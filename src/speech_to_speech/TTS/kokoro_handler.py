@@ -284,50 +284,53 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
             audio_cfg = runtime_config.session.audio
             audio_output = audio_cfg.output if audio_cfg is not None else None
             voice = str(audio_output.voice) if audio_output is not None and audio_output.voice else None
-        if voice:
-            self.voice = voice
-
         if self.backend == "mlx":
-            yield from self._process_mlx(text, language_code)
+            yield from self._process_mlx(text, language_code, pinned_voice=voice)
         else:
-            yield from self._process_kokoro(text, language_code)
+            yield from self._process_kokoro(text, language_code, pinned_voice=voice)
 
-    def _lang_and_voice_for(self, language_code: str) -> tuple[str, str]:
+    def _lang_and_voice_for(self, language_code: str, pinned_voice: Optional[str] = None) -> tuple[str, str]:
         """Pick the Kokoro language and voice for a reply in ``language_code``.
 
-        The English entries in the map point at British English, so an American
-        English setup keeps its own variant. Returning to the setup language
-        restores the configured voice instead of that language's default voice.
+        English and unsupported-language fallbacks use the configured English
+        variant. Returning to the setup language restores the client's voice,
+        if supplied, or the CLI voice. Other languages use their default unless
+        the client selected a voice belonging to that language.
         """
         new_lang_code = WHISPER_LANGUAGE_TO_KOKORO_LANG.get(language_code, self.lang_code)
         if new_lang_code == "b" and self._initial_lang_code in ("a", "b"):
             new_lang_code = self._initial_lang_code
         if new_lang_code == self._initial_lang_code:
-            return new_lang_code, self._initial_voice
+            return new_lang_code, pinned_voice or self._initial_voice
+        if pinned_voice and pinned_voice.startswith(new_lang_code):
+            return new_lang_code, pinned_voice
         return new_lang_code, KOKORO_LANG_DEFAULT_VOICES.get(new_lang_code, self.voice)
 
-    def _process_mlx(self, llm_sentence: str, language_code: Optional[str] = None) -> Iterator[np.ndarray]:
+    def _process_mlx(
+        self, llm_sentence: str, language_code: Optional[str] = None, *, pinned_voice: Optional[str] = None
+    ) -> Iterator[np.ndarray]:
         """Process using MLX backend with Apple Silicon optimizations."""
         from scipy.signal import resample_poly
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
         with MLXLockContext(handler_name="KokoroTTS", timeout=10.0):
-            if language_code is not None:
-                new_lang_code, new_voice = self._lang_and_voice_for(language_code)
-                if new_lang_code != self.lang_code:
-                    logger.info(
-                        f"Language change detected: {self.lang_code} -> {new_lang_code}, voice: {self.voice} -> {new_voice}"
-                    )
-                    try:
-                        new_pipeline = self.model._get_pipeline(new_lang_code)
-                        new_pipeline.load_voice(new_voice)
-                        self.lang_code = new_lang_code
-                        self.voice = new_voice
-                        self._pipeline = new_pipeline
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to switch language/voice: {e}. Keeping current language: {self.lang_code}"
-                        )
+            new_lang_code, new_voice = (
+                self._lang_and_voice_for(language_code, pinned_voice)
+                if language_code is not None
+                else (self.lang_code, pinned_voice or self.voice)
+            )
+            if new_lang_code != self.lang_code or new_voice != self.voice:
+                logger.info(
+                    f"Language change detected: {self.lang_code} -> {new_lang_code}, voice: {self.voice} -> {new_voice}"
+                )
+                try:
+                    new_pipeline = self.model._get_pipeline(new_lang_code)
+                    new_pipeline.load_voice(new_voice)
+                    self.lang_code = new_lang_code
+                    self.voice = new_voice
+                    self._pipeline = new_pipeline
+                except Exception as e:
+                    logger.warning(f"Failed to switch language/voice: {e}. Keeping current language: {self.lang_code}")
 
             console.print(f"[green]ASSISTANT: {llm_sentence}")
 
@@ -378,22 +381,27 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     logger.debug(f"TTS yielding audio chunk: {len(chunk)} samples")
                     yield chunk
 
-    def _process_kokoro(self, llm_sentence: str, language_code: Optional[str] = None) -> Iterator[np.ndarray]:
+    def _process_kokoro(
+        self, llm_sentence: str, language_code: Optional[str] = None, *, pinned_voice: Optional[str] = None
+    ) -> Iterator[np.ndarray]:
         """Process using native kokoro library."""
         from scipy.signal import resample_poly
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
-        if language_code is not None:
-            new_lang_code, new_voice = self._lang_and_voice_for(language_code)
-            if new_lang_code != self.lang_code:
-                logger.info(
-                    f"Language change detected: {self.lang_code} -> {new_lang_code}, voice: {self.voice} -> {new_voice}"
-                )
-                self.lang_code = new_lang_code
-                self.voice = new_voice
-                from kokoro import KPipeline
+        new_lang_code, new_voice = (
+            self._lang_and_voice_for(language_code, pinned_voice)
+            if language_code is not None
+            else (self.lang_code, pinned_voice or self.voice)
+        )
+        if new_lang_code != self.lang_code:
+            logger.info(
+                f"Language change detected: {self.lang_code} -> {new_lang_code}, voice: {self.voice} -> {new_voice}"
+            )
+            from kokoro import KPipeline
 
-                self.pipeline = KPipeline(lang_code=self.lang_code, device=self.device)
+            self.pipeline = KPipeline(lang_code=new_lang_code, device=self.device)
+            self.lang_code = new_lang_code
+        self.voice = new_voice
 
         console.print(f"[green]ASSISTANT: {llm_sentence}")
 
