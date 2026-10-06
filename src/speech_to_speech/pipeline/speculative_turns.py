@@ -31,6 +31,10 @@ class TurnGate:
     deadline: float | None = None
 
 
+class TurnOutputHeld(Exception):
+    """Output reached its commit while its turn was held; keep it queued."""
+
+
 _ACCEPT = TurnGate(TurnGateAction.ACCEPT)
 _DROP = TurnGate(TurnGateAction.DROP)
 

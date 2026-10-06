@@ -141,6 +141,28 @@ def _simulate_session_end_drain(input_queue: Queue, output_queue: Queue, timeout
     raise AssertionError("SESSION_END did not appear on input_queue within timeout")
 
 
+def _resume_speech(monkeypatch, service, tracker, *, after_hold_check: bool) -> None:
+    """Start a speech candidate now, or once the send loop's next hold check passes.
+
+    VAD runs on its own thread, so resumed speech can start between that check
+    and the output's commit.
+    """
+    if not after_hold_check:
+        assert tracker.speech_candidate_started(1100)
+        return
+    hold_check = service.is_turn_output_held
+    resumed = ThreadingEvent()
+
+    def check_then_resume(event):
+        held = hold_check(event)
+        if not held and not resumed.is_set():
+            resumed.set()
+            assert tracker.speech_candidate_started(1100)
+        return held
+
+    monkeypatch.setattr(service, "is_turn_output_held", check_then_resume)
+
+
 def _pcm_bytes(n_samples: int) -> bytes:
     return b"\x00" * (n_samples * 2)
 
@@ -700,7 +722,8 @@ class TestSendLoop:
                 assert tracker._committed == set()
                 assert tracker.begin_reopen_candidate("turn_1", 0) is None
 
-    def test_held_answer_keeps_receiving_audio_that_reopens_its_turn(self, setup):
+    @pytest.mark.parametrize("resume_after_hold_check", [False, True], ids=["before_queue", "after_hold_check"])
+    def test_held_answer_keeps_receiving_audio_that_reopens_its_turn(self, setup, monkeypatch, resume_after_hold_check):
         app, service, input_queue, output_queue, text_output_queue, *_ = setup
         tracker = SpeculativeTurnTracker()
         service.speculative_turns = tracker
@@ -711,7 +734,7 @@ class TestSendLoop:
                 tracker.speech_started(0)
                 tracker.segment_finalized(1000)
                 # Resumed speech arrives after the grace, as the answer is queued.
-                assert tracker.speech_candidate_started(1100)
+                _resume_speech(monkeypatch, service, tracker, after_hold_check=resume_after_hold_check)
                 output_queue.put(AssistantOutputEvent(text="Stale answer.", turn_id="turn_1", turn_revision=0))
                 time.sleep(0.05)
 
@@ -733,7 +756,8 @@ class TestSendLoop:
                 assert "Stale answer." not in str(messages)
                 assert not tracker.is_committed("turn_1", 0)
 
-    def test_held_tool_call_reaches_client_before_response_done(self, setup):
+    @pytest.mark.parametrize("resume_after_hold_check", [False, True], ids=["before_queue", "after_hold_check"])
+    def test_held_tool_call_reaches_client_before_response_done(self, setup, monkeypatch, resume_after_hold_check):
         app, service, _, output_queue, text_output_queue, *_ = setup
         tracker = SpeculativeTurnTracker()
         service.speculative_turns = tracker
@@ -747,7 +771,7 @@ class TestSendLoop:
                 response_key = service._state(list(service._conns)[0]).current_response_key
                 # A tool-call-only answer never commits in TTS, so a speech
                 # candidate after the workers' gate holds its text-side events.
-                assert tracker.speech_candidate_started(1100)
+                _resume_speech(monkeypatch, service, tracker, after_hold_check=resume_after_hold_check)
                 text_output_queue.put(
                     AssistantToolCallReadyEvent(
                         response_key=response_key,

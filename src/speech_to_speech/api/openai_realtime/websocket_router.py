@@ -48,6 +48,7 @@ from speech_to_speech.pipeline.events import (
 )
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
+from speech_to_speech.pipeline.speculative_turns import TurnOutputHeld
 from speech_to_speech.pipeline.transcript_logging import log_exception
 
 # aiortc (the 'webrtc' extra) is optional. Import it here, at module load,
@@ -837,10 +838,12 @@ def create_app(
                 # Text events first (speech_started cancels active response).
                 try:
                     text_msg = None
+                    parked_index = None
                     if session is not None and session_id is not None:
                         for index, pending in enumerate(session.pending_text_output_items):
                             if not _output_is_held(unit, session, pending):
                                 text_msg = session.pending_text_output_items.pop(index)
+                                parked_index = index
                                 break
                     if text_msg is None:
                         text_msg = unit.text_output_queue.get_nowait()
@@ -873,8 +876,20 @@ def create_app(
                         was_in_response = st.in_response
                         was_response_pending = st.response_pending
 
-                    if transport is not None and isinstance(text_msg, PipelineEvent) and session_id:
-                        events = unit.service.dispatch_pipeline_event(session_id, text_msg)
+                    if (
+                        transport is not None
+                        and isinstance(text_msg, PipelineEvent)
+                        and session is not None
+                        and session_id
+                    ):
+                        try:
+                            events = unit.service.dispatch_pipeline_event(session_id, text_msg)
+                        except TurnOutputHeld:
+                            # Resumed speech started after the hold check. Park
+                            # the event again in its original place.
+                            pending_items = session.pending_text_output_items
+                            pending_items.insert(len(pending_items) if parked_index is None else parked_index, text_msg)
+                            events = []
                         if events:
                             await transport.send_events(events)
 
@@ -947,8 +962,15 @@ def create_app(
                         if session_id is not None and _response_key_is_obsolete(unit, session_id, response_key):
                             _discard_obsolete_response_key(unit, session_id, response_key)
                             continue
-                        if transport is not None and session_id is not None:
-                            await transport.send_events(unit.service.dispatch_pipeline_event(session_id, audio_chunk))
+                        if transport is not None and session is not None and session_id is not None:
+                            try:
+                                events = unit.service.dispatch_pipeline_event(session_id, audio_chunk)
+                            except TurnOutputHeld:
+                                # Resumed speech started after the hold check.
+                                session.pending_output_item = audio_chunk
+                                await asyncio.sleep(0.01)
+                                continue
+                            await transport.send_events(events)
                         continue
 
                     if _is_pipeline_end(audio_chunk):
