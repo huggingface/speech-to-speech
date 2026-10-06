@@ -34,7 +34,51 @@ python -m speech_to_speech.evals.big_bench_audio build-subset \
 `full` includes every question at the same dataset revision. Its seed only affects
 ordering; it does not omit or sample any questions.
 
-## Development on Hugging Face
+## Build and run with Docker
+
+Commit evaluation changes first. From the repository root, create a temporary
+build context from that commit and write the revision file required by
+`Dockerfile.eval`:
+
+```bash
+EVAL_CONTEXT="$(mktemp -d)"
+git archive HEAD | tar -x -C "$EVAL_CONTEXT"
+git rev-parse HEAD > "$EVAL_CONTEXT/source-revision.txt"
+docker build --platform linux/amd64 \
+    -f "$EVAL_CONTEXT/Dockerfile.eval" \
+    -t s2s-big-bench-audio:local "$EVAL_CONTEXT"
+rm -rf "$EVAL_CONTEXT"
+```
+
+This builds the committed source, including its manifests, without uploading to a
+Space. The image records the same revision in its reports. The CUDA image targets
+Linux/amd64; GPU execution needs an NVIDIA GPU host with the
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+Building on another architecture requires Docker's amd64 emulation.
+
+With `HF_TOKEN` exported in the launching shell, run a four-question smoke test:
+
+```bash
+docker run --name s2s-eval-smoke --platform linux/amd64 --gpus all \
+    -e HF_TOKEN -e S2S_LIMIT=4 -e S2S_LABEL=local-smoke \
+    s2s-big-bench-audio:local vibe-check
+docker cp s2s-eval-smoke:/output ./eval-output
+docker rm s2s-eval-smoke
+```
+
+The container starts the engine and evaluator together, so no exposed server port
+is needed. Copy `/output` before removing the container, including after an
+unsuccessful run, to retain its report and redacted server log. The default
+container user writes to the image's own output directory, avoiding host bind
+mount permission changes. Provider inference is billed to the token's account.
+
+The `S2S_*` settings below also work with `docker run -e`. To upload reports and
+logs, add `-e S2S_PUSH_TO_HUB=your-hf-username/s2s-big-bench-audio-results`; an
+existing destination must be private. To run the entire benchmark, use
+`-e S2S_SUBSET=full` and omit `-e S2S_LIMIT=4`. Optional engine extras can be
+installed at build time with `--build-arg EXTRAS="kokoro supertonic"`.
+
+## Optional image building on Hugging Face
 
 Commit the evaluation code, then create/update an image-building **private Docker
 Space in your authenticated personal profile** (requires `huggingface_hub`):
@@ -89,7 +133,9 @@ Reports go to `reports/<timestamp>-<label>.json` and server logs to
 `logs/<label>.log` in the private results dataset. Job IDs are the default labels;
 use unique labels to avoid replacing a previous log. Files also live under
 `/output` inside the ephemeral Job. A hard Job timeout can prevent uploads, so
-leave time for model downloads, initialization, and all questions.
+leave time for model downloads, initialization, and all questions. Existing
+public result datasets are refused before report or log uploads, including logs
+from startup failures. Repository visibility is never changed automatically.
 
 | Environment variable | Default | Purpose |
 |---|---|---|
@@ -104,11 +150,12 @@ leave time for model downloads, initialization, and all questions.
 | `S2S_EVAL_ARGS` | unset | Extra evaluation arguments, e.g. `--silence-ms 1200` |
 | `S2S_REPORT_DIR` | `/output` | Local report/log directory |
 
-`Dockerfile.eval` installs the engine from the uploaded source. Dependencies are
+`Dockerfile.eval` installs the engine from the build context. Dependencies are
 resolved at build time and runtime package versions are recorded in reports.
 The build argument `EXTRAS="kokoro supertonic"` installs extra backends.
 Model weights and evaluation audio download at runtime. The Space upload script creates the
-`source-revision.txt` required by the Dockerfile.
+`source-revision.txt` required by the Dockerfile, as does the ordinary Docker
+recipe above.
 
 ## Run the whole benchmark
 

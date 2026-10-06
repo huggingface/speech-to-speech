@@ -1,4 +1,4 @@
-# Built by a private Docker Space; GPU execution happens in Hugging Face Jobs.
+# Build locally or with a Docker Space; run on an NVIDIA host or HF Jobs.
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 \
     PATH="/usr/src/app/.venv/bin:${PATH}" \
@@ -14,7 +14,7 @@ RUN set -eu; flags=""; for extra in $EXTRAS; do flags="$flags --extra $extra"; d
     uv sync --python /usr/bin/python3 --no-install-project --no-dev $flags
 COPY src ./src
 COPY docker ./docker
-# Written by prepare_eval_space.py, so reports identify the uploaded source tree.
+# Contains the committed Git SHA; prepare_eval_space.py writes it for Space builds.
 COPY source-revision.txt /opt/source-revision.txt
 RUN set -eu; flags=""; for extra in $EXTRAS; do flags="$flags --extra $extra"; done; \
     uv sync --python /usr/bin/python3 --no-dev $flags
