@@ -292,7 +292,9 @@ Return `ToolResult(output, create_response=False)` for a fire-and-forget action 
 
 Calls start as soon as their standard `response.function_call_arguments.done` events arrive, away from the receive loop. Completed outputs are submitted in protocol `output_index` order from `response.output_item.added`; the terminal `response.output` provides the same ordering authority for compatible servers that omit the added event. This lets tool work and hidden follow-up generation overlap acknowledgement speech without turning completion-event timing into conversation order. The client still waits for the origin `response.done(status="completed")` before sending one public follow-up `response.create`; cancelled or incomplete responses cancel any results that have not already been submitted. `execute_tool` may be an async function, an object with async `__call__`, or another callable that returns an awaitable. Unknown tools, malformed JSON, non-awaitable handlers, and handler failures are returned as `function_call_output` errors and always request a recovery response, even when the module default is fire-and-forget. Outstanding async handlers are cancelled on disconnect or shutdown.
 
-If a tool finishes while the user is speaking, the client submits its output but holds the follow-up `response.create` until the user's item is committed, when the turn can no longer reopen. If the answer to that turn completes with output, it saw the tool output, so no follow-up is sent. If the turn gets no answer, or its answer fails, is cancelled or is empty, the client sends the follow-up.
+If a tool finishes while the user is speaking, the client submits its output but holds the follow-up `response.create` until the user's item is committed, when the turn can no longer reopen. A completed answer suppresses a follow-up only when the server reports that its model input included the result. A result that arrives after generation starts still needs a follow-up. Failed, cancelled and empty answers do not suppress it.
+
+The packaged client marks automatic creates with `s2s_tool_followup_call_ids` in response metadata. This server reports model-input results through `s2s_tool_input_call_ids` on a completed `response.done`. Both values contain a JSON list of call IDs within the 512-character metadata limit. The server rejects an automatic create if those results already reached a completed answer, or asks the client to wait if user input can still reopen. Explicit unmarked creates keep their usual behavior. Servers without this extension still get the client speech guard, but cannot suppress all duplicate follow-ups.
 
 Library users can configure the same contract directly:
 
@@ -362,6 +364,12 @@ sequenceDiagram
 ---
 
 ## Testing
+
+Run the tool scheduling and model-input checks without a GPU:
+
+```bash
+CUDA_VISIBLE_DEVICES='' uv run pytest tests/openai_realtime/test_audio_client.py tests/openai_realtime/test_realtime_service.py tests/openai_realtime/test_response_input_identity.py tests/test_lm_output_processor.py tests/test_responses_api_language_model.py -q
+```
 
 ### Local LLM with Transformers
 

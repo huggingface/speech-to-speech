@@ -40,6 +40,13 @@ from openai.types.realtime.response_content_part_added_event import Part as Adde
 from openai.types.realtime.response_content_part_done_event import Part as DoneContentPart
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
+from speech_to_speech.api.openai_realtime.tool_followup import (
+    TOOL_FOLLOWUP_COVERED,
+    TOOL_FOLLOWUP_METADATA_KEY,
+    TOOL_FOLLOWUP_WAIT,
+    TOOL_INPUT_METADATA_KEY,
+    tool_call_ids,
+)
 from speech_to_speech.LLM.chat import ChatItemError, add_supported_item
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
@@ -53,6 +60,7 @@ from speech_to_speech.pipeline.messages import (
     GenerateResponseRequest,
     ResponsePrefetchTransaction,
 )
+from speech_to_speech.pipeline.speculative_turns import TurnPhase
 from speech_to_speech.pipeline.transcript_logging import log_exception
 from speech_to_speech.pipeline.turn_latency import TURN_LATENCY_METADATA_KEY
 from speech_to_speech.utils.utils import _generate_id, is_out_of_band, response_wants_audio
@@ -344,6 +352,10 @@ class ResponseHandler(RealtimeBaseHandler):
         if event.response_key is None:
             return []
         st = self._state(conn_id)
+        if event.succeeded and event.input_tool_call_ids:
+            st.response_tool_inputs[event.response_key] = set(event.input_tool_call_ids)
+            while len(st.response_tool_inputs) > 128:
+                st.response_tool_inputs.pop(next(iter(st.response_tool_inputs)))
         prefetch_request = st.tool_followup_prefetch_request
         if not event.succeeded and prefetch_request is not None and prefetch_request.response_key == event.response_key:
             # A hidden failure must remain invisible. Remove it now so the
@@ -479,6 +491,13 @@ class ResponseHandler(RealtimeBaseHandler):
 
         rp = st.current_response_params
         metadata = dict(rp.metadata) if rp and rp.metadata else {}
+        # Only the server can report which tool results reached the model.
+        metadata.pop(TOOL_INPUT_METADATA_KEY, None)
+        if status == "completed" and not is_out_of_band(rp):
+            tool_inputs = st.response_tool_inputs.get(st.current_response_key or "", set())
+            value = json.dumps(sorted(tool_inputs), separators=(",", ":"))
+            if tool_inputs and len(metadata) < 16 and len(value) <= 512:
+                metadata[TOOL_INPUT_METADATA_KEY] = value
         if status != "in_progress":
             # Terminal latency metadata is server-owned, even when no measurement exists.
             metadata.pop(TURN_LATENCY_METADATA_KEY, None)
@@ -771,6 +790,18 @@ class ResponseHandler(RealtimeBaseHandler):
                     message="Only string tool_choice values are supported for now (auto, required, none).",
                     _type="tool_choice_not_supported",
                 )
+        metadata = event.response.metadata if event.response else None
+        followup_ids = tool_call_ids(metadata.get(TOOL_FOLLOWUP_METADATA_KEY)) if metadata else set()
+        if not is_out_of_band(event.response) and followup_ids and followup_ids <= st.answered_tool_call_ids:
+            return self.make_error("Tool results already used by a completed response.", TOOL_FOLLOWUP_COVERED)
+        turns = self._service.speculative_turns
+        if (
+            not is_out_of_band(event.response)
+            and followup_ids
+            and turns is not None
+            and turns.phase in {TurnPhase.LISTENING, TurnPhase.SOFT_ENDED}
+        ):
+            return self.make_error("User input has not committed yet.", TOOL_FOLLOWUP_WAIT)
         prefetch_request = st.tool_followup_prefetch_request if not st.in_response else None
         if prefetch_request is not None:
             if self._prefetch_matches(event):
@@ -996,6 +1027,13 @@ class ResponseHandler(RealtimeBaseHandler):
                     response=terminal_response,
                 )
             )
+            tool_inputs = st.response_tool_inputs.pop(st.current_response_key or "", set())
+            if status == "completed" and terminal_response.output and not is_out_of_band(st.current_response_params):
+                st.answered_tool_call_ids.update(tool_inputs)
+                retained = {
+                    item.call_id for item in st.runtime_config.chat.copy().buffer if item.type == "function_call_output"
+                }
+                st.answered_tool_call_ids.intersection_update(retained)
             if status == "completed":
                 st.runtime_config.chat.finalize_provisional_generation(st.current_response_key)
             elif status in ("cancelled", "failed", "incomplete"):

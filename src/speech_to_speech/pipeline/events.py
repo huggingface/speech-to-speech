@@ -189,6 +189,7 @@ class ResponseGenerationDoneEvent(PipelineEvent):
     type: Literal["response_generation_done"] = "response_generation_done"
     response_key: str | None = Field(default=None, exclude=True, repr=False)
     call_ids: list[str] = Field(default_factory=list)
+    input_tool_call_ids: list[str] = Field(default_factory=list)
     succeeded: bool = True
     turn_id: str | None = None
     turn_revision: int | None = None

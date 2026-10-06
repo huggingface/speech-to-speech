@@ -118,6 +118,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
             ResponseGenerationDoneEvent(
                 response_key=response_key,
                 call_ids=list(self._tool_call_ids),
+                input_tool_call_ids=lm_output.input_tool_call_ids,
                 succeeded=succeeded,
                 turn_id=lm_output.turn_id,
                 turn_revision=lm_output.turn_revision,

@@ -2438,6 +2438,112 @@ class TestEncodeAudioChunk:
 
 
 class TestFinishAudioResponse:
+    @pytest.mark.parametrize(
+        "status,empty", [("completed", False), ("completed", True), ("cancelled", False), ("incomplete", False)]
+    )
+    def test_tool_followup_checks_completed_model_input(self, service, conn_id, text_prompt_queue, status, empty):
+        from speech_to_speech.api.openai_realtime.tool_followup import (
+            TOOL_FOLLOWUP_COVERED,
+            TOOL_FOLLOWUP_METADATA_KEY,
+            TOOL_FOLLOWUP_WAIT,
+            TOOL_INPUT_METADATA_KEY,
+        )
+        from speech_to_speech.pipeline.messages import AssistantTextPart
+
+        st = service._state(conn_id)
+        call = RealtimeConversationItemFunctionCall(
+            type="function_call", call_id="call_1", name="lookup", arguments="{}"
+        )
+        st.runtime_config.chat.add_item(call)
+        service.handle_conversation_item_create(
+            conn_id,
+            ConversationItemCreateEvent(
+                type="conversation.item.create",
+                item={"type": "function_call_output", "call_id": "call_1", "output": "flights"},
+            ),
+        )
+        created = service.handle_response_create(
+            conn_id,
+            ResponseCreateEvent(
+                type="response.create",
+                response={
+                    "metadata": {TOOL_INPUT_METADATA_KEY: '["forged"]'},
+                },
+            ),
+        )
+        assert TOOL_INPUT_METADATA_KEY not in (created.response.metadata or {})
+        request = text_prompt_queue.get_nowait()
+        if not empty:
+            service.dispatch_pipeline_event(
+                conn_id,
+                AssistantOutputEvent(
+                    response_key=request.response_key,
+                    parts=[AssistantTextPart(text="Flights are ready.")],
+                ),
+            )
+        service.dispatch_pipeline_event(
+            conn_id,
+            ResponseGenerationDoneEvent(
+                response_key=request.response_key,
+                input_tool_call_ids=["call_1"],
+            ),
+        )
+        terminal = service.finish_response(conn_id, status=status, response_key=request.response_key)
+        done = next(event for event in terminal if isinstance(event, ResponseDoneEvent))
+        assert (done.response.metadata or {}).get(TOOL_INPUT_METADATA_KEY) == (
+            '["call_1"]' if status == "completed" else None
+        )
+        followup = ResponseCreateEvent(
+            type="response.create",
+            response={
+                "metadata": {TOOL_FOLLOWUP_METADATA_KEY: '["call_1"]'},
+            },
+        )
+        result = service.handle_response_create(conn_id, followup)
+        if status == "completed" and not empty:
+            # The client create may arrive only after the answer finished.
+            assert result.error.type == TOOL_FOLLOWUP_COVERED
+            assert text_prompt_queue.empty()
+            # Explicit requests remain valid even when they repeat context.
+            assert isinstance(
+                service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create")),
+                ResponseCreatedEvent,
+            )
+        else:
+            assert isinstance(result, ResponseCreatedEvent)
+        request = text_prompt_queue.get_nowait()
+        service.finish_response(conn_id, response_key=request.response_key)
+
+        # A create sent before speech_started can reach the server during speech.
+        service.speculative_turns = SpeculativeTurnTracker()
+        turn_id, revision = service.speculative_turns.start_turn()
+        result = service.handle_response_create(
+            conn_id,
+            ResponseCreateEvent(
+                type="response.create",
+                response={
+                    "metadata": {TOOL_FOLLOWUP_METADATA_KEY: '["not_yet_answered"]'},
+                },
+            ),
+        )
+        assert result.error.type == TOOL_FOLLOWUP_WAIT
+        assert text_prompt_queue.empty()
+        service.speculative_turns.segment_finalized(100)
+        service.speculative_turns.commit(turn_id, revision)
+        service.speculative_turns.close(turn_id, revision)
+        assert isinstance(
+            service.handle_response_create(
+                conn_id,
+                ResponseCreateEvent(
+                    type="response.create",
+                    response={
+                        "metadata": {TOOL_FOLLOWUP_METADATA_KEY: '["not_yet_answered"]'},
+                    },
+                ),
+            ),
+            ResponseCreatedEvent,
+        )
+
     def test_finish_without_audio_emits_only_response_done(self, service, conn_id):
         service.response._ensure_response(conn_id)
         events = service.finish_response(conn_id)

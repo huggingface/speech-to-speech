@@ -27,6 +27,13 @@ from jsonschema import SchemaError, ValidationError
 from jsonschema.validators import validator_for
 from openai import AsyncOpenAI
 
+from speech_to_speech.api.openai_realtime.tool_followup import (
+    TOOL_FOLLOWUP_COVERED,
+    TOOL_FOLLOWUP_METADATA_KEY,
+    TOOL_FOLLOWUP_WAIT,
+    TOOL_INPUT_METADATA_KEY,
+    tool_call_ids,
+)
 from speech_to_speech.pipeline.transcript_logging import log_exception
 
 logger = logging.getLogger(__name__)
@@ -502,18 +509,14 @@ class _ToolCallCoordinator:
         self._pending_tool_flushes = 0
         self._queued_follow_ups = 0
         self._pending_create_id: str | None = None
-        self._pending_create_follow_ups = 0
         self._pending_create_saw_response = False
         self._waiting_for_response_after_collision = False
-        # Follow-ups wait from a user's speech until their item commits, after
-        # which the turn cannot reopen. If the turn's answer completes with
-        # output, it saw the outputs delivered before it started, so their
-        # follow-ups drop.
+        # Keep results in history while speech can still reopen.
         self._user_turn_open = False
         self._user_turn_item_id: str | None = None
-        self._awaiting_turn_answer = False
-        self._turn_answer_id: str | None = None
-        self._turn_answer_follow_ups = 0
+        self._queued_tool_results: dict[str, set[str]] = {}
+        self._pending_create_call_ids: set[str] = set()
+        self._answered_tool_call_ids: set[str] = set()
         self._next_create_sequence = 0
         self._tool_batches: dict[str, _ToolResponseBatch] = {}
         self._tool_batch_order: list[str] = []
@@ -534,14 +537,10 @@ class _ToolCallCoordinator:
             if create_id and create_id == self._pending_create_id:
                 self._pending_create_id = None
                 self._pending_create_saw_response = False
-                self._queued_follow_ups -= self._pending_create_follow_ups
-                self._pending_create_follow_ups = 0
-            else:
-                if self._pending_create_id is not None:
-                    self._pending_create_saw_response = True
-                if self._awaiting_turn_answer:
-                    self._turn_answer_id = self._active_response_id
-                    self._turn_answer_follow_ups = self._queued_follow_ups
+                self._consume_tool_results(self._pending_create_call_ids)
+                self._pending_create_call_ids.clear()
+            elif self._pending_create_id is not None:
+                self._pending_create_saw_response = True
         elif event.type == "response.output_item.added":
             item = getattr(event, "item", None)
             if getattr(item, "type", None) == "function_call":
@@ -567,7 +566,6 @@ class _ToolCallCoordinator:
         elif event.type == "input_audio_buffer.speech_started":
             self._user_turn_open = True
             self._user_turn_item_id = getattr(event, "item_id", None)
-            self._awaiting_turn_answer = True
         elif event.type == "input_audio_buffer.committed":
             if self._user_turn_open and self._user_turn_item_id in (None, getattr(event, "item_id", None)):
                 self._user_turn_open = False
@@ -629,14 +627,12 @@ class _ToolCallCoordinator:
             self._active_response_id = None
         self._waiting_for_response_after_collision = False
         status = getattr(response, "status", None)
-        if response_id is not None and response_id == self._turn_answer_id:
-            # A failed, cancelled or empty answer did not give the user the outputs.
-            if status == "completed" and getattr(response, "output", None):
-                self._queued_follow_ups = max(0, self._queued_follow_ups - self._turn_answer_follow_ups)
-                self._pending_create_follow_ups = min(self._pending_create_follow_ups, self._queued_follow_ups)
-                self._awaiting_turn_answer = False
-            self._turn_answer_id = None
-            self._turn_answer_follow_ups = 0
+        metadata = getattr(response, "metadata", None)
+        if status == "completed" and getattr(response, "output", None) and isinstance(metadata, Mapping):
+            self._answered_tool_call_ids.update(tool_call_ids(metadata.get(TOOL_INPUT_METADATA_KEY)))
+            self._consume_tool_results(self._answered_tool_call_ids)
+            outstanding = set().union(*(batch.call_ids for batch in self._tool_batches.values()))
+            self._answered_tool_call_ids.intersection_update(outstanding)
         if isinstance(response_id, str) and response_id and status == "completed":
             output = getattr(response, "output", None) or []
             calls = [
@@ -774,8 +770,19 @@ class _ToolCallCoordinator:
         if response_id in self._tool_batch_order:
             self._tool_batch_order.remove(response_id)
         if batch.successful and not batch.cancelled and batch.create_response:
-            self._queued_follow_ups += 1
+            remaining = batch.delivered_call_ids - self._answered_tool_call_ids
+            self._answered_tool_call_ids.difference_update(batch.delivered_call_ids)
+            if remaining:
+                self._queued_tool_results[response_id] = remaining
+            self._queued_follow_ups = len(self._queued_tool_results)
         self._kick_follow_up()
+
+    def _consume_tool_results(self, call_ids: set[str]) -> None:
+        for response_id, pending in list(self._queued_tool_results.items()):
+            pending.difference_update(call_ids)
+            if not pending:
+                del self._queued_tool_results[response_id]
+        self._queued_follow_ups = len(self._queued_tool_results)
 
     def _cancel_batch(self, response_id: str, batch: _ToolResponseBatch) -> None:
         batch.cancelled = True
@@ -799,8 +806,18 @@ class _ToolCallCoordinator:
             return
         rejected_create_id = self._pending_create_id
         self._pending_create_id = None
-        self._pending_create_follow_ups = 0
 
+        if TOOL_FOLLOWUP_COVERED in {getattr(error, "type", None), getattr(error, "code", None)}:
+            self._consume_tool_results(self._pending_create_call_ids)
+            self._pending_create_call_ids.clear()
+            self._pending_create_saw_response = False
+            self._kick_follow_up()
+            return
+        self._pending_create_call_ids.clear()
+        if TOOL_FOLLOWUP_WAIT in {getattr(error, "type", None), getattr(error, "code", None)}:
+            self._pending_create_saw_response = False
+            self._user_turn_open = True
+            return
         if not is_collision:
             self._pending_create_saw_response = False
             self._closing = True
@@ -838,22 +855,34 @@ class _ToolCallCoordinator:
                 or self._user_turn_open
             ):
                 return
+            call_ids: set[str] = set()
+            for call_id in sorted(set().union(*self._queued_tool_results.values())):
+                candidate = call_ids | {call_id}
+                if len(json.dumps(sorted(candidate), separators=(",", ":"))) > 512:
+                    break
+                call_ids = candidate
+            metadata = {_TOOL_CREATE_ID_METADATA_KEY: f"tool_{self._next_create_sequence + 1}"}
+            if call_ids:
+                metadata[TOOL_FOLLOWUP_METADATA_KEY] = json.dumps(sorted(call_ids), separators=(",", ":"))
+            else:
+                # Keep older endpoints and unusually long provider call IDs usable.
+                call_ids = set().union(*self._queued_tool_results.values())
+            self._pending_create_call_ids = call_ids
             self._next_create_sequence += 1
             create_id = f"tool_{self._next_create_sequence}"
             self._pending_create_id = create_id
-            self._pending_create_follow_ups = self._queued_follow_ups
             self._pending_create_saw_response = False
             try:
                 await self._conn.send(
                     {
                         "event_id": create_id,
                         "type": "response.create",
-                        "response": {"metadata": {_TOOL_CREATE_ID_METADATA_KEY: create_id}},
+                        "response": {"metadata": metadata},
                     }
                 )
             except BaseException:
                 self._pending_create_id = None
-                self._pending_create_follow_ups = 0
+                self._pending_create_call_ids.clear()
                 self._pending_create_saw_response = False
                 raise
 

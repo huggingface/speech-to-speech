@@ -342,7 +342,11 @@ def test_generation_done_side_channel_does_not_wait_for_tts_delivery():
                 turn_revision=0,
             )
         ),
-        *processor.process(EndOfResponse(response_key="response_1", turn_id="turn_1", turn_revision=0)),
+        *processor.process(
+            EndOfResponse(
+                response_key="response_1", turn_id="turn_1", turn_revision=0, input_tool_call_ids=["call_previous"]
+            )
+        ),
     ]
 
     tool_ready = side_events.get_nowait()
@@ -354,6 +358,7 @@ def test_generation_done_side_channel_does_not_wait_for_tts_delivery():
     assert isinstance(logical_done, ResponseGenerationDoneEvent)
     assert logical_done.response_key == "response_1"
     assert logical_done.call_ids == ["call_1"]
+    assert logical_done.input_tool_call_ids == ["call_previous"]
     assert logical_done.succeeded is True
     assert [type(item) for item in ordered] == [
         AssistantOutputEvent,

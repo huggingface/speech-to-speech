@@ -953,6 +953,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 cancel_generation=turn.gen,
                 response_key=turn.response_key,
                 error=error_message,
+                input_tool_call_ids=(
+                    sorted({item.call_id for item in active_chat.buffer if item.type == "function_call_output"})
+                    if history_committed and not is_out_of_band(turn.response)
+                    else []
+                ),
                 status="incomplete" if generation_completed and state.ending.status == "incomplete" else "completed",
                 reason=state.ending.reason if generation_completed and state.ending.status == "incomplete" else None,
             )

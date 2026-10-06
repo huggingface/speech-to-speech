@@ -17,6 +17,7 @@ from openai.types.realtime.conversation_item import (
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.responses import (
     Response,
+    ResponseCompletedEvent,
     ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
@@ -909,6 +910,7 @@ def test_generation_is_rejected_until_ordered_tool_output_arrives():
         RealtimeConversationItemFunctionCall(
             type="function_call",
             call_id="call_pending",
+            id="fc_pending",
             name="pending",
             arguments="{}",
         )
@@ -923,6 +925,53 @@ def test_generation_is_rejected_until_ordered_tool_output_arrives():
     assert isinstance(outputs[0], EndOfResponse)
     assert outputs[0].error is not None and "function call outputs are pending" in outputs[0].error
     assert [item.type for item in chat.buffer] == ["message", "function_call", "message"]
+
+    chat.append_tool_output(
+        "call_pending",
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id="call_pending",
+            output="first result",
+            id="fco_pending",
+        ),
+    )
+
+    def completed_create(**kwargs):
+        # This second result arrives after the model input snapshot. It must not
+        # be reported as consumed by this answer.
+        chat.add_ordered_function_call(
+            RealtimeConversationItemFunctionCall(
+                type="function_call",
+                call_id="call_later",
+                id="fc_later",
+                name="pending",
+                arguments="{}",
+            )
+        )
+        chat.append_tool_output(
+            "call_later",
+            RealtimeConversationItemFunctionCallOutput(
+                type="function_call_output",
+                call_id="call_later",
+                output="late result",
+                id="fco_later",
+            ),
+        )
+        return _make_stream(
+            [
+                _make_text_delta_event("First result."),
+                _make_output_item_done_event(content="First result."),
+                ResponseCompletedEvent.model_construct(
+                    type="response.completed", response=SimpleNamespace(status="completed", usage=None)
+                ),
+            ]
+        )
+
+    handler.client.responses.create = completed_create
+    request.runtime_config.session = _make_runtime_config().session
+    completed = list(handler.process(request))
+    terminal = next(item for item in completed if isinstance(item, EndOfResponse))
+    assert terminal.input_tool_call_ids == ["call_pending"]
 
 
 def test_responses_api_timing_logs_only_text_chunks():
