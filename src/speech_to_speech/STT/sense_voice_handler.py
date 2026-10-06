@@ -4,12 +4,12 @@ import logging
 from typing import Any, Iterator
 
 import numpy as np
-import torch
 from rich.console import Console
 
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
+from speech_to_speech.utils.utils import empty_device_cache
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -55,15 +55,9 @@ class SenseVoiceSTTHandler(BaseSTTHandler):
         logger.info("Warming up %s", self.__class__.__name__)
         self._generate(np.zeros(16000, dtype=np.float32))
 
-    def _empty_cache(self) -> None:
-        if isinstance(self.device, str) and self.device.startswith("cuda") and torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        elif self.device == "mps" and torch.backends.mps.is_available():
-            torch.mps.empty_cache()
-
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         pred_text = self._generate(vad_audio.audio)
-        self._empty_cache()
+        empty_device_cache(self.device)
         console.print(f"[yellow]USER: {pred_text}")
 
         if vad_audio.mode == "progressive":

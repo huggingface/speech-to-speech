@@ -30,6 +30,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 from openai.types.realtime import RealtimeSessionCreateRequest
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
@@ -113,7 +114,7 @@ def build_lightning_whisper_mlx(monkeypatch):
     from speech_to_speech.STT.lightning_whisper_mlx_handler import LightningWhisperSTTHandler
 
     monkeypatch.setattr(lightning_whisper_mlx_handler.console, "print", lambda *a, **k: None)
-    monkeypatch.setattr(lightning_whisper_mlx_handler.torch.mps, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.mps, "empty_cache", lambda: None)
 
     handler = object.__new__(LightningWhisperSTTHandler)
     handler.device = "mps"

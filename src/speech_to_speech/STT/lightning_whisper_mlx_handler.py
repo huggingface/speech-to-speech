@@ -5,7 +5,6 @@ from time import perf_counter
 from typing import Any, Iterator, Optional
 
 import numpy as np
-import torch
 from lightning_whisper_mlx import LightningWhisperMLX
 from rich.console import Console
 
@@ -13,6 +12,7 @@ from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 from speech_to_speech.utils.mlx_lock import MLXLockContext
+from speech_to_speech.utils.utils import empty_device_cache
 
 logger = logging.getLogger(__name__)
 
@@ -90,9 +90,7 @@ class LightningWhisperSTTHandler(BaseSTTHandler):
 
         pred_text = transcription_dict["text"].strip()
         language_code = transcription_dict["language"]
-        # Same idea as ChatTTSHandler: MPS cache clear only on Apple Silicon.
-        if self.device == "mps":
-            torch.mps.empty_cache()
+        empty_device_cache(self.device)
 
         logger.debug("finished whisper inference")
         console.print(f"[yellow]USER: {pred_text}")

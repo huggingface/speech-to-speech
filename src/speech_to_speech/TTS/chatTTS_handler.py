@@ -15,7 +15,7 @@ from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-from speech_to_speech.utils.utils import validate_device
+from speech_to_speech.utils.utils import device_is_available, validate_device
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,7 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         _cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
         console.print(f"[green]ASSISTANT: {text}")
-        if self.device == "mps":
+        if self.device == "mps" and device_is_available(self.device):
             import time
 
             start = time.time()

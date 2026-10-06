@@ -4,13 +4,12 @@ import logging
 from typing import Any, Iterator
 
 import numpy as np
-import torch
 from rich.console import Console
 
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
-from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
+from speech_to_speech.utils.utils import TORCH_DEVICES, empty_device_cache, resolve_device
 
 logger = logging.getLogger(__name__)
 
@@ -58,9 +57,7 @@ class ParaformerSTTHandler(BaseSTTHandler):
         logger.debug("infering paraformer...")
 
         pred_text = self.model.generate(vad_audio.audio)[0]["text"].strip().replace(" ", "")
-        # Same idea as ChatTTSHandler: MPS cache clear only on Apple Silicon.
-        if self.device == "mps":
-            torch.mps.empty_cache()
+        empty_device_cache(self.device)
 
         logger.debug("finished paraformer inference")
         console.print(f"[yellow]USER: {pred_text}")

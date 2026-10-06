@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+import torch
 
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription, VADAudio
 from speech_to_speech.STT import paraformer_handler
@@ -38,7 +39,7 @@ def test_setup_extracts_language_from_model_name(monkeypatch, model_name, expect
     fake_funasr = MagicMock()
     fake_funasr.AutoModel = MagicMock(return_value=fake_model)
     monkeypatch.setitem(sys.modules, "funasr", fake_funasr)
-    monkeypatch.setattr(paraformer_handler.torch.mps, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.mps, "empty_cache", lambda: None)
 
     handler = object.__new__(ParaformerSTTHandler)
     handler.setup(model_name=model_name, device="cpu")
@@ -48,7 +49,7 @@ def test_setup_extracts_language_from_model_name(monkeypatch, model_name, expect
 
 def test_progressive_paraformer_transcription_is_partial(monkeypatch):
     monkeypatch.setattr(paraformer_handler.console, "print", lambda *args, **kwargs: None)
-    monkeypatch.setattr(paraformer_handler.torch.mps, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.mps, "empty_cache", lambda: None)
 
     result = list(
         _handler().process(
@@ -71,7 +72,7 @@ def test_progressive_paraformer_transcription_is_partial(monkeypatch):
 
 def test_final_paraformer_transcription_is_final(monkeypatch):
     monkeypatch.setattr(paraformer_handler.console, "print", lambda *args, **kwargs: None)
-    monkeypatch.setattr(paraformer_handler.torch.mps, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.mps, "empty_cache", lambda: None)
 
     result = list(
         _handler().process(
@@ -97,7 +98,7 @@ def test_final_paraformer_transcription_is_final(monkeypatch):
 
 def test_final_paraformer_transcription_uses_english_checkpoint_language(monkeypatch):
     monkeypatch.setattr(paraformer_handler.console, "print", lambda *args, **kwargs: None)
-    monkeypatch.setattr(paraformer_handler.torch.mps, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.mps, "empty_cache", lambda: None)
 
     result = list(
         _handler(language="en").process(
@@ -117,7 +118,7 @@ def test_paraformer_skips_mps_cache_clear_on_cpu(monkeypatch):
     def fail_if_called():
         raise AssertionError("torch.mps.empty_cache should not run on cpu")
 
-    monkeypatch.setattr(paraformer_handler.torch.mps, "empty_cache", fail_if_called)
+    monkeypatch.setattr(torch.mps, "empty_cache", fail_if_called)
 
     result = list(
         _handler(device="cpu").process(

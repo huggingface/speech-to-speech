@@ -153,3 +153,128 @@ def test_importing_device_helpers_does_not_import_torch() -> None:
     )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+# --- accelerator cache clearing -----------------------------------------------------------
+#
+# `resolve_device` keeps an explicit device as requested without checking that it exists
+# (see test_explicit_supported_device_is_kept_with_its_index), so `self.device == "mps"`
+# records the request. Calling into `torch.mps` on that basis raises
+# `RuntimeError: Cannot execute emptyCache() without MPS backend.`
+
+
+def _recording_caches(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    cleared: list[str] = []
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: cleared.append("cuda"))
+    monkeypatch.setattr(torch.mps, "empty_cache", lambda: cleared.append("mps"))
+    return cleared
+
+
+def test_empty_device_cache_skips_a_requested_but_absent_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    _available(monkeypatch)
+    cleared = _recording_caches(monkeypatch)
+
+    utils.empty_device_cache("mps")
+    utils.empty_device_cache("cuda")
+
+    assert cleared == []
+
+
+def test_empty_device_cache_clears_a_present_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    _available(monkeypatch, "cuda", "mps")
+    cleared = _recording_caches(monkeypatch)
+
+    utils.empty_device_cache("mps")
+    utils.empty_device_cache("cuda")
+
+    assert cleared == ["mps", "cuda"]
+
+
+def test_empty_device_cache_reads_the_type_of_an_indexed_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    _available(monkeypatch, "cuda")
+    cleared = _recording_caches(monkeypatch)
+
+    utils.empty_device_cache("cuda:1")
+
+    assert cleared == ["cuda"]
+
+
+@pytest.mark.parametrize("device", ["cpu", "xpu", "npu"])
+def test_empty_device_cache_is_a_no_op_for_devices_without_a_cache(
+    monkeypatch: pytest.MonkeyPatch, device: str
+) -> None:
+    _available(monkeypatch, "xpu", "npu")
+    cleared = _recording_caches(monkeypatch)
+
+    utils.empty_device_cache(device)
+
+    assert cleared == []
+
+
+def test_device_is_available_reports_the_fact_not_the_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    _available(monkeypatch, "cuda")
+
+    assert resolve_device("mps", TORCH_DEVICES, "Test") == "mps"
+    assert utils.device_is_available("mps") is False
+    assert utils.device_is_available("cuda:1") is True
+
+
+def test_no_handler_guards_an_mps_call_on_the_requested_device_alone() -> None:
+    """`self.device == "mps"` is the request; a torch.mps call needs availability too."""
+    import ast
+    from pathlib import Path
+
+    def guards_on_requested_device(test: ast.expr) -> bool:
+        # Matches `self.device == "mps"` but not `... and device_is_available(...)`.
+        return (
+            isinstance(test, ast.Compare)
+            and isinstance(test.ops[0], ast.Eq)
+            and isinstance(test.left, ast.Attribute)
+            and test.left.attr == "device"
+            and isinstance(test.comparators[0], ast.Constant)
+            and test.comparators[0].value == "mps"
+        )
+
+    def calls_torch_mps(node: ast.AST) -> bool:
+        return any(
+            isinstance(inner, ast.Attribute) and isinstance(inner.value, ast.Attribute) and inner.value.attr == "mps"
+            for inner in ast.walk(node)
+        )
+
+    offenders = []
+    for path in sorted(Path("src/speech_to_speech").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.If) and guards_on_requested_device(node.test):
+                if any(calls_torch_mps(stmt) for stmt in node.body):
+                    offenders.append(f"{path}:{node.lineno}")
+
+    assert offenders == [], (
+        "these blocks call into torch.mps guarded only by the requested device; "
+        f"use empty_device_cache()/device_is_available(): {offenders}"
+    )
+
+
+def test_paraformer_does_not_clear_an_mps_cache_it_was_only_asked_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The #145 symptom: `--paraformer_stt_device mps` without an MPS build."""
+    import numpy as np
+
+    from speech_to_speech.pipeline.messages import VADAudio
+    from speech_to_speech.STT.paraformer_handler import ParaformerSTTHandler
+
+    _available(monkeypatch, "cpu")
+    monkeypatch.setattr(
+        torch.mps,
+        "empty_cache",
+        lambda: (_ for _ in ()).throw(RuntimeError("Cannot execute emptyCache() without MPS backend.")),
+    )
+    fake_model = MagicMock()
+    fake_model.generate.return_value = [{"text": "你好"}]
+    monkeypatch.setitem(sys.modules, "funasr", SimpleNamespace(AutoModel=MagicMock(return_value=fake_model)))
+
+    handler = object.__new__(ParaformerSTTHandler)
+    handler.setup(model_name="paraformer-zh", device="mps")
+    assert handler.device == "mps"
+
+    audio = VADAudio(audio=np.zeros(16000, dtype=np.float32), turn_id="turn_1", turn_revision=0)
+    assert [out.text for out in handler.process(audio)] == ["你好"]

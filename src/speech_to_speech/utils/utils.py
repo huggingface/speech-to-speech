@@ -78,6 +78,38 @@ def _is_device_available(device_type: str) -> bool:
     return device_type == "cpu"
 
 
+def device_is_available(device: str) -> bool:
+    """Whether ``device`` is actually present, rather than merely requested.
+
+    ``resolve_device`` deliberately keeps an explicit device as asked for without
+    checking availability, so a handler's ``self.device`` records the request.
+    Code that calls into a device-specific torch namespace needs the fact, not
+    the request.
+    """
+    return _is_device_available(device.split(":", 1)[0])
+
+
+def empty_device_cache(device: str) -> None:
+    """Free cached accelerator memory for ``device``, if that backend is present.
+
+    ``torch.mps.empty_cache()`` raises ``RuntimeError: Cannot execute
+    emptyCache() without MPS backend.`` when torch has no MPS backend, so
+    guarding on ``self.device == "mps"`` alone is not enough -- an explicit
+    ``--device mps`` reaches here unvalidated. Devices without a cache to clear
+    (CPU, and XPU/NPU, which no call site cleared before this helper) are a
+    no-op.
+    """
+    import torch
+
+    device_type = device.split(":", 1)[0]
+    if not _is_device_available(device_type):
+        return
+    if device_type == "cuda":
+        torch.cuda.empty_cache()
+    elif device_type == "mps":
+        torch.mps.empty_cache()
+
+
 def validate_device(device: str, supported: Sequence[str], component: str) -> None:
     """Raise unless ``device`` is ``auto`` or one of the ``supported`` device types (``cuda:1`` counts as ``cuda``)."""
     if device != "auto" and device.split(":", 1)[0] not in supported:
