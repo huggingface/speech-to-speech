@@ -125,7 +125,7 @@ def test_late_commit_from_superseded_turn_is_rejected():
 def test_committed_turn_remains_valid_after_conversation_advances():
     tracker = SpeculativeTurnTracker()
     tracker.start_turn()
-    tracker.commit("turn_1", 0)
+    tracker.wait_for_gate("turn_1", 0, commit=True)
 
     tracker.start_turn()
 
@@ -372,7 +372,7 @@ def test_commit_after_reset_does_not_resurrect_untracked_turn():
     tracker.observe("turn_1", 0)
     tracker.reset()
 
-    tracker.commit("turn_1", 0)
+    tracker.wait_for_gate("turn_1", 0, commit=True)
 
     assert not tracker.is_committed("turn_1", 0)
 
@@ -382,7 +382,7 @@ def test_commit_after_new_turn_does_not_resurrect_superseded_turn():
     tracker.start_turn()
     tracker.start_turn()
 
-    tracker.commit("turn_1", 0)
+    tracker.wait_for_gate("turn_1", 0, commit=True)
 
     assert not tracker.is_committed("turn_1", 0)
     assert tracker.is_latest("turn_2", 0)
@@ -393,7 +393,6 @@ def test_commit_after_new_turn_does_not_resurrect_superseded_turn():
     [
         lambda tracker: tracker.wait_for_gate("turn_1", 0, commit=True),
         lambda tracker: tracker.gate("turn_1", 0, commit=True).action is ACCEPT,
-        lambda tracker: tracker.commit("turn_1", 0),
     ],
 )
 def test_untracked_turn_cannot_be_accepted(accept):
@@ -413,7 +412,7 @@ def test_reused_turn_id_after_reset_is_not_reported_as_committed():
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)
     tracker.reset()
-    tracker.commit("turn_1", 0)
+    tracker.wait_for_gate("turn_1", 0, commit=True)
 
     tracker.observe("turn_1", 0)
 
@@ -509,7 +508,7 @@ def test_vad_reopens_speculative_turn_when_live_transcription_disabled():
 def test_vad_starts_new_turn_after_committed_turn_would_have_reopened():
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)
-    tracker.commit("turn_1", 0)
+    tracker.wait_for_gate("turn_1", 0, commit=True)
     handler = object.__new__(VADHandler)
     handler.enable_realtime_transcription = False
     handler._speech_started_emitted = False
@@ -1019,7 +1018,7 @@ def test_continuation_bar_inactive_when_turn_committed():
     handler = _handler_after_soft_ended_turn()
     handler.min_speech_continuation_ms = 192
     tracker = handler.speculative_turns
-    tracker.commit("turn_1", 0)
+    tracker.wait_for_gate("turn_1", 0, commit=True)
 
     outputs = _drive_final_segment(handler, active_chunks=8, segment_chunks=8)
 
@@ -1114,7 +1113,7 @@ def test_vad_does_not_reopen_committed_turn():
     while not handler.text_output_queue.empty():
         handler.text_output_queue.get_nowait()
 
-    tracker.commit("turn_1", 0)
+    tracker.wait_for_gate("turn_1", 0, commit=True)
     handler._total_samples = 16000 * 3
 
     outputs = _drive_final_segment(handler)

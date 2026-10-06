@@ -166,21 +166,13 @@ def _output_response_key(item: Any) -> str | None:
     return None
 
 
-def _output_is_held(unit: PipelineUnit, session: SessionState, item: Any) -> bool:
+def _output_is_held(unit: PipelineUnit, session_id: str, item: Any) -> bool:
     """Whether *item* must stay queued until its response or turn allows it.
 
     Holding never waits here, so speech and connection events keep flowing.
     """
     response_key = _output_response_key(item)
-    if response_key is None:
-        return unit.service.is_turn_output_held(item)
-    if unit.service.response.is_response_output_blocked(session.session_id, response_key):
-        return True
-    if _is_audio_done(item) and any(
-        _output_response_key(pending) == response_key for pending in session.pending_text_output_items
-    ):
-        # The done sentinel carries no turn, so the turn hold cannot stop it.
-        # It must not close the response before its parked tool calls.
+    if response_key is not None and unit.service.response.is_response_output_blocked(session_id, response_key):
         return True
     return unit.service.is_turn_output_held(item)
 
@@ -841,14 +833,14 @@ def create_app(
                     parked_index = None
                     if session is not None and session_id is not None:
                         for index, pending in enumerate(session.pending_text_output_items):
-                            if not _output_is_held(unit, session, pending):
+                            if not _output_is_held(unit, session_id, pending):
                                 text_msg = session.pending_text_output_items.pop(index)
                                 parked_index = index
                                 break
                     if text_msg is None:
                         text_msg = unit.text_output_queue.get_nowait()
 
-                    if session is not None and session_id is not None and _output_is_held(unit, session, text_msg):
+                    if session is not None and session_id is not None and _output_is_held(unit, session_id, text_msg):
                         # Response-dependent side-channel events share the same
                         # exposure barrier as audio/output events. In particular,
                         # an early tool call must never overtake response.created.
@@ -940,7 +932,11 @@ def create_app(
                     else:
                         audio_chunk = unit.output_queue.get_nowait()
 
-                    if session is not None and session_id is not None and _output_is_held(unit, session, audio_chunk):
+                    if (
+                        session is not None
+                        and session_id is not None
+                        and _output_is_held(unit, session_id, audio_chunk)
+                    ):
                         # Generation and TTS may complete before the client sends
                         # response.create, or before response.created finishes
                         # sending. Keep every lifecycle event private until the

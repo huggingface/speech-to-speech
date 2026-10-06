@@ -298,13 +298,6 @@ class SpeculativeTurnTracker:
                 )
                 self._condition.notify_all()
 
-    def commit(self, turn_id: str | None, revision: int | None) -> bool:
-        """Accept relevant work now; callers consult :meth:`gate` first."""
-        if turn_id is None or revision is None:
-            return True
-        with self._condition:
-            return self._commit_locked(turn_id, revision)
-
     def close(self, turn_id: str | None, revision: int | None) -> None:
         """Release committed state after a response reaches its terminal event.
 

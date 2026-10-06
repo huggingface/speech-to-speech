@@ -757,7 +757,7 @@ class TestSendLoop:
                 assert not tracker.is_committed("turn_1", 0)
 
     @pytest.mark.parametrize("resume_after_hold_check", [False, True], ids=["before_queue", "after_hold_check"])
-    def test_held_tool_call_reaches_client_before_response_done(self, setup, monkeypatch, resume_after_hold_check):
+    def test_held_tool_call_is_dropped_when_its_turn_reopens(self, setup, monkeypatch, resume_after_hold_check):
         app, service, _, output_queue, text_output_queue, *_ = setup
         tracker = SpeculativeTurnTracker()
         service.speculative_turns = tracker
@@ -769,34 +769,29 @@ class TestSendLoop:
                 ws.send_json({"type": "response.create"})
                 assert ws.receive_json()["type"] == "response.created"
                 response_key = service._state(list(service._conns)[0]).current_response_key
-                # A tool-call-only answer never commits in TTS, so a speech
-                # candidate after the workers' gate holds its text-side events.
+                # A tool-call-only answer never commits in TTS, so its early
+                # side-channel copy and its ordered copy both reach the send loop.
                 _resume_speech(monkeypatch, service, tracker, after_hold_check=resume_after_hold_check)
-                text_output_queue.put(
-                    AssistantToolCallReadyEvent(
-                        response_key=response_key,
-                        output_sequence=0,
-                        turn_id="turn_1",
-                        turn_revision=0,
-                        part=AssistantToolCallPart(
-                            tool={"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"}
-                        ),
-                    )
+                part = AssistantToolCallPart(
+                    tool={"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"}
                 )
-                output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=response_key))
+                turn = {"turn_id": "turn_1", "turn_revision": 0}
+                text_output_queue.put(
+                    AssistantToolCallReadyEvent(response_key=response_key, output_sequence=0, part=part, **turn)
+                )
+                output_queue.put(
+                    AssistantOutputEvent(response_key=response_key, output_sequence=0, parts=[part], **turn)
+                )
                 time.sleep(0.05)
-                tracker.speech_candidate_cancelled()
 
+                assert tracker.speech_started(1300) == ("turn_1", 1, True)
+                text_output_queue.put(SpeechStartedEvent(turn_id="turn_1", turn_revision=1))
                 messages = [ws.receive_json()]
-                while messages[-1]["type"] != "response.done" and len(messages) < 4:
+                while messages[-1]["type"] != "input_audio_buffer.speech_started" and len(messages) < 10:
                     messages.append(ws.receive_json())
-                assert [message["type"] for message in messages] == [
-                    "response.output_item.added",
-                    "response.function_call_arguments.done",
-                    "response.output_item.done",
-                    "response.done",
-                ]
-                assert [item["call_id"] for item in messages[-1]["response"]["output"]] == ["call_1"]
+                assert messages[-1]["type"] == "input_audio_buffer.speech_started"
+                assert "call_1" not in str(messages)
+                assert not tracker.is_committed("turn_1", 0)
 
     def test_barge_in_discard_clears_after_response_done(self, setup):
         """After barge-in sets discarding=True, __RESPONSE_DONE__ must clear it back to False."""
