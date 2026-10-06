@@ -136,6 +136,15 @@ class Qwen3TTSHandlerArguments:
             "runaway or stalled long generations) and the first audio of later sentences starts sooner."
         },
     )
+    qwen3_tts_sentence_pause_s: float = field(
+        default=0.0,
+        metadata={
+            "help": "Silence in seconds appended after each synthesized utterance. With coalesce_inputs False "
+            "every sentence is synthesized separately and its leading silence is trimmed, so the gap between "
+            "sentences can end up shorter than a comma pause; 0.3-0.5 restores a natural sentence break. "
+            "Default 0 (off)."
+        },
+    )
     qwen3_tts_blocksize: int = field(
         default=512,
         metadata={"help": "Audio chunk size in samples for streaming output. Default is 512."},

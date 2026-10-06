@@ -133,6 +133,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         streaming_chunk_size: int | None = None,
         max_new_tokens: int = DEFAULT_QWEN3_TTS_MAX_NEW_TOKENS,
         coalesce_inputs: bool = True,
+        sentence_pause_s: float = 0.0,
         blocksize: int = 512,
         gen_kwargs: dict[str, Any] | None = None,
         cancel_scope: CancelScope | None = None,
@@ -160,6 +161,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.mlx_quantization = self._normalize_mlx_quantization(mlx_quantization)
         self.max_new_tokens = max_new_tokens
         self.coalesce_inputs = coalesce_inputs
+        self.sentence_pause_s = max(0.0, float(sentence_pause_s))
         self.blocksize = blocksize
         self.dtype: torch.dtype | None | str = None
         self.gen_kwargs = gen_kwargs or {}
@@ -755,6 +757,14 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             chunk = np.pad(leftover, (0, self.blocksize - len(leftover)))
             yield chunk
             total_samples += len(leftover)
+
+        # 문장 단위 합성(coalesce_inputs=False)은 문장마다 앞 무음을 잘라내서 문장 사이 쉼이 쉼표 쉼보다
+        # 짧아진다. 발화 뒤에 무음을 붙여 문장 사이를 띄운다 (sentence_pause_s, 기본 0 = 끔).
+        # RTF 계산에서는 뺀다 (생성한 소리가 아님).
+        if found_speech:
+            pause_blocks = math.ceil(getattr(self, "sentence_pause_s", 0.0) * PIPELINE_SR / self.blocksize)
+            for _ in range(pause_blocks):
+                yield np.zeros(self.blocksize, dtype=np.int16)
 
         generation_time = perf_counter() - start
         audio_duration = total_samples / PIPELINE_SR
