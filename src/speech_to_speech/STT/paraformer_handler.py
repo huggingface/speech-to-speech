@@ -9,7 +9,7 @@ from rich.console import Console
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
-from speech_to_speech.utils.utils import TORCH_DEVICES, empty_device_cache, resolve_device
+from speech_to_speech.utils.utils import TORCH_DEVICES, empty_mps_cache, resolve_device
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ class ParaformerSTTHandler(BaseSTTHandler):
         logger.debug("infering paraformer...")
 
         pred_text = self.model.generate(vad_audio.audio)[0]["text"].strip().replace(" ", "")
-        empty_device_cache(self.device)
+        empty_mps_cache(self.device)
 
         logger.debug("finished paraformer inference")
         console.print(f"[yellow]USER: {pred_text}")

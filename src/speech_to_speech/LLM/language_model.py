@@ -71,7 +71,7 @@ from speech_to_speech.pipeline.messages import (
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
 from speech_to_speech.pipeline.turn_latency import bind_active_turn_latency_tracker
-from speech_to_speech.utils.utils import empty_device_cache, is_out_of_band, response_wants_audio
+from speech_to_speech.utils.utils import empty_mps_cache, is_out_of_band, response_wants_audio
 
 try:
     import mlx.core as mx
@@ -902,7 +902,7 @@ class LanguageModelHandler(BaseLanguageModelHandler):
                 mx.clear_cache()
             except Exception:
                 pass
-            empty_device_cache("mps")
+            empty_mps_cache("mps")
         else:
             self._cancel_criteria.reset()
             if ctx.prefetch_transaction is not None:
@@ -917,7 +917,7 @@ class LanguageModelHandler(BaseLanguageModelHandler):
             thread.start()
             yield from self._stream_tokens(self.streamer, gen, language_code, ctx, runtime_config, response)
             self._finish_transformers_generation(thread)
-            empty_device_cache(self.device)
+            empty_mps_cache(self.device)
 
     def _build_compaction_generate_fn(self) -> CompactGenerateFn:
         if self.backend == "mlx":
@@ -1086,7 +1086,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
                 mx.clear_cache()
             except Exception:
                 pass
-            empty_device_cache("mps")
+            empty_mps_cache("mps")
         else:
             inputs, input_tokens = self._prepare_vlm_inputs(prepared)
             ctx.input_tokens += input_tokens
@@ -1111,7 +1111,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             thread.start()
             yield from self._stream_tokens(self.streamer, gen, language_code, ctx, runtime_config, response)
             self._finish_transformers_generation(thread)
-            empty_device_cache(self.device)
+            empty_mps_cache(self.device)
 
     def _build_compaction_generate_fn(self) -> CompactGenerateFn:
         if self.backend == "mlx":

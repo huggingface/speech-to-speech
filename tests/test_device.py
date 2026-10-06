@@ -170,43 +170,31 @@ def _recording_caches(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return cleared
 
 
-def test_empty_device_cache_skips_a_requested_but_absent_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_empty_mps_cache_skips_mps_when_it_is_not_available(monkeypatch: pytest.MonkeyPatch) -> None:
     _available(monkeypatch)
     cleared = _recording_caches(monkeypatch)
 
-    utils.empty_device_cache("mps")
-    utils.empty_device_cache("cuda")
+    utils.empty_mps_cache("mps")
 
     assert cleared == []
 
 
-def test_empty_device_cache_clears_a_present_backend(monkeypatch: pytest.MonkeyPatch) -> None:
-    _available(monkeypatch, "cuda", "mps")
+def test_empty_mps_cache_clears_mps_when_it_is_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    _available(monkeypatch, "mps")
     cleared = _recording_caches(monkeypatch)
 
-    utils.empty_device_cache("mps")
-    utils.empty_device_cache("cuda")
+    utils.empty_mps_cache("mps")
 
-    assert cleared == ["mps", "cuda"]
+    assert cleared == ["mps"]
 
 
-def test_empty_device_cache_reads_the_type_of_an_indexed_device(monkeypatch: pytest.MonkeyPatch) -> None:
-    _available(monkeypatch, "cuda")
+@pytest.mark.parametrize("device", ["cuda", "cuda:1", "cpu", "xpu", "npu"])
+def test_empty_mps_cache_never_touches_other_devices(monkeypatch: pytest.MonkeyPatch, device: str) -> None:
+    """Clearing the CUDA cache after every generation would discard reusable blocks."""
+    _available(monkeypatch, "cuda", "xpu", "npu", "mps")
     cleared = _recording_caches(monkeypatch)
 
-    utils.empty_device_cache("cuda:1")
-
-    assert cleared == ["cuda"]
-
-
-@pytest.mark.parametrize("device", ["cpu", "xpu", "npu"])
-def test_empty_device_cache_is_a_no_op_for_devices_without_a_cache(
-    monkeypatch: pytest.MonkeyPatch, device: str
-) -> None:
-    _available(monkeypatch, "xpu", "npu")
-    cleared = _recording_caches(monkeypatch)
-
-    utils.empty_device_cache(device)
+    utils.empty_mps_cache(device)
 
     assert cleared == []
 
@@ -278,3 +266,27 @@ def test_paraformer_does_not_clear_an_mps_cache_it_was_only_asked_for(monkeypatc
 
     audio = VADAudio(audio=np.zeros(16000, dtype=np.float32), turn_id="turn_1", turn_revision=0)
     assert [out.text for out in handler.process(audio)] == ["你好"]
+
+
+def test_cuda_paraformer_does_not_clear_the_cuda_cache_per_transcription(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cache clear was MPS-only before; CUDA must keep its allocator cache."""
+    import numpy as np
+
+    from speech_to_speech.pipeline.messages import VADAudio
+    from speech_to_speech.STT.paraformer_handler import ParaformerSTTHandler
+
+    _available(monkeypatch, "cuda")
+    cleared = _recording_caches(monkeypatch)
+    fake_model = MagicMock()
+    fake_model.generate.return_value = [{"text": "你好"}]
+    monkeypatch.setitem(sys.modules, "funasr", SimpleNamespace(AutoModel=MagicMock(return_value=fake_model)))
+
+    handler = object.__new__(ParaformerSTTHandler)
+    handler.setup(model_name="paraformer-zh", device="cuda")
+    for revision in range(3):
+        audio = VADAudio(
+            audio=np.zeros(16000, dtype=np.float32), turn_id="turn_1", turn_revision=revision, mode="progressive"
+        )
+        list(handler.process(audio))
+
+    assert cleared == []

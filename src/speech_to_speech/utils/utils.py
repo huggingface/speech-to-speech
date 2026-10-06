@@ -89,25 +89,20 @@ def device_is_available(device: str) -> bool:
     return _is_device_available(device.split(":", 1)[0])
 
 
-def empty_device_cache(device: str) -> None:
-    """Free cached accelerator memory for ``device``, if that backend is present.
+def empty_mps_cache(device: str) -> None:
+    """Free the MPS allocator cache, but only if ``device`` is MPS and MPS is present.
 
     ``torch.mps.empty_cache()`` raises ``RuntimeError: Cannot execute
-    emptyCache() without MPS backend.`` when torch has no MPS backend, so
-    guarding on ``self.device == "mps"`` alone is not enough -- an explicit
-    ``--device mps`` reaches here unvalidated. Devices without a cache to clear
-    (CPU, and XPU/NPU, which no call site cleared before this helper) are a
-    no-op.
+    emptyCache() without MPS backend.`` when torch has no MPS backend, so checking
+    ``self.device == "mps"`` alone is not enough: an explicit ``--device mps``
+    reaches here unvalidated. Other devices are left alone on purpose -- clearing
+    the CUDA cache after every generation would throw away reusable blocks.
     """
+    if device.split(":", 1)[0] != "mps" or not _is_device_available("mps"):
+        return
     import torch
 
-    device_type = device.split(":", 1)[0]
-    if not _is_device_available(device_type):
-        return
-    if device_type == "cuda":
-        torch.cuda.empty_cache()
-    elif device_type == "mps":
-        torch.mps.empty_cache()
+    torch.mps.empty_cache()
 
 
 def validate_device(device: str, supported: Sequence[str], component: str) -> None:
