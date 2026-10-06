@@ -1181,7 +1181,7 @@ async def test_audio_client_one_follow_up_covers_all_queued_tool_outputs():
         "conversation.item.create",
         "response.create",
     ]
-    assert coordinator._queued_follow_ups == 2
+    assert len(coordinator._queued_tool_results) == 2
     create_event = conn.sent[-1]
 
     coordinator.handle_event(
@@ -1190,7 +1190,7 @@ async def test_audio_client_one_follow_up_covers_all_queued_tool_outputs():
             metadata={"s2s_local_tool_create_id": create_event["event_id"]},
         )
     )
-    assert coordinator._queued_follow_ups == 0
+    assert len(coordinator._queued_tool_results) == 0
 
     coordinator.handle_event(response_done("response_tool_1"))
     await asyncio.sleep(0.05)
@@ -1261,7 +1261,7 @@ async def test_audio_client_waits_for_response_lifecycle_after_follow_up_collisi
     )
     await asyncio.sleep(0.01)
     assert len(conn.sent) == 2
-    assert coordinator._queued_follow_ups == 1
+    assert len(coordinator._queued_tool_results) == 1
 
     if user_turn:
         coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.committed", item_id="item_2"))
@@ -1301,7 +1301,7 @@ async def test_audio_client_handles_tool_followup_settlement(rejection):
         coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.committed", item_id="item_2"))
         await wait_until(lambda: len(conn.sent) == 3)
     else:
-        assert coordinator._queued_follow_ups == 0
+        assert len(coordinator._queued_tool_results) == 0
     await coordinator.close()
 
 

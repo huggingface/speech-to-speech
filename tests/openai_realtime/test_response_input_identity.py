@@ -395,11 +395,6 @@ def test_direct_audio_chat_item_retains_its_input_identity(runtime_config):
         pytest.param("responses", 1, id="trimmed-history"),
     ],
 )
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="Known duplicate follow-up gaps in this draft; run with --runxfail to reproduce",
-)
 async def test_completed_answer_suppresses_duplicate_tool_followup(
     service, conn_id, runtime_config, text_prompt_queue, backend, history_size
 ):

@@ -371,34 +371,25 @@ Run the tool scheduling and model-input checks without a GPU:
 CUDA_VISIBLE_DEVICES='' uv run pytest tests/openai_realtime/test_audio_client.py tests/openai_realtime/test_realtime_service.py tests/openai_realtime/test_response_input_identity.py tests/test_lm_output_processor.py tests/test_responses_api_language_model.py -q
 ```
 
-### Reproduce the draft's duplicate tool replies
+### Reproduce and check duplicate tool replies
 
-The two remaining review findings share one CPU reproduction in
-`tests/openai_realtime/test_response_input_identity.py`. It runs the actual
-model completion, output processor, service and client coordinator, with scripted
-model output and speech events. Run it from the repository root:
+The shared CPU reproduction in `tests/openai_realtime/test_response_input_identity.py`
+runs the real completion, output processor, service and client coordinator with
+scripted model output and speech events:
 
 ```bash
-CUDA_VISIBLE_DEVICES='' uv run pytest tests/openai_realtime/test_response_input_identity.py -k completed_answer_suppresses_duplicate_tool_followup --runxfail -q -s --tb=short
+CUDA_VISIBLE_DEVICES='' uv run pytest tests/openai_realtime/test_response_input_identity.py -k completed_answer_suppresses_duplicate_tool_followup -q -s --tb=short
 ```
 
-On this draft, expect **two failures** and exit status 1:
+Both cases now pass. `local-backend` reports `call_1` in model input and completion,
+then sends no extra create. `trimmed-history` removes the result from chat, but
+rejects a create already in flight with `tool_followup_already_answered`.
+The server keeps up to 1,024 recent consumed-result IDs per connection independently
+of history. The oldest acknowledgements expire when the limit is reached.
 
-- `local-backend`: model input includes `call_1`, but completion acknowledges
-  no results. The client sends a redundant create, and the server accepts it.
-- `trimmed-history`: completion acknowledges `call_1`, but a one-turn history
-  limit removes its old turn. The server accepts a create that the client sent
-  before the answer completed and that reaches the server afterward.
-
-Each case prints the model-input IDs, completion acknowledgement, remaining
-history IDs, number of automatic creates and server result. Both currently print
-`"server_followup_result": "response.created"`. The desired result is no new
-create for the local case, and `tool_followup_already_answered` for the delayed
-create in the trimmed-history case.
-
-The cases use strict expected-failure marks in normal test runs. `--runxfail`
-exposes the failing assertions; an unexpected pass makes the normal suite fail
-so the marks must be removed when the bugs are fixed.
+To see the failures before the fixes, use commit `d2df091` and add `--runxfail` to
+that command. The local case emits no acknowledgement and requests another reply;
+the trimmed-history case accepts the delayed duplicate. Both fail with exit status 1.
 
 ### Local LLM with Transformers
 

@@ -2443,9 +2443,9 @@ class TestFinishAudioResponse:
     )
     def test_tool_followup_checks_completed_model_input(self, service, conn_id, text_prompt_queue, status, empty):
         from speech_to_speech.api.openai_realtime.tool_followup import (
+            TOOL_FOLLOWUP_ACK_LIMIT,
             TOOL_FOLLOWUP_COVERED,
             TOOL_FOLLOWUP_METADATA_KEY,
-            TOOL_FOLLOWUP_WAIT,
             TOOL_INPUT_METADATA_KEY,
         )
         from speech_to_speech.pipeline.messages import AssistantTextPart
@@ -2488,6 +2488,9 @@ class TestFinishAudioResponse:
                 input_tool_call_ids=["call_1"],
             ),
         )
+        if status == "completed" and not empty:
+            # Acknowledgements stay bounded even when history no longer retains them.
+            st.answered_tool_call_ids = {f"old_{i}": None for i in range(TOOL_FOLLOWUP_ACK_LIMIT)}
         terminal = service.finish_response(conn_id, status=status, response_key=request.response_key)
         done = next(event for event in terminal if isinstance(event, ResponseDoneEvent))
         assert (done.response.metadata or {}).get(TOOL_INPUT_METADATA_KEY) == (
@@ -2503,6 +2506,9 @@ class TestFinishAudioResponse:
         if status == "completed" and not empty:
             # The client create may arrive only after the answer finished.
             assert result.error.type == TOOL_FOLLOWUP_COVERED
+            assert len(st.answered_tool_call_ids) == TOOL_FOLLOWUP_ACK_LIMIT
+            assert "old_0" not in st.answered_tool_call_ids
+            assert "call_1" in st.answered_tool_call_ids
             assert text_prompt_queue.empty()
             # Explicit requests remain valid even when they repeat context.
             assert isinstance(
@@ -2514,35 +2520,26 @@ class TestFinishAudioResponse:
         request = text_prompt_queue.get_nowait()
         service.finish_response(conn_id, response_key=request.response_key)
 
+    def test_tool_followup_waits_for_open_input(self, service, conn_id, text_prompt_queue):
+        from speech_to_speech.api.openai_realtime.tool_followup import (
+            TOOL_FOLLOWUP_METADATA_KEY,
+            TOOL_FOLLOWUP_WAIT,
+        )
+
         # A create sent before speech_started can reach the server during speech.
         service.speculative_turns = SpeculativeTurnTracker()
         turn_id, revision = service.speculative_turns.start_turn()
-        result = service.handle_response_create(
-            conn_id,
-            ResponseCreateEvent(
-                type="response.create",
-                response={
-                    "metadata": {TOOL_FOLLOWUP_METADATA_KEY: '["not_yet_answered"]'},
-                },
-            ),
+        followup = ResponseCreateEvent(
+            type="response.create",
+            response={"metadata": {TOOL_FOLLOWUP_METADATA_KEY: '["not_yet_answered"]'}},
         )
+        result = service.handle_response_create(conn_id, followup)
         assert result.error.type == TOOL_FOLLOWUP_WAIT
         assert text_prompt_queue.empty()
         service.speculative_turns.segment_finalized(100)
         service.speculative_turns.commit(turn_id, revision)
         service.speculative_turns.close(turn_id, revision)
-        assert isinstance(
-            service.handle_response_create(
-                conn_id,
-                ResponseCreateEvent(
-                    type="response.create",
-                    response={
-                        "metadata": {TOOL_FOLLOWUP_METADATA_KEY: '["not_yet_answered"]'},
-                    },
-                ),
-            ),
-            ResponseCreatedEvent,
-        )
+        assert isinstance(service.handle_response_create(conn_id, followup), ResponseCreatedEvent)
 
     def test_finish_without_audio_emits_only_response_done(self, service, conn_id):
         service.response._ensure_response(conn_id)

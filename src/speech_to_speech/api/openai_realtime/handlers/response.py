@@ -41,6 +41,7 @@ from openai.types.realtime.response_content_part_done_event import Part as DoneC
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
 from speech_to_speech.api.openai_realtime.tool_followup import (
+    TOOL_FOLLOWUP_ACK_LIMIT,
     TOOL_FOLLOWUP_COVERED,
     TOOL_FOLLOWUP_METADATA_KEY,
     TOOL_FOLLOWUP_WAIT,
@@ -792,7 +793,7 @@ class ResponseHandler(RealtimeBaseHandler):
                 )
         metadata = event.response.metadata if event.response else None
         followup_ids = tool_call_ids(metadata.get(TOOL_FOLLOWUP_METADATA_KEY)) if metadata else set()
-        if not is_out_of_band(event.response) and followup_ids and followup_ids <= st.answered_tool_call_ids:
+        if not is_out_of_band(event.response) and followup_ids and followup_ids <= st.answered_tool_call_ids.keys():
             return self.make_error("Tool results already used by a completed response.", TOOL_FOLLOWUP_COVERED)
         turns = self._service.speculative_turns
         if (
@@ -1029,11 +1030,11 @@ class ResponseHandler(RealtimeBaseHandler):
             )
             tool_inputs = st.response_tool_inputs.pop(st.current_response_key or "", set())
             if status == "completed" and terminal_response.output and not is_out_of_band(st.current_response_params):
-                st.answered_tool_call_ids.update(tool_inputs)
-                retained = {
-                    item.call_id for item in st.runtime_config.chat.copy().buffer if item.type == "function_call_output"
-                }
-                st.answered_tool_call_ids.intersection_update(retained)
+                for call_id in sorted(tool_inputs):
+                    st.answered_tool_call_ids.pop(call_id, None)
+                    st.answered_tool_call_ids[call_id] = None
+                while len(st.answered_tool_call_ids) > TOOL_FOLLOWUP_ACK_LIMIT:
+                    st.answered_tool_call_ids.pop(next(iter(st.answered_tool_call_ids)))
             if status == "completed":
                 st.runtime_config.chat.finalize_provisional_generation(st.current_response_key)
             elif status in ("cancelled", "failed", "incomplete"):

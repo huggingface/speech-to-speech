@@ -507,7 +507,6 @@ class _ToolCallCoordinator:
         self._default_create_response = config.tool_response_create
         self._active_response_id: str | None = None
         self._pending_tool_flushes = 0
-        self._queued_follow_ups = 0
         self._pending_create_id: str | None = None
         self._pending_create_saw_response = False
         self._waiting_for_response_after_collision = False
@@ -774,7 +773,6 @@ class _ToolCallCoordinator:
             self._answered_tool_call_ids.difference_update(batch.delivered_call_ids)
             if remaining:
                 self._queued_tool_results[response_id] = remaining
-            self._queued_follow_ups = len(self._queued_tool_results)
         self._kick_follow_up()
 
     def _consume_tool_results(self, call_ids: set[str]) -> None:
@@ -782,7 +780,6 @@ class _ToolCallCoordinator:
             pending.difference_update(call_ids)
             if not pending:
                 del self._queued_tool_results[response_id]
-        self._queued_follow_ups = len(self._queued_tool_results)
 
     def _cancel_batch(self, response_id: str, batch: _ToolResponseBatch) -> None:
         batch.cancelled = True
@@ -848,7 +845,7 @@ class _ToolCallCoordinator:
             if (
                 self._closing
                 or self._pending_tool_flushes > 0
-                or self._queued_follow_ups == 0
+                or not self._queued_tool_results
                 or self._active_response_id is not None
                 or self._pending_create_id is not None
                 or self._waiting_for_response_after_collision
