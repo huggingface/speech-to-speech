@@ -700,6 +700,36 @@ class TestSendLoop:
                 assert tracker._committed == set()
                 assert tracker.begin_reopen_candidate("turn_1", 0) is None
 
+    def test_held_answer_keeps_receiving_audio_that_reopens_its_turn(self, setup):
+        app, service, input_queue, output_queue, text_output_queue, *_ = setup
+        tracker = SpeculativeTurnTracker()
+        service.speculative_turns = tracker
+        audio_b64 = base64.b64encode(_pcm_bytes(512)).decode("ascii")
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                tracker.speech_started(0)
+                tracker.segment_finalized(1000)
+                # Resumed speech arrives after the grace, as the answer is queued.
+                assert tracker.speech_candidate_started(1100)
+                output_queue.put(AssistantOutputEvent(text="Stale answer.", turn_id="turn_1", turn_revision=0))
+                time.sleep(0.05)
+
+                # VAD needs more audio to confirm the speech; the held answer
+                # must not stop the server from receiving it.
+                ws.send_json({"type": "input_audio_buffer.append", "audio": audio_b64})
+                assert input_queue.get(timeout=1)
+                assert tracker.speech_started(1300) == ("turn_1", 1, True)
+                text_output_queue.put(SpeechStartedEvent(turn_id="turn_1", turn_revision=1))
+                output_queue.put(AssistantOutputEvent(text="Revised answer.", turn_id="turn_1", turn_revision=1))
+
+                messages = [ws.receive_json()]
+                while "Revised answer." not in str(messages[-1]):
+                    messages.append(ws.receive_json())
+                assert messages[0]["type"] == "input_audio_buffer.speech_started"
+                assert "Stale answer." not in str(messages)
+                assert not tracker.is_committed("turn_1", 0)
+
     def test_barge_in_discard_clears_after_response_done(self, setup):
         """After barge-in sets discarding=True, __RESPONSE_DONE__ must clear it back to False."""
         app, service, _, output_queue, text_output_queue, _, _, response_playing, cancel_scope = setup

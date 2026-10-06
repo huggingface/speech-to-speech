@@ -9,12 +9,14 @@ import torch
 
 from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEvent
 from speech_to_speech.pipeline.messages import VADAudio
-from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnPhase
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnGate, TurnGateAction, TurnPhase
 from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.VAD.smart_turn import SmartTurnResult
 from speech_to_speech.VAD.vad_handler import VADHandler
 from speech_to_speech.VAD.vad_iterator import VADIterator
 from tests.test_vad_iterator import _FakeVADModel
+
+ACCEPT, DROP, HOLD = TurnGateAction.ACCEPT, TurnGateAction.DROP, TurnGateAction.HOLD
 
 
 @pytest.fixture
@@ -24,23 +26,21 @@ def clock(monkeypatch):
     return now
 
 
-def test_pending_reopen_defers_commit_until_cancelled(clock):
+def test_pending_reopen_holds_output_until_cancelled(clock):
     tracker = SpeculativeTurnTracker()
     tracker.speech_started(0)
     tracker.segment_finalized(1000, output_hold_ms=800)
     assert tracker.speech_candidate_started(1100)
     clock[0] += 1.0  # Grace expires while VAD is still checking the candidate.
 
-    tracker.commit("turn_1", 0)
-
+    assert tracker.gate("turn_1", 0, commit=True) == TurnGate(HOLD, clock[0] + 1.0)
     assert not tracker.is_committed("turn_1", 0)
-    assert tracker.try_commit_if_latest_after_reopen_grace("turn_1", 0) is None
 
     tracker.speech_candidate_cancelled()
 
     assert tracker.current_turn() == ("turn_1", 0)
     assert tracker.phase == TurnPhase.SOFT_ENDED
-    assert tracker.try_commit_if_latest_after_reopen_grace("turn_1", 0) is True
+    assert tracker.gate("turn_1", 0, commit=True).action is ACCEPT
     assert tracker.is_committed("turn_1", 0)
     assert tracker.phase == TurnPhase.ANSWERING
 
@@ -55,7 +55,7 @@ def test_confirmed_reopen_makes_previous_revision_stale(clock, resume_ms):
     # Resume during the processing/output hold, or just before the audio cap.
     # A candidate admitted before the cap can confirm after its threshold.
     assert tracker.speech_candidate_started(resume_ms)
-    assert tracker.try_commit_if_latest_after_reopen_grace("turn_1", 0) is None
+    assert tracker.gate("turn_1", 0, commit=True).action is HOLD
     assert tracker.speech_started(resume_ms + 192) == ("turn_1", 1, True)
 
     assert not tracker.is_latest("turn_1", 0)
@@ -118,7 +118,7 @@ def test_late_commit_from_superseded_turn_is_rejected():
     tracker.start_turn()
     tracker.start_turn()
 
-    assert not tracker.commit_if_latest_after_reopen_grace("turn_1", 0)
+    assert not tracker.wait_for_gate("turn_1", 0, commit=True)
     assert not tracker.is_committed("turn_1", 0)
 
 
@@ -137,7 +137,7 @@ def test_closed_committed_turn_becomes_stale_after_conversation_advances():
     tracker = SpeculativeTurnTracker()
     tracker.speech_started(0)
     tracker.segment_finalized(1000)
-    assert tracker.try_commit_if_latest_after_reopen_grace("turn_1", 0) is True
+    assert tracker.gate("turn_1", 0, commit=True).action is ACCEPT
     assert tracker.speech_started(1100) == ("turn_2", 0, False)
     tracker.segment_finalized(2000)
     assert tracker.is_latest("turn_1", 0)
@@ -161,19 +161,19 @@ def test_closed_current_turn_accepts_followups_but_cannot_reopen():
     assert tracker.speech_started(400) == ("turn_1", 0, False)
     tracker.segment_finalized(1000)
     assert tracker.phase == TurnPhase.SOFT_ENDED
-    assert tracker.try_commit_if_latest_after_reopen_grace("turn_1", 0) is True
+    assert tracker.gate("turn_1", 0, commit=True).action is ACCEPT
     assert tracker.phase == TurnPhase.ANSWERING
 
     # The observe adapter cannot revise either an accepted or a closed turn.
     tracker.observe("turn_1", 1)
     assert tracker.current_turn() == ("turn_1", 0)
-    assert tracker.commit_if_latest_after_reopen_grace("turn_1", 1) is False
+    assert tracker.wait_for_gate("turn_1", 1, commit=True) is False
     assert not tracker.is_committed("turn_1", 1)
     tracker.close("turn_1", 0)
     assert tracker.phase == TurnPhase.CLOSED
     tracker.observe("turn_1", 1)
     assert tracker.current_turn() == ("turn_1", 0)
-    assert tracker.commit_if_latest_after_reopen_grace("turn_1", 1) is False
+    assert tracker.wait_for_gate("turn_1", 1, commit=True) is False
     assert not tracker.is_committed("turn_1", 1)
 
     # A tool follow-up or client response.create still answers this turn.
@@ -181,7 +181,7 @@ def test_closed_current_turn_accepts_followups_but_cannot_reopen():
     assert tracker.is_committed("turn_1", 0)
     assert not tracker.can_reopen(1100)
     assert tracker.begin_reopen_candidate("turn_1", 0) is None
-    assert tracker.try_commit_if_latest_after_reopen_grace("turn_1", 0) is True
+    assert tracker.gate("turn_1", 0, commit=True).action is ACCEPT
     assert tracker.phase == TurnPhase.ANSWERING
 
     tracker.close("turn_1", 0)
@@ -209,7 +209,7 @@ def test_newer_turn_releases_older_reopen_grace_waiter_as_stale():
     tracker.start_reopen_grace("turn_1", 0, grace_s=1.0)
     result: list[bool] = []
 
-    thread = Thread(target=lambda: result.append(tracker.is_latest_after_reopen_grace("turn_1", 0)))
+    thread = Thread(target=lambda: result.append(tracker.wait_for_gate("turn_1", 0)))
     thread.start()
     time.sleep(0.02)
 
@@ -237,7 +237,7 @@ def test_reset_restarts_turn_sequence_without_leaking_state():
     assert tracker.processing_deadline("turn_2", 0) is None
     assert tracker._pending_reopen is None
     assert tracker._reopen_grace is None
-    assert tracker.try_commit_if_latest_after_reopen_grace("turn_2", 0) is False
+    assert tracker.gate("turn_2", 0, commit=True).action is DROP
     assert tracker.start_turn() == ("turn_1", 0)
     assert tracker.is_latest("turn_1", 0)
 
@@ -254,49 +254,51 @@ def test_starting_new_turn_clears_pending_reopen():
     assert tracker.is_latest("turn_2", 0)
 
 
-def test_pending_reopen_wait_timeout_clears_candidate(monkeypatch):
+def test_pending_reopen_hold_expires_without_clearing_candidate(clock):
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)
     candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+    assert tracker.gate("turn_1", 0, hold_for_grace=False).action is HOLD
 
-    monkeypatch.setattr(tracker, "_PENDING_REOPEN_WAIT_TIMEOUT_S", 0)
-    assert tracker.is_latest_after_pending_reopen("turn_1", 0)
+    clock[0] += tracker._PENDING_REOPEN_HOLD_S
 
-    assert candidate_revision == 1
-    assert tracker._pending_reopen is None
+    assert tracker.gate("turn_1", 0, hold_for_grace=False).action is ACCEPT
+    assert tracker.has_speech_candidate()
+    assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+    assert tracker.gate("turn_1", 0).action is DROP
 
 
-def test_commit_if_latest_waits_for_pending_reopen_and_drops_confirmed_reopen():
+def test_committing_wait_drops_confirmed_reopen():
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)
     candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
 
     assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
-    assert not tracker.commit_if_latest_after_reopen_grace("turn_1", 0)
+    assert not tracker.wait_for_gate("turn_1", 0, commit=True)
     assert not tracker.is_committed("turn_1", 0)
 
 
-def test_commit_if_latest_commits_after_pending_reopen_is_cancelled():
+def test_committing_wait_commits_after_pending_reopen_is_cancelled():
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)
     candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
 
     tracker.cancel_reopen_candidate("turn_1", candidate_revision)
 
-    assert tracker.commit_if_latest_after_reopen_grace("turn_1", 0)
+    assert tracker.wait_for_gate("turn_1", 0, commit=True)
     assert tracker.is_committed("turn_1", 0)
 
 
-def test_try_commit_after_reopen_grace_reports_pending_without_blocking():
+def test_gate_holds_for_reopen_grace_without_blocking():
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)
     tracker.start_reopen_grace("turn_1", 0, grace_s=0.05)
 
-    assert tracker.try_commit_if_latest_after_reopen_grace("turn_1", 0) is None
+    assert tracker.gate("turn_1", 0, commit=True).action is HOLD
 
     time.sleep(0.06)
 
-    assert tracker.try_commit_if_latest_after_reopen_grace("turn_1", 0) is True
+    assert tracker.gate("turn_1", 0, commit=True).action is ACCEPT
     assert tracker.is_committed("turn_1", 0)
 
 
@@ -307,7 +309,7 @@ def test_reopen_grace_wait_drops_confirmed_reopen():
     result: dict[str, bool] = {}
 
     def wait_for_grace():
-        result["is_latest"] = tracker.is_latest_after_reopen_grace("turn_1", 0)
+        result["is_latest"] = tracker.wait_for_gate("turn_1", 0)
 
     thread = Thread(target=wait_for_grace)
     thread.start()
@@ -321,7 +323,7 @@ def test_reopen_grace_wait_drops_confirmed_reopen():
     assert result == {"is_latest": False}
 
 
-def test_is_latest_after_stability_window_catches_reopen_started_during_wait():
+def test_processing_hold_catches_reopen_started_during_wait():
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)
 
@@ -333,11 +335,11 @@ def test_is_latest_after_stability_window_catches_reopen_started_during_wait():
     thread = Thread(target=reopen_turn)
     thread.start()
 
-    assert not tracker.is_latest_after_stability_window("turn_1", 0, settle_s=0.2)
+    assert not tracker.wait_for_gate("turn_1", 0, hold_for_grace=False, hold_until=time.monotonic() + 0.2)
     thread.join(timeout=1.0)
 
 
-def test_is_latest_after_stability_window_survives_cancelled_reopen_candidate():
+def test_processing_hold_survives_cancelled_reopen_candidate():
     tracker = SpeculativeTurnTracker()
     tracker.observe("turn_1", 0)
     started = Event()
@@ -345,7 +347,7 @@ def test_is_latest_after_stability_window_survives_cancelled_reopen_candidate():
 
     def wait_for_stability():
         started.set()
-        result.append(tracker.is_latest_after_stability_window("turn_1", 0, settle_s=0.2))
+        result.append(tracker.wait_for_gate("turn_1", 0, hold_for_grace=False, hold_until=time.monotonic() + 0.2))
 
     thread = Thread(target=wait_for_stability)
     thread.start()
@@ -387,22 +389,23 @@ def test_commit_after_new_turn_does_not_resurrect_superseded_turn():
 
 
 @pytest.mark.parametrize(
-    "commit_method",
+    "accept",
     [
-        "commit_if_latest_after_reopen_grace",
-        "try_commit_if_latest_after_reopen_grace",
+        lambda tracker: tracker.wait_for_gate("turn_1", 0, commit=True),
+        lambda tracker: tracker.gate("turn_1", 0, commit=True).action is ACCEPT,
+        lambda tracker: tracker.commit("turn_1", 0),
     ],
 )
-def test_commit_if_latest_variants_keep_untracked_turn_out_of_committed_state(commit_method):
+def test_untracked_turn_cannot_be_accepted(accept):
     """Tagged work cannot succeed after its session cursor was reset."""
     tracker = SpeculativeTurnTracker()
     assert not tracker.is_latest("turn_1", 0)
     assert tracker.is_latest(None, None)
-    assert getattr(tracker, commit_method)("turn_1", 0) is False
+    assert accept(tracker) is False
     tracker.observe("turn_1", 0)
     tracker.reset()
 
-    assert getattr(tracker, commit_method)("turn_1", 0) is False
+    assert accept(tracker) is False
     assert not tracker.is_committed("turn_1", 0)
 
 
@@ -439,15 +442,15 @@ def test_output_hold_and_processing_delay_have_separate_deadlines(clock, hold_ms
     tracker.segment_finalized(1000, output_hold_ms=hold_ms, processing_delay_ms=delay_ms)
     deadline = 100.0 + delay_ms / 1000
     assert tracker.processing_deadline("turn_1", 0) == pytest.approx(deadline)
-    assert tracker.try_commit_if_latest_after_reopen_grace("turn_1", 0) is None
+    assert tracker.gate("turn_1", 0, commit=True).action is HOLD
 
     clock[0] = 100.0 + hold_ms / 1000 - 0.001
     assert tracker.processing_deadline("turn_1", 0) == pytest.approx(deadline)
     assert deadline <= clock[0]
-    assert tracker.try_commit_if_latest_after_reopen_grace("turn_1", 0) is None
+    assert tracker.gate("turn_1", 0, commit=True).action is HOLD
 
     clock[0] += 0.002
-    assert tracker.try_commit_if_latest_after_reopen_grace("turn_1", 0) is True
+    assert tracker.gate("turn_1", 0, commit=True).action is ACCEPT
     assert tracker.phase == TurnPhase.ANSWERING
 
 
@@ -654,7 +657,7 @@ def test_vad_pending_reopen_starts_before_active_speech_threshold():
     assert list(handler.process(_audio_bytes())) == []
 
     assert tracker._pending_reopen is not None
-    tracker.commit("turn_1", 0)
+    assert tracker.gate("turn_1", 0, commit=True).action is HOLD
     assert not tracker.is_committed("turn_1", 0)
     assert handler.text_output_queue.empty()
     assert handler._speech_started_emitted is False
@@ -898,9 +901,9 @@ def test_vad_incomplete_smart_turn_commits_after_longer_grace_without_resumed_sp
     outputs = _drive_final_segment(handler)
 
     assert len(outputs) == 1
-    assert handler.speculative_turns.try_commit_if_latest_after_reopen_grace("turn_1", 0) is None
+    assert handler.speculative_turns.gate("turn_1", 0, commit=True).action is HOLD
     time.sleep(0.06)
-    assert handler.speculative_turns.try_commit_if_latest_after_reopen_grace("turn_1", 0) is True
+    assert handler.speculative_turns.gate("turn_1", 0, commit=True).action is ACCEPT
     assert handler.speculative_turns.is_committed("turn_1", 0)
 
 

@@ -25,6 +25,7 @@ from speech_to_speech.api.openai_realtime.input_state import (
 )
 from speech_to_speech.api.openai_realtime.utils import StreamingPcm16Resampler
 from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEvent
+from speech_to_speech.pipeline.speculative_turns import TurnGateAction
 
 if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import ServerEvent
@@ -215,9 +216,10 @@ class AudioHandler(RealtimeBaseHandler):
             # empty, or its response ended without output. The item cannot
             # reopen once published, so commit after the same reopen gate
             # used for accepted output.
-            committed = turns.try_commit_if_latest_after_reopen_grace(pending.turn_id, pending.turn_revision)
-            if committed is None:
+            decision = turns.gate(pending.turn_id, pending.turn_revision, commit=True)
+            if decision.action is TurnGateAction.HOLD:
                 return "hold"
+            committed = decision.action is TurnGateAction.ACCEPT
             if committed and not has_response:
                 # Terminal-only input has no response completion to retire its
                 # commitment. Retire that record once the input is final.

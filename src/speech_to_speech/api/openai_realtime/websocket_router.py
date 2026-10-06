@@ -165,14 +165,15 @@ def _output_response_key(item: Any) -> str | None:
     return None
 
 
-def _response_key_output_is_blocked(
-    unit: PipelineUnit,
-    session_id: str,
-    response_key: str | None,
-) -> bool:
-    if response_key is None:
-        return False
-    return unit.service.response.is_response_output_blocked(session_id, response_key)
+def _output_is_held(unit: PipelineUnit, session_id: str, item: Any) -> bool:
+    """Whether *item* must stay queued until its response or turn allows it.
+
+    Holding never waits here, so speech and connection events keep flowing.
+    """
+    response_key = _output_response_key(item)
+    if response_key is not None and unit.service.response.is_response_output_blocked(session_id, response_key):
+        return True
+    return unit.service.is_turn_output_held(item)
 
 
 def _discard_obsolete_response_key(unit: PipelineUnit, session_id: str, response_key: str | None) -> None:
@@ -830,30 +831,19 @@ def create_app(
                     text_msg = None
                     if session is not None and session_id is not None:
                         for index, pending in enumerate(session.pending_text_output_items):
-                            if not _response_key_output_is_blocked(
-                                unit,
-                                session_id,
-                                _output_response_key(pending),
-                            ):
+                            if not _output_is_held(unit, session_id, pending):
                                 text_msg = session.pending_text_output_items.pop(index)
                                 break
                     if text_msg is None:
                         text_msg = unit.text_output_queue.get_nowait()
 
-                    if (
-                        session is not None
-                        and session_id is not None
-                        and _response_key_output_is_blocked(
-                            unit,
-                            session_id,
-                            _output_response_key(text_msg),
-                        )
-                    ):
+                    if session is not None and session_id is not None and _output_is_held(unit, session_id, text_msg):
                         # Response-dependent side-channel events share the same
                         # exposure barrier as audio/output events. In particular,
                         # an early tool call must never overtake response.created.
                         # Unlike the serial output hold, this list does not stall
-                        # the origin response whose completion enables the claim.
+                        # the origin response whose completion enables the claim,
+                        # or speech events while resumed speech is checked.
                         session.pending_text_output_items.append(text_msg)
                         text_msg = None
                     if text_msg is None:
@@ -930,16 +920,12 @@ def create_app(
                     if (
                         session is not None
                         and session_id is not None
-                        and _response_key_output_is_blocked(
-                            unit,
-                            session_id,
-                            _output_response_key(audio_chunk),
-                        )
+                        and _output_is_held(unit, session_id, audio_chunk)
                     ):
                         # Generation and TTS may complete before the client sends
                         # response.create, or before response.created finishes
                         # sending. Keep every lifecycle event private until the
-                        # response is publicly announced.
+                        # response is publicly announced and its turn has settled.
                         session.pending_output_item = audio_chunk
                         await asyncio.sleep(0.01)
                         continue

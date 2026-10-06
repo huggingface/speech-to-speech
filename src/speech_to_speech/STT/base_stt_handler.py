@@ -126,10 +126,11 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
             if processing_deadline is not None:
                 item_delay_s = max(0.0, processing_deadline - monotonic())
             wait_started_at_s = perf_counter()
-            is_latest = self.speculative_turns.is_latest_after_stability_window(
+            is_latest = self.speculative_turns.wait_for_gate(
                 turn_id,
                 turn_revision,
-                max(self.final_revision_settle_s, item_delay_s),
+                hold_for_grace=False,
+                hold_until=monotonic() + max(self.final_revision_settle_s, item_delay_s),
             )
             store = getattr(self, "turn_latency_store", None)
             if store is not None and item_delay_s > 0:
@@ -137,7 +138,7 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
                     turn_id, turn_revision, wait_started_at_s, min(perf_counter(), wait_started_at_s + item_delay_s)
                 )
         elif wait_for_pending_reopen:
-            is_latest = self.speculative_turns.is_latest_after_pending_reopen(turn_id, turn_revision)
+            is_latest = self.speculative_turns.wait_for_gate(turn_id, turn_revision, hold_for_grace=False)
         else:
             is_latest = self.speculative_turns.is_latest(turn_id, turn_revision)
         return is_latest

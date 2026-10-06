@@ -1027,11 +1027,8 @@ class ResponseHandler(RealtimeBaseHandler):
     ) -> list[ServerEvent]:
         """Translate ordered assistant output into OpenAI Realtime events."""
         if self._service.speculative_turns:
-            commit_result = self._service.speculative_turns.commit_if_latest_after_reopen_grace(
-                event.turn_id,
-                event.turn_revision,
-            )
-            if not commit_result:
+            # The send loop held this event until its turn settled.
+            if not self._service.speculative_turns.commit(event.turn_id, event.turn_revision):
                 logger.debug("Dropping stale assistant output for turn=%s rev=%s", event.turn_id, event.turn_revision)
                 return []
         st = self._state(conn_id)

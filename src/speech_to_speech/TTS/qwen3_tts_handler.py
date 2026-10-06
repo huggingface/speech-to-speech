@@ -838,7 +838,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         speculative_turns = getattr(self, "speculative_turns", None)
         if isinstance(tts_input, EndOfResponse):
-            if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
+            if speculative_turns and not speculative_turns.wait_for_gate(
                 tts_input.turn_id,
                 tts_input.turn_revision,
             ):
@@ -848,14 +848,13 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             yield AUDIO_RESPONSE_DONE
             return
 
-        if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
+        if speculative_turns and not speculative_turns.wait_for_gate(
             tts_input.turn_id,
             tts_input.turn_revision,
+            commit=True,
         ):
             logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
             return
-        if speculative_turns:
-            speculative_turns.commit(tts_input.turn_id, tts_input.turn_revision)
 
         runtime_config = tts_input.runtime_config
         response = tts_input.response
