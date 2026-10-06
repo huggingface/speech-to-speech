@@ -41,6 +41,14 @@ def report_filename(report: dict[str, Any], *, prefix: str = DEFAULT_PREFIX) -> 
     return f"{prefix}/{moment:%Y%m%dT%H%M%S}-{label}.json"
 
 
+def ensure_private_dataset(repo_id: str, *, api: Any) -> None:
+    """Create a private destination if needed and refuse public existing repos."""
+    api.create_repo(repo_id=repo_id, repo_type="dataset", exist_ok=True, private=True)
+    # HF ignores private=True for an existing repository; verify before upload.
+    if not api.repo_info(repo_id, repo_type="dataset").private:
+        raise RuntimeError(f"Refusing to upload evaluation results to public dataset {repo_id}")
+
+
 def push_report(
     report: dict[str, Any],
     repo_id: str,
@@ -55,7 +63,7 @@ def push_report(
 
         api = HfApi(token=token)
 
-    api.create_repo(repo_id=repo_id, repo_type="dataset", exist_ok=True, private=True)
+    ensure_private_dataset(repo_id, api=api)
     destination = path_in_repo or report_filename(report)
     api.upload_file(
         path_or_fileobj=json.dumps(report, indent=2).encode(),

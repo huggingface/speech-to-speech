@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import huggingface_hub
 import pytest
+from huggingface_hub import DatasetInfo
 
 from speech_to_speech.evals.big_bench_audio import __main__ as cli
 from speech_to_speech.evals.big_bench_audio import job
@@ -136,7 +137,7 @@ def test_full_server_override_keeps_provider_settings_and_existing_openai_key(mo
     assert captured["api_key"] == "test-provider-credential"
 
 
-@pytest.mark.parametrize("returncode", [0, 1])
+@pytest.mark.parametrize("returncode", [0, 1, 2])
 def test_job_redacts_logs_before_upload_and_preserves_runner_exit_status(monkeypatch, capsys, returncode):
     secrets = ["test-hub-credential", "test-provider-credential", "test-realtime-credential"]
     for name, value in zip(("HF_TOKEN", "OPENAI_API_KEY", "S2S_API_KEY"), secrets):
@@ -145,12 +146,20 @@ def test_job_redacts_logs_before_upload_and_preserves_runner_exit_status(monkeyp
     captured = capture_launch(monkeypatch, returncode=returncode, log="auth: " + " ".join(secrets))
     uploads = []
     creates = []
+    operations = []
 
     class FakeApi:
         def create_repo(self, **kwargs):
             creates.append(kwargs)
+            operations.append("create")
+
+        def repo_info(self, repo_id, *, repo_type):
+            operations.append("info")
+            assert repo_id == "me/results" and repo_type == "dataset"
+            return DatasetInfo(id=repo_id, private=True)
 
         def upload_file(self, **kwargs):
+            operations.append("upload")
             uploads.append((kwargs, kwargs["path_or_fileobj"].read_text()))
 
     monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
@@ -158,6 +167,7 @@ def test_job_redacts_logs_before_upload_and_preserves_runner_exit_status(monkeyp
     assert job.main() == returncode
 
     assert creates == [{"repo_id": "me/results", "repo_type": "dataset", "private": True, "exist_ok": True}]
+    assert operations == ["create", "info", "upload"]
     upload, contents = uploads[0]
     assert upload["path_in_repo"] == "logs/local.log" and upload["repo_id"] == "me/results"
     assert contents == "auth: <redacted> <redacted> <redacted>"
@@ -184,3 +194,33 @@ def test_full_job_selects_all_1000_questions_without_a_limit(monkeypatch):
     args = captured["args"]
     assert args.subset == "full" and args.limit is None
     assert len(load_subset(args.subset).head(args.limit)) == 1000
+
+
+@pytest.mark.parametrize("returncode", [0, 1, 2])
+def test_job_refuses_public_log_destination_including_startup_failures(monkeypatch, returncode):
+    monkeypatch.setenv("S2S_PUSH_TO_HUB", "me/public-results")
+    monkeypatch.setenv("HF_TOKEN", "test-hub-credential")
+    captured = capture_launch(monkeypatch, returncode=returncode, log="auth: test-hub-credential")
+    creates, checks, uploads = [], [], []
+
+    class FakeApi:
+        def create_repo(self, **kwargs):
+            creates.append(kwargs)
+
+        def repo_info(self, repo_id, *, repo_type):
+            checks.append((repo_id, repo_type))
+            return DatasetInfo(id=repo_id, private=False)
+
+        def upload_file(self, **kwargs):
+            uploads.append(kwargs)
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+
+    with pytest.raises(RuntimeError, match="public dataset me/public-results"):
+        job.main()
+
+    assert creates == [{"repo_id": "me/public-results", "repo_type": "dataset", "private": True, "exist_ok": True}]
+    assert checks == [("me/public-results", "dataset")]
+    assert uploads == []
+    assert not Path(captured["args"].out).exists()
+    assert Path(captured["args"].spawn_log).read_text() == "auth: <redacted>"

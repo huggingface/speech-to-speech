@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from speech_to_speech.evals.big_bench_audio.hub import slugify
+from speech_to_speech.evals.big_bench_audio.hub import ensure_private_dataset, slugify
 
 
 def main() -> int:
@@ -69,7 +69,7 @@ def main() -> int:
             from huggingface_hub import HfApi
 
             api = HfApi()
-            api.create_repo(repo_id=repo, repo_type="dataset", private=True, exist_ok=True)
+            ensure_private_dataset(repo, api=api)
             api.upload_file(
                 path_or_fileobj=server_log, path_in_repo=f"logs/{name}.log", repo_id=repo, repo_type="dataset"
             )
