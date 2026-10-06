@@ -733,6 +733,47 @@ class TestSendLoop:
                 assert "Stale answer." not in str(messages)
                 assert not tracker.is_committed("turn_1", 0)
 
+    def test_held_tool_call_reaches_client_before_response_done(self, setup):
+        app, service, _, output_queue, text_output_queue, *_ = setup
+        tracker = SpeculativeTurnTracker()
+        service.speculative_turns = tracker
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                tracker.speech_started(0)
+                tracker.segment_finalized(1000)
+                ws.send_json({"type": "response.create"})
+                assert ws.receive_json()["type"] == "response.created"
+                response_key = service._state(list(service._conns)[0]).current_response_key
+                # A tool-call-only answer never commits in TTS, so a speech
+                # candidate after the workers' gate holds its text-side events.
+                assert tracker.speech_candidate_started(1100)
+                text_output_queue.put(
+                    AssistantToolCallReadyEvent(
+                        response_key=response_key,
+                        output_sequence=0,
+                        turn_id="turn_1",
+                        turn_revision=0,
+                        part=AssistantToolCallPart(
+                            tool={"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"}
+                        ),
+                    )
+                )
+                output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=response_key))
+                time.sleep(0.05)
+                tracker.speech_candidate_cancelled()
+
+                messages = [ws.receive_json()]
+                while messages[-1]["type"] != "response.done" and len(messages) < 4:
+                    messages.append(ws.receive_json())
+                assert [message["type"] for message in messages] == [
+                    "response.output_item.added",
+                    "response.function_call_arguments.done",
+                    "response.output_item.done",
+                    "response.done",
+                ]
+                assert [item["call_id"] for item in messages[-1]["response"]["output"]] == ["call_1"]
+
     def test_barge_in_discard_clears_after_response_done(self, setup):
         """After barge-in sets discarding=True, __RESPONSE_DONE__ must clear it back to False."""
         app, service, _, output_queue, text_output_queue, _, _, response_playing, cancel_scope = setup
