@@ -371,6 +371,35 @@ Run the tool scheduling and model-input checks without a GPU:
 CUDA_VISIBLE_DEVICES='' uv run pytest tests/openai_realtime/test_audio_client.py tests/openai_realtime/test_realtime_service.py tests/openai_realtime/test_response_input_identity.py tests/test_lm_output_processor.py tests/test_responses_api_language_model.py -q
 ```
 
+### Reproduce the draft's duplicate tool replies
+
+The two remaining review findings share one CPU reproduction in
+`tests/openai_realtime/test_response_input_identity.py`. It runs the actual
+model completion, output processor, service and client coordinator, with scripted
+model output and speech events. Run it from the repository root:
+
+```bash
+CUDA_VISIBLE_DEVICES='' uv run pytest tests/openai_realtime/test_response_input_identity.py -k completed_answer_suppresses_duplicate_tool_followup --runxfail -q -s --tb=short
+```
+
+On this draft, expect **two failures** and exit status 1:
+
+- `local-backend`: model input includes `call_1`, but completion acknowledges
+  no results. The client sends a redundant create, and the server accepts it.
+- `trimmed-history`: completion acknowledges `call_1`, but a one-turn history
+  limit removes its old turn. The server accepts a create that the client sent
+  before the answer completed and that reaches the server afterward.
+
+Each case prints the model-input IDs, completion acknowledgement, remaining
+history IDs, number of automatic creates and server result. Both currently print
+`"server_followup_result": "response.created"`. The desired result is no new
+create for the local case, and `tool_followup_already_answered` for the delayed
+create in the trimmed-history case.
+
+The cases use strict expected-failure marks in normal test runs. `--runxfail`
+exposes the failing assertions; an unexpected pass makes the normal suite fail
+so the marks must be removed when the bugs are fixed.
+
 ### Local LLM with Transformers
 
 ```bash
