@@ -6,7 +6,7 @@ class PocketTTSHandlerArguments:
     pocket_tts_device: str = field(
         default="cpu",
         metadata={
-            "help": "The device type on which the Pocket TTS model will run. Options: 'cpu', 'cuda', 'mps'. Default is 'cpu'."
+            "help": "The device type on which the Pocket TTS model will run. Options: 'auto' (first available of CUDA, NPU, XPU, MPS, CPU), 'cuda', 'npu', 'xpu', 'mps', or 'cpu'. Default is 'cpu'."
         },
     )
     pocket_tts_voice: str = field(
@@ -28,4 +28,8 @@ class PocketTTSHandlerArguments:
     pocket_tts_max_tokens: int = field(
         default=50,
         metadata={"help": "Maximum number of tokens to generate per sentence in Pocket TTS. Default is 50."},
+    )
+    pocket_tts_language: str = field(
+        default="english",
+        metadata={"help": "PocketTTS language/model configuration to load."},
     )

@@ -9,7 +9,12 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - `mlx-audio-whisper` → `STT/mlx_audio_whisper_handler.py`
 - `faster-whisper` → `STT/faster_whisper_handler.py`
 - `parakeet-tdt` → `STT/parakeet_tdt_handler.py`
+- `parakeet-unified` → `STT/nemo_asr_handler.py`
+- `nemotron-streaming` → `STT/nemo_asr_handler.py`
+- `orukeet` → `STT/nemo_asr_handler.py`
 - `paraformer` → `STT/paraformer_handler.py`
+- `qwen3-asr` → `STT/qwen3_asr_handler.py`
+- `openai` → `STT/openai_compatible_handler.py`
 
 ## Language Support by Handler
 
@@ -57,8 +62,9 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 ### 5) Parakeet TDT (`--stt parakeet-tdt`)
 
 - Handler: `ParakeetTDTSTTHandler`
-- Language flag: `--parakeet_tdt_language` (optional)
-- Supports auto language detection when language not specified
+- Language option: `--parakeet_tdt_language` (accepted for compatibility; ignored by the decoder)
+- Both decoders choose the transcription language automatically. The reported language is inferred from
+  the resulting text when possible; otherwise it is unknown.
 - Declared supported language list (25 European languages):
   - `en`, `de`, `fr`, `es`, `it`, `pt`, `nl`, `pl`, `ru`, `uk`, `cs`, `sk`, `hu`, `ro`, `bg`, `hr`, `sl`, `sr`, `da`, `no`, `sv`, `fi`, `et`, `lv`, `lt`
 - Backend behavior:
@@ -74,6 +80,66 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 - Practical support:
   - Depends on selected FunASR model checkpoint
   - Default setup is Chinese-oriented (`zh`)
+
+### 7) Qwen3-ASR (`--stt qwen3-asr`)
+
+- Handler: `Qwen3ASRSTTHandler`
+- Model flag: `--qwen3_asr_model_name` (default `Qwen/Qwen3-ASR-0.6B-hf`; `Qwen/Qwen3-ASR-1.7B-hf` is more accurate)
+- Language flag: `--qwen3_asr_language` (ISO code or name, default `auto`)
+- Context flag: `--qwen3_asr_prompt` (optional hotwords or domain context)
+- Supported languages: the 30 in the checkpoint's language table
+  - `ar`, `yue`, `zh`, `cs`, `da`, `nl`, `en`, `fil`, `fi`, `fr`, `de`, `el`, `hi`, `hu`, `id`, `it`, `ja`, `ko`, `mk`, `ms`, `fa`, `pl`, `pt`, `ro`, `ru`, `es`, `sv`, `th`, `tr`, `vi`
+- Behavior:
+  - With `auto`, the model identifies the language of each final turn and reports it with the `-auto` suffix
+  - Progressive (partial) windows are short and fool the language ID, so they reuse the language of the last final turn
+  - A forced language is passed on every request and reported as is
+- The required Transformers version supports the prompt and explicit language forcing on all platforms.
+
+### 8) OpenAI-compatible endpoint (`--stt openai`)
+
+- Handler: `OpenAICompatibleSTTHandler`
+- Endpoint: `POST /v1/audio/transcriptions`
+- Upload: mono PCM16 WAV at 16 kHz
+- Supports JSON (`{"text": "..."}`) and plain-text responses
+- Keeps one active progressive request and the latest pending window per pipeline;
+  final requests proceed independently, with cancellation and session-safe delivery
+- Bounds pending finals to eight per pipeline; overflow produces a typed failure
+  without uploading audio, and accepted finals retain their order
+- Endpoint capacity and provider quotas remain the inference service/proxy's responsibility
+- See [`docs/openai-compatible-stt.md`](../../../docs/openai-compatible-stt.md)
+
+### 9) Parakeet Unified (`--stt parakeet-unified`)
+
+- Handler: `NemoASRSTTHandler`
+- Install: `pip install "speech-to-speech[nemo]"`
+- Model flag: `--parakeet_unified_model_name`
+- Default model: `nvidia/parakeet-unified-en-0.6b`
+- Language flag: `--parakeet_unified_language` (default `en`)
+- Device flag: `--parakeet_unified_device` (default `auto`)
+- The pipeline transcribes each VAD utterance with NeMo `ASRModel.transcribe` (offline API)
+
+### 10) Nemotron Streaming (`--stt nemotron-streaming`)
+
+- Handler: `NemoASRSTTHandler`
+- Install: `pip install "speech-to-speech[nemo]"`
+- Model flag: `--nemotron_streaming_model_name`
+- Default model: `nvidia/nemotron-speech-streaming-en-0.6b`
+- Override: `nvidia/nemotron-3.5-asr-streaming-0.6b` for multilingual
+- Override: [`mehdi-hf/nemotron-asr-streaming-farsi`](https://huggingface.co/mehdi-hf/nemotron-asr-streaming-farsi) for Persian, with NeMo Speech 3.0 or newer and Python 3.11 or newer
+- Language flag: `--nemotron_streaming_language` (default `en`). Fallback if the model does not emit a tag. The English-only checkpoint always reports this value. Nemotron 3.5 detects language per utterance (`target_lang=auto`), strips `<xx-XX>` from the text, and reports the detected code on the final transcription.
+- Device flag: `--nemotron_streaming_device` (default `auto`)
+- The English and multilingual checkpoints use NeMo `ASRModel.transcribe`. The Persian checkpoint uses cache-aware inference with the trained `fa-IR` prompt and always reports `fa`.
+
+### 11) Orukeet (`--stt orukeet`)
+
+- Handler: `NemoASRSTTHandler`
+- Install: `pip install "speech-to-speech[nemo]"`
+- Model flag: `--orukeet_model_name`
+- Default model: `oruk/orukeet`
+- Checkpoint flags: `--orukeet_checkpoint_filename` (default `orukeet-v0.1.0.nemo`), `--orukeet_checkpoint_revision`
+- Language flag: `--orukeet_language` (default `auto`). Fallback until text language detection returns a code, then the last detected code.
+- Device flag: `--orukeet_device` (default `auto`)
+- The pipeline downloads the NeMo file, loads it with `ASRModel.restore_from`, and transcribes each VAD utterance with `ASRModel.transcribe` (offline API)
 
 ## Language Abbreviations (ISO-style codes seen in STT handlers)
 
@@ -115,20 +181,20 @@ This document summarizes the Speech-to-Text (STT) implementations in the `STT/` 
 ### Whisper (Transformers)
 
 ```bash
-python s2s_pipeline.py --stt whisper --language en
-python s2s_pipeline.py --stt whisper --language auto
+speech-to-speech serve --stt whisper --language en
+speech-to-speech serve --stt whisper --language auto
 ```
 
 ### Whisper MLX (LightningWhisperMLX)
 
 ```bash
-python s2s_pipeline.py --stt whisper-mlx --language auto --device mps
+speech-to-speech serve --stt whisper-mlx --language auto --device mps
 ```
 
 ### MLX Audio Whisper
 
 ```bash
-python s2s_pipeline.py --stt mlx-audio-whisper \
+speech-to-speech serve --stt mlx-audio-whisper \
   --mlx_audio_whisper_model_name mlx-community/whisper-large-v3-turbo \
   --language auto
 ```
@@ -136,7 +202,7 @@ python s2s_pipeline.py --stt mlx-audio-whisper \
 ### Faster-Whisper
 
 ```bash
-python s2s_pipeline.py --stt faster-whisper \
+speech-to-speech serve --stt faster-whisper \
   --faster_whisper_stt_model_name large-v3 \
   --faster_whisper_stt_gen_language en
 ```
@@ -144,14 +210,13 @@ python s2s_pipeline.py --stt faster-whisper \
 ### Parakeet TDT
 
 ```bash
-python s2s_pipeline.py --stt parakeet-tdt --parakeet_tdt_device auto
-python s2s_pipeline.py --stt parakeet-tdt --parakeet_tdt_language de
+speech-to-speech serve --stt parakeet-tdt --parakeet_tdt_device auto
 ```
 
 With live transcription (MLX or CUDA/nano-parakeet backend):
 
 ```bash
-python s2s_pipeline.py --stt parakeet-tdt \
+speech-to-speech serve --stt parakeet-tdt \
   --enable_live_transcription \
   --live_transcription_update_interval 0.25
 ```
@@ -159,5 +224,87 @@ python s2s_pipeline.py --stt parakeet-tdt \
 ### Paraformer
 
 ```bash
-python s2s_pipeline.py --stt paraformer --paraformer_stt_model_name paraformer-zh
+speech-to-speech serve --stt paraformer --paraformer_stt_model_name paraformer-zh
 ```
+
+### Qwen3-ASR
+
+```bash
+speech-to-speech serve --stt qwen3-asr
+speech-to-speech serve --stt qwen3-asr --qwen3_asr_language fr
+speech-to-speech serve --stt qwen3-asr \
+  --qwen3_asr_model_name Qwen/Qwen3-ASR-1.7B-hf \
+  --qwen3_asr_prompt "Vocabulary: Quilter, apostle."
+```
+
+### Parakeet Unified
+
+```bash
+pip install "speech-to-speech[nemo]"
+speech-to-speech serve --stt parakeet-unified
+```
+
+The pipeline transcribes VAD utterances with NeMo `ASRModel.transcribe` (offline API).
+
+### Nemotron Streaming
+
+```bash
+pip install "speech-to-speech[nemo]"
+speech-to-speech serve --stt nemotron-streaming
+# Mixed-language sessions with the multilingual checkpoint:
+speech-to-speech serve --stt nemotron-streaming \
+  --nemotron_streaming_model_name nvidia/nemotron-3.5-asr-streaming-0.6b
+# Persian speech:
+speech-to-speech serve --stt nemotron-streaming \
+  --nemotron_streaming_model_name mehdi-hf/nemotron-asr-streaming-farsi
+```
+
+The English-only checkpoint reports `--nemotron_streaming_language` on every
+final transcription. Nemotron 3.5 detects the language of each utterance,
+strips the `<xx-XX>` tag from the text, and reports that code for
+`--enable_lang_prompt` and language-sensitive TTS.
+
+The Persian checkpoint requires `pip install "nemo_toolkit[asr]>=3.0"` and
+Python 3.11 or newer. It downloads the `.nemo` checkpoint and uses the trained
+`fa-IR` prompt with 1.12 seconds of look-ahead. Each VAD window starts with fresh
+encoder and decoder caches; the last chunk flushes the remaining output.
+Progressive VAD windows produce partial transcripts, and final windows report
+language code `fa`, regardless of `--nemotron_streaming_language`. These windows
+are processed independently rather than sharing caches across VAD events.
+Ordinary NeMo `transcribe()` is unsuitable for this checkpoint because its
+dataloader can randomly select an untrained language prompt.
+
+To run the real-checkpoint integration test from a source checkout, use a
+Persian recording of at least one second:
+
+```bash
+FARSI_ASR_TEST_AUDIO=/path/to/persian.wav \
+  python -m pytest tests/test_nemotron_farsi_integration.py -q
+```
+
+The test checks repeated final decoding, partial output, turn metadata, silence,
+and session language reset. Set `FARSI_ASR_TEST_DEVICE=cuda` to test on a GPU,
+`FARSI_ASR_TEST_MODEL=/path/to/model.nemo` to use a local checkpoint, or
+`FARSI_ASR_TEST_EXPECTED_TEXT` to assert an exact transcript.
+
+### Orukeet
+
+```bash
+pip install "speech-to-speech[nemo]"
+speech-to-speech serve --stt orukeet
+```
+
+The pipeline downloads `orukeet-v0.1.0.nemo` from `oruk/orukeet`, loads it with
+`ASRModel.restore_from`, and transcribes VAD utterances with NeMo
+`ASRModel.transcribe` (offline API). Language codes come from text detection
+on each final transcription.
+
+## Speaker activity alongside STT
+
+For setup and streaming speaker labels in live conversations, see the
+[speaker-aware conversation guide](../../../examples/streaming-diarization/README.md).
+In the conversation pipeline, VAD sends speech chunks to a background diarization
+worker while STT handles the finalized audio. Long idle silence is not processed.
+Enable `--diarization` in `serve` or `local` to carry speaker metadata
+through STT into the LLM's conversation history. Mixed-speaker utterances are
+explicitly marked as ambiguous; live word-level attribution is not inferred.

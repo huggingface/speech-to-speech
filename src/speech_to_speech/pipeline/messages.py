@@ -8,15 +8,23 @@ constants.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
+from threading import Event, Lock
 from time import perf_counter
-from typing import Final, Literal, Optional, TypeAlias
+from typing import Annotated, Any, Final, Literal, Optional, TypeAlias
+from uuid import uuid4
 
 import numpy as np
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.pipeline.speaker_metadata import PendingSpeakerAttribution, SpeakerAttribution
+from speech_to_speech.pipeline.transcript_logging import log_exception
+
+logger = logging.getLogger(__name__)
 
 # ── Base class ────────────────────────────────────────────────────────
 
@@ -41,10 +49,16 @@ class VADAudio(PipelineMessage):
 
     tag: Literal["vad_audio"] = "vad_audio"
     audio: np.ndarray
+    speaker_attribution: SpeakerAttribution | None = None
+    speaker_pending: PendingSpeakerAttribution | None = Field(default=None, exclude=True, repr=False)
+    runtime_config: RuntimeConfig | None = None
     mode: Literal["progressive", "final"] | None = None
     turn_id: str | None = None
     turn_revision: int | None = None
+    processing_delay_s: float = 0.0
     created_at_s: float = Field(default_factory=perf_counter)
+    # Estimated voiced-audio end on the server monotonic clock, separate from gate age.
+    speech_end_at_s: float | None = None
 
 
 # ── STT → TranscriptionNotifier → LLM ────────────────────────────────
@@ -64,7 +78,18 @@ class Transcription(PipelineMessage):
 
     tag: Literal["transcription"] = "transcription"
     text: str
+    speaker_attribution: SpeakerAttribution | None = None
     language_code: Optional[str] = None
+    turn_id: str | None = None
+    turn_revision: int | None = None
+    speech_stopped_at_s: float | None = None
+
+
+class TranscriptionFailure(PipelineMessage):
+    """A final STT operation failed without producing LLM input."""
+
+    tag: Literal["transcription_failure"] = "transcription_failure"
+    message: str
     turn_id: str | None = None
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
@@ -73,12 +98,62 @@ class Transcription(PipelineMessage):
 # ── LLM → LMOutputProcessor ──────────────────────────────────────────
 
 
+class AssistantTextPart(BaseModel):
+    """One ordered assistant text part."""
+
+    type: Literal["text"] = "text"
+    text: str
+
+
+class AssistantToolCallPart(BaseModel):
+    """One ordered assistant function-call part."""
+
+    type: Literal["tool_call"] = "tool_call"
+    tool: ResponseFunctionToolCall
+
+
+AssistantOutputPart: TypeAlias = Annotated[
+    AssistantTextPart | AssistantToolCallPart,
+    Field(discriminator="type"),
+]
+
+
+def _normalize_assistant_output_fields(
+    parts: list[AssistantOutputPart],
+    text: str,
+    tools: list[ResponseFunctionToolCall],
+    fields_set: set[str],
+) -> tuple[str, list[ResponseFunctionToolCall]] | None:
+    """Keep ordered parts and their legacy compatibility views consistent."""
+
+    if parts or "parts" in fields_set:
+        derived_text = "".join(part.text for part in parts if isinstance(part, AssistantTextPart))
+        derived_tools = [part.tool for part in parts if isinstance(part, AssistantToolCallPart)]
+        if "text" in fields_set and text != derived_text:
+            raise ValueError("text must match the ordered parts")
+        if "tools" in fields_set and tools != derived_tools:
+            raise ValueError("tools must match the ordered parts")
+        return derived_text, derived_tools
+
+    if text:
+        parts.append(AssistantTextPart(text=text))
+    parts.extend(AssistantToolCallPart(tool=tool) for tool in tools)
+    return None
+
+
 class LLMResponseChunk(PipelineMessage):
-    """One sentence/chunk of the LLM response."""
+    """One ordered group of assistant output parts.
+
+    ``text`` and ``tools`` remain as compatibility views for callers that
+    still construct the legacy shape. New code can populate ``parts`` to
+    represent arbitrary text/tool interleaving without losing order.
+    """
 
     tag: Literal["llm_response_chunk"] = "llm_response_chunk"
-    text: str
+    parts: list[AssistantOutputPart] = Field(default_factory=list)
+    text: str = ""
     language_code: Optional[str] = None
+    selected_language: str | None = Field(default=None, exclude=True)
     tools: list[ResponseFunctionToolCall] = Field(default_factory=list)
     runtime_config: RuntimeConfig | None = None
     response: RealtimeResponseCreateParams | None = None
@@ -86,6 +161,15 @@ class LLMResponseChunk(PipelineMessage):
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
     cancel_generation: int | None = None
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
+    prefetch_transaction: Any = Field(default=None, exclude=True, repr=False)
+
+    @model_validator(mode="after")
+    def _normalize_ordered_parts(self) -> "LLMResponseChunk":
+        legacy_views = _normalize_assistant_output_fields(self.parts, self.text, self.tools, self.model_fields_set)
+        if legacy_views is not None:
+            self.text, self.tools = legacy_views
+        return self
 
 
 class TokenUsage(PipelineMessage):
@@ -96,22 +180,33 @@ class TokenUsage(PipelineMessage):
     output_tokens: int
     turn_id: str | None = None
     turn_revision: int | None = None
+    cancel_generation: int | None = None
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
+
+
+ResponseIncompleteReason: TypeAlias = Literal["max_output_tokens", "content_filter"]
 
 
 class EndOfResponse(PipelineMessage):
     """Sentinel marking the end of a response.
 
-    ``error`` is set when generation could not start (e.g. an out-of-band
-    response whose ``input`` failed validation); the output processor turns it
+    ``error`` is set when generation fails; the output processor turns it
     into a ``response.done(status="failed")`` while still closing the response
     normally for pipeline cleanup.
+
+    ``status`` and ``reason`` describe a provider limit or filter that cut the
+    reply short. An error takes precedence over this incomplete status.
     """
 
     tag: Literal["end_of_response"] = "end_of_response"
     turn_id: str | None = None
     turn_revision: int | None = None
     cancel_generation: int | None = None
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
     error: str | None = None
+    status: Literal["completed", "incomplete"] = "completed"
+    reason: ResponseIncompleteReason | None = None
+    cleanup_only: bool = False
 
 
 # ── LMOutputProcessor → TTS ──────────────────────────────────────────
@@ -123,12 +218,34 @@ class TTSInput(PipelineMessage):
     tag: Literal["tts_input"] = "tts_input"
     text: str
     language_code: Optional[str] = None
+    selected_language: str | None = Field(default=None, exclude=True)
+    tts_language_code: str | None = Field(default=None, exclude=True)
+    response_assistant_language_code: str | None = Field(default=None, exclude=True)
     runtime_config: RuntimeConfig | None = None
     response: RealtimeResponseCreateParams | None = None
     turn_id: str | None = None
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
     cancel_generation: int | None = None
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
+    prefetch_transaction: Any = Field(default=None, exclude=True, repr=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def snapshot_language(cls, values: Any) -> Any:
+        """Resolve direct TTS inputs once; the LM processor supplies response snapshots."""
+        if not isinstance(values, dict):
+            return values
+        values = values.copy()
+        if "selected_language" not in values:
+            config = values.get("runtime_config")
+            values["selected_language"] = config.selected_language if config is not None else None
+        if "tts_language_code" not in values:
+            selected = values["selected_language"]
+            values["tts_language_code"] = (
+                None if selected == "auto" else selected if selected is not None else values.get("language_code")
+            )
+        return values
 
 
 class AudioOutput(PipelineMessage):
@@ -137,9 +254,116 @@ class AudioOutput(PipelineMessage):
     tag: Literal["audio_output"] = "audio_output"
     audio: bytes | np.ndarray
     cancel_generation: int | None = None
+    response_key: str | None = Field(default=None, exclude=True, repr=False)
+    cleanup_only: bool = False
 
 
 # ── Realtime service → LLM ────────────────────────────────────────────
+
+
+class ResponsePrefetchTransaction:
+    """Commit irreversible chat cleanup only after a prefetch is claimed.
+
+    Generated assistant items are already provisional and can be rolled back
+    by response key. Image stripping and history trimming are not reversible,
+    so an unclaimed prefetch parks those operations here until the matching
+    standard ``response.create`` arrives.
+    """
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._cleanup: Callable[[], None] | None = None
+        self._abort_callbacks: list[Callable[[], None]] = []
+        self._claimed = False
+        self._discarded = False
+        self._resolved = Event()
+
+    def register_abort(self, abort: Callable[[], None]) -> None:
+        """Abort immediately if discarded, otherwise arm an active prefetch."""
+        run_abort = False
+        with self._lock:
+            if self._discarded:
+                run_abort = True
+            elif not self._claimed:
+                self._abort_callbacks.append(abort)
+        if run_abort:
+            self._run_abort(abort)
+
+    @staticmethod
+    def _run_abort(abort: Callable[[], None]) -> None:
+        try:
+            abort()
+        except Exception as exc:
+            # Cancellation must still reach response rollback and tombstoning
+            # when a provider or backend raises while releasing its stream.
+            log_exception(logger, "Failed to abort discarded response prefetch", exc)
+
+    @property
+    def discarded(self) -> bool:
+        """Whether this speculative request has been invalidated."""
+        with self._lock:
+            return self._discarded
+
+    @property
+    def claimed(self) -> bool:
+        with self._lock:
+            return self._claimed
+
+    def wait_until_resolved(self, timeout: float) -> bool:
+        """Wait until public claim or internal discard decides this prefetch."""
+        return self._resolved.wait(timeout)
+
+    def complete(self, cleanup: Callable[[], None]) -> None:
+        """Store cleanup, or run it immediately when already claimed."""
+        run_cleanup = False
+        with self._lock:
+            if self._discarded:
+                return
+            self._abort_callbacks = []
+            if self._claimed:
+                run_cleanup = True
+            else:
+                self._cleanup = cleanup
+        if run_cleanup:
+            cleanup()
+
+    def claim(self) -> bool:
+        """Commit cleanup or return false when speculative work already failed."""
+        cleanup: Callable[[], None] | None
+        with self._lock:
+            if self._discarded:
+                return False
+            if self._claimed:
+                return True
+            self._claimed = True
+            self._abort_callbacks = []
+            cleanup = self._cleanup
+            self._cleanup = None
+        if cleanup is not None:
+            try:
+                cleanup()
+            except Exception:
+                with self._lock:
+                    self._claimed = False
+                    self._discarded = True
+                self._resolved.set()
+                raise
+        self._resolved.set()
+        return True
+
+    def discard(self) -> None:
+        """Prevent cleanup from mutating chat after speculation is invalidated."""
+        abort_callbacks: list[Callable[[], None]]
+        with self._lock:
+            if self._discarded or self._claimed:
+                return
+            self._discarded = True
+            self._cleanup = None
+            abort_callbacks = self._abort_callbacks
+            self._abort_callbacks = []
+            self._resolved.set()
+        for abort in abort_callbacks:
+            self._run_abort(abort)
 
 
 class GenerateResponseRequest(PipelineMessage):
@@ -154,19 +378,31 @@ class GenerateResponseRequest(PipelineMessage):
     """
 
     tag: Literal["generate_response"] = "generate_response"
+    response_key: str = Field(default_factory=lambda: uuid4().hex, exclude=True, repr=False)
     runtime_config: RuntimeConfig
+    selected_language: str | None = Field(default=None, exclude=True)
     response: RealtimeResponseCreateParams | None = None
+    audio: np.ndarray | None = None
+    audio_sample_rate: int = 16000
+    # Stable chat identity for direct audio input, assigned before generation.
+    input_item_id: str | None = None
     language_code: Optional[str] = None
     turn_id: str | None = None
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
+    prefetch_transaction: ResponsePrefetchTransaction | None = Field(default=None, exclude=True, repr=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def snapshot_selected_language(cls, values: Any) -> Any:
+        if not isinstance(values, dict) or "selected_language" in values:
+            return values
+        values = values.copy()
+        values["selected_language"] = values["runtime_config"].selected_language
+        return values
 
 
 # ── Binary sentinels (audio/output queue) ─────────────────────────────
 
 AUDIO_RESPONSE_DONE: Final[bytes] = b"__RESPONSE_DONE__"
 PIPELINE_END: Final[bytes] = b"END"
-
-PipelineEndSentinel: TypeAlias = Literal[b"END"]
-AudioResponseDoneSentinel: TypeAlias = Literal[b"__RESPONSE_DONE__"]
-SentinelMessage: TypeAlias = PipelineEndSentinel | AudioResponseDoneSentinel
