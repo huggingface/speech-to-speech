@@ -4,32 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from openai.types.realtime.conversation_item import (
-    RealtimeConversationItemAssistantMessage,
-    RealtimeConversationItemFunctionCall,
-    RealtimeConversationItemUserMessage,
-)
-from openai.types.responses import ResponseReasoningItem
+from openai.types.realtime.conversation_item import RealtimeConversationItemFunctionCall
 
-from speech_to_speech.LLM.chat import (
-    Chat,
-    CompactFn,
-    ResponsesAssistantMessage,
-    ResponsesFunctionCall,
-    SupportedItem,
-)
-
-_ITEM_TYPES = {
-    cls.__name__: cls
-    for cls in (
-        RealtimeConversationItemAssistantMessage,
-        RealtimeConversationItemFunctionCall,
-        RealtimeConversationItemUserMessage,
-        ResponsesAssistantMessage,
-        ResponsesFunctionCall,
-        ResponseReasoningItem,
-    )
-}
+from speech_to_speech.LLM.chat import Chat, CompactFn, SupportedItem
 
 
 @dataclass(frozen=True)
@@ -43,8 +20,7 @@ class ResponseHistory:
     """
 
     chat_id: int
-    version: int
-    items: tuple[tuple[str, str], ...]
+    items: tuple[tuple[type[SupportedItem], str], ...]
     after_item_id: str | None
     complete: bool = False
     input_item_id: str | None = None
@@ -76,12 +52,11 @@ class ResponseHistory:
                 scratch.add_ordered_function_call(copied)
             else:
                 scratch.add_item(copied)
-            encoded.append((type(copied).__name__, copied.model_dump_json(exclude_unset=True)))
+            encoded.append((type(copied), copied.model_dump_json(exclude_unset=True)))
             # Reuse those stable IDs in the next cumulative proposal.
             item.id = copied.id
         return cls(
             chat_id=id(chat),
-            version=len(encoded) + int(complete),
             items=tuple(encoded),
             after_item_id=after_item_id,
             complete=complete,
@@ -92,5 +67,5 @@ class ResponseHistory:
             compactor=compactor,
         )
 
-    def decode_items(self) -> list[SupportedItem]:
-        return [_ITEM_TYPES[kind].model_validate_json(value) for kind, value in self.items]  # type: ignore[misc]
+    def decode_items(self, start: int = 0) -> list[SupportedItem]:
+        return [kind.model_validate_json(value) for kind, value in self.items[start:]]

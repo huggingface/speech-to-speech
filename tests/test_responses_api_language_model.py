@@ -230,7 +230,8 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None, rea
     return handler
 
 
-def test_discarded_prefetch_aborts_blocked_provider_stream():
+@pytest.mark.parametrize("with_tool_prefix", [False, True])
+def test_discarded_prefetch_aborts_blocked_provider_stream(with_tool_prefix):
     class BlockingStream:
         def __init__(self):
             self.started = Event()
@@ -238,9 +239,17 @@ def test_discarded_prefetch_aborts_blocked_provider_stream():
             self.closed = False
 
         def __iter__(self):
+            if with_tool_prefix:
+                yield ResponseOutputItemDoneEvent(
+                    type="response.output_item.done",
+                    output_index=0,
+                    sequence_number=0,
+                    item=ResponseFunctionToolCall(
+                        id="fc_prefetch", call_id="call_prefetch", type="function_call", name="lookup", arguments="{}"
+                    ),
+                )
             self.started.set()
             self.released.wait(timeout=2.0)
-            return iter(())
 
         def close(self):
             self.closed = True
@@ -254,16 +263,35 @@ def test_discarded_prefetch_aborts_blocked_provider_stream():
     transaction = ResponsePrefetchTransaction()
     request.prefetch_transaction = transaction
     outputs: list[object] = []
-    worker = Thread(target=lambda: outputs.extend(drive_llm(handler, request)))
+    prefix_staged = Event()
+    resume_consumer = Event()
 
+    def run():
+        for output in drive_llm(handler, request):
+            outputs.append(output)
+            if isinstance(output, LLMResponseChunk) and output.tools:
+                prefix_staged.set()
+                # Model output may wait behind TTS. Discard must still abort
+                # the provider without waiting for this consumer to resume.
+                resume_consumer.wait(timeout=2.0)
+
+    worker = Thread(target=run)
     worker.start()
-    assert stream.started.wait(timeout=1.0)
-    transaction.discard()
-    worker.join(timeout=1.0)
-
-    assert not worker.is_alive()
-    assert stream.closed
-    assert cancel_scope.generation == 0
+    try:
+        assert stream.started.wait(timeout=1.0)
+        if with_tool_prefix:
+            assert prefix_staged.wait(timeout=1.0)
+        transaction.discard()
+        assert stream.closed
+        resume_consumer.set()
+        worker.join(timeout=1.0)
+        assert not worker.is_alive()
+        assert stream.closed
+        assert cancel_scope.generation == 0
+    finally:
+        resume_consumer.set()
+        stream.close()
+        worker.join(timeout=2.0)
 
 
 def test_failed_prefetch_is_discarded_before_terminal_is_yielded():

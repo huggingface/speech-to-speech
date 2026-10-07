@@ -609,19 +609,6 @@ class RealtimeService:
 
         try:
             self.history.stage(conn_id, event)
-        except Exception as exc:
-            log_exception(logger, "History write-back failed", exc)
-            return self._on_response_failed(
-                conn_id,
-                ResponseFailedEvent(
-                    response_key=getattr(event, "response_key", None),
-                    turn_id=getattr(event, "turn_id", None),
-                    turn_revision=getattr(event, "turn_revision", None),
-                    message=f"Language model history commit failed: {exc}",
-                ),
-            )
-
-        try:
             if isinstance(event, AssistantOutputEvent):
                 return self.response.on_assistant_output(conn_id, event)
             if isinstance(event, AssistantResponseDoneEvent):

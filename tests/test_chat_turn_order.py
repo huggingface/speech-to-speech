@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 import pytest
 from openai.types.realtime import RealtimeSessionCreateRequest
+from openai.types.realtime.realtime_conversation_item_user_message import Content as UserContent
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.responses import ResponseFunctionToolCall
 
@@ -53,6 +54,8 @@ class _OverlappingSpeechHandler(BaseLanguageModelHandler):
         response: RealtimeResponseCreateParams | None = None,
     ) -> Iterator[LLMResponseChunk]:
         assert runtime_config is not None
+        runtime_config.chat.strip_images()
+        assert chat.image_message_ids(), "Live cleanup must not alter the model's input snapshot"
         runtime_config.chat.add_item(make_user_message("B"))
         yield LLMResponseChunk(text="answer A", runtime_config=runtime_config, response=response)
 
@@ -69,7 +72,9 @@ def _make_handler() -> _OverlappingSpeechHandler:
 
 def test_local_response_history_precedes_speech_that_arrived_during_generation():
     chat = Chat(10)
-    chat.add_item(make_user_message("A"))
+    user = make_user_message("A")
+    user.content.append(UserContent(type="input_image", image_url="data:image/jpeg;base64,abc"))
+    chat.add_item(user)
     request = GenerateResponseRequest(
         runtime_config=RuntimeConfig(
             chat=chat,

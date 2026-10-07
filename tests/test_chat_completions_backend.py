@@ -578,11 +578,8 @@ def test_prefetch_cleanup_failure_restores_consumed_image_and_history(monkeypatc
     assert live_image.content[0].type == "input_image"
 
 
-def test_tool_call_recorded_before_chunk_is_emitted():
-    """Regression: a fast client can return function_call_output before the
-    deferred end-of-turn write-back runs. The call must already be in history
-    the instant its chunk is yielded, otherwise the output is rejected with
-    'No function_call with call_id ... found' and the model re-issues the call."""
+def test_tool_call_recorded_before_client_can_return_output():
+    """The service must record a call before a fast client returns its output."""
     h = _make_handler(stream=True)
     h.client.chat.completions.create = lambda **k: _FakeStream(
         [

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from queue import Empty, Queue
 from typing import TYPE_CHECKING
 
@@ -20,7 +20,7 @@ class _ResponseHistoryState:
     proposal: ResponseHistory | None = None
     accepted: bool = False
     failed: bool = False
-    applied_ids: set[str] = field(default_factory=set)
+    applied_count: int = 0
     last_item_id: str | None = None
     cleaned: bool = False
 
@@ -63,15 +63,20 @@ class HistoryWriter:
         state = self._responses.setdefault((conn_id, key), _ResponseHistoryState())
         if state.failed:
             return
-        if (
-            state.proposal is None
-            or proposal.version > state.proposal.version
-            or (proposal.version == state.proposal.version and proposal.complete)
+        if state.proposal is None or (len(proposal.items), proposal.complete) > (
+            len(state.proposal.items),
+            state.proposal.complete,
         ):
             state.proposal = proposal
         prefetch = self._service._state(conn_id).tool_followup_prefetch_request
-        if prefetch is not None and prefetch.response_key == key and prefetch.prefetch_transaction is not None:
-            # The service owns the deferred cleanup; model workers only emit data.
+        if (
+            proposal.complete
+            and prefetch is not None
+            and prefetch.response_key == key
+            and prefetch.prefetch_transaction is not None
+        ):
+            # Only completion releases the provider abort callback. A tool
+            # prefix must remain abortable while the hidden stream is running.
             def claim_history() -> None:
                 tracker = self._service.speculative_turns
                 if tracker is not None:
@@ -106,12 +111,12 @@ class HistoryWriter:
 
     def _apply_proposal(self, conn_id: str, key: str, state: _ResponseHistoryState) -> None:
         proposal = state.proposal
-        if proposal is None:
+        if proposal is None or state.cleaned:
             return
         chat = self._service._state(conn_id).runtime_config.chat
         if proposal.chat_id != id(chat):
             return
-        items = [item for item in proposal.decode_items() if item.id not in state.applied_ids]
+        items = proposal.decode_items(state.applied_count)
         recorded = chat.add_provisional_generation_items(
             key,
             items,
@@ -121,11 +126,10 @@ class HistoryWriter:
         if recorded is None:
             state.failed = True
             return
-        for item in recorded:
-            if item.id is not None:
-                state.applied_ids.add(item.id)
-                state.last_item_id = item.id
-        if not proposal.complete or state.cleaned:
+        state.applied_count = len(proposal.items)
+        if recorded:
+            state.last_item_id = recorded[-1].id
+        if not proposal.complete:
             return
         snapshot = chat.snapshot_history_cleanup()
         try:
@@ -138,7 +142,6 @@ class HistoryWriter:
             chat.trim_if_needed(proposal.compactor)
         except Exception:
             chat.restore_history_cleanup(snapshot)
-            self.reject(conn_id, key)
             raise
         state.cleaned = True
 

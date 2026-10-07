@@ -577,8 +577,9 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         # Snapshot the end of the conversation before generating so this turn's
         # output is written back at its own position even when non-interrupting
         # speech appends a newer user message while the model is still running.
-        history_anchor_id = original_chat.history_anchor_id()
-        if not out_of_band and original_chat.has_pending_tool_calls():
+        active_chat = original_chat.copy(deep=True)
+        history_anchor_id = active_chat.history_anchor_id()
+        if not out_of_band and active_chat.has_pending_tool_calls():
             yield EndOfResponse(
                 turn_id=ctx.turn_id,
                 turn_revision=ctx.turn_revision,
@@ -589,7 +590,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             return
         if out_of_band:
             try:
-                active_chat = build_active_chat(original_chat, response)
+                active_chat = build_active_chat(active_chat, response)
             except ChatItemError as exc:
                 log_exception(logger, "Out-of-band response rejected", exc, level=logging.INFO)
                 yield EndOfResponse(
@@ -600,8 +601,6 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     error=str(exc),
                 )
                 return
-        else:
-            active_chat = original_chat.copy()
         language_code = request.language_code
         language_code, _ = resolve_auto_language(language_code)
         lang_name = language_name_for_prompt(language_code, enable=self.enable_lang_prompt)
