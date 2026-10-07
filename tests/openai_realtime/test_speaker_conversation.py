@@ -103,6 +103,15 @@ def make_vad(monkeypatch):
     return handler
 
 
+def _user_texts(chat) -> list[str]:
+    """Stored user messages; rendering merges back-to-back user turns."""
+    return [
+        " ".join(p.text for p in item.content if p.text)
+        for item in chat.buffer
+        if getattr(item, "role", None) == "user"
+    ]
+
+
 def test_pcm_to_vad_to_stt_to_conversation_carries_distinct_speakers(
     monkeypatch, service, conn_id, runtime_config, text_prompt_queue
 ):
@@ -127,11 +136,11 @@ def test_pcm_to_vad_to_stt_to_conversation_carries_distinct_speakers(
             assert wire[0].transcript == text  # Metadata is not presented as recognized speech.
             request = text_prompt_queue.get_nowait()
             assert request.runtime_config is runtime_config
-        messages = [m for m in runtime_config.chat.to_transformers_chat() if m["role"] == "user"]
-        assert "speaker_0" in messages[0]["content"]
-        assert "speaker_1" not in messages[0]["content"]
-        assert "speaker_1" in messages[1]["content"]
-        assert "I would like coffee." in messages[1]["content"]
+        messages = _user_texts(runtime_config.chat)
+        assert "speaker_0" in messages[0]
+        assert "speaker_1" not in messages[0]
+        assert "speaker_1" in messages[1]
+        assert "I would like coffee." in messages[1]
         responses = str(runtime_config.chat.to_responses_api_chat())
         assert "speaker_0" in responses and "speaker_1" in responses
         # VAD reset cannot erase attribution from queued transcripts.
@@ -327,7 +336,7 @@ def test_compact_speaker_tag_survives_history_eviction(service, conn_id, runtime
         runtime_config.chat.trim_if_needed()
 
     assert all(item.id != first_item_id for item in runtime_config.chat.buffer)
-    messages = [m["content"] for m in runtime_config.chat.to_transformers_chat() if m["role"] == "user"]
+    messages = _user_texts(runtime_config.chat)
     assert len(messages) == history_size
     for message in messages:
         assert message.startswith("[speaker_0, speaker_1; words not attributed; partial] ")

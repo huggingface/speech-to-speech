@@ -862,6 +862,27 @@ class TestToTransformersChat:
         result = chat.to_transformers_chat()
         assert result[0]["name"] == ""
 
+    def test_adjacent_user_messages_serialize_as_one_without_changing_history(self):
+        # An interrupted or failed reply leaves user turns back to back; strict
+        # templates (Gemma, Mistral) reject that, so they render as one message.
+        chat = Chat(size=5)
+        chat.add_item(_user("Find a flight"))
+        chat.add_item(_user("Actually, a hotel"))
+        assert chat.to_transformers_chat() == [{"role": "user", "content": "Find a flight\nActually, a hotel"}]
+        assert chat.to_responses_api_chat() == [
+            {
+                "role": "user",
+                "type": "message",
+                "content": [{"type": "input_text", "text": "Find a flight\nActually, a hotel"}],
+            }
+        ]
+
+        chat.add_item(_user_msg_with_parts(("text", "look"), ("image", "http://img.png")))
+        result = chat.to_transformers_chat()
+        assert len(result) == 1
+        assert [part.get("text") for part in result[0]["content"]] == ["Find a flight\nActually, a hotel", "look", None]
+        assert len(chat.buffer) == 3
+
     def test_full_mixed_conversation(self):
         chat = Chat(size=10)
         chat.add_item(_system("System prompt"))
