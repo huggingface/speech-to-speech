@@ -368,7 +368,7 @@ sequenceDiagram
 Run the tool scheduling and model-input checks without a GPU:
 
 ```bash
-CUDA_VISIBLE_DEVICES='' uv run pytest tests/openai_realtime/test_audio_client.py tests/openai_realtime/test_realtime_service.py tests/openai_realtime/test_response_input_identity.py tests/test_lm_output_processor.py tests/test_responses_api_language_model.py -q
+CUDA_VISIBLE_DEVICES='' uv run pytest tests/openai_realtime/test_audio_client.py tests/openai_realtime/test_realtime_service.py tests/openai_realtime/test_response_input_identity.py tests/openai_realtime/test_websocket_router.py tests/test_lm_output_processor.py tests/test_responses_api_language_model.py -q
 ```
 
 ### Reproduce and check duplicate tool replies
@@ -386,6 +386,10 @@ then sends no extra create. `trimmed-history` removes the result from chat, but
 rejects a create already in flight with `tool_followup_already_answered`.
 The server keeps up to 1,024 recent consumed-result IDs per connection independently
 of history. The oldest acknowledgements expire when the limit is reached.
+
+The router test also checks a short answer with queued transcription updates.
+Consumed-result IDs travel with ordered output completion, so the answer reports
+them before a delayed logical-completion event arrives on the text side channel.
 
 To see the failures before the fixes, use commit `d2df091` and add `--runxfail` to
 that command. The local case emits no acknowledgement and requests another reply;

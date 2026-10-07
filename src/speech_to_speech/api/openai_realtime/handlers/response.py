@@ -353,10 +353,6 @@ class ResponseHandler(RealtimeBaseHandler):
         if event.response_key is None:
             return []
         st = self._state(conn_id)
-        if event.succeeded and event.input_tool_call_ids:
-            st.response_tool_inputs[event.response_key] = set(event.input_tool_call_ids)
-            while len(st.response_tool_inputs) > 128:
-                st.response_tool_inputs.pop(next(iter(st.response_tool_inputs)))
         prefetch_request = st.tool_followup_prefetch_request
         if not event.succeeded and prefetch_request is not None and prefetch_request.response_key == event.response_key:
             # A hidden failure must remain invisible. Remove it now so the
@@ -1281,6 +1277,15 @@ class ResponseHandler(RealtimeBaseHandler):
         st = self._state(conn_id)
         response_was_missing = st.current_response_id is None
         self._ensure_response(conn_id, event.response_key)
+        if (
+            event.status == "completed"
+            and event.response_key is not None
+            and event.input_tool_call_ids
+            and not is_out_of_band(st.current_response_params)
+        ):
+            # This event precedes the terminal on the same queue. The logical
+            # completion side channel can still be behind transcription events.
+            st.response_tool_inputs[event.response_key] = set(event.input_tool_call_ids)
         if event.status == "incomplete":
             st.response_incomplete = True
             st.response_incomplete_reason = event.reason

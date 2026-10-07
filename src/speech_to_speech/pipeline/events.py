@@ -166,12 +166,13 @@ class TokenUsageEvent(PipelineEvent):
 
 
 class AssistantResponseDoneEvent(PipelineEvent):
-    """Marks the end of ordered assistant output for one response."""
+    """Marks ordered output completion and the tool results used by this response."""
 
     type: Literal["assistant_response_done"] = "assistant_response_done"
     status: Literal["completed", "incomplete"] = "completed"
     reason: ResponseIncompleteReason | None = None
     response_key: str | None = Field(default=None, exclude=True, repr=False)
+    input_tool_call_ids: list[str] = Field(default_factory=list)
     turn_id: str | None = None
     turn_revision: int | None = None
     cancel_generation: int | None = None
@@ -189,7 +190,6 @@ class ResponseGenerationDoneEvent(PipelineEvent):
     type: Literal["response_generation_done"] = "response_generation_done"
     response_key: str | None = Field(default=None, exclude=True, repr=False)
     call_ids: list[str] = Field(default_factory=list)
-    input_tool_call_ids: list[str] = Field(default_factory=list)
     succeeded: bool = True
     turn_id: str | None = None
     turn_revision: int | None = None

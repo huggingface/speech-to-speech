@@ -16,6 +16,7 @@ from speech_to_speech.LLM.chat import make_user_audio_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AudioInputCompletedEvent,
+    PipelineEvent,
     ResponseFailedEvent,
     SpeechStartedEvent,
     SpeechStoppedEvent,
@@ -497,7 +498,9 @@ async def test_completed_answer_suppresses_duplicate_tool_followup(
         logical_done = Queue()
         processor = LMOutputProcessor.__new__(LMOutputProcessor)
         processor.setup(text_output_queue=logical_done)
-        list(processor.process(terminal))
+        for completion in processor.process(terminal):
+            if isinstance(completion, PipelineEvent):
+                service.dispatch_pipeline_event(conn_id, completion)
         while not logical_done.empty():
             service.dispatch_pipeline_event(conn_id, logical_done.get_nowait())
         finished = service.finish_response(conn_id, response_key=request.response_key)

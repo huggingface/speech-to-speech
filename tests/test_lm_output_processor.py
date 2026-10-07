@@ -358,7 +358,6 @@ def test_generation_done_side_channel_does_not_wait_for_tts_delivery():
     assert isinstance(logical_done, ResponseGenerationDoneEvent)
     assert logical_done.response_key == "response_1"
     assert logical_done.call_ids == ["call_1"]
-    assert logical_done.input_tool_call_ids == ["call_previous"]
     assert logical_done.succeeded is True
     assert [type(item) for item in ordered] == [
         AssistantOutputEvent,
@@ -368,6 +367,9 @@ def test_generation_done_side_channel_does_not_wait_for_tts_delivery():
         EndOfResponse,
     ]
     assert [item.output_sequence for item in ordered if isinstance(item, AssistantOutputEvent)] == [0, 1]
+    ordered_done = next(item for item in ordered if isinstance(item, AssistantResponseDoneEvent))
+    assert ordered_done.response_key == "response_1"
+    assert ordered_done.input_tool_call_ids == ["call_previous"]
 
 
 def test_unclaimed_prefetch_emits_tool_ready_side_channel_before_tts_delivery():

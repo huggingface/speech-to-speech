@@ -11,15 +11,23 @@ import base64
 import time
 from queue import Empty, Queue
 from threading import Event as ThreadingEvent
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from openai.types.realtime import RealtimeConversationItemFunctionCall, RealtimeConversationItemFunctionCallOutput
 from starlette.testclient import TestClient
 
 import speech_to_speech.api.openai_realtime.websocket_router as router_module
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
 from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService
+from speech_to_speech.api.openai_realtime.tool_followup import (
+    TOOL_FOLLOWUP_COVERED,
+    TOOL_FOLLOWUP_METADATA_KEY,
+    TOOL_INPUT_METADATA_KEY,
+)
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
+from speech_to_speech.LLM.chat import make_user_message
 from speech_to_speech.LLM.language_model import LanguageModelHandler
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.cancel_scope import CancelScope
@@ -29,6 +37,7 @@ from speech_to_speech.pipeline.events import (
     AssistantResponseDoneEvent,
     AssistantToolCallReadyEvent,
     AudioInputCompletedEvent,
+    PartialTranscriptionEvent,
     PipelineEvent,
     ResponseFailedEvent,
     ResponseGenerationDoneEvent,
@@ -44,11 +53,13 @@ from speech_to_speech.pipeline.messages import (
     AssistantTextPart,
     AssistantToolCallPart,
     AudioOutput,
+    EndOfResponse,
     GenerateResponseRequest,
     ResponsePrefetchTransaction,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
+from tests.test_response_overrides import _RecordingLocalHandler
 
 from .realtime_contract import (
     assert_response_lifecycle_contract,
@@ -595,6 +606,82 @@ class TestClientEventDispatch:
 
 
 class TestSendLoop:
+    @pytest.mark.parametrize("partial_count", [0, 5])
+    def test_completed_tool_answer_rejects_duplicate_with_side_channel_backlog(self, setup, partial_count):
+        app, service, _, output_queue, text_output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                conn_id = next(iter(service._conns))
+                state = service._state(conn_id)
+                chat = state.runtime_config.chat
+                chat.add_item(make_user_message("Find flights."))
+                chat.add_ordered_function_call(
+                    RealtimeConversationItemFunctionCall(
+                        type="function_call", call_id="call_1", name="lookup", arguments="{}"
+                    )
+                )
+                chat.append_tool_output(
+                    "call_1",
+                    RealtimeConversationItemFunctionCallOutput(
+                        type="function_call_output", call_id="call_1", output="Flights are ready."
+                    ),
+                )
+                ws.send_json({"type": "response.create", "response": {"output_modalities": ["text"]}})
+                assert ws.receive_json()["type"] == "response.created"
+                request = service.text_prompt_queue.get_nowait()
+
+                # Use the real local completion path to compute the consumed IDs.
+                handler = object.__new__(_RecordingLocalHandler)
+                handler.cancel_scope = handler.speculative_turns = handler.compactor = None
+                handler.enable_lang_prompt = False
+                handler.tokenizer = SimpleNamespace(encode=lambda _text: [])
+                handler.emit_text = True
+                chunks = list(handler.process(request))
+                terminal = next(chunk for chunk in chunks if isinstance(chunk, EndOfResponse))
+                assert terminal.input_tool_call_ids == ["call_1"]
+                processor = object.__new__(LMOutputProcessor)
+                processor.setup(text_output_queue=text_output_queue)
+                tts = object.__new__(Qwen3TTSHandler)
+                tts.speculative_turns = None
+
+                # Non-interrupting speech can backlog ordinary partials ahead of
+                # logical completion while this short answer drains in order.
+                service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(interrupt_response=False))
+                for index in range(partial_count):
+                    text_output_queue.put(PartialTranscriptionEvent(delta="And hotels " + "please " * index))
+                for chunk in chunks:
+                    if hasattr(chunk, "response"):
+                        chunk.response = request.response
+                    for event in processor.process(chunk):
+                        if isinstance(event, EndOfResponse):
+                            for output in tts.process(event):
+                                output_queue.put(tts.output_for_queue(output, event))
+                        else:
+                            output_queue.put(event)
+
+                while True:
+                    event = ws.receive_json()
+                    if event["type"] == "response.done":
+                        answer = event["response"]
+                        break
+                assert answer["status"] == "completed" and answer["output"]
+                assert answer["metadata"][TOOL_INPUT_METADATA_KEY] == '["call_1"]'
+                assert "call_1" in state.answered_tool_call_ids
+                ws.send_json(
+                    {
+                        "type": "response.create",
+                        "response": {"metadata": {TOOL_FOLLOWUP_METADATA_KEY: '["call_1"]'}},
+                    }
+                )
+                while True:
+                    event = ws.receive_json()
+                    if event["type"] in {"error", "response.created"}:
+                        break
+                assert event["type"] == "error"
+                assert event["error"]["type"] == TOOL_FOLLOWUP_COVERED
+                assert service.text_prompt_queue.empty()
+
     def test_audio_output_ignores_session_end_control_message(self, setup):
         app, _, _, output_queue, *_ = setup
         with TestClient(app) as client:

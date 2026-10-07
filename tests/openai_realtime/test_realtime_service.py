@@ -2439,9 +2439,19 @@ class TestEncodeAudioChunk:
 
 class TestFinishAudioResponse:
     @pytest.mark.parametrize(
-        "status,empty", [("completed", False), ("completed", True), ("cancelled", False), ("incomplete", False)]
+        "status,empty,out_of_band",
+        [
+            ("completed", False, False),
+            ("completed", True, False),
+            ("cancelled", False, False),
+            ("incomplete", False, False),
+            ("failed", False, False),
+            ("completed", False, True),
+        ],
     )
-    def test_tool_followup_checks_completed_model_input(self, service, conn_id, text_prompt_queue, status, empty):
+    def test_tool_followup_checks_completed_model_input(
+        self, service, conn_id, text_prompt_queue, status, empty, out_of_band
+    ):
         from speech_to_speech.api.openai_realtime.tool_followup import (
             TOOL_FOLLOWUP_ACK_LIMIT,
             TOOL_FOLLOWUP_COVERED,
@@ -2468,6 +2478,7 @@ class TestFinishAudioResponse:
                 type="response.create",
                 response={
                     "metadata": {TOOL_INPUT_METADATA_KEY: '["forged"]'},
+                    "conversation": "none" if out_of_band else "auto",
                 },
             ),
         )
@@ -2483,18 +2494,18 @@ class TestFinishAudioResponse:
             )
         service.dispatch_pipeline_event(
             conn_id,
-            ResponseGenerationDoneEvent(
+            AssistantResponseDoneEvent(
                 response_key=request.response_key,
                 input_tool_call_ids=["call_1"],
             ),
         )
-        if status == "completed" and not empty:
+        if status == "completed" and not empty and not out_of_band:
             # Acknowledgements stay bounded even when history no longer retains them.
             st.answered_tool_call_ids = {f"old_{i}": None for i in range(TOOL_FOLLOWUP_ACK_LIMIT)}
         terminal = service.finish_response(conn_id, status=status, response_key=request.response_key)
         done = next(event for event in terminal if isinstance(event, ResponseDoneEvent))
         assert (done.response.metadata or {}).get(TOOL_INPUT_METADATA_KEY) == (
-            '["call_1"]' if status == "completed" else None
+            '["call_1"]' if status == "completed" and not out_of_band else None
         )
         followup = ResponseCreateEvent(
             type="response.create",
@@ -2503,7 +2514,7 @@ class TestFinishAudioResponse:
             },
         )
         result = service.handle_response_create(conn_id, followup)
-        if status == "completed" and not empty:
+        if status == "completed" and not empty and not out_of_band:
             # The client create may arrive only after the answer finished.
             assert result.error.type == TOOL_FOLLOWUP_COVERED
             assert len(st.answered_tool_call_ids) == TOOL_FOLLOWUP_ACK_LIMIT
