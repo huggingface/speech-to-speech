@@ -22,6 +22,7 @@ from speech_to_speech.pipeline.speaker_metadata import (
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.STT import openai_compatible_handler as stt_module
+from tests.turns import reopen
 
 pytestmark = pytest.mark.filterwarnings("error::pytest.PytestUnhandledThreadExceptionWarning")
 
@@ -543,8 +544,7 @@ def test_new_revision_cancels_active_final_before_another_request_arrives(handle
     handler = handler_factory(operation, tracker=tracker)
     assert list(handler.process(audio())) == []
     assert operation.started.wait(1)
-    assert tracker.begin_reopen_candidate("turn_1", 0) == 1
-    assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
+    reopen(tracker)
     assert operation.cancelled.wait(1)
     handler._final_thread.join(timeout=1)
     assert not handler._final_thread.is_alive()
@@ -741,8 +741,7 @@ def test_new_revision_replaces_old_active_and_pending_progressive_work(handler_f
     assert list(handler.process(audio("progressive"))) == []
     assert old.started.wait(1)
     assert list(handler.process(audio("progressive", samples=320))) == []
-    assert tracker.begin_reopen_candidate("turn_1", 0) == 1
-    assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
+    reopen(tracker)
     assert list(handler.process(audio("progressive", revision=1, samples=480))) == []
     assert old.cancelled.wait(1)
     old.release.set()

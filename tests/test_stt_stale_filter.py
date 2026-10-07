@@ -11,6 +11,7 @@ from speech_to_speech.pipeline.messages import PIPELINE_END, PartialTranscriptio
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
+from tests.turns import reopen
 
 
 class RecordingSTTHandler(BaseSTTHandler):
@@ -29,13 +30,7 @@ class RecordingSTTHandler(BaseSTTHandler):
         self.processed.append((vad_audio.turn_id, vad_audio.turn_revision))
         if self.mark_stale_during_process and vad_audio.turn_id is not None and vad_audio.turn_revision is not None:
             assert self.speculative_turns is not None
-            assert (
-                self.speculative_turns.begin_reopen_candidate(vad_audio.turn_id, vad_audio.turn_revision)
-                == vad_audio.turn_revision + 1
-            )
-            assert self.speculative_turns.confirm_reopen_candidate(
-                vad_audio.turn_id, vad_audio.turn_revision, vad_audio.turn_revision + 1
-            )
+            reopen(self.speculative_turns, vad_audio.turn_id, vad_audio.turn_revision)
         yield Transcription(
             text="hello",
             turn_id=vad_audio.turn_id,
@@ -81,8 +76,7 @@ def _handler(
 def test_stt_handler_drops_stale_queued_audio_without_processing():
     tracker = SpeculativeTurnTracker()
     tracker.start_turn()
-    assert tracker.begin_reopen_candidate("turn_1", 0) == 1
-    assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
+    reopen(tracker)
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out)
@@ -99,8 +93,7 @@ def test_stt_handler_drops_stale_queued_audio_without_processing():
 def test_stt_handler_bulk_drops_stale_queued_audio():
     tracker = SpeculativeTurnTracker()
     tracker.start_turn()
-    assert tracker.begin_reopen_candidate("turn_1", 0) == 1
-    assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
+    reopen(tracker)
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out)
@@ -191,8 +184,7 @@ def test_stt_handler_uses_per_endpoint_processing_delay():
 def test_stale_final_input_discards_pending_vad_measurement():
     revisions = SpeculativeTurnTracker()
     revisions.start_turn()
-    assert revisions.begin_reopen_candidate("turn_1", 0) == 1
-    assert revisions.confirm_reopen_candidate("turn_1", 0, 1)
+    reopen(revisions)
     handler = _handler(revisions, Queue(), Queue())
     store = TurnLatencyStore()
     handler.turn_latency_store = store

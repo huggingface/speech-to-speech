@@ -78,6 +78,7 @@ from speech_to_speech.pipeline.messages import (
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnPhase
 from speech_to_speech.pipeline.turn_latency import TURN_LATENCY_METADATA_KEY
+from tests.turns import reopen
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1861,10 +1862,8 @@ class TestHandleResponseCreate:
     def test_response_create_preserves_latest_user_turn_timing(self, service, conn_id, text_prompt_queue):
         service.speculative_turns = SpeculativeTurnTracker()
         service.speculative_turns.start_turn()
-        assert service.speculative_turns.begin_reopen_candidate("turn_1", 0) == 1
-        assert service.speculative_turns.confirm_reopen_candidate("turn_1", 0, 1)
-        assert service.speculative_turns.begin_reopen_candidate("turn_1", 1) == 2
-        assert service.speculative_turns.confirm_reopen_candidate("turn_1", 1, 2)
+        reopen(service.speculative_turns)
+        reopen(service.speculative_turns, "turn_1", 1)
         service.dispatch_pipeline_event(
             conn_id,
             TranscriptionCompletedEvent(
@@ -1912,10 +1911,8 @@ class TestHandleResponseCreate:
 
         service.speculative_turns = SpeculativeTurnTracker()
         service.speculative_turns.start_turn()
-        assert service.speculative_turns.begin_reopen_candidate("turn_1", 0) == 1
-        assert service.speculative_turns.confirm_reopen_candidate("turn_1", 0, 1)
-        assert service.speculative_turns.begin_reopen_candidate("turn_1", 1) == 2
-        assert service.speculative_turns.confirm_reopen_candidate("turn_1", 1, 2)
+        reopen(service.speculative_turns)
+        reopen(service.speculative_turns, "turn_1", 1)
         assert select_language("es") is None
         service.dispatch_pipeline_event(
             conn_id,
@@ -2521,8 +2518,7 @@ class TestFinishAudioResponse:
             metadata[TURN_LATENCY_METADATA_KEY] = "client-value-must-not-win"
         service.speculative_turns = SpeculativeTurnTracker()
         service.speculative_turns.start_turn()
-        assert service.speculative_turns.begin_reopen_candidate("turn_1", 0) == 1
-        assert service.speculative_turns.confirm_reopen_candidate("turn_1", 0, 1)
+        reopen(service.speculative_turns)
         service.dispatch_pipeline_event(
             conn_id, TranscriptionCompletedEvent(transcript="Hello", turn_id="turn_1", turn_revision=1)
         )
@@ -3062,8 +3058,7 @@ class TestDispatchPipelineEvent:
             SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
         )
         tracker.start_turn()
-        assert tracker.begin_reopen_candidate("turn_1", 0) == 1
-        assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
+        reopen(tracker)
 
         events = service.dispatch_pipeline_event(
             conn_id,
@@ -4687,8 +4682,7 @@ class TestDispatchPipelineEvent:
             TranscriptionCompletedEvent(transcript="hello", turn_id=turn_id, turn_revision=0),
         )
 
-        assert tracker.begin_reopen_candidate(turn_id, 0) == 1
-        assert tracker.confirm_reopen_candidate(turn_id, 0, 1)
+        reopen(tracker, turn_id)
         service.dispatch_pipeline_event(
             conn_id,
             SpeechStartedEvent(turn_id=turn_id, turn_revision=1, reopened=True),
@@ -4740,8 +4734,7 @@ class TestDispatchPipelineEvent:
             TranscriptionCompletedEvent(transcript="hello", turn_id="turn_1", turn_revision=0),
         )
 
-        assert tracker.begin_reopen_candidate("turn_1", 0) == 1
-        assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
+        reopen(tracker)
         service.dispatch_pipeline_event(
             conn_id,
             SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True),
@@ -4842,8 +4835,7 @@ class TestDispatchPipelineEvent:
             SpeechStoppedEvent(duration_s=1.0, turn_id="turn_1", turn_revision=0),
         )
 
-        assert tracker.begin_reopen_candidate("turn_1", 0) == 1
-        assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
+        reopen(tracker)
         second_started = service.dispatch_pipeline_event(
             conn_id,
             SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True),
@@ -4911,8 +4903,7 @@ class TestDispatchPipelineEvent:
         conn_id = service.register()
         service._state(conn_id).runtime_config = runtime_config
         tracker.start_turn()
-        assert tracker.begin_reopen_candidate("turn_1", 0) == 1
-        assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
+        reopen(tracker)
 
         events = service.dispatch_pipeline_event(
             conn_id,

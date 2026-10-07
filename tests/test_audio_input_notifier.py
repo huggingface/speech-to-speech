@@ -9,6 +9,7 @@ from speech_to_speech.pipeline.events import AudioInputCompletedEvent
 from speech_to_speech.pipeline.messages import VADAudio
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
+from tests.turns import reopen
 
 
 def _notifier(
@@ -58,8 +59,7 @@ def test_audio_input_notifier_ignores_progressive_audio():
 def test_audio_input_notifier_discards_stale_pending_vad_measurement():
     revisions = SpeculativeTurnTracker()
     revisions.start_turn()
-    assert revisions.begin_reopen_candidate("turn_1", 0) == 1
-    assert revisions.confirm_reopen_candidate("turn_1", 0, 1)
+    reopen(revisions)
     notifier = _notifier(speculative_turns=revisions)
     store = TurnLatencyStore()
     notifier.turn_latency_store = store

@@ -14,6 +14,7 @@ from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, AudioOutput, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
+from tests.turns import reopen
 
 
 def _audible_stream_chunk():
@@ -571,8 +572,7 @@ def test_stale_keyed_terminal_becomes_cleanup_after_lm_tts_handoff():
         turn_revision=0,
         cancel_generation=7,
     )
-    assert tracker.begin_reopen_candidate("turn_1", 0) == 1
-    assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
+    reopen(tracker)
 
     outputs = list(handler.process(terminal))
     queued = handler.output_for_queue(outputs[0], terminal)

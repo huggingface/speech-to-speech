@@ -18,6 +18,7 @@ from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, AudioOutput,
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS import omnivoice_handler as omnivoice_module
 from speech_to_speech.TTS.omnivoice_handler import OmniVoiceTTSHandler
+from tests.turns import reopen
 
 
 class FakeModel:
@@ -296,8 +297,7 @@ def test_stale_keyed_terminal_becomes_cleanup_after_lm_tts_handoff() -> None:
         turn_revision=0,
         cancel_generation=7,
     )
-    assert tracker.begin_reopen_candidate("turn_1", 0) == 1
-    assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
+    reopen(tracker)
 
     outputs = list(handler.process(terminal))
     queued = handler.output_for_queue(outputs[0], terminal)

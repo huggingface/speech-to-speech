@@ -36,6 +36,7 @@ from speech_to_speech.STT.openai_compatible_handler import (
     TranscriptionRequestError,
 )
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
+from tests.turns import reopen
 
 
 class _TranscriptionServer(BaseHTTPRequestHandler):
@@ -678,8 +679,7 @@ def test_obsolete_progressive_request_is_not_sent_before_worker_starts(monkeypat
             assert isinstance(outputs[0], Transcription)
             assert outputs[0].text == "final"
         elif superseded_by == "new_revision":
-            assert tracker.begin_reopen_candidate("turn_1", 0) == 1
-            assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
+            reopen(tracker)
         elif superseded_by == "session_end":
             handler.on_session_end()
         elif superseded_by == "shutdown":
@@ -714,8 +714,7 @@ def test_stale_revision_is_dropped_after_request(monkeypatch):
 
     class _ReopeningOperation(_FakeOperation):
         def run(self, cancel_check=lambda: False):
-            assert tracker.begin_reopen_candidate("turn_1", 0) == 1
-            assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
+            reopen(tracker)
             return HttpTranscriptionResult(text="stale")
 
     monkeypatch.setattr(stt_module, "HttpTranscriptionOperation", _ReopeningOperation)

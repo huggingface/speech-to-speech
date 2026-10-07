@@ -49,6 +49,7 @@ from speech_to_speech.pipeline.messages import (
     TTSInput,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from tests.turns import reopen
 
 # ── Fakes ────────────────────────────────────────────────────────────────────
 
@@ -956,8 +957,7 @@ def test_stale_provider_failure_does_not_emit_fallback():
     h.speculative_turns = tracker
 
     def fail(**kwargs):
-        assert tracker.begin_reopen_candidate("turn_1", 0) == 1
-        assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
+        reopen(tracker)
         raise RuntimeError("stale request failed")
 
     h.client.chat.completions.create = fail

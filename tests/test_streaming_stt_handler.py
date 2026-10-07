@@ -32,6 +32,7 @@ from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 from speech_to_speech.VAD.vad_iterator import VADIterator
 from tests.test_speculative_turns import _audio_bytes, _StaticVADIterator, _vad_handler_for_iterator
 from tests.test_vad_iterator import _FakeVADModel
+from tests.turns import reopen
 
 DIALECT_CASES = [
     (OpenAIRealtimeSTTHandler, "openai"),
@@ -902,8 +903,7 @@ def test_commit_to_final_metric_records_receipt_even_without_consumption(
             return
         if _is_final_commit(event, dialect):
             if not consume_final:
-                assert tracker.begin_reopen_candidate("turn_1", 0) == 1
-                assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
+                reopen(tracker)
             now += 0.125
             socket.incoming.put(json.dumps(_completion_event("received", dialect=dialect)))
 
@@ -1292,8 +1292,7 @@ def test_unconsumed_stale_commit_times_out_and_releases_later_turns(handler_type
         handler.commit_boundary("turn_1", 0)
         assert first_commit_seen.wait(timeout=1)
         pending = handler._session._pending_commits[(handler._session.generation, "turn_1", 0)][0]
-        assert tracker.begin_reopen_candidate("turn_1", 0) == 1
-        assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
+        reopen(tracker)
         assert not handler.should_process_input(_vad_final())
         # Never call process() for the stale final. Later commands must still
         # run, and reopening the timed-out turn must not transcribe its suffix.
@@ -1520,8 +1519,7 @@ def test_connection_failure_discards_reopened_revisions_of_the_same_turn(handler
     first_thread.start()
     assert first_commit_seen.wait(timeout=1)
 
-    assert tracker.begin_reopen_candidate("turn_1", 0) == 1
-    assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
+    reopen(tracker)
     handler.start_turn("turn_1", 1)
     handler.append_audio(reopened_chunk)
     handler.commit_boundary("turn_1", 1)
@@ -1719,8 +1717,7 @@ def test_reopen_audio_waits_for_the_active_revision_to_finish(handler_type, dial
     first_thread.start()
     assert first_commit_seen.wait(timeout=1)
 
-    assert tracker.begin_reopen_candidate("turn_1", 0) == 1
-    assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
+    reopen(tracker)
     handler.start_turn("turn_1", 1)
     handler.append_audio(second_chunk)
     assert not second_append_seen.wait(timeout=0.1)

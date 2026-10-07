@@ -49,6 +49,7 @@ from speech_to_speech.pipeline.messages import (
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
+from tests.turns import reopen
 
 from .realtime_contract import (
     assert_response_lifecycle_contract,
@@ -914,8 +915,7 @@ class TestSendLoop:
                 tracker.start_turn()
                 for revision in (0, 1):
                     if revision:
-                        assert tracker.begin_reopen_candidate("turn_1", 0) == revision
-                        assert tracker.confirm_reopen_candidate("turn_1", 0, revision)
+                        reopen(tracker)
                     service.dispatch_pipeline_event(
                         conn_id,
                         SpeechStartedEvent(

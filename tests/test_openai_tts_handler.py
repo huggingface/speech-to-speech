@@ -37,6 +37,7 @@ from speech_to_speech.TTS.openai_compatible_handler import (
     OpenAICompatibleTTSHandler,
     SpeechRequestCancelled,
 )
+from tests.turns import reopen
 
 
 class _FakeSpeechOperation:
@@ -682,8 +683,7 @@ def test_openai_tts_stale_keyed_terminal_becomes_cleanup(monkeypatch):
         turn_revision=0,
         cancel_generation=7,
     )
-    assert tracker.begin_reopen_candidate("turn_1", 0) == 1
-    assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
+    reopen(tracker)
 
     outputs = list(handler.process(terminal))
     queued = handler.output_for_queue(outputs[0], terminal)
@@ -1007,11 +1007,7 @@ def test_openai_tts_reopened_during_startup_suppresses_old_revision(monkeypatch)
     tracker.start_turn()
     handler = _openai_tts_handler(monkeypatch, speculative_turns=tracker)
 
-    def reopen_during_startup():
-        assert tracker.begin_reopen_candidate("turn_1", 0) == 1
-        assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
-
-    _FakeSpeechOperation.startup_action = reopen_during_startup
+    _FakeSpeechOperation.startup_action = lambda: reopen(tracker)
 
     chunks = list(
         handler.process(

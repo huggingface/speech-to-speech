@@ -36,6 +36,7 @@ from speech_to_speech.pipeline.messages import (
     TTSInput,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from tests.turns import reopen
 
 
 def _processor(tracker: SpeculativeTurnTracker) -> LMOutputProcessor:
@@ -48,8 +49,7 @@ def _tracked_processor(revision: int = 0) -> tuple[SpeculativeTurnTracker, LMOut
     tracker = SpeculativeTurnTracker()
     tracker.start_turn()
     for base_revision in range(revision):
-        assert tracker.begin_reopen_candidate("turn_1", base_revision) == base_revision + 1
-        assert tracker.confirm_reopen_candidate("turn_1", base_revision, base_revision + 1)
+        reopen(tracker, revision=base_revision)
     return tracker, _processor(tracker)
 
 

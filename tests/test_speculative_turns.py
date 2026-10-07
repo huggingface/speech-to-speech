@@ -15,6 +15,7 @@ from speech_to_speech.VAD.smart_turn import SmartTurnResult
 from speech_to_speech.VAD.vad_handler import VADHandler
 from speech_to_speech.VAD.vad_iterator import VADIterator
 from tests.test_vad_iterator import _FakeVADModel
+from tests.turns import reopen
 
 ACCEPT, DROP, HOLD = TurnGateAction.ACCEPT, TurnGateAction.DROP, TurnGateAction.HOLD
 
@@ -1424,8 +1425,7 @@ def test_vad_drops_pending_timing_with_superseded_final_audio():
     handler.queue_out = Queue()
     handler.speculative_turns = SpeculativeTurnTracker()
     handler.speculative_turns.start_turn()
-    assert handler.speculative_turns.begin_reopen_candidate("turn_1", 0) == 1
-    assert handler.speculative_turns.confirm_reopen_candidate("turn_1", 0, 1)
+    reopen(handler.speculative_turns)
     handler.turn_latency_store = TurnLatencyStore()
     old = handler.turn_latency_store.get_or_create_for_turn("turn_1", 0)
     old.vad_decision_s = 0.3
@@ -1441,8 +1441,7 @@ def test_vad_drops_pending_timing_with_superseded_final_audio():
 def test_vad_drops_stale_progressive_revisions_from_output_queue():
     tracker = SpeculativeTurnTracker()
     tracker.start_turn()
-    assert tracker.begin_reopen_candidate("turn_1", 0) == 1
-    assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
+    reopen(tracker)
     handler = object.__new__(VADHandler)
     handler.queue_out = Queue()
     handler.speculative_turns = tracker
