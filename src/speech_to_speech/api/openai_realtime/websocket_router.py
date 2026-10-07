@@ -847,6 +847,11 @@ def create_app(
                         # Unlike the serial output hold, this list does not stall
                         # the origin response whose completion enables the claim,
                         # or speech events while resumed speech is checked.
+                        prefetch = unit.service._state(session_id).tool_followup_prefetch_request
+                        if prefetch is not None and _output_response_key(text_msg) == prefetch.response_key:
+                            # Staging is private. Claim applies this data before
+                            # response.created; model threads never write chat.
+                            unit.service.history.stage(session_id, text_msg)
                         session.pending_text_output_items.append(text_msg)
                         text_msg = None
                     if text_msg is None:
@@ -921,6 +926,7 @@ def create_app(
                 # A failed transcription can become final when its reopen grace
                 # expires, even if no later turn or assistant output arrives.
                 if transport is not None and session_id and session is not None and session.released_at is None:
+                    unit.service.history.drain_compactions()
                     settled_input = unit.service.audio.resolve_input_terminals(session_id)
                     if settled_input:
                         await transport.send_events(settled_input)
@@ -941,6 +947,9 @@ def create_app(
                         # response.create, or before response.created finishes
                         # sending. Keep every lifecycle event private until the
                         # response is publicly announced and its turn has settled.
+                        prefetch = unit.service._state(session_id).tool_followup_prefetch_request
+                        if prefetch is not None and _output_response_key(audio_chunk) == prefetch.response_key:
+                            unit.service.history.stage(session_id, audio_chunk)
                         session.pending_output_item = audio_chunk
                         await asyncio.sleep(0.01)
                         continue

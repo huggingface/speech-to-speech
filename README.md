@@ -816,6 +816,24 @@ output and VAD probabilities. Run that reproduction alone with:
 CUDA_VISIBLE_DEVICES='' uv run pytest tests/openai_realtime/test_response_input_identity.py -q -s
 ```
 
+Model workers read a copy of the conversation and emit proposed history items.
+The Realtime service applies those items after the global turn gate accepts the
+output. It records tool calls before sending them to clients, holds prefetched
+history until claim, and applies background compaction results on the service
+loop. Adjacent user messages stay separate in stored history and join only when
+building model input.
+
+Run the history and backend checks with:
+
+```bash
+CUDA_VISIBLE_DEVICES='' uv run pytest -q \
+  tests/test_chat.py tests/test_chat_turn_order.py \
+  tests/test_chat_completions_backend.py tests/test_responses_api_language_model.py \
+  tests/test_responses_reasoning.py tests/test_voice_prompt.py \
+  tests/openai_realtime/test_websocket_router.py
+```
+
+
 ## Star History
 
 [![Star History Chart](assets/star-history.svg)](https://github.com/huggingface/speech-to-speech/stargazers)

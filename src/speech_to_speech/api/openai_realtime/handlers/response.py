@@ -1036,6 +1036,7 @@ class ResponseHandler(RealtimeBaseHandler):
             if decision.action is TurnGateAction.DROP:
                 logger.debug("Dropping stale assistant output for turn=%s rev=%s", event.turn_id, event.turn_revision)
                 return []
+        self._service.history.accept(conn_id, event.response_key)
         st = self._state(conn_id)
         if st.current_response_turn_id is None and event.turn_id is not None:
             st.current_response_turn_id = event.turn_id
@@ -1222,6 +1223,7 @@ class ResponseHandler(RealtimeBaseHandler):
             emitted = self.on_assistant_output(
                 conn_id,
                 AssistantOutputEvent(
+                    history=ready.history,
                     parts=[ready.part],
                     turn_id=ready.turn_id,
                     turn_revision=ready.turn_revision,
@@ -1240,7 +1242,17 @@ class ResponseHandler(RealtimeBaseHandler):
         event: AssistantResponseDoneEvent,
     ) -> list[ServerEvent]:
         """Record that all ordered text/tool output for one response was emitted."""
+        if self._service.speculative_turns is not None:
+            decision = self._service.speculative_turns.gate(event.turn_id, event.turn_revision, commit=True)
+            if decision.action is TurnGateAction.HOLD:
+                raise TurnOutputHeld
+            if decision.action is TurnGateAction.DROP:
+                return []
+        self._service.history.accept(conn_id, event.response_key)
         st = self._state(conn_id)
+        if st.current_response_turn_id is None and event.turn_id is not None:
+            st.current_response_turn_id = event.turn_id
+            st.current_response_turn_revision = event.turn_revision
         response_was_missing = st.current_response_id is None
         self._ensure_response(conn_id, event.response_key)
         if event.status == "incomplete":

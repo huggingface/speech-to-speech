@@ -1145,16 +1145,39 @@ class TestCompaction:
         assert len(captured) == 1
         assert "delivered answer" in str(captured[0])
 
-    def test_compaction_replaces_old_turns(self):
+    @pytest.mark.parametrize("service_owned", [False, True])
+    def test_compaction_replaces_old_turns(self, service_owned):
         chat = Chat(size=2)
         compactor = _make_stub_compactor("U", "A")
         for i in range(3):
             chat.add_item(_user(f"u{i}"))
             chat.add_item(_assistant(f"a{i}"))
         chat.add_item(_user("u3"))
-        chat.trim_if_needed(compactor)
+        service = None
+        if service_owned:
+            from speech_to_speech.api.openai_realtime.service import RealtimeService
+            from speech_to_speech.pipeline.events import AssistantResponseDoneEvent
+            from speech_to_speech.pipeline.history import ResponseHistory
+
+            service = RealtimeService()
+            conn_id = service.register()
+            service._state(conn_id).runtime_config.chat = chat
+            proposal = ResponseHistory.capture(
+                chat, [], after_item_id=chat.history_anchor_id(), complete=True, compactor=compactor
+            )
+            service.dispatch_pipeline_event(
+                conn_id, AssistantResponseDoneEvent(response_key="compact_response", history=proposal)
+            )
+            service.finish_response(conn_id, response_key="compact_response")
+        else:
+            chat.trim_if_needed(compactor)
 
         _wait_thread(chat)
+        if service is not None:
+            # Computing the summary must not splice shared history in the worker.
+            assert len(chat.buffer) == 7
+            service.history.drain_compactions()
+            service.unregister(conn_id)
         # Buffer should be: [user_summary, assistant_summary, u3] (3 items)
         assert len(chat.buffer) == 3
         assert isinstance(chat.buffer[0], RealtimeConversationItemUserMessage)

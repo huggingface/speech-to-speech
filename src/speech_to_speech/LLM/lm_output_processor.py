@@ -118,6 +118,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
             ResponseGenerationDoneEvent(
                 response_key=response_key,
                 call_ids=list(self._tool_call_ids),
+                history=lm_output.history,
                 succeeded=succeeded,
                 turn_id=lm_output.turn_id,
                 turn_revision=lm_output.turn_revision,
@@ -152,7 +153,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
 
         if isinstance(lm_output, EndOfResponse):
             response_key = lm_output.response_key or self._response_key
-            if not self._turn_output_allowed(
+            if lm_output.cleanup_only or not self._turn_output_allowed(
                 lm_output.turn_id,
                 lm_output.turn_revision,
             ):
@@ -187,6 +188,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 )
             else:
                 yield AssistantResponseDoneEvent(
+                    history=lm_output.history,
                     status=lm_output.status,
                     reason=lm_output.reason,
                     response_key=response_key,
@@ -226,6 +228,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 if self.text_output_queue is not None:
                     self.text_output_queue.put(
                         AssistantToolCallReadyEvent(
+                            history=lm_output.history,
                             part=part,
                             output_sequence=output_sequence,
                             turn_id=lm_output.turn_id,
@@ -235,6 +238,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                         )
                     )
             event = AssistantOutputEvent(
+                history=lm_output.history,
                 parts=[part],
                 turn_id=lm_output.turn_id,
                 turn_revision=lm_output.turn_revision,

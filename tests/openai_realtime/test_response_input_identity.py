@@ -375,7 +375,9 @@ def test_direct_audio_chat_item_retains_its_input_identity(runtime_config):
         ),
     )
     request = prompts.get_nowait()
-    list(_make_handler(stream=False).process(request))
+    from tests.llm_history import drive_llm
+
+    list(drive_llm(_make_handler(stream=False), request))
     assert runtime_config.chat.buffer[0].id == request.input_item_id
     tracker.speech_started(200)
     assert service.response_input_turn(conn_id) == ("turn_1", 0, 123.0)

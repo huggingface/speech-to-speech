@@ -42,6 +42,7 @@ from speech_to_speech.pipeline.messages import (
     ResponsePrefetchTransaction,
     TokenUsage,
 )
+from tests.llm_history import drive_llm
 
 
 def _make_text_delta_event(text):
@@ -136,7 +137,7 @@ def test_reasoning_tool_continuation_replays_original_provider_items(stream):
         return _make_stream([]) if stream else _make_response([])
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
-    outputs = list(handler.process(request))
+    outputs = list(drive_llm(handler, request))
     tool = next(output.tools[0] for output in outputs if isinstance(output, LLMResponseChunk) and output.tools)
     assert tool.id.startswith("fc_") and tool.id != "fc_original"
     assert tool.call_id.startswith("call_") and tool.call_id != "call_original"
@@ -147,7 +148,7 @@ def test_reasoning_tool_continuation_replays_original_provider_items(stream):
             output="Sunny.",
         )
     )
-    continuation = list(handler.process(request))
+    continuation = list(drive_llm(handler, request))
     assert next(output for output in continuation if isinstance(output, EndOfResponse)).error is None
     assert [item.model_dump(exclude_unset=True) for item in [reasoning, call]] == originals
 
@@ -253,7 +254,7 @@ def test_discarded_prefetch_aborts_blocked_provider_stream():
     transaction = ResponsePrefetchTransaction()
     request.prefetch_transaction = transaction
     outputs: list[object] = []
-    worker = Thread(target=lambda: outputs.extend(handler.process(request)))
+    worker = Thread(target=lambda: outputs.extend(drive_llm(handler, request)))
 
     worker.start()
     assert stream.started.wait(timeout=1.0)
@@ -275,7 +276,7 @@ def test_failed_prefetch_is_discarded_before_terminal_is_yielded():
     request = _make_request()
     transaction = ResponsePrefetchTransaction()
     request.prefetch_transaction = transaction
-    generation = handler.process(request)
+    generation = drive_llm(handler, request)
 
     terminal = next(generation)
 
@@ -297,7 +298,7 @@ def test_claimed_failed_prefetch_emits_transactional_fallback():
     assert transaction.claim()
     request.prefetch_transaction = transaction
 
-    outputs = list(handler.process(request))
+    outputs = list(drive_llm(handler, request))
 
     assert isinstance(outputs[0], LLMResponseChunk)
     assert outputs[0].text == base_openai_compatible_language_model.PROVIDER_FAILURE_FALLBACK
@@ -330,7 +331,7 @@ def test_discarded_prefetch_does_not_block_on_provider_connect():
     transaction = ResponsePrefetchTransaction()
     request.prefetch_transaction = transaction
     outputs: list[object] = []
-    worker = Thread(target=lambda: outputs.extend(handler.process(request)))
+    worker = Thread(target=lambda: outputs.extend(drive_llm(handler, request)))
 
     worker.start()
     assert request_started.wait(timeout=1.0)
@@ -368,7 +369,7 @@ def test_claimed_prefetch_cancel_does_not_block_on_provider_connect():
     transaction = ResponsePrefetchTransaction()
     request.prefetch_transaction = transaction
     outputs: list[object] = []
-    worker = Thread(target=lambda: outputs.extend(handler.process(request)))
+    worker = Thread(target=lambda: outputs.extend(drive_llm(handler, request)))
 
     worker.start()
     assert request_started.wait(timeout=1.0)
@@ -406,7 +407,7 @@ def test_claimed_prefetch_cancel_aborts_blocked_provider_read():
     transaction = ResponsePrefetchTransaction()
     request.prefetch_transaction = transaction
     outputs: list[object] = []
-    worker = Thread(target=lambda: outputs.extend(handler.process(request)))
+    worker = Thread(target=lambda: outputs.extend(drive_llm(handler, request)))
 
     worker.start()
     assert stream.started.wait(timeout=1.0)
@@ -444,7 +445,7 @@ def test_repeated_prefetch_invalidation_bounds_provider_connect_workers():
     first_transaction = ResponsePrefetchTransaction()
     first_request.prefetch_transaction = first_transaction
     first_outputs: list[object] = []
-    request_worker = Thread(target=lambda: first_outputs.extend(handler.process(first_request)))
+    request_worker = Thread(target=lambda: first_outputs.extend(drive_llm(handler, first_request)))
 
     request_worker.start()
     assert request_started.wait(timeout=1.0)
@@ -460,7 +461,7 @@ def test_repeated_prefetch_invalidation_bounds_provider_connect_workers():
         transaction = ResponsePrefetchTransaction()
         request.prefetch_transaction = transaction
 
-        list(handler.process(request))
+        list(drive_llm(handler, request))
 
         assert transaction.discarded
     assert create_calls == 1
@@ -480,7 +481,7 @@ def test_repeated_prefetch_invalidation_bounds_provider_connect_workers():
         ]
     )
 
-    claimed_outputs = list(handler.process(claimed_request))
+    claimed_outputs = list(drive_llm(handler, claimed_request))
 
     assert any(isinstance(output, LLMResponseChunk) and output.text == "public" for output in claimed_outputs)
 
@@ -513,7 +514,7 @@ def test_prefetch_uses_one_worker_and_one_bounded_queue(monkeypatch):
     request = _make_request()
     request.prefetch_transaction = ResponsePrefetchTransaction()
 
-    list(handler.process(request))
+    list(drive_llm(handler, request))
 
     assert worker_names == ["realtime-tool-prefetch"]
     assert queue_limits == [base_openai_compatible_language_model.PREFETCH_STREAM_QUEUE_MAXSIZE]
@@ -583,7 +584,7 @@ def test_process_streams_text_from_response_events():
     )
     request = GenerateResponseRequest(runtime_config=config)
     config.session.audio.input.transcription.language = "de"
-    outputs = list(handler.process(request))
+    outputs = list(drive_llm(handler, request))
 
     assert len(outputs) == 3
     assert isinstance(outputs[0], LLMResponseChunk) and outputs[0].text == "Hello."
@@ -618,7 +619,7 @@ def test_text_only_streams_raw_deltas_without_sentence_trimming():
         response=RealtimeResponseCreateParams(output_modalities=["text"]),
     )
 
-    outputs = list(handler.process(req))
+    outputs = list(drive_llm(handler, req))
 
     # Still streamed, not a single buffered chunk.
     assert captured["stream"] is True
@@ -639,7 +640,7 @@ def test_audio_response_sentence_batches_streaming_call():
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
 
     # response=None defaults to audio, so streaming is preserved.
-    list(handler.process(_make_request("Hi")))
+    list(drive_llm(handler, _make_request("Hi")))
 
     assert captured["stream"] is True
 
@@ -660,7 +661,7 @@ def test_process_flushes_tool_lead_in_before_function_call_with_sentence_batchin
     )
 
     request = _make_request("What do you see?")
-    outputs = list(handler.process(request))
+    outputs = list(drive_llm(handler, request))
 
     assert len(outputs) == 3
     assert isinstance(outputs[0], LLMResponseChunk)
@@ -689,7 +690,7 @@ def test_markdown_cleanup_does_not_modify_responses_api_tool_arguments():
     request.runtime_config.session.tools = [
         {"type": "function", "name": "search_docs", "parameters": {"type": "object"}}
     ]
-    outputs = list(handler.process(request))
+    outputs = list(drive_llm(handler, request))
     chunks = [output for output in outputs if isinstance(output, LLMResponseChunk)]
     spoken_chunks = [chunk.text for chunk in chunks if chunk.text]
     tool_chunks = [chunk for chunk in chunks if chunk.tools]
@@ -716,7 +717,7 @@ def test_process_preserves_streamed_text_after_function_call_order():
         )
     )
 
-    outputs = list(handler.process(_make_request("What do you see?")))
+    outputs = list(drive_llm(handler, _make_request("What do you see?")))
 
     assert len(outputs) == 4
     assert isinstance(outputs[0], LLMResponseChunk)
@@ -749,7 +750,9 @@ def test_audio_streaming_preserves_provider_whitespace_across_chunks():
         )
     )
 
-    outputs = [o.text for o in handler.process(_make_request("Ask about weather")) if isinstance(o, LLMResponseChunk)]
+    outputs = [
+        o.text for o in drive_llm(handler, _make_request("Ask about weather")) if isinstance(o, LLMResponseChunk)
+    ]
     text = "".join(outputs)
 
     assert outputs == ["Mock brain is working. I heard you say: What is the weather today?"]
@@ -788,7 +791,7 @@ def test_process_preserves_nonstreaming_text_tool_text_order():
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: api_response))
 
     request = _make_request("What do you see?")
-    outputs = list(handler.process(request))
+    outputs = list(drive_llm(handler, request))
 
     assert len(outputs) == 4
     assert isinstance(outputs[0], LLMResponseChunk)
@@ -838,7 +841,7 @@ def test_process_handles_cancellation():
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
 
-    outputs = list(handler.process(_make_request("Hi")))
+    outputs = list(drive_llm(handler, _make_request("Hi")))
 
     assert len(outputs) == 1
     assert isinstance(outputs[0], EndOfResponse)
@@ -863,7 +866,7 @@ def test_cancelled_stream_emits_provider_usage_and_rolls_back_history():
     )
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: _make_stream([])))
     request = _make_request("Use a tool")
-    generation = handler.process(request)
+    generation = drive_llm(handler, request)
 
     tool_chunk = next(generation)
     assert isinstance(tool_chunk, LLMResponseChunk) and tool_chunk.tools
@@ -899,7 +902,7 @@ def test_cancelled_nonstreaming_response_emits_provider_usage():
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
     request = _make_request("Hi")
 
-    outputs = list(handler.process(request))
+    outputs = list(drive_llm(handler, request))
 
     assert not any(isinstance(output, LLMResponseChunk) for output in outputs)
     usage = next(output for output in outputs if isinstance(output, TokenUsage))
@@ -915,7 +918,7 @@ def test_cancelled_text_tool_turn_rolls_back_ordered_call():
         responses=SimpleNamespace(create=lambda **kwargs: _make_stream([_make_function_call_done_event()]))
     )
     request = _make_request("Use a tool")
-    generation = handler.process(request)
+    generation = drive_llm(handler, request)
 
     tool_chunk = next(generation)
     assert isinstance(tool_chunk, LLMResponseChunk)
@@ -943,7 +946,7 @@ def test_provider_error_after_text_tool_rolls_back_ordered_call():
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: FailingStream()))
     request = _make_request("Use a tool")
-    outputs = list(handler.process(request))
+    outputs = list(drive_llm(handler, request))
 
     end = next(output for output in outputs if isinstance(output, EndOfResponse))
     assert end.error is not None and "provider stream failed" in end.error
@@ -974,7 +977,7 @@ def test_generation_is_rejected_until_ordered_tool_output_arrives():
     chat.add_item(make_user_message("second"))
     request = GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat))
 
-    outputs = list(handler.process(request))
+    outputs = list(drive_llm(handler, request))
 
     assert called is False
     assert len(outputs) == 1
@@ -1067,7 +1070,7 @@ def test_process_read_timeout_speaks_fallback_and_preserves_failure():
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: make_timeout_stream()))
 
     request = _make_request("Hi")
-    outputs = list(handler.process(request))
+    outputs = list(drive_llm(handler, request))
 
     assert len(outputs) == 2
     assert isinstance(outputs[0], LLMResponseChunk)
@@ -1092,7 +1095,7 @@ def test_read_timeout_after_partial_text_fails_without_apology_or_history_commit
     request = _make_request("Hi")
     request.response = RealtimeResponseCreateParams(output_modalities=["text"])
 
-    outputs = list(handler.process(request))
+    outputs = list(drive_llm(handler, request))
 
     chunks = [output.text for output in outputs if isinstance(output, LLMResponseChunk)]
     assert chunks == ["Partial answer. "]
@@ -1115,7 +1118,7 @@ def test_read_timeout_after_tool_call_fails_and_rolls_back_call():
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: ToolThenTimeoutStream()))
     request = _make_request("Use a tool")
 
-    outputs = list(handler.process(request))
+    outputs = list(drive_llm(handler, request))
 
     assert isinstance(outputs[0], LLMResponseChunk)
     assert outputs[0].tools
@@ -1138,7 +1141,7 @@ def test_generation_error_emits_failed_end_of_response():
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=boom))
 
     request = _make_request("Hi")
-    outputs = list(handler.process(request))
+    outputs = list(drive_llm(handler, request))
 
     eors = [o for o in outputs if isinstance(o, EndOfResponse)]
     assert len(eors) == 1
@@ -1174,7 +1177,7 @@ def test_empty_context_fails_with_clear_message_without_calling_provider():
         ),
     )
 
-    outputs = list(handler.process(req))
+    outputs = list(drive_llm(handler, req))
 
     assert not called  # short-circuited before reaching the provider
     eors = [o for o in outputs if isinstance(o, EndOfResponse)]
@@ -1199,7 +1202,7 @@ def test_disable_thinking_passes_extra_body():
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
 
-    list(handler.process(_make_request("Hi")))
+    list(drive_llm(handler, _make_request("Hi")))
 
     assert captured["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
 
@@ -1219,7 +1222,7 @@ def test_no_disable_thinking_omits_extra_body():
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
 
-    list(handler.process(_make_request("Hi")))
+    list(drive_llm(handler, _make_request("Hi")))
 
     assert captured.get("extra_body") is None
     assert captured["reasoning"] == {"effort": "none"}
@@ -1240,7 +1243,7 @@ def test_responses_reasoning_omitted_when_unset():
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
 
-    list(handler.process(_make_request("Hi")))
+    list(drive_llm(handler, _make_request("Hi")))
 
     assert "reasoning" not in captured
 
@@ -1284,9 +1287,9 @@ def test_second_turn_flattens_assistant_history_for_responses():
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
 
     cfg.chat.add_item(make_user_message("Hi"))
-    list(handler.process(GenerateResponseRequest(runtime_config=cfg)))
+    list(drive_llm(handler, GenerateResponseRequest(runtime_config=cfg)))
     cfg.chat.add_item(make_user_message("Again"))
-    list(handler.process(GenerateResponseRequest(runtime_config=cfg)))
+    list(drive_llm(handler, GenerateResponseRequest(runtime_config=cfg)))
 
     assistant_items = [item for item in captured["input"] if item.get("role") == "assistant"]
     assert len(assistant_items) == 1
@@ -1318,7 +1321,7 @@ def test_audio_request_uses_chat_completions_input_audio_payload():
         chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)),
     )
 
-    outputs = list(handler.process(_make_audio_request()))
+    outputs = list(drive_llm(handler, _make_audio_request()))
 
     assert isinstance(outputs[0], LLMResponseChunk)
     assert outputs[0].text == "Yes, I heard you."
@@ -1368,8 +1371,8 @@ def test_audio_second_turn_retains_recent_audio_then_compacts_older_turn():
     handler.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)))
     cfg = _make_runtime_config(chat_size=5)
 
-    list(handler.process(_make_audio_request(cfg)))
-    list(handler.process(_make_audio_request(cfg)))
+    list(drive_llm(handler, _make_audio_request(cfg)))
+    list(drive_llm(handler, _make_audio_request(cfg)))
 
     second_messages = captured_calls[1]["messages"]
     assert [message["role"] for message in second_messages] == ["system", "user", "assistant", "user"]
@@ -1426,7 +1429,7 @@ def test_audio_nonstreaming_tool_call_uses_chat_protocol_and_survives_next_turn(
     ]
     cfg.session.tool_choice = {"type": "function", "name": "lookup"}
 
-    first_outputs = list(handler.process(_make_audio_request(cfg)))
+    first_outputs = list(drive_llm(handler, _make_audio_request(cfg)))
     emitted_tools = [tool for output in first_outputs if isinstance(output, LLMResponseChunk) for tool in output.tools]
     assert len(emitted_tools) == 1
     emitted_tool = emitted_tools[0]
@@ -1454,7 +1457,7 @@ def test_audio_nonstreaming_tool_call_uses_chat_protocol_and_survives_next_turn(
             output='{"temperature": 22}',
         )
     )
-    list(handler.process(_make_audio_request(cfg)))
+    list(drive_llm(handler, _make_audio_request(cfg)))
 
     second_messages = captured_calls[1]["messages"]
     assert [message["role"] for message in second_messages] == [
@@ -1504,7 +1507,7 @@ def test_audio_streaming_reuses_tool_parser_and_emits_trailing_usage():
     cfg = _make_runtime_config(chat_size=5)
     cfg.session.tools = [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}]
 
-    outputs = list(handler.process(_make_audio_request(cfg)))
+    outputs = list(drive_llm(handler, _make_audio_request(cfg)))
 
     chunks = [output for output in outputs if isinstance(output, LLMResponseChunk)]
     usage = [output for output in outputs if isinstance(output, TokenUsage)]
@@ -1537,7 +1540,7 @@ def test_audio_nonstreaming_refusal_is_emitted_and_stored():
     )
     cfg = _make_runtime_config(chat_size=5)
 
-    outputs = list(handler.process(_make_audio_request(cfg)))
+    outputs = list(drive_llm(handler, _make_audio_request(cfg)))
 
     assert any(isinstance(output, LLMResponseChunk) and output.text == "I cannot help with that." for output in outputs)
     assert any(
@@ -1557,7 +1560,7 @@ def test_failed_audio_request_rolls_back_provisional_history():
     )
     cfg = _make_runtime_config(chat_size=5)
 
-    outputs = list(handler.process(_make_audio_request(cfg)))
+    outputs = list(drive_llm(handler, _make_audio_request(cfg)))
 
     assert [type(output) for output in outputs] == [LLMResponseChunk, EndOfResponse]
     assert outputs[0].text == base_openai_compatible_language_model.PROVIDER_FAILURE_FALLBACK
@@ -1586,7 +1589,7 @@ def test_interrupted_audio_tool_turn_rolls_back_user_call_and_fast_output():
     cfg = _make_runtime_config(chat_size=5)
     cfg.session.tools = [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}]
 
-    generation = handler.process(_make_audio_request(cfg))
+    generation = drive_llm(handler, _make_audio_request(cfg))
     tool_chunk = next(output for output in generation if isinstance(output, LLMResponseChunk) and output.tools)
     call_id = tool_chunk.tools[0].call_id
     cfg.chat.add_item(
@@ -1632,7 +1635,7 @@ def test_out_of_band_emits_output_but_does_not_commit_to_default_conversation():
     events = [_make_text_delta_event("OOB answer."), _make_output_item_done_event(content="OOB answer.")]
     _capture_create(handler, events)
 
-    outputs = list(handler.process(req))
+    outputs = list(drive_llm(handler, req))
 
     # The response is still produced and streamed back to the client...
     assert any(isinstance(o, LLMResponseChunk) and o.text == "OOB answer." for o in outputs)
@@ -1656,7 +1659,7 @@ def test_empty_response_overrides_disable_session_instructions_and_tools():
     )
     captured = _capture_create(handler, [_make_output_item_done_event(content="ok")])
 
-    list(handler.process(request))
+    list(drive_llm(handler, request))
 
     assert captured["tools"] == []
     assert "SESSION INSTRUCTIONS" not in str(captured["input"])
@@ -1676,7 +1679,7 @@ def test_out_of_band_timeout_after_tool_call_fails_without_apology():
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: ToolThenTimeoutStream()))
     request, cfg = _make_oob_request([make_user_message("OOB tool request")])
 
-    outputs = list(handler.process(request))
+    outputs = list(drive_llm(handler, request))
 
     assert isinstance(outputs[0], LLMResponseChunk)
     assert outputs[0].tools
@@ -1691,7 +1694,7 @@ def test_out_of_band_input_builds_fresh_context():
     req, _cfg = _make_oob_request([make_user_message("OOB question")])
     captured = _capture_create(handler, [_make_output_item_done_event(content="ok")])
 
-    list(handler.process(req))
+    list(drive_llm(handler, req))
 
     serialized = str(captured["input"])
     assert "OOB question" in serialized
@@ -1703,7 +1706,7 @@ def test_out_of_band_empty_input_clears_context():
     req, _cfg = _make_oob_request([])
     captured = _capture_create(handler, [_make_output_item_done_event(content="ok")])
 
-    list(handler.process(req))
+    list(drive_llm(handler, req))
 
     serialized = str(captured["input"])
     assert "Hi" not in serialized  # default conversation not used
@@ -1715,7 +1718,7 @@ def test_out_of_band_absent_input_reads_default_conversation():
     req, cfg = _make_oob_request(None)
     captured = _capture_create(handler, [_make_output_item_done_event(content="ok")])
 
-    list(handler.process(req))
+    list(drive_llm(handler, req))
 
     serialized = str(captured["input"])
     assert "Hi" in serialized  # default conversation used as read-only context
@@ -1741,7 +1744,7 @@ def test_out_of_band_invalid_input_emits_failed_end_of_response():
     )
     req, _cfg = _make_oob_request([orphan])
 
-    outputs = list(handler.process(req))
+    outputs = list(drive_llm(handler, req))
 
     assert not called  # generation never started
     assert len(outputs) == 1
@@ -1772,6 +1775,6 @@ def test_response_history_precedes_speech_that_arrived_during_generation():
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
 
-    list(handler.process(request))
+    list(drive_llm(handler, request))
 
     assert [part.text for item in chat.buffer for part in item.content if part.text] == ["A", "answer A", "B"]

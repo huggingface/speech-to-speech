@@ -10,19 +10,25 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any, Optional
 
+import pytest
 from openai.types.realtime import RealtimeSessionCreateRequest
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.responses import ResponseFunctionToolCall
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.api.openai_realtime.service import RealtimeService
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.LLM.language_model import BaseLanguageModelHandler, StreamContext
+from speech_to_speech.pipeline.events import AssistantOutputEvent
+from speech_to_speech.pipeline.history import ResponseHistory
 from speech_to_speech.pipeline.messages import (
     AssistantTextPart,
     AssistantToolCallPart,
     GenerateResponseRequest,
     LLMResponseChunk,
 )
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from tests.llm_history import drive_llm
 
 
 class _OverlappingSpeechHandler(BaseLanguageModelHandler):
@@ -71,34 +77,52 @@ def test_local_response_history_precedes_speech_that_arrived_during_generation()
         )
     )
 
-    list(_make_handler().process(request))
+    list(drive_llm(_make_handler(), request))
 
     assert [part.text for item in chat.buffer for part in item.content if part.text] == ["A", "answer A", "B"]
 
 
-def test_keyless_commit_places_text_and_tool_calls_in_their_own_turn():
-    """Responses committed without a response key follow the same anchor."""
-    chat = Chat(10)
+@pytest.mark.parametrize("accepted_first", [False, True])
+def test_history_acceptance_uses_global_order_and_keeps_committed_work(accepted_first):
+    """A proposal must pass the same turn gate as its output; accepted work survives."""
+    tracker = SpeculativeTurnTracker()
+    service = RealtimeService(speculative_turns=tracker)
+    conn_id = service.register()
+    chat = service._state(conn_id).runtime_config.chat
     chat.add_item(make_user_message("A"))
+    turn_id, revision = tracker.start_turn()
     anchor = chat.history_anchor_id()
-    chat.add_item(make_user_message("B"))
-
-    committed = BaseLanguageModelHandler._commit_ordered_output(
+    parts = [
+        AssistantTextPart(text="answer A"),
+        AssistantToolCallPart(
+            tool=ResponseFunctionToolCall(type="function_call", call_id="call_a", name="camera", arguments="{}")
+        ),
+    ]
+    proposal = ResponseHistory.capture(
         chat,
-        [
-            AssistantTextPart(text="answer A"),
-            AssistantToolCallPart(
-                tool=ResponseFunctionToolCall(
-                    type="function_call",
-                    call_id="call_a",
-                    name="camera",
-                    arguments="{}",
-                )
-            ),
-        ],
-        wants_audio=False,
+        BaseLanguageModelHandler._ordered_output_items(parts, wants_audio=False),
         after_item_id=anchor,
+        complete=True,
     )
-
-    assert committed
-    assert [item.type for item in chat.buffer] == ["message", "message", "function_call", "message"]
+    event = AssistantOutputEvent(
+        parts=parts,
+        history=proposal,
+        response_key="response_a",
+        turn_id=turn_id,
+        turn_revision=revision,
+    )
+    # Merely producing a proposal leaves shared history untouched.
+    assert [item.type for item in chat.buffer] == ["message"]
+    if accepted_first:
+        assert service.dispatch_pipeline_event(conn_id, event)
+    tracker.start_turn()
+    chat.add_item(make_user_message("B"))
+    if accepted_first:
+        # Replayed side/ordered copies do not duplicate the history proposal.
+        service.dispatch_pipeline_event(conn_id, event)
+        service.finish_response(conn_id, response_key="response_a")
+        assert [item.type for item in chat.buffer] == ["message", "message", "function_call", "message"]
+    else:
+        assert service.dispatch_pipeline_event(conn_id, event) == []
+        assert [item.type for item in chat.buffer] == ["message", "message"]
+    service.unregister(conn_id)

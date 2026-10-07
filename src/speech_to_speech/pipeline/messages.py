@@ -21,6 +21,7 @@ from openai.types.responses.response_function_tool_call import ResponseFunctionT
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.pipeline.history import ResponseHistory
 from speech_to_speech.pipeline.speaker_metadata import PendingSpeakerAttribution, SpeakerAttribution
 from speech_to_speech.pipeline.transcript_logging import log_exception
 
@@ -149,6 +150,8 @@ class LLMResponseChunk(PipelineMessage):
     represent arbitrary text/tool interleaving without losing order.
     """
 
+    history: ResponseHistory | None = Field(default=None, exclude=True, repr=False)
+
     tag: Literal["llm_response_chunk"] = "llm_response_chunk"
     parts: list[AssistantOutputPart] = Field(default_factory=list)
     text: str = ""
@@ -197,6 +200,8 @@ class EndOfResponse(PipelineMessage):
     ``status`` and ``reason`` describe a provider limit or filter that cut the
     reply short. An error takes precedence over this incomplete status.
     """
+
+    history: ResponseHistory | None = Field(default=None, exclude=True, repr=False)
 
     tag: Literal["end_of_response"] = "end_of_response"
     turn_id: str | None = None
@@ -264,10 +269,10 @@ class AudioOutput(PipelineMessage):
 class ResponsePrefetchTransaction:
     """Commit irreversible chat cleanup only after a prefetch is claimed.
 
-    Generated assistant items are already provisional and can be rolled back
-    by response key. Image stripping and history trimming are not reversible,
-    so an unclaimed prefetch parks those operations here until the matching
-    standard ``response.create`` arrives.
+    Model workers produce history proposals without changing shared chat.
+    The service stages those proposals and registers their acceptance here.
+    The matching standard ``response.create`` claims the work and applies
+    history and cleanup on the service thread.
     """
 
     def __init__(self) -> None:

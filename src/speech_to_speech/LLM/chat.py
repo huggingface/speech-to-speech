@@ -164,6 +164,7 @@ class Chat:
         # acquire it once; internal callers that already hold it use the
         # ``_locked`` helpers, so no reentry is needed (regular Lock is safe).
         self._lock = threading.Lock()
+        self.compaction_result_callback: Callable[[CompactionResult, set[str], int], None] | None = None
         self._compact_in_flight: bool = False
         self._compact_thread: threading.Thread | None = None
         self._deferred_compactor: CompactFn | None = None
@@ -1179,6 +1180,7 @@ class Chat:
         gen: int,
     ) -> None:
         """Worker thread entry point."""
+        delivered = False
         try:
             if self._shutdown.is_set() or self._gen_counter != gen:
                 return
@@ -1196,9 +1198,26 @@ class Chat:
                 return
             if self._shutdown.is_set() or self._gen_counter != gen:
                 return
+            if self.compaction_result_callback is not None:
+                self.compaction_result_callback(result, marker_ids, gen)
+                delivered = True
+                return
             self._apply_compaction(result, marker_ids, gen)
         finally:
-            # Don't clobber the flag if reset/close has advanced the gen.
+            # The service clears single-flight state after applying a queued
+            # result; do not launch another summary against the old prefix.
+            if not delivered:
+                # Don't clobber the flag if reset/close has advanced the gen.
+                with self._lock:
+                    if self._gen_counter == gen:
+                        self._compact_in_flight = False
+                        self._run_deferred_compaction_if_ready()
+
+    def finish_compaction(self, result: CompactionResult, marker_ids: set[str], gen: int) -> None:
+        """Apply a worker result from the owning service's event loop."""
+        try:
+            self._apply_compaction(result, marker_ids, gen)
+        finally:
             with self._lock:
                 if self._gen_counter == gen:
                     self._compact_in_flight = False

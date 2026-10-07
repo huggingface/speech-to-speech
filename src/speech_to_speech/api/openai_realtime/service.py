@@ -55,6 +55,7 @@ from speech_to_speech.api.openai_realtime.handlers import (
     ResponseHandler,
     SessionHandler,
 )
+from speech_to_speech.api.openai_realtime.history import HistoryCommitError, HistoryWriter
 from speech_to_speech.api.openai_realtime.input_state import (
     InputItemState,
     PendingInputTerminal,
@@ -369,6 +370,7 @@ class RealtimeService:
         self._conns: dict[str, ConnState] = {}
         self.total_usage = GlobalUsageMetrics()
 
+        self.history = HistoryWriter(self)
         self.audio = AudioHandler(self)
         self.session = SessionHandler(self)
         self.response = ResponseHandler(self)
@@ -406,6 +408,7 @@ class RealtimeService:
         return state.session_id
 
     def unregister(self, conn_id: str) -> None:
+        self.history.close_session(conn_id)
         st = self._conns.pop(conn_id, None)
         if st is not None:
             # Suppress any in-flight compaction splice so a daemon worker can't
@@ -559,6 +562,7 @@ class RealtimeService:
             self.total_usage.input_tokens += input_tokens
             self.total_usage.output_tokens += output_tokens
             self.turn_latency_store.discard_response(response_key, session_id=conn_id)
+        self.history.close(conn_id, response_key)
         st.close_response_key(response_key)
 
     def handle_conversation_item_create(self, conn_id: str, event: ConversationItemCreateEvent) -> list[ServerEvent]:
@@ -573,6 +577,7 @@ class RealtimeService:
 
     def dispatch_pipeline_event(self, conn_id: str, event: PipelineEvent) -> list[ServerEvent]:
         """Route an internal pipeline event to the appropriate handler."""
+        self.history.drain_compactions()
         # Provider-reported usage is billable accounting, not client-visible
         # assistant output. Cancellation must not make it stale.
         if isinstance(event, TokenUsageEvent):
@@ -602,15 +607,41 @@ class RealtimeService:
             )
             return []
 
-        if isinstance(event, AssistantOutputEvent):
-            return self.response.on_assistant_output(conn_id, event)
-        if isinstance(event, AssistantResponseDoneEvent):
-            return self.response.on_assistant_response_done(conn_id, event)
-        handler = self._pipeline_dispatch.get(type(event))
-        if handler is None:
-            logger.debug("Unhandled pipeline event type: %s", type(event).__name__)
-            return []
-        return handler(conn_id, event)
+        try:
+            self.history.stage(conn_id, event)
+        except Exception as exc:
+            log_exception(logger, "History write-back failed", exc)
+            return self._on_response_failed(
+                conn_id,
+                ResponseFailedEvent(
+                    response_key=getattr(event, "response_key", None),
+                    turn_id=getattr(event, "turn_id", None),
+                    turn_revision=getattr(event, "turn_revision", None),
+                    message=f"Language model history commit failed: {exc}",
+                ),
+            )
+
+        try:
+            if isinstance(event, AssistantOutputEvent):
+                return self.response.on_assistant_output(conn_id, event)
+            if isinstance(event, AssistantResponseDoneEvent):
+                return self.response.on_assistant_response_done(conn_id, event)
+            handler = self._pipeline_dispatch.get(type(event))
+            if handler is None:
+                logger.debug("Unhandled pipeline event type: %s", type(event).__name__)
+                return []
+            return handler(conn_id, event)
+        except HistoryCommitError as exc:
+            log_exception(logger, "History acceptance failed", exc)
+            return self._on_response_failed(
+                conn_id,
+                ResponseFailedEvent(
+                    response_key=getattr(event, "response_key", None),
+                    turn_id=getattr(event, "turn_id", None),
+                    turn_revision=getattr(event, "turn_revision", None),
+                    message=str(exc),
+                ),
+            )
 
     def is_turn_output_held(self, event: object) -> bool:
         """Whether assistant output must wait for its speculative turn to settle.
@@ -915,6 +946,8 @@ class RealtimeService:
             self.response._ensure_response(conn_id, event.response_key)
         if st.response_failed:
             return events
+        if event.response_key is not None:
+            self.history.reject(conn_id, event.response_key)
         st.response_failed = True
         st.response_error_type = "response_failed"
         events.extend(self.response.finish_audio_output(conn_id, event.response_key))
