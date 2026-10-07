@@ -61,7 +61,7 @@ from speech_to_speech.pipeline.messages import (
     GenerateResponseRequest,
     ResponsePrefetchTransaction,
 )
-from speech_to_speech.pipeline.speculative_turns import TurnPhase
+from speech_to_speech.pipeline.speculative_turns import TurnGateAction, TurnOutputHeld, TurnPhase
 from speech_to_speech.pipeline.transcript_logging import log_exception
 from speech_to_speech.pipeline.turn_latency import TURN_LATENCY_METADATA_KEY
 from speech_to_speech.utils.utils import _generate_id, is_out_of_band, response_wants_audio
@@ -1066,11 +1066,12 @@ class ResponseHandler(RealtimeBaseHandler):
     ) -> list[ServerEvent]:
         """Translate ordered assistant output into OpenAI Realtime events."""
         if self._service.speculative_turns:
-            commit_result = self._service.speculative_turns.commit_if_latest_after_reopen_grace(
-                event.turn_id,
-                event.turn_revision,
-            )
-            if not commit_result:
+            # VAD can start resumed speech after the send loop's hold check, so
+            # check again and commit under one lock.
+            decision = self._service.speculative_turns.gate(event.turn_id, event.turn_revision, commit=True)
+            if decision.action is TurnGateAction.HOLD:
+                raise TurnOutputHeld
+            if decision.action is TurnGateAction.DROP:
                 logger.debug("Dropping stale assistant output for turn=%s rev=%s", event.turn_id, event.turn_revision)
                 return []
         st = self._state(conn_id)

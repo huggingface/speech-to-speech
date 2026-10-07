@@ -144,12 +144,12 @@ def test_configured_grace_is_not_reported_as_wait_without_a_gate(monkeypatch) ->
     turns.start_reopen_grace("turn_1", 0, 2.0)
 
     clock[0] = 3.0
-    assert turns.is_latest_after_reopen_grace("turn_1", 0)
+    assert turns.wait_for_gate("turn_1", 0)
     assert pending.smart_turn_wait_s == 0.0
 
     clock[0] = 4.0
     turns.start_reopen_grace("turn_1", 0, 2.0)
-    assert turns.is_latest_after_reopen_grace("turn_1", 0)
+    assert turns.wait_for_gate("turn_1", 0)
     assert pending.smart_turn_wait_s == 2.0
 
 

@@ -2537,7 +2537,7 @@ class TestFinishAudioResponse:
         assert result.error.type == TOOL_FOLLOWUP_WAIT
         assert text_prompt_queue.empty()
         service.speculative_turns.segment_finalized(100)
-        service.speculative_turns.commit(turn_id, revision)
+        assert service.speculative_turns.wait_for_gate(turn_id, revision, commit=True)
         service.speculative_turns.close(turn_id, revision)
         assert isinstance(service.handle_response_create(conn_id, followup), ResponseCreatedEvent)
 
@@ -4007,31 +4007,21 @@ class TestDispatchPipelineEvent:
         runtime_config,
         should_listen,
     ):
+        from tests.reopen_dispatch import pending_dispatch
+
         tracker = SpeculativeTurnTracker()
         service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
         conn_id = service.register()
         service._state(conn_id).runtime_config = runtime_config
         tracker.observe("turn_1", 0)
         candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
-        done = Event()
-        result = {}
+        event = AssistantOutputEvent(text="stale", turn_id="turn_1", turn_revision=0)
 
-        def dispatch():
-            result["events"] = service.dispatch_pipeline_event(
-                conn_id,
-                AssistantOutputEvent(text="stale", turn_id="turn_1", turn_revision=0),
-            )
-            done.set()
+        with pending_dispatch(service, conn_id, event) as dispatch:
+            assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+            events = dispatch.result(timeout=1.0)
 
-        thread = Thread(target=dispatch)
-        thread.start()
-
-        assert not done.wait(0.05)
-        assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
-        assert done.wait(1.0)
-        thread.join(timeout=1.0)
-
-        assert result["events"] == []
+        assert events == []
         assert service._state(conn_id).current_response_id is None
         service.unregister(conn_id)
 
@@ -4133,34 +4123,24 @@ class TestDispatchPipelineEvent:
         runtime_config,
         should_listen,
     ):
+        from tests.reopen_dispatch import pending_dispatch
+
         tracker = SpeculativeTurnTracker()
         service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
         conn_id = service.register()
         service._state(conn_id).runtime_config = runtime_config
         tracker.observe("turn_1", 0)
         candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
-        done = Event()
-        result = {}
+        event = AssistantOutputEvent(text="latest", turn_id="turn_1", turn_revision=0)
 
-        def dispatch():
-            result["events"] = service.dispatch_pipeline_event(
-                conn_id,
-                AssistantOutputEvent(text="latest", turn_id="turn_1", turn_revision=0),
-            )
-            done.set()
+        with pending_dispatch(service, conn_id, event) as dispatch:
+            tracker.cancel_reopen_candidate("turn_1", candidate_revision)
+            events = dispatch.result(timeout=1.0)
 
-        thread = Thread(target=dispatch)
-        thread.start()
-
-        assert not done.wait(0.05)
-        tracker.cancel_reopen_candidate("turn_1", candidate_revision)
-        assert done.wait(1.0)
-        thread.join(timeout=1.0)
-
-        assert len(result["events"]) == 4
-        assert isinstance(result["events"][0], ResponseCreatedEvent)
-        assert isinstance(result["events"][3], ResponseAudioTranscriptDeltaEvent)
-        assert result["events"][3].delta == "latest"
+        assert len(events) == 4
+        assert isinstance(events[0], ResponseCreatedEvent)
+        assert isinstance(events[3], ResponseAudioTranscriptDeltaEvent)
+        assert events[3].delta == "latest"
         assert tracker.is_committed("turn_1", 0)
         service.unregister(conn_id)
 
