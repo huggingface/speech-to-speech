@@ -41,8 +41,8 @@ class SessionHandler(RealtimeBaseHandler):
 
         transcription = s.audio.input.transcription if s.audio is not None and s.audio.input is not None else None
         if transcription is not None and isinstance(transcription.language, str):
-            language = transcription.language.strip()
-            if language.lower() == "auto":
+            language = transcription.language.strip().lower()
+            if language == "auto":
                 if not self._service.stt_auto_reset_supported:
                     return self.make_error(
                         message="Auto cannot reset the active STT backend's configured language hint.",
@@ -52,13 +52,23 @@ class SessionHandler(RealtimeBaseHandler):
             else:
                 if not language:
                     return self.make_error(message="Language must not be empty.", _type="invalid_request_error")
-                for backend, supported in (
-                    ("STT", self._service.stt_supported_languages),
-                    ("TTS", self._service.tts_supported_languages),
+                for backend, supported, accepts_hint in (
+                    ("STT", self._service.stt_supported_languages, self._service.stt_language_hint_supported),
+                    ("TTS", self._service.tts_supported_languages, self._service.tts_language_hint_supported),
                 ):
                     if supported is not None and language not in supported:
                         return self.make_error(
                             message=f"Language {language!r} is not supported by the active {backend} backend.",
+                            _type="invalid_request_error",
+                        )
+                    if not accepts_hint:
+                        guidance = 'send "auto" to use its configured language behavior.'
+                        if backend == "STT" and not self._service.stt_auto_reset_supported:
+                            guidance = "Change the backend's startup configuration to change its language hint."
+                        return self.make_error(
+                            message=(
+                                f"The active {backend} backend cannot accept a per-session language hint; {guidance}"
+                            ),
                             _type="invalid_request_error",
                         )
                 transcription.language = language
