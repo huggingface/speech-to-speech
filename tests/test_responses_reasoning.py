@@ -52,6 +52,75 @@ def _stream(items):
     )
 
 
+def _message(content="mixed"):
+    parts = [
+        {
+            "type": "output_text",
+            "text": "Checking the source.",
+            "annotations": [
+                {
+                    "type": "url_citation",
+                    "start_index": 0,
+                    "end_index": 8,
+                    "title": "Source",
+                    "url": "https://example.com/source",
+                }
+            ],
+            "logprobs": None,
+        },
+        {"type": "refusal", "refusal": "Cannot provide that detail."},
+    ]
+    return ResponseOutputMessage.model_validate(
+        {
+            "id": "msg_provider",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "phase": "commentary",
+            "content": parts if content == "mixed" else parts[1:] if content == "refusal" else [],
+        }
+    )
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("content", ["mixed", "refusal", "empty"])
+def test_assistant_message_payload_survives_complete_reasoning_tool_continuation(stream, content):
+    reasoning, call = _items()
+    message = _message(content)
+    items = [reasoning, message, call]
+    originals = [item.model_dump(exclude_unset=True) for item in items]
+    handler = _make_handler(stream=stream)
+    request = _make_request(chat_size=5)
+    captured = []
+
+    def create(**kwargs):
+        captured.append(kwargs["input"])
+        if len(captured) == 1:
+            return _stream(items) if stream else _make_response(items)
+        assert kwargs["input"][2:5] == originals
+        assert kwargs["input"][5]["type"] == "function_call_output"
+        assert kwargs["input"][5]["call_id"] == call.call_id
+        return _stream([]) if stream else _make_response([])
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    first = list(handler.process(request))
+    tool = next(item.tools[0] for item in first if isinstance(item, LLMResponseChunk) and item.tools)
+    local_message = next(
+        item for item in request.runtime_config.chat.buffer if getattr(item, "role", None) == "assistant"
+    )
+    assert local_message.id.startswith("msg_") and local_message.id != message.id
+    assert [part.text for part in local_message.content] == [
+        part.text if part.type == "output_text" else part.refusal for part in message.content
+    ]
+    _finish(request.runtime_config.chat, tool.call_id)
+    # A copy uses the same replay path while retaining its own provider payload.
+    assert request.runtime_config.chat.copy(deep=True).to_responses_api_chat()[1:4] == originals
+    second = list(handler.process(request))
+    assert next(item for item in second if isinstance(item, EndOfResponse)).error is None
+    assert len(captured) == 2
+    assert [item.model_dump(exclude_unset=True) for item in items] == originals
+
+
 def _stage(chat, items):
     reasoning, call = items
     mapped = ResponsesApiModelHandler._tool_call(call)
@@ -140,12 +209,16 @@ def test_reasoning_before_assistant_message_is_retained_without_client_output(st
 
 
 @pytest.mark.parametrize("discard", ["cancel", "prefetch"])
-def test_reasoning_and_fast_tool_output_are_rolled_back(discard):
+@pytest.mark.parametrize("with_message", [None, "mixed", "empty"])
+def test_reasoning_and_fast_tool_output_are_rolled_back(discard, with_message):
     handler = _make_handler(stream=True)
     request = _make_request(chat_size=5)
     if discard == "prefetch":
         request.prefetch_transaction = ResponsePrefetchTransaction()
-    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kw: _stream(_items())))
+    items = _items()
+    if with_message:
+        items.insert(1, _message(with_message))
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kw: _stream(items)))
     generation = handler.process(request)
     chunk = next(generation)
     assert isinstance(chunk, LLMResponseChunk) and chunk.tools
@@ -175,13 +248,17 @@ def test_stale_speculative_turn_rolls_back_reasoning_and_call():
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_out_of_band_reasoning_does_not_enter_default_history(stream):
+@pytest.mark.parametrize("with_message", [False, True])
+def test_out_of_band_reasoning_does_not_enter_default_history(stream, with_message):
     handler = _make_handler(stream=stream)
     request = _make_request()
     request.response = RealtimeResponseCreateParams(conversation="none")
+    items = _items()
+    if with_message:
+        items.insert(1, _message())
     handler.client = SimpleNamespace(
         responses=SimpleNamespace(
-            create=lambda **kw: _stream(_items()) if stream else _make_response(_items()),
+            create=lambda **kw: _stream(items) if stream else _make_response(items),
         )
     )
     outputs = list(handler.process(request))
@@ -413,9 +490,13 @@ def test_provider_payload_fields_and_opaque_ids_are_not_normalized():
 
 
 @pytest.mark.parametrize("stream, reverse_done", [(False, False), (True, False), (True, True)])
-def test_pinned_sdk_parses_and_serializes_reasoning_tool_continuation(stream, reverse_done):
+@pytest.mark.parametrize("with_message", [False, True])
+def test_pinned_sdk_parses_and_serializes_reasoning_tool_continuation(stream, reverse_done, with_message):
     """Exercise SDK HTTP/SSE handling; no hosted API is contacted."""
-    originals = [item.model_dump(exclude_unset=True) for item in _items()]
+    items = _items()
+    if with_message:
+        items.insert(1, _message())
+    originals = [item.model_dump(exclude_unset=True) for item in items]
     requests = []
 
     def respond(request):
@@ -441,8 +522,9 @@ def test_pinned_sdk_parses_and_serializes_reasoning_tool_continuation(stream, re
             "usage": None,
         }
         if len(requests) == 2:
-            assert body["input"][2:4] == originals
-            assert body["input"][4]["call_id"] == "call_1"
+            end = 2 + len(originals)
+            assert body["input"][2:end] == originals
+            assert body["input"][end]["call_id"] == "call_1"
         if not stream:
             return httpx.Response(200, json=response)
         indexes = list(range(len(output)))

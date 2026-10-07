@@ -216,7 +216,9 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
                 elif isinstance(item, ResponseOutputMessage):
                     message_id = _generate_id("msg")
                     history_item_ids[raw_event.output_index] = message_id
-                    yield AssistantMessage(content=self._assistant_content(item.content), id=message_id)
+                    yield AssistantMessage(
+                        content=self._assistant_content(item.content), id=message_id, response_item=item
+                    )
             elif isinstance(raw_event, (ResponseCompletedEvent, ResponseIncompleteEvent, ResponseFailedEvent)):
                 saw_terminal = True
                 usage = getattr(raw_event.response, "usage", None)
@@ -245,7 +247,7 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
             elif isinstance(message, ResponseReasoningItem):
                 yield message
             elif isinstance(message, ResponseOutputMessage):
-                yield AssistantMessage(content=self._assistant_content(message.content))
+                yield AssistantMessage(content=self._assistant_content(message.content), response_item=message)
                 # Text-only keeps every character; the base applies remove_unspeechable
                 # for audio. Only output_text parts are spoken (refusals are stored).
                 raw = "".join(c.text for c in message.content if c.type == "output_text")

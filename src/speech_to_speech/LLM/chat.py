@@ -21,7 +21,13 @@ from openai.types.realtime.realtime_conversation_item_assistant_message import (
 from openai.types.realtime.realtime_conversation_item_system_message import Content as SystemContent
 from openai.types.realtime.realtime_conversation_item_user_message import Content as UserContent
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
-from openai.types.responses import ResponseFunctionToolCall, ResponseReasoningItem
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputMessage,
+    ResponseOutputRefusal,
+    ResponseOutputText,
+    ResponseReasoningItem,
+)
 from openai.types.responses.response_input_image_param import ResponseInputImageParam
 from openai.types.responses.response_input_message_content_list_param import (
     ResponseInputMessageContentListParam,
@@ -77,6 +83,19 @@ class ResponsesFunctionCall(RealtimeConversationItemFunctionCall):
     response_item: ResponseFunctionToolCall
 
 
+# SDK parsing defers these serializers. Build them during module initialization,
+# before concurrent sessions replay messages with omitted optional content fields.
+ResponseOutputText.model_rebuild()
+ResponseOutputRefusal.model_rebuild()
+ResponseOutputMessage.model_rebuild()
+
+
+class ResponsesAssistantMessage(RealtimeConversationItemAssistantMessage):
+    """Local assistant text with its untouched Responses message for replay."""
+
+    response_item: ResponseOutputMessage
+
+
 SupportedItem = Union[
     RealtimeConversationItemSystemMessage,
     RealtimeConversationItemUserMessage,
@@ -84,6 +103,7 @@ SupportedItem = Union[
     RealtimeConversationItemFunctionCall,
     RealtimeConversationItemFunctionCallOutput,
     ResponsesFunctionCall,
+    ResponsesAssistantMessage,
     ResponseReasoningItem,
 ]
 
@@ -352,7 +372,7 @@ class Chat:
         elif isinstance(item, RealtimeConversationItemAssistantMessage):
             item.id = _ensure_id(item.id, "msg")
             item.content = [part for part in item.content if part.type == "output_text" and part.text]
-            if not item.content:
+            if not item.content and not isinstance(item, ResponsesAssistantMessage):
                 return item
             self._place_locked(item, insert_at)
             logger.debug("Added assistant message to chat (%d parts)", len(item.content))
@@ -560,7 +580,11 @@ class Chat:
                     # by this write cannot leave a stale index behind.
                     if len(self.buffer) > buffered_before and recorded.id is not None:
                         anchor_id = recorded.id
-                    if isinstance(recorded, RealtimeConversationItemAssistantMessage) and not recorded.content:
+                    if (
+                        isinstance(recorded, RealtimeConversationItemAssistantMessage)
+                        and not recorded.content
+                        and not isinstance(recorded, ResponsesAssistantMessage)
+                    ):
                         continue
                     recorded_items.append(recorded)
                     if recorded.id is not None:
@@ -772,6 +796,8 @@ class Chat:
                         audio_placeholder_added = True
                 if content:
                     result.append(ResponseMessage(content=content, role="user", type="message"))
+            elif isinstance(item, ResponsesAssistantMessage):
+                result.append(cast(ResponseInputItemParam, item.response_item.model_dump(exclude_unset=True)))
             elif isinstance(item, RealtimeConversationItemAssistantMessage):
                 assistant_content: list[ResponseOutputTextParam] = []
                 for assistant_part in item.content:

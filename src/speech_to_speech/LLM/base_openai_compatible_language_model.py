@@ -26,13 +26,14 @@ from openai.types.realtime.conversation_item import (
 from openai.types.realtime.realtime_conversation_item_assistant_message import (
     Content as AssistantContent,
 )
-from openai.types.responses import ResponseFunctionToolCall, ResponseReasoningItem
+from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage, ResponseReasoningItem
 from pydantic import BaseModel, ConfigDict, Field
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.chat import (
     Chat,
     ChatItemError,
+    ResponsesAssistantMessage,
     ResponsesFunctionCall,
     SupportedItem,
     build_active_chat,
@@ -90,6 +91,17 @@ class AssistantMessage(BaseModel):
 
     content: list[AssistantContent]
     id: str | None = None
+    response_item: ResponseOutputMessage | None = None
+
+    def to_chat_item(self) -> RealtimeConversationItemAssistantMessage:
+        item = RealtimeConversationItemAssistantMessage(
+            type="message", role="assistant", content=self.content, id=self.id
+        )
+        if self.response_item is not None:
+            return ResponsesAssistantMessage(
+                **item.model_dump(exclude_unset=True), response_item=self.response_item.model_copy(deep=True)
+            )
+        return item
 
 
 class ToolCall(BaseModel):
@@ -645,11 +657,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 if event.status == "failed":
                     raise RuntimeError(event.error or "The language model provider reported a failed response.")
             elif isinstance(event, AssistantMessage):
-                state.pending.append(
-                    RealtimeConversationItemAssistantMessage(
-                        type="message", role="assistant", content=event.content, id=event.id
-                    )
-                )
+                state.pending.append(event.to_chat_item())
             elif isinstance(event, ResponseReasoningItem):
                 state.pending.append(event.model_copy(deep=True))
             elif isinstance(event, ToolCall):
@@ -738,11 +746,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 if event.status == "failed":
                     raise RuntimeError(event.error or "The language model provider reported a failed response.")
             elif isinstance(event, AssistantMessage):
-                state.pending.append(
-                    RealtimeConversationItemAssistantMessage(
-                        type="message", role="assistant", content=event.content, id=event.id
-                    )
-                )
+                state.pending.append(event.to_chat_item())
             elif isinstance(event, ResponseReasoningItem):
                 state.pending.append(event.model_copy(deep=True))
             elif isinstance(event, ToolCall):
