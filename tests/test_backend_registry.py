@@ -4,7 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass, fields, replace
 from queue import Queue
 from threading import Event
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from openai.types.realtime import RealtimeErrorEvent, SessionUpdateEvent
@@ -104,6 +104,87 @@ def test_parakeet_session_language_selection_remains_unsupported():
     assert s2s_pipeline._stt_session_languages(selection, handler) == set(SUPPORTED_LANGUAGES)
     assert "es" in s2s_pipeline._stt_session_languages(selection, handler)
     assert not s2s_pipeline._stt_language_hint_supported(selection, handler)
+
+
+@pytest.mark.parametrize(
+    "model_name", [None, "nvidia/parakeet-tdt-0.6b-v2", "nvidia/parakeet-tdt-0.6b-v3", "custom-checkpoint"]
+)
+def test_parakeet_checkpoint_controls_declared_session_coverage(monkeypatch, model_name):
+    from speech_to_speech.STT import parakeet_tdt_handler
+
+    loaded = []
+    package = ModuleType("nano_parakeet")
+
+    def load(model_name, device):
+        loaded.append(model_name)
+        return SimpleNamespace()
+
+    package.from_pretrained = load
+    monkeypatch.setitem(sys.modules, "nano_parakeet", package)
+    monkeypatch.setattr(parakeet_tdt_handler, "warm_language_detector", lambda candidates: None)
+    monkeypatch.setattr(parakeet_tdt_handler.ParakeetTDTSTTHandler, "warmup", lambda self: None)
+    monkeypatch.setattr(s2s_pipeline, "VADHandler", lambda *args, **kwargs: SimpleNamespace())
+    real_factory = s2s_pipeline.create_backend_handler
+
+    def factory(selection, context):
+        if selection.spec.kind == "stt":
+            return real_factory(selection, context)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(s2s_pipeline, "create_backend_handler", factory)
+    cli = ["--stt", "parakeet-tdt", "--parakeet_tdt_device", "cpu", "--tts", "openai"]
+    if model_name:
+        cli.extend(["--parakeet_tdt_model_name", model_name])
+    args = parse_arguments(cli)
+    unit = s2s_pipeline._build_pipeline_unit(
+        index=0,
+        stop_event=Event(),
+        module_kwargs=args.module_kwargs,
+        vad_handler_kwargs=args.vad_handler_kwargs,
+        stt_backend=args.stt_backend,
+        llm_backend=args.llm_backend,
+        tts_backend=args.tts_backend,
+    )
+    assert loaded == [model_name or "nvidia/parakeet-tdt-0.6b-v3"]
+    conn_id = unit.service.register()
+    try:
+        update = SessionUpdateEvent.model_validate(
+            {
+                "type": "session.update",
+                "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": "es"}}}},
+            }
+        )
+        error = unit.service.handle_session_update(conn_id, update)
+
+        assert isinstance(error, RealtimeErrorEvent)
+        if model_name == "nvidia/parakeet-tdt-0.6b-v2":
+            assert unit.service.stt_supported_languages == {"en"}
+            assert "not supported" in error.error.message
+        else:
+            assert "language hint" in error.error.message
+        if model_name == "custom-checkpoint":
+            assert unit.service.stt_supported_languages is None
+        assert unit.service._state(conn_id).runtime_config.selected_language is None
+    finally:
+        unit.service.unregister(conn_id)
+
+
+@pytest.mark.parametrize(
+    ("model_name", "expected"),
+    [("mlx-community/parakeet-tdt-0.6b-v2", {"en"}), ("mlx-community/parakeet-tdt-0.6b-v3", {"en", "es"})],
+)
+def test_mlx_parakeet_session_coverage_matches_the_loaded_checkpoint(model_name, expected):
+    from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
+
+    handler = object.__new__(ParakeetTDTSTTHandler)
+    handler.model_name = model_name
+    selection = BackendSelection(STT_BACKENDS["parakeet-tdt"], {})
+
+    supported = s2s_pipeline._stt_session_languages(selection, handler)
+
+    assert expected <= supported
+    if model_name.endswith("-v2"):
+        assert "es" not in supported
 
 
 @pytest.mark.parametrize(

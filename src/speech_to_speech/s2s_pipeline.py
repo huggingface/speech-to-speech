@@ -517,8 +517,18 @@ def _stt_session_languages(selection: BackendSelection, handler: Any) -> set[str
     if selection.name == "whisper":
         generation_config = getattr(getattr(handler, "model", None), "generation_config", None)
         return {"en"} if getattr(generation_config, "is_multilingual", None) is False else None
-    if selection.name in {"qwen3-asr", "parakeet-tdt"}:
+    if selection.name == "qwen3-asr":
         return set(modules[type(handler).__module__].SUPPORTED_LANGUAGES)
+    if selection.name == "parakeet-tdt":
+        model_name = getattr(handler, "model_name", selection.config.get("model_name"))
+        if model_name in {"nvidia/parakeet-tdt-0.6b-v2", "mlx-community/parakeet-tdt-0.6b-v2"}:
+            return {"en"}
+        if model_name is None or model_name in {
+            "nvidia/parakeet-tdt-0.6b-v3",
+            "mlx-community/parakeet-tdt-0.6b-v3",
+        }:
+            return set(modules[type(handler).__module__].SUPPORTED_LANGUAGES)
+        return None
     if selection.name == "parakeet-unified" and selection.config.get("model_name") == "nvidia/parakeet-unified-en-0.6b":
         return {"en"}
     if selection.name == "paraformer":
