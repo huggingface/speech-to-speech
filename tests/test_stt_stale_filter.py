@@ -29,7 +29,13 @@ class RecordingSTTHandler(BaseSTTHandler):
         self.processed.append((vad_audio.turn_id, vad_audio.turn_revision))
         if self.mark_stale_during_process and vad_audio.turn_id is not None and vad_audio.turn_revision is not None:
             assert self.speculative_turns is not None
-            self.speculative_turns.observe(vad_audio.turn_id, vad_audio.turn_revision + 1)
+            assert (
+                self.speculative_turns.begin_reopen_candidate(vad_audio.turn_id, vad_audio.turn_revision)
+                == vad_audio.turn_revision + 1
+            )
+            assert self.speculative_turns.confirm_reopen_candidate(
+                vad_audio.turn_id, vad_audio.turn_revision, vad_audio.turn_revision + 1
+            )
         yield Transcription(
             text="hello",
             turn_id=vad_audio.turn_id,
@@ -74,7 +80,9 @@ def _handler(
 
 def test_stt_handler_drops_stale_queued_audio_without_processing():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 1)
+    tracker.start_turn()
+    assert tracker.begin_reopen_candidate("turn_1", 0) == 1
+    assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out)
@@ -90,7 +98,9 @@ def test_stt_handler_drops_stale_queued_audio_without_processing():
 
 def test_stt_handler_bulk_drops_stale_queued_audio():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 1)
+    tracker.start_turn()
+    assert tracker.begin_reopen_candidate("turn_1", 0) == 1
+    assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out)
@@ -111,7 +121,7 @@ def test_stt_handler_bulk_drops_stale_queued_audio():
 
 def test_stt_handler_waits_for_pending_reopen_before_processing():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
     queue_in = Queue()
     queue_out = Queue()
@@ -136,7 +146,7 @@ def test_stt_handler_waits_for_pending_reopen_before_processing():
 
 def test_stt_handler_waits_for_final_revision_stability_window():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out, final_revision_settle_s=0.2)
@@ -158,7 +168,7 @@ def test_stt_handler_waits_for_final_revision_stability_window():
 
 def test_stt_handler_uses_per_endpoint_processing_delay():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out)
@@ -180,7 +190,9 @@ def test_stt_handler_uses_per_endpoint_processing_delay():
 
 def test_stale_final_input_discards_pending_vad_measurement():
     revisions = SpeculativeTurnTracker()
-    revisions.observe("turn_1", 1)
+    revisions.start_turn()
+    assert revisions.begin_reopen_candidate("turn_1", 0) == 1
+    assert revisions.confirm_reopen_candidate("turn_1", 0, 1)
     handler = _handler(revisions, Queue(), Queue())
     store = TurnLatencyStore()
     handler.turn_latency_store = store
@@ -192,7 +204,7 @@ def test_stale_final_input_discards_pending_vad_measurement():
 
 def test_stt_handler_drops_output_that_became_stale_during_processing():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out, mark_stale_during_process=True)
@@ -214,7 +226,7 @@ def test_stt_handler_drops_output_that_became_stale_during_processing():
 
 def test_stt_handler_drops_progressive_input_after_final_emit():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out)
@@ -226,7 +238,7 @@ def test_stt_handler_drops_progressive_input_after_final_emit():
 
 def test_stt_handler_drops_partial_output_after_final_emit():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out)
@@ -238,7 +250,7 @@ def test_stt_handler_drops_partial_output_after_final_emit():
 
 def test_stt_handler_bulk_drops_queued_progressives_after_final_emit():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out)
@@ -259,7 +271,7 @@ def test_stt_handler_bulk_drops_queued_progressives_after_final_emit():
 
 def test_stt_handler_drops_progressive_when_final_for_same_revision_is_queued():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out)
@@ -271,7 +283,7 @@ def test_stt_handler_drops_progressive_when_final_for_same_revision_is_queued():
 
 def test_stt_handler_keeps_progressive_when_final_for_different_turn_is_queued():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out)
@@ -283,7 +295,7 @@ def test_stt_handler_keeps_progressive_when_final_for_different_turn_is_queued()
 
 def test_stt_handler_bulk_drops_progressives_queued_before_matching_final():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out)

@@ -346,7 +346,7 @@ def handler_factory(monkeypatch):
         handler.cleanup()
 
 
-def audio(mode="final", *, turn="turn-1", revision=0, samples=160):
+def audio(mode="final", *, turn="turn_1", revision=0, samples=160):
     return VADAudio(audio=np.zeros(samples, dtype=np.float32), mode=mode, turn_id=turn, turn_revision=revision)
 
 
@@ -538,12 +538,13 @@ def test_teardown_during_audio_encoding_prevents_http_dispatch(handler_factory, 
 
 def test_new_revision_cancels_active_final_before_another_request_arrives(handler_factory):
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn-1", 0)
+    tracker.start_turn()
     operation = ControlledOperation()
     handler = handler_factory(operation, tracker=tracker)
     assert list(handler.process(audio())) == []
     assert operation.started.wait(1)
-    tracker.observe("turn-1", 1)
+    assert tracker.begin_reopen_candidate("turn_1", 0) == 1
+    assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
     assert operation.cancelled.wait(1)
     handler._final_thread.join(timeout=1)
     assert not handler._final_thread.is_alive()
@@ -732,7 +733,7 @@ def test_final_discards_pending_progressive_and_rejects_later_windows(handler_fa
 
 def test_new_revision_replaces_old_active_and_pending_progressive_work(handler_factory):
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn-1", 0)
+    tracker.start_turn()
     old = ControlledOperation("old", ignore_cancel=True)
     latest = ControlledOperation("latest")
     latest.release.set()
@@ -740,7 +741,8 @@ def test_new_revision_replaces_old_active_and_pending_progressive_work(handler_f
     assert list(handler.process(audio("progressive"))) == []
     assert old.started.wait(1)
     assert list(handler.process(audio("progressive", samples=320))) == []
-    tracker.observe("turn-1", 1)
+    assert tracker.begin_reopen_candidate("turn_1", 0) == 1
+    assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
     assert list(handler.process(audio("progressive", revision=1, samples=480))) == []
     assert old.cancelled.wait(1)
     old.release.set()
