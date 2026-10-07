@@ -1,0 +1,90 @@
+name: OmniVoice compatibility
+
+# Check the optional extra when its installation or smoke coverage changes.
+# The weekly run also catches upstream dependency releases without a repo change.
+on:
+  push:
+    branches: [main]
+    paths: &omnivoice-paths
+      - pyproject.toml
+      - uv.lock
+      - .github/workflows/ci.yml
+      - .github/workflows/omnivoice.yml
+      - src/speech_to_speech/TTS/omnivoice_handler.py
+      - src/speech_to_speech/arguments_classes/omnivoice_tts_arguments.py
+      - tests/test_omnivoice_tts_handler.py
+      - tests/install_smoke.py
+  pull_request:
+    paths: *omnivoice-paths
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  omnivoice-resolver:
+    permissions:
+      contents: read
+    name: OmniVoice resolver (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux
+            platform: x86_64-manylinux_2_39
+          - label: windows
+            platform: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "latest"
+      - name: Resolve speech-to-speech[omnivoice]
+        run: >-
+          uv pip compile pyproject.toml
+          --extra omnivoice
+          --python-version 3.11
+          --python-platform ${{ matrix.platform }}
+          --output-file ${{ runner.temp }}/omnivoice-${{ matrix.label }}.txt
+
+  install-smoke:
+    permissions:
+      contents: read
+    name: OmniVoice install smoke (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "latest"
+      - name: Build wheel
+        run: uv build --wheel
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install wheel with OmniVoice
+        shell: bash
+        run: |
+          python -m venv .venv-smoke
+          source .venv-smoke/bin/activate
+          python -m pip install --upgrade pip
+          wheel=$(find dist -name 'speech_to_speech-*.whl' -print -quit)
+          python -m pip install "${wheel}[omnivoice]"
+          python -m pip check
+      - name: Run installed CLI smoke test
+        shell: bash
+        env:
+          SPEECH_TO_SPEECH_SMOKE_EXTRA: omnivoice
+        run: |
+          source .venv-smoke/bin/activate
+          unset OPENAI_API_KEY
+          # Validate the installed entry point without loading models or calling OpenAI.
+          python tests/install_smoke.py

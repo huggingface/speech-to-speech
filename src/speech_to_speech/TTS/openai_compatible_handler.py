@@ -17,6 +17,7 @@ from scipy.signal import firwin, lfilter
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.LLM.utils import WHISPER_LANGUAGE_TO_LLM_LANGUAGE
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
@@ -26,6 +27,7 @@ from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 logger = logging.getLogger(__name__)
 
 PIPELINE_SAMPLE_RATE = 16000
+QWEN3_TTS_LANGUAGE_CODES = frozenset({"zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"})
 
 
 class SpeechRequestCancelled(RuntimeError):
@@ -381,6 +383,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         blocksize: int = 512,
         cancel_scope: CancelScope | None = None,
         speculative_turns: SpeculativeTurnTracker | None = None,
+        detect_llm_output_language: bool = False,
         gen_kwargs: dict[str, Any] | None = None,
         warmup_enabled: bool = True,
     ) -> None:
@@ -412,6 +415,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.blocksize = blocksize
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
+        self.detect_llm_output_language = detect_llm_output_language
         self.gen_kwargs = gen_kwargs or {}
         self._operation_lock = Lock()
         self._active_operation: HttpSpeechOperation | None = None
@@ -449,7 +453,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         if isinstance(tts_input, EndOfResponse):
-            if self.speculative_turns and not self.speculative_turns.is_latest_after_reopen_grace(
+            if self.speculative_turns and not self.speculative_turns.wait_for_gate(
                 tts_input.turn_id,
                 tts_input.turn_revision,
             ):
@@ -461,7 +465,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
             yield AUDIO_RESPONSE_DONE
             return
 
-        if self.speculative_turns and not self.speculative_turns.is_latest_after_reopen_grace(
+        if self.speculative_turns and not self.speculative_turns.wait_for_gate(
             tts_input.turn_id,
             tts_input.turn_revision,
         ):
@@ -503,16 +507,65 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         first_audio = True
         started_at_s = perf_counter()
         operation: HttpSpeechOperation | None = None
+
+        def record_first_provider_audio() -> None:
+            if cancel_check():
+                return
+            store = getattr(self, "turn_latency_store", None)
+            tracker = store.get_response(tts_input.response_key) if store else None
+            if tracker is not None:
+                tracker.record_tts_ttfa(perf_counter() - started_at_s)
+
         try:
             voice = self._resolve_voice(tts_input.runtime_config, tts_input.response)
-            operation = self._make_operation(text=text, voice=voice, runtime_config=tts_input.runtime_config)
+            routing = tts_input.runtime_config.routing if tts_input.runtime_config is not None else None
+            model = routing.routes.tts.model if routing is not None else self.model
+            selected = tts_input.selected_language
+            use_detected_language = (
+                selected is None
+                and self.detect_llm_output_language
+                and isinstance(self.language, str)
+                and self.language.strip().lower() == "auto"
+            )
+            if selected is None and not use_detected_language:
+                operation = self._make_operation(text=text, voice=voice, runtime_config=tts_input.runtime_config)
+            else:
+                language = (
+                    tts_input.response_assistant_language_code if use_detected_language else tts_input.tts_language_code
+                )
+                if (
+                    (use_detected_language or selected == "auto")
+                    and "qwen3-tts" in model.lower()
+                    and language not in QWEN3_TTS_LANGUAGE_CODES
+                ):
+                    language = None
+                elif (
+                    selected not in (None, "auto")
+                    and "qwen3-tts" in model.lower()
+                    and language not in QWEN3_TTS_LANGUAGE_CODES
+                ):
+                    # A detected language Qwen3 cannot speak keeps the session language.
+                    language = selected
+                if language is None and use_detected_language:
+                    language = self.language
+                elif language is None and selected == "auto" and "qwen3-tts" in model.lower():
+                    language = "auto"
+                if language is not None and "qwen3-tts" in model.lower():
+                    language = WHISPER_LANGUAGE_TO_LLM_LANGUAGE.get(language, language).title()
+                operation = self._make_operation(
+                    text=text,
+                    voice=voice,
+                    language=language,
+                    use_setup_language=False,
+                    runtime_config=tts_input.runtime_config,
+                )
             with self._operation_lock:
                 self._active_operation = operation
             source_chunks = operation.iter_bytes(cancel_check)
             decoded_chunks = (
-                self._decode_pcm_stream(source_chunks)
+                self._decode_pcm_stream(source_chunks, on_first_source_audio=record_first_provider_audio)
                 if self.response_format == "pcm"
-                else self._decode_wav_stream(source_chunks)
+                else self._decode_wav_stream(source_chunks, on_first_source_audio=record_first_provider_audio)
             )
             for chunk in decoded_chunks:
                 if cancel_check():
@@ -557,10 +610,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         tracker = self.speculative_turns
         if tracker is None or tts_input.turn_id is None or tts_input.turn_revision is None:
             return True
-        return tracker.commit_if_latest_after_reopen_grace(
-            tts_input.turn_id,
-            tts_input.turn_revision,
-        )
+        return tracker.wait_for_gate(tts_input.turn_id, tts_input.turn_revision, commit=True)
 
     @staticmethod
     def _response_identity(
@@ -577,9 +627,13 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         text: str,
         voice: str | dict[str, str],
         runtime_config: RuntimeConfig | None = None,
+        language: str | None = None,
+        use_setup_language: bool = True,
     ) -> HttpSpeechOperation:
         routing = runtime_config.routing if runtime_config is not None else None
-        payload = self._request_payload(text=text, voice=voice)
+        payload = self._request_payload(
+            text=text, voice=voice, language=language, use_setup_language=use_setup_language
+        )
         if routing is not None:
             payload["model"] = routing.routes.tts.model
         return HttpSpeechOperation(
@@ -596,6 +650,8 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         *,
         text: str,
         voice: str | dict[str, str],
+        language: str | None = None,
+        use_setup_language: bool = True,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model,
@@ -610,8 +666,12 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
             payload["stream"] = True
         elif self.speed != 1.0:
             payload["speed"] = self.speed
-        if self.language:
-            payload["language"] = self.language
+        if use_setup_language:
+            language = self.language
+        if language:
+            payload["language"] = language
+        elif not use_setup_language:
+            payload.pop("language", None)
         if self.task_type:
             payload["task_type"] = self.task_type
         if self.instructions:
@@ -641,7 +701,9 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
             return {"id": voice_id}
         raise ValueError("Realtime voice overrides must be a voice name or custom voice ID")
 
-    def _decode_pcm_stream(self, encoded_chunks: Iterator[bytes]) -> Iterator[np.ndarray]:
+    def _decode_pcm_stream(
+        self, encoded_chunks: Iterator[bytes], *, on_first_source_audio: Callable[[], None] | None = None
+    ) -> Iterator[np.ndarray]:
         byte_remainder = b""
 
         def sample_chunks() -> Iterator[np.ndarray]:
@@ -657,9 +719,11 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 # discard it with a warning instead of failing the whole response.
                 logger.warning("Speech endpoint returned an incomplete PCM16 sample")
 
-        yield from self._resample_to_blocks(sample_chunks(), self.sample_rate)
+        yield from self._resample_to_blocks(sample_chunks(), self.sample_rate, on_first_source_audio)
 
-    def _decode_wav_stream(self, encoded_chunks: Iterator[bytes]) -> Iterator[np.ndarray]:
+    def _decode_wav_stream(
+        self, encoded_chunks: Iterator[bytes], *, on_first_source_audio: Callable[[], None] | None = None
+    ) -> Iterator[np.ndarray]:
         stream = _StreamingByteReader(encoded_chunks)
         try:
             wav_reader = wave.open(cast(Any, stream), "rb")
@@ -680,6 +744,14 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
             def sample_chunks() -> Iterator[np.ndarray]:
                 byte_remainder = b""
                 frame_size = channels * sample_width
+                # Read one frame first so TTFA does not wait for the larger
+                # block-oriented reads below after provider audio has arrived.
+                first_frame = wav_reader.readframes(1)
+                if first_frame:
+                    usable = len(first_frame) - (len(first_frame) % frame_size)
+                    byte_remainder = first_frame[usable:]
+                    if usable:
+                        yield self._decode_wav_frames(first_frame[:usable], channels, sample_width)
                 while encoded := wav_reader.readframes(source_frames_per_read):
                     encoded = byte_remainder + encoded
                     usable = len(encoded) - (len(encoded) % frame_size)
@@ -689,7 +761,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 if byte_remainder:
                     logger.warning("Speech endpoint returned an incomplete WAV audio frame")
 
-            yield from self._resample_to_blocks(sample_chunks(), sample_rate)
+            yield from self._resample_to_blocks(sample_chunks(), sample_rate, on_first_source_audio)
         except wave.Error as exc:
             raise SpeechRequestError("speech endpoint returned an invalid WAV stream") from exc
         finally:
@@ -715,10 +787,14 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self,
         sample_chunks: Iterator[np.ndarray],
         source_rate: int,
+        on_first_source_audio: Callable[[], None] | None = None,
     ) -> Iterator[np.ndarray]:
         resampler = _StreamingFIRResampler(source_rate, PIPELINE_SAMPLE_RATE)
-        sample_remainder = np.empty(0, dtype=np.int16)
+        sample_remainder: np.ndarray = np.empty(0, dtype=np.int16)
         for samples in sample_chunks:
+            if on_first_source_audio is not None and samples.size:
+                on_first_source_audio()
+                on_first_source_audio = None
             converted = resampler.push(samples)
             sample_remainder = np.concatenate((sample_remainder, converted))
             while sample_remainder.size >= self.blocksize:
@@ -736,9 +812,14 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
     def _log_first_audio_latency(self, tts_input: TTSInput, request_started_at_s: float) -> None:
         logger.info("OpenAI-compatible TTS time to first audio: %.3fs", perf_counter() - request_started_at_s)
         if tts_input.speech_stopped_at_s is not None:
+            latency_s = max(0.0, perf_counter() - tts_input.speech_stopped_at_s)
+            store = getattr(self, "turn_latency_store", None)
+            tracker = store.get_response(tts_input.response_key) if store else None
+            if tracker is not None:
+                tracker.record_e2e(latency_s)
             logger.info(
                 "Last speech detected to first speech out: %.3fs (turn=%s rev=%s)",
-                max(0.0, perf_counter() - tts_input.speech_stopped_at_s),
+                latency_s,
                 tts_input.turn_id,
                 tts_input.turn_revision,
             )

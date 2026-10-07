@@ -139,17 +139,17 @@ class SupertonicTTSHandler(BaseHandler[TTSIn, TTSOut]):
         speculative_turns = getattr(self, "speculative_turns", None)
 
         if isinstance(tts_input, EndOfResponse):
-            if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
-                tts_input.turn_id, tts_input.turn_revision
-            ):
+            if speculative_turns and not speculative_turns.wait_for_gate(tts_input.turn_id, tts_input.turn_revision):
                 if tts_input.response_key is None:
                     return
                 tts_input.cleanup_only = True
             yield AUDIO_RESPONSE_DONE
             return
 
-        if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
-            tts_input.turn_id, tts_input.turn_revision
+        if speculative_turns and not speculative_turns.wait_for_gate(
+            tts_input.turn_id,
+            tts_input.turn_revision,
+            commit=True,
         ):
             logger.debug(
                 "Dropping stale TTS input for turn=%s rev=%s",
@@ -157,8 +157,6 @@ class SupertonicTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 tts_input.turn_revision,
             )
             return
-        if speculative_turns:
-            speculative_turns.commit(tts_input.turn_id, tts_input.turn_revision)
 
         cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
 
@@ -166,7 +164,15 @@ class SupertonicTTSHandler(BaseHandler[TTSIn, TTSOut]):
         if not text.strip():
             return
 
-        lang = self._resolve_language(tts_input.language_code)
+        language_code = tts_input.tts_language_code
+        selected = tts_input.selected_language
+        if (
+            selected not in (None, "auto")
+            and self._normalize_language_code(language_code or "") not in SUPERTONIC_LANGUAGE_CODES
+        ):
+            # A detected language Supertonic cannot speak keeps the session language.
+            language_code = selected
+        lang = self._resolve_language(language_code)
 
         console.print(f"[green]ASSISTANT: {text}")
 

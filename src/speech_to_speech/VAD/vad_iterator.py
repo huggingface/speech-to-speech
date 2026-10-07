@@ -38,7 +38,6 @@ class VADIterator:
         self.model = model
         self.threshold = threshold
         self.sampling_rate = sampling_rate
-        self.is_speaking = False
         self.buffer: list[torch.Tensor] = []
         self.prefix_buffer: list[torch.Tensor] = []
         self.active_speech_samples = 0
@@ -57,6 +56,7 @@ class VADIterator:
         self.model.reset_states()
         self.triggered = False
         self.temp_end = 0
+        self.last_speech_end_sample: int | None = None
         self.current_sample = 0
         self.buffer = []
         self.prefix_buffer = []
@@ -158,6 +158,7 @@ class VADIterator:
 
                 # End of speech: keep the final low-confidence chunks that were
                 # observed before VAD decided the utterance was done.
+                self.last_speech_end_sample = self.temp_end - window_size_samples
                 self.temp_end = 0
                 self.triggered = False
                 spoken_utterance = self.speech_buffer()

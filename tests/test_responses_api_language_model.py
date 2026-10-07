@@ -20,6 +20,7 @@ from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
+    ResponseReasoningItem,
     ResponseTextDeltaEvent,
 )
 from openai.types.responses.response_output_text import ResponseOutputText
@@ -92,6 +93,63 @@ def _make_response(output, usage=None):
     resp.usage = usage
     resp.output = output
     return resp
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_reasoning_tool_continuation_replays_original_provider_items(stream):
+    reasoning = ResponseReasoningItem(
+        id="rs_original",
+        type="reasoning",
+        summary=[{"type": "summary_text", "text": "Check the weather."}],
+        encrypted_content="opaque-provider-content",
+        status="completed",
+    )
+    call = ResponseFunctionToolCall(
+        id="fc_original",
+        call_id="call_original",
+        type="function_call",
+        name="weather",
+        arguments='{"city":"Paris"}',
+        status="completed",
+    )
+    originals = [item.model_dump(exclude_unset=True) for item in [reasoning, call]]
+    handler = _make_handler(stream=stream)
+    request = _make_request("Weather?", chat_size=5)
+    requests = []
+
+    def create(**kwargs):
+        requests.append(kwargs)
+        if len(requests) == 1:
+            if stream:
+                return _make_stream(
+                    [
+                        ResponseOutputItemDoneEvent(
+                            type="response.output_item.done", output_index=i, sequence_number=i, item=item
+                        )
+                        for i, item in enumerate([reasoning, call])
+                    ]
+                )
+            return _make_response([reasoning, call])
+        assert kwargs["input"][2:4] == originals
+        assert kwargs["input"][4]["type"] == "function_call_output"
+        assert kwargs["input"][4]["call_id"] == "call_original"
+        return _make_stream([]) if stream else _make_response([])
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    outputs = list(handler.process(request))
+    tool = next(output.tools[0] for output in outputs if isinstance(output, LLMResponseChunk) and output.tools)
+    assert tool.id.startswith("fc_") and tool.id != "fc_original"
+    assert tool.call_id.startswith("call_") and tool.call_id != "call_original"
+    request.runtime_config.chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id=tool.call_id,
+            output="Sunny.",
+        )
+    )
+    continuation = list(handler.process(request))
+    assert next(output for output in continuation if isinstance(output, EndOfResponse)).error is None
+    assert [item.model_dump(exclude_unset=True) for item in [reasoning, call]] == originals
 
 
 def _make_runtime_config(chat_size=2, instructions="You are a helpful AI assistant."):
@@ -519,11 +577,20 @@ def test_process_streams_text_from_response_events():
         )
     )
 
-    outputs = list(handler.process(_make_request("Hi")))
+    config = _make_request("Hi").runtime_config
+    from openai.types.realtime import RealtimeSessionCreateRequest
+
+    config.session = RealtimeSessionCreateRequest(
+        type="realtime", audio={"input": {"transcription": {"language": "es"}}}
+    )
+    request = GenerateResponseRequest(runtime_config=config)
+    config.session.audio.input.transcription.language = "de"
+    outputs = list(handler.process(request))
 
     assert len(outputs) == 3
     assert isinstance(outputs[0], LLMResponseChunk) and outputs[0].text == "Hello."
     assert isinstance(outputs[1], LLMResponseChunk) and outputs[1].text == "How are you?"
+    assert all(output.selected_language == "es" for output in outputs[:2])
     assert isinstance(outputs[2], EndOfResponse)
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from time import perf_counter
 from typing import Any, Iterator, Optional
 
 import numpy as np
@@ -51,6 +52,7 @@ class LightningWhisperSTTHandler(BaseSTTHandler):
             model_name = model_name.split("/")[-1]
         self.device = device
         self.model = LightningWhisperMLX(model=model_name, batch_size=6, quant=None)
+        language = self.canonical_language(language)
         self.start_language = language
         self.last_language = language
 
@@ -69,11 +71,14 @@ class LightningWhisperSTTHandler(BaseSTTHandler):
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         logger.debug("infering whisper...")
+        started_at_s = perf_counter()
 
         audio = vad_audio.audio
-        if self.start_language != "auto":
+        selected = vad_audio.runtime_config.selected_language if vad_audio.runtime_config else None
+        request_language = self.start_language if selected is None else selected
+        if request_language != "auto":
             with MLXLockContext(handler_name=self.__class__.__name__):
-                transcription_dict = self.model.transcribe(audio, language=self.start_language)
+                transcription_dict = self.model.transcribe(audio, language=request_language)
         else:
             with MLXLockContext(handler_name=self.__class__.__name__):
                 transcription_dict = self.model.transcribe(audio)
@@ -93,7 +98,7 @@ class LightningWhisperSTTHandler(BaseSTTHandler):
         console.print(f"[yellow]USER: {pred_text}")
         logger.debug(f"Language Code Whisper: {language_code}")
 
-        if self.start_language == "auto":
+        if request_language == "auto":
             language_code += "-auto"
 
         if vad_audio.mode == "progressive":
@@ -104,10 +109,11 @@ class LightningWhisperSTTHandler(BaseSTTHandler):
             )
             return
 
+        self._record_final_stt(vad_audio, perf_counter() - started_at_s)
         yield Transcription(
             text=pred_text,
             language_code=language_code,
             turn_id=vad_audio.turn_id,
             turn_revision=vad_audio.turn_revision,
-            speech_stopped_at_s=vad_audio.created_at_s,
+            speech_stopped_at_s=vad_audio.speech_end_at_s,
         )

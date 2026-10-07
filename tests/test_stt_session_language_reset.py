@@ -86,10 +86,9 @@ def _handler(cls, extra, *, start_language, last_language):
 
 
 # Expected `last_language` after a session ends, per configured `start_language`.
-# Parakeet's existing "auto" fallback is explicitly outside issue #555's scope.
 _EXPECTED_AFTER_RESET = {
     # handler class: {start_language: expected last_language}
-    "ParakeetTDTSTTHandler": {None: "en", "auto": "auto", "de": "de"},
+    "ParakeetTDTSTTHandler": {None: None, "auto": None, "de": None},
     "_default": {None: None, "auto": None, "de": "de"},
 }
 
@@ -158,12 +157,6 @@ def test_qwen3_auto_does_not_survive_as_a_code():
 
 
 # --- the base-class contract --------------------------------------------------------------
-
-
-def test_base_handler_declares_the_language_attributes():
-    """Declared on the base so the reset works for a backend that never sets them."""
-    assert BaseSTTHandler.start_language is None
-    assert BaseSTTHandler.last_language is None
 
 
 def test_reset_is_safe_for_a_handler_that_never_set_a_language():

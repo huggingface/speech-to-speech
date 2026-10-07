@@ -14,6 +14,7 @@ from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import transcript_for_log
+from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -43,7 +44,7 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         Args:
             should_listen: Event to control when to start listening again
-            device: Device to run model on ('cpu', 'cuda', 'mps')
+            device: Device to run model on ('auto', 'cuda', 'npu', 'xpu', 'mps', 'cpu')
             voice: Voice to use. Can be:
                 - A preset name: 'alba', 'marius', 'javert', 'jean', 'fantine', 'cosette', 'eponine', 'azelma'
                 - A local audio file path
@@ -56,7 +57,7 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.should_listen = should_listen
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
-        self.device = device
+        self.device = resolve_device(device, TORCH_DEVICES, "Pocket TTS")
         self.voice = voice
         self.language = language
         self.sample_rate = sample_rate
@@ -75,14 +76,10 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.model = TTSModel.load_model(language=self.language)
 
         # Move model to specified device
-        if device == "cuda":
-            self.model = self.model.cuda()
-        elif device == "mps":
-            self.model = self.model.to("mps")
-        elif device != "cpu":
-            self.model = self.model.to(device)
+        if self.device != "cpu":
+            self.model = self.model.to(self.device)
 
-        logger.info(f"Pocket TTS model moved to {device}")
+        logger.info(f"Pocket TTS model moved to {self.device}")
 
         # Load voice state
         logger.info(f"Loading voice: {voice}")
@@ -102,7 +99,7 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         speculative_turns = getattr(self, "speculative_turns", None)
         if isinstance(tts_input, EndOfResponse):
-            if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
+            if speculative_turns and not speculative_turns.wait_for_gate(
                 tts_input.turn_id,
                 tts_input.turn_revision,
             ):
@@ -112,17 +109,16 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
             yield AUDIO_RESPONSE_DONE
             return
 
-        if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
+        if speculative_turns and not speculative_turns.wait_for_gate(
             tts_input.turn_id,
             tts_input.turn_revision,
+            commit=True,
         ):
             logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
             return
-        if speculative_turns:
-            speculative_turns.commit(tts_input.turn_id, tts_input.turn_revision)
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
-        language_code = tts_input.language_code
+        language_code = tts_input.tts_language_code
         text = tts_input.text
         logger.debug(f"Received language code: {language_code}")
 

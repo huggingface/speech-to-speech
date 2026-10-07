@@ -24,6 +24,25 @@ Both choices run one `RealtimeSession` adapter over the pinned official
 queue, audio, visualization, device, camera, and metering behavior out of the
 protocol implementation.
 
+## Response timings
+
+Open Conversation and expand **Server timings** beneath a response to inspect
+E2E (estimated speech end to first generated audio), VAD end decision, Smart Turn
+decision, transcription, response generation, voice synthesis to first audio,
+and hold time before response. E2E is visible in the collapsed summary.
+MLX lock wait is available only in macOS terminal logs.
+Tool-only responses receive their own timing entry; follow-ups do not repeat STT.
+
+These are server measurements, excluding browser buffering and playback. Stages
+can overlap and must not be summed. Missing stages display **Unavailable**. Older
+servers, absent metadata, and unsupported or malformed records leave the transcript
+unchanged. Server timings become available when the response finishes, including
+interrupted, failed, and incomplete responses.
+
+Validation: `npm run test:agents:adapter` checks parsing and adapter behavior;
+`npm run test:ui` checks the history display at desktop and phone widths (requires
+`npx playwright install chromium`).
+
 ## Quick start (local)
 
 1. **Start the speech-to-speech backend** (from the repo root;
@@ -253,7 +272,7 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
 | `limiter.py` | SQLite per-day talk-time budget (chunked server-clock reservation) |
 | `s2s-realtime-client.js` | Narrow demo adapter around one Agents SDK `RealtimeSession` and SDK transports with browser-owned WebSocket truncation |
 | `package.json` / `package-lock.json` | Exact official Agents SDK and browser-test dependency pins |
-| `ws/codec.js` | base64 <-> PCM helpers + transcript extraction (pure) |
+| `ws/codec.js` | URL normalization + transcript extraction (pure) |
 | `ws/user-audio-recorder.js` | Bounded sent-PCM buffer + VAD slicing + browser-playable WAV wrapping |
 | `ws/orb-visualizer.js` | `OrbVisualiser`: FFT bands -> orb CSS custom properties |
 | `worklets/mic-capture.js` | AudioWorklet: 48 kHz Float32 -> 24 kHz Int16 PCM, posts ~40 ms chunks |

@@ -202,3 +202,21 @@ for (const bufferMs of [0, 100]) {
     });
   }
 }
+
+test("SDK preserves terminal server timings through its WebSocket parser", async (t) => {
+  const f = await fixture();
+  t.after(() => f.client.close());
+  const timing = {
+    version: 1, turn_id: "turn_1", turn_revision: 0, response_key: "key-1", status: "completed",
+    stt_s: 0.181284, llm_s: 1.24, tts_ttfa_s: 0.12, e2e_s: 1.61, mlx_lock_wait_s: 0,
+  };
+  const finished = [];
+  f.client.addEventListener("response-finished", (event) => finished.push(event.detail));
+  f.start();
+  f.receive({ type: "response.done", response: {
+    id: "a", status: "completed", output: [],
+    metadata: { "speech_to_speech.turn_latency": JSON.stringify(timing) },
+  } });
+  assert.equal(finished.length, 1);
+  assert.deepEqual(finished[0].latency, timing);
+});

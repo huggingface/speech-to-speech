@@ -33,6 +33,7 @@ from speech_to_speech.pipeline.events import (
     ResponseFailedEvent,
     ResponseGenerationDoneEvent,
     SpeechStartedEvent,
+    SpeechStoppedEvent,
     TokenUsageEvent,
     TranscriptionCompletedEvent,
     TranscriptionFailedEvent,
@@ -140,6 +141,28 @@ def _simulate_session_end_drain(input_queue: Queue, output_queue: Queue, timeout
     raise AssertionError("SESSION_END did not appear on input_queue within timeout")
 
 
+def _resume_speech(monkeypatch, service, tracker, *, after_hold_check: bool) -> None:
+    """Start a speech candidate now, or once the send loop's next hold check passes.
+
+    VAD runs on its own thread, so resumed speech can start between that check
+    and the output's commit.
+    """
+    if not after_hold_check:
+        assert tracker.speech_candidate_started(1100)
+        return
+    hold_check = service.is_turn_output_held
+    resumed = ThreadingEvent()
+
+    def check_then_resume(event):
+        held = hold_check(event)
+        if not held and not resumed.is_set():
+            resumed.set()
+            assert tracker.speech_candidate_started(1100)
+        return held
+
+    monkeypatch.setattr(service, "is_turn_output_held", check_then_resume)
+
+
 def _pcm_bytes(n_samples: int) -> bytes:
     return b"\x00" * (n_samples * 2)
 
@@ -226,7 +249,7 @@ class TestClientEventDispatch:
                     }
                 )
                 time.sleep(0.1)
-                cid = service.connection_ids[0]
+                cid = list(service._conns)[0]
                 assert service._state(cid).runtime_config.session.audio.output.voice == "coral"
 
     def test_session_update_receives_session_updated_confirmation(self, setup):
@@ -305,7 +328,7 @@ class TestClientEventDispatch:
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
-                conn_id = service.connection_ids[0]
+                conn_id = list(service._conns)[0]
                 st = service._state(conn_id)
                 request = GenerateResponseRequest(runtime_config=st.runtime_config)
                 st.tool_followup_prefetch_request = request
@@ -365,7 +388,7 @@ class TestClientEventDispatch:
                 ws.receive_json()
                 ws.send_json({"type": "response.create"})
                 assert created_send_started.wait(timeout=1.0)
-                conn_id = service.connection_ids[0]
+                conn_id = list(service._conns)[0]
                 response_key = service._state(conn_id).current_response_key
                 text_output_queue.put(
                     AssistantToolCallReadyEvent(
@@ -404,7 +427,7 @@ class TestClientEventDispatch:
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
-                conn_id = service.connection_ids[0]
+                conn_id = list(service._conns)[0]
                 st = service._state(conn_id)
                 origin_key = "response_origin"
                 st.generation_done_tool_calls[origin_key] = {"call_1"}
@@ -530,7 +553,7 @@ class TestClientEventDispatch:
                 assert state.response_pending is False
                 assert state.pending_response_keys == set()
                 assert service.turn_latency_store._trackers == {}
-                assert service.turn_latency_store.active_session_count == 0
+                assert len(service.turn_latency_store._session_keys) == 0
 
                 ws.send_json({"type": "response.create"})
                 assert ws.receive_json()["type"] == "response.created"
@@ -668,6 +691,108 @@ class TestSendLoop:
                 assert msg["type"] == "input_audio_buffer.speech_started"
                 assert msg["audio_start_ms"] == 0
 
+    def test_failed_transcription_reaches_client_after_reopen_grace(self, setup):
+        app, service, _, _, text_output_queue, *_ = setup
+        tracker = SpeculativeTurnTracker()
+        service.speculative_turns = tracker
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                tracker.start_turn()
+                text_output_queue.put(SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
+                started = ws.receive_json()
+                assert started["type"] == "input_audio_buffer.speech_started"
+
+                tracker.start_reopen_grace("turn_1", 0, grace_s=0.05)
+                text_output_queue.put(SpeechStoppedEvent(turn_id="turn_1", turn_revision=0))
+                text_output_queue.put(TranscriptionFailedEvent(message="STT failed", turn_id="turn_1", turn_revision=0))
+
+                stopped = ws.receive_json()
+                committed = ws.receive_json()
+                created = ws.receive_json()
+                failed = ws.receive_json()
+                assert [stopped["type"], committed["type"], created["type"], failed["type"]] == [
+                    "input_audio_buffer.speech_stopped",
+                    "input_audio_buffer.committed",
+                    "conversation.item.created",
+                    "conversation.item.input_audio_transcription.failed",
+                ]
+                assert started["item_id"] == stopped["item_id"] == failed["item_id"]
+                assert tracker.phase.value == "closed"
+                assert tracker._committed == set()
+                assert tracker.begin_reopen_candidate("turn_1", 0) is None
+
+    @pytest.mark.parametrize("resume_after_hold_check", [False, True], ids=["before_queue", "after_hold_check"])
+    def test_held_answer_keeps_receiving_audio_that_reopens_its_turn(self, setup, monkeypatch, resume_after_hold_check):
+        app, service, input_queue, output_queue, text_output_queue, *_ = setup
+        tracker = SpeculativeTurnTracker()
+        service.speculative_turns = tracker
+        audio_b64 = base64.b64encode(_pcm_bytes(512)).decode("ascii")
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                tracker.speech_started(0)
+                tracker.segment_finalized(1000)
+                # Resumed speech arrives after the grace, as the answer is queued.
+                _resume_speech(monkeypatch, service, tracker, after_hold_check=resume_after_hold_check)
+                output_queue.put(AssistantOutputEvent(text="Stale answer.", turn_id="turn_1", turn_revision=0))
+                time.sleep(0.05)
+
+                # VAD needs more audio to confirm the speech; the held answer
+                # must not stop the server from receiving it.
+                ws.send_json({"type": "input_audio_buffer.append", "audio": audio_b64})
+                assert input_queue.get(timeout=1)
+                assert tracker.speech_started(1300) == ("turn_1", 1, True)
+                text_output_queue.put(SpeechStartedEvent(turn_id="turn_1", turn_revision=1))
+                output_queue.put(AssistantOutputEvent(text="Revised answer.", turn_id="turn_1", turn_revision=1))
+
+                messages = [ws.receive_json()]
+                for _ in range(10):
+                    if "Revised answer." in str(messages[-1]):
+                        break
+                    messages.append(ws.receive_json())
+                assert "Revised answer." in str(messages[-1])
+                assert messages[0]["type"] == "input_audio_buffer.speech_started"
+                assert "Stale answer." not in str(messages)
+                assert not tracker.is_committed("turn_1", 0)
+
+    @pytest.mark.parametrize("resume_after_hold_check", [False, True], ids=["before_queue", "after_hold_check"])
+    def test_held_tool_call_is_dropped_when_its_turn_reopens(self, setup, monkeypatch, resume_after_hold_check):
+        app, service, _, output_queue, text_output_queue, *_ = setup
+        tracker = SpeculativeTurnTracker()
+        service.speculative_turns = tracker
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                tracker.speech_started(0)
+                tracker.segment_finalized(1000)
+                ws.send_json({"type": "response.create"})
+                assert ws.receive_json()["type"] == "response.created"
+                response_key = service._state(list(service._conns)[0]).current_response_key
+                # A tool-call-only answer never commits in TTS, so its early
+                # side-channel copy and its ordered copy both reach the send loop.
+                _resume_speech(monkeypatch, service, tracker, after_hold_check=resume_after_hold_check)
+                part = AssistantToolCallPart(
+                    tool={"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"}
+                )
+                turn = {"turn_id": "turn_1", "turn_revision": 0}
+                text_output_queue.put(
+                    AssistantToolCallReadyEvent(response_key=response_key, output_sequence=0, part=part, **turn)
+                )
+                output_queue.put(
+                    AssistantOutputEvent(response_key=response_key, output_sequence=0, parts=[part], **turn)
+                )
+                time.sleep(0.05)
+
+                assert tracker.speech_started(1300) == ("turn_1", 1, True)
+                text_output_queue.put(SpeechStartedEvent(turn_id="turn_1", turn_revision=1))
+                messages = [ws.receive_json()]
+                while messages[-1]["type"] != "input_audio_buffer.speech_started" and len(messages) < 10:
+                    messages.append(ws.receive_json())
+                assert messages[-1]["type"] == "input_audio_buffer.speech_started"
+                assert "call_1" not in str(messages)
+                assert not tracker.is_committed("turn_1", 0)
+
     def test_barge_in_discard_clears_after_response_done(self, setup):
         """After barge-in sets discarding=True, __RESPONSE_DONE__ must clear it back to False."""
         app, service, _, output_queue, text_output_queue, _, _, response_playing, cancel_scope = setup
@@ -718,7 +843,7 @@ class TestSendLoop:
                 assert state.in_response is False
                 assert pending_key in state.closed_response_keys
                 assert service.turn_latency_store._trackers == {}
-                assert service.turn_latency_store.active_session_count == 0
+                assert len(service.turn_latency_store._session_keys) == 0
                 assert not response_playing.is_set()
 
                 output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=stale_generation))
@@ -786,7 +911,9 @@ class TestSendLoop:
                 ws.receive_json()  # session.created
                 conn_id = next(iter(service._conns))
                 requests = []
+                tracker.start_turn()
                 for revision in (0, 1):
+                    tracker.observe("turn_1", revision)
                     service.dispatch_pipeline_event(
                         conn_id,
                         SpeechStartedEvent(
@@ -916,7 +1043,7 @@ class TestSendLoop:
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()
-                conn_id = service.connection_ids[0]
+                conn_id = list(service._conns)[0]
                 stale_generation = cancel_scope.generation
                 service.response._ensure_response(conn_id, "cancelled")
                 ws.send_json({"type": "response.cancel"})
@@ -1200,7 +1327,7 @@ class TestSendLoop:
                 created = ws.receive_json()
                 assert created["type"] == "response.created"
                 assert created["response"]["output_modalities"] == ["text"]
-                conn_id = service.connection_ids[0]
+                conn_id = list(service._conns)[0]
                 response_key = service._state(conn_id).current_response_key
 
                 # Side channel first, then the ordered stream catches up.
@@ -1488,7 +1615,7 @@ class TestCleanup:
             time.sleep(0.3)
 
             assert unit.session is None
-            assert unit.service.connection_ids == []
+            assert list(unit.service._conns) == []
             transaction.claim()
             assert cleanup == []
             assert unit.service.total_usage.input_tokens == 17
@@ -1673,3 +1800,56 @@ class TestPool:
             data = client.get("/v1/usage").json()
             assert data["errors_by_type"] == {"foo": 2, "bar": 1}
             assert data["total_errors"] == 3
+
+
+@pytest.mark.parametrize("reason", ["max_output_tokens", "content_filter"])
+def test_partial_incomplete_response_drains_audio_before_done(setup, reason):
+    app, _, _, output_queue, _, _, _, _, cancel_scope = setup
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/realtime") as ws:
+            ws.receive_json()  # session.created
+            output_rate = 24000
+            ws.send_json(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "type": "realtime",
+                        "audio": {"output": {"format": {"type": "audio/pcm", "rate": output_rate}}},
+                    },
+                }
+            )
+            assert ws.receive_json()["type"] == "session.updated"
+            response_key = "incomplete_response"
+            generation = cancel_scope.generation
+            for item in [
+                AssistantOutputEvent(text="partial response", response_key=response_key, cancel_generation=generation),
+                AudioOutput(audio=_pcm_bytes(256), response_key=response_key, cancel_generation=generation),
+                AudioOutput(audio=_pcm_bytes(128), response_key=response_key, cancel_generation=generation),
+                AssistantResponseDoneEvent(
+                    response_key=response_key,
+                    cancel_generation=generation,
+                    status="incomplete",
+                    reason=reason,
+                ),
+                AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=response_key, cancel_generation=generation),
+            ]:
+                output_queue.put(item)
+
+            messages = []
+            while not messages or messages[-1]["type"] != "response.done":
+                messages.append(ws.receive_json())
+            response = messages[-1]["response"]
+            assert response["status"] == "incomplete"
+            assert response["status_details"]["reason"] == reason
+            assert response["status_details"].get("error") is None
+            assert not any(message["type"] == "error" for message in messages)
+            pcm = b"".join(
+                base64.b64decode(message["delta"])
+                for message in messages
+                if message["type"] == "response.output_audio.delta"
+            )
+            # The router may batch chunks; count samples instead of deltas.
+            assert len(pcm) == round(384 * output_rate / 16000) * 2
+            assert sum(message["type"] == "response.output_audio.done" for message in messages) == 1
+            parsed = parse_wire_events(messages)
+            assert_response_lifecycle_contract(parsed, wants_audio=True, expected_status="incomplete")

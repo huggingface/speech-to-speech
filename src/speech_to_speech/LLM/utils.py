@@ -38,9 +38,11 @@ MARKDOWN_FENCE_LINE_PATTERN = re.compile(
 
 # Emphasis is removed only when the same delimiter run opens and closes it at
 # conservative word boundaries. Intraword stars are preserved as operators.
+# The body closes lazily so adjacent single-character spans ("*A* or *B*") match
+# independently instead of merging into one span across the gap between them.
 MARKDOWN_BOUNDARY_EMPHASIS_PATTERN = re.compile(
     r"(?<![\w*_])(?P<delimiter>\*{1,3}|_{1,2})(?![*_])"
-    r"(?P<body>\S(?:[^\n]*?\S)?)(?P=delimiter)(?![\w*_])"
+    r"(?P<body>\S(?:[^\n]*?\S)??)(?P=delimiter)(?![\w*_])"
 )
 
 

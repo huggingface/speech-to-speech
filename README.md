@@ -196,7 +196,7 @@ pip install "speech-to-speech[faster-whisper]"  # Faster Whisper STT
 pip install "speech-to-speech[whisper-mlx]"     # Lightning Whisper MLX STT on macOS
 pip install "speech-to-speech[paraformer]"      # Paraformer STT through FunASR
 pip install "speech-to-speech[fireredvad]"      # FireRed streaming VAD
-pip install "speech-to-speech[nemo]"            # Parakeet Unified STT through NeMo
+pip install "speech-to-speech[nemo]"            # Parakeet Unified, Nemotron, and Orukeet STT through NeMo
 pip install "speech-to-speech[mlx-lm]"          # mlx-vlm support for vision models on macOS
 ```
 
@@ -225,6 +225,9 @@ This installs the package in editable mode. With the environment activated, use 
 | VAD | [FireRed Stream-VAD](https://huggingface.co/FireRedTeam/FireRedVAD) | CUDA / CPU | `fireredvad` |
 | STT | [Parakeet TDT](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (default) | CUDA / CPU through nano-parakeet, Apple Silicon through MLX | built-in |
 | STT | [Parakeet Unified](https://huggingface.co/nvidia/parakeet-unified-en-0.6b) | CUDA / CPU | `nemo` |
+| STT | [Nemotron Speech Streaming](https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b) | CUDA / CPU | `nemo` |
+| STT | [Nemotron Streaming Farsi](https://huggingface.co/mehdi-hf/nemotron-asr-streaming-farsi), selected with `--stt nemotron-streaming --nemotron_streaming_model_name mehdi-hf/nemotron-asr-streaming-farsi` | CUDA / CPU | `nemo`, NeMo >=3.0, Python >=3.11 |
+| STT | [Orukeet](https://huggingface.co/oruk/orukeet) | CUDA / CPU | `nemo` |
 | STT | [Whisper](https://huggingface.co/docs/transformers/en/model_doc/whisper) through Transformers | CUDA / CPU | built-in |
 | STT | [Faster Whisper](https://github.com/SYSTRAN/faster-whisper) | CUDA / CPU | `faster-whisper` |
 | STT | [Lightning Whisper MLX](https://github.com/mustafaaljadery/lightning-whisper-mlx) | Apple Silicon | `whisper-mlx` |
@@ -244,6 +247,12 @@ This installs the package in editable mode. With the environment activated, use 
 | TTS | [OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) | CUDA / Intel XPU / Apple Silicon | `omnivoice` |
 | TTS | [MMS TTS](https://huggingface.co/docs/transformers/model_doc/mms) | CUDA / CPU | built-in |
 | TTS | OpenAI-compatible `/v1/audio/speech` endpoint | local or remote HTTP server | built-in |
+
+Optional [streaming speaker diarization](./examples/streaming-diarization/README.md)
+adds speaker labels to transcribed turns. Enable it with `--diarization` after
+installing the supporting Transformers build; the linked guide has the current
+model revision and setup while the merged [Transformers PR #49056](https://github.com/huggingface/transformers/pull/49056)
+is awaiting a package release.
 
 Select implementations with `--stt`, `--llm_backend`, and `--tts`. The CLI constructs configuration only for the selected backends; known options for inactive backends remain accepted for compatibility but are ignored with a warning. JSON configuration may likewise include extra inactive-backend keys, which are ignored. Run `speech-to-speech serve -h` for the defaults, or pass selectors before `-h` to see another combination's backend-specific flags (for example, `speech-to-speech serve --stt mlx-audio-whisper -h`).
 
@@ -338,6 +347,11 @@ docker compose up
 The compose file starts a llama.cpp server with Gemma 4 and the Realtime server, exposing ports `8080` and `8765`.
 
 ## Realtime API
+
+The server logs per-response STT, LLM, first TTS audio, and speech-to-audio
+durations for supported backends, including vLLM-backed STT and TTS. See the
+[response latency guide](./docs/response-latency.md) for the coverage matrix
+and measurement boundaries.
 
 Realtime mode supports the OpenAI Realtime protocol over WebSocket and WebRTC, with live transcription and low-latency turn-taking. WebSocket clients connect at `/v1/realtime`:
 
@@ -603,17 +617,20 @@ Language coverage depends on the STT and TTS backends you pick, not on the pipel
 | TTS | Pocket TTS | English, French, German, Portuguese, Italian, Spanish |
 | TTS | OpenAI-compatible `/v1/audio/speech` endpoint | Depends on the connected TTS server/model |
 
-Make sure the STT, LLM, and TTS you pair all cover your target language(s). Two usage patterns:
+Make sure the STT, LLM, and TTS you pair all cover your target language(s). By default, the language code sent to TTS comes from the **user's transcription**. Qwen3-TTS keeps its configured `auto` behavior by default. Add `--detect_llm_output_language` to detect the language of each assistant text chunk instead and send that code to TTS. This helps when the assistant replies in a different language from the user. The Lingua detector is loaded and warmed when the pipeline starts, so detection does not wait for the full reply. Short text (under 20 characters for most languages, or under four CJK characters) and ambiguous text use the last detected assistant language for that response. If there is none yet, TTS receives no language code and uses its own automatic or default behavior; this avoids delaying speech to collect more text. A TTS backend must support the detected language to use it. When a Realtime session selects a language with `session.audio.input.transcription.language`, STT keeps that language, but TTS receives the confidently detected assistant language instead. The first spoken text of each response decides; if it is too short or ambiguous, the whole response uses the session's selected language. If the active TTS backend cannot speak the detected language, that response uses the session's selected language.
 
-- **Single language**: set `--language` to the target language code. The default is `en`.
-- **Language switching**: set `--language auto`. The STT detects the language of each spoken prompt and forwards it to the LLM. Optionally add `--enable_lang_prompt` to append a "Please reply to my message in ..." instruction. It defaults to `False`; large LLMs usually infer the language from context, but the explicit instruction can help smaller models.
+For **Parakeet TDT**, the decoder chooses the transcription language automatically. `--parakeet_tdt_language` remains accepted for compatibility with existing commands, but setting it to a code such as `de` does not constrain decoding. The reported language is inferred with Lingua from the finished transcription when possible. Text shorter than 20 characters is not classified, and inconclusive or failed detection reports an unknown language rather than the configured or previous code. `--language` belongs to the Whisper backends; it does not control Parakeet. For Whisper and Whisper MLX, use `--language auto` to detect each turn, or a code such as `--language zh` to fix the language. Other STT backends have their own language flags; see the [STT component guide](./src/speech_to_speech/STT/README.md#language-support-by-handler).
 
-Automatic language detection:
+To encourage replies in the user's detected language, add `--enable_lang_prompt`. It appends a per-turn instruction such as "Please reply to my message in French." The flag is off by default and works independently of `--detect_llm_output_language`. Qwen3-TTS uses `--qwen3_tts_language auto` by default: it infers language from text unless assistant language detection or a session selection supplies a supported code. Set `--qwen3_tts_language german`, for example, to force synthesis in German.
+
+Automatic detection with Parakeet and a language instruction for the LLM:
 
 ```bash
 speech-to-speech serve \
     --stt parakeet-tdt \
-    --language auto \
+    --enable_lang_prompt \
+    --detect_llm_output_language \
+    --qwen3_tts_language auto \
     --llm_backend mlx-lm \
     --model_name "mlx-community/Qwen3-4B-Instruct-2507-4bit"
 ```
@@ -633,7 +650,7 @@ Both commands also work with `--mac-optimal-settings`; explicit `--stt` flags ov
 
 ## OmniVoice
 
-OmniVoice provides voice cloning, voice design, and automatic voice selection across 600+ languages. Install its opt-in dependencies and provide a reference clip plus its transcript for voice cloning. This example uses CUDA on Linux or Windows; use `--omnivoice_device mps` on Apple Silicon or `--omnivoice_device xpu` with an Intel XPU-enabled PyTorch installation:
+OmniVoice provides voice cloning, voice design, and automatic voice selection across 600+ languages. Install its opt-in dependencies and provide a reference clip plus its transcript for voice cloning. This example uses CUDA on Linux or Windows; use `--omnivoice_device mps` on Apple Silicon, `--omnivoice_device xpu` with an Intel XPU-enabled PyTorch installation, or `--omnivoice_device npu` with an Ascend `torch_npu` installation:
 
 ```bash
 pip install "speech-to-speech[omnivoice]"
@@ -711,6 +728,28 @@ gated by `--smart_turn_max_wait_ms` (2 seconds by default). If speech resumes du
 reopened as a newer revision, the accumulated audio is re-emitted, and work from the previous revision is
 discarded before it reaches the user.
 
+The turn tracker owns the conversation order and the `LISTENING`, `SOFT_ENDED`,
+`ANSWERING`, and `CLOSED` states. VAD supplies speech boundaries and Smart Turn timing;
+the tracker decides whether resumed speech reopens the current turn. The unanswered
+reopen cap uses streamed-audio time, so a push-to-talk pause with no audio does not
+advance it. Processing and output holds use wall-clock deadlines. Starting a newer
+turn drops older work that has not committed; accepted output can finish.
+
+Each response belongs to the input supplied to generation. The server records that
+ownership on conversation items and accepted tool calls. A tool follow-up keeps its
+originating input's turn. If a user message follows the tool call, the follow-up
+answers that message's turn; if a newer turn closed without one, it moves to that
+turn, so a late tool result is still spoken. Client input without a speech-turn
+association stays untagged. A response cannot borrow the identity of speech still
+being recorded.
+These input records do not control turn state, reopening, or deadlines.
+
+The server holds `input_audio_buffer.speech_stopped` and the final transcription while a turn can still
+reopen. Resumed speech keeps the same open item and live transcription deltas
+continue. Once the turn commits, the client receives one stop, an input-buffer commitment, the created
+user item, and one final transcript, so its user-turn history matches the model's.
+If transcription fails, the server sends the stop and failure after the reopen grace ends.
+
 The base package includes the quantized CPU runtime and enables Smart Turn by default:
 
 ```bash
@@ -750,9 +789,31 @@ Issues and PRs are welcome. Good starting points are the [open issues](https://g
 For local development:
 
 ```bash
-uv sync
-pytest
-ruff check
+uv sync --group dev
+uv run pytest tests -q
+uv run ruff check src tests
+uv run ruff format --check src tests
+uv run mypy src
+```
+
+To check turn ordering, Smart Turn timing, and Realtime routing on CPU:
+
+```bash
+CUDA_VISIBLE_DEVICES='' uv run pytest -q \
+  tests/test_speculative_turns.py \
+  tests/test_smart_turn.py tests/test_stt_stale_filter.py \
+  tests/test_audio_input_notifier.py tests/test_lm_output_processor.py \
+  tests/openai_realtime/test_response_input_identity.py \
+  tests/openai_realtime/test_realtime_service.py \
+  tests/openai_realtime/test_speculative_turn_protocol.py
+```
+
+The response-input tests include a delayed tool completing during synthetic speech,
+using the packaged client coordinator, service, and VAD handler with mocked model
+output and VAD probabilities. Run that reproduction alone with:
+
+```bash
+CUDA_VISIBLE_DEVICES='' uv run pytest tests/openai_realtime/test_response_input_identity.py -q -s
 ```
 
 ## Star History

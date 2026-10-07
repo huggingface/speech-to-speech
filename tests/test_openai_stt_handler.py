@@ -10,8 +10,13 @@ from threading import Barrier, Event, Thread
 
 import numpy as np
 import pytest
-from openai.types.realtime import ConversationItemInputAudioTranscriptionDeltaEvent
+from openai.types.realtime import (
+    ConversationItemInputAudioTranscriptionDeltaEvent,
+    RealtimeSessionCreateRequest,
+    SessionUpdateEvent,
+)
 
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.api.openai_realtime.service import RealtimeService
 from speech_to_speech.pipeline.events import SpeechStartedEvent
 from speech_to_speech.pipeline.messages import (
@@ -303,6 +308,119 @@ def test_openai_stt_returns_final_transcription(monkeypatch):
     assert outputs[0].language_code == "en"
     assert _FakeOperation.instances[-1].kwargs["endpoint_url"].endswith("/v1/audio/transcriptions")
     assert _FakeOperation.instances[-1].kwargs["wav_bytes"].startswith(b"RIFF")
+
+
+def test_first_turn_uses_session_selected_language(monkeypatch):
+    service = RealtimeService()
+    conn_id = service.register()
+    update = SessionUpdateEvent.model_validate(
+        {
+            "type": "session.update",
+            "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": "es"}}}},
+        }
+    )
+    assert service.handle_session_update(conn_id, update) is None
+
+    handler = _handler(monkeypatch, language="en")
+    _FakeOperation.results = [HttpTranscriptionResult(text="hola", language="es")]
+    source = _audio()
+    source.runtime_config = service._state(conn_id).runtime_config
+    assert list(handler.process(source)) == []
+    assert handler._final_thread is not None
+    handler._final_thread.join(timeout=1)
+
+    assert _FakeOperation.instances[-1].kwargs["language"] == "es"
+
+
+def test_explicit_auto_removes_setup_language_from_stt_request(monkeypatch):
+    handler = _handler(monkeypatch, language="en")
+    _FakeOperation.results = [HttpTranscriptionResult(text="hola", language="es")]
+    config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(
+            type="realtime",
+            audio={"input": {"transcription": {"language": "auto"}}},
+        )
+    )
+    source = _audio()
+    source.runtime_config = config
+
+    assert list(handler.process(source)) == []
+    assert handler._final_thread is not None
+    handler._final_thread.join(timeout=1)
+
+    assert _FakeOperation.instances[-1].kwargs["language"] is None
+    assert handler.language == "en"
+
+
+def test_mid_turn_session_update_applies_to_pending_stt_request(monkeypatch):
+    handler = _handler(monkeypatch, language="en")
+    config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(type="realtime", audio={"input": {"transcription": {"language": "es"}}})
+    )
+    config.session.audio.input.transcription.language = "de"
+    _FakeOperation.results = [HttpTranscriptionResult(text="hallo", language="de")]
+    first = _audio()
+    first.runtime_config = config
+
+    assert list(handler.process(first)) == []
+    assert handler._final_thread is not None
+    handler._final_thread.join(timeout=1)
+
+    assert _FakeOperation.instances[-1].kwargs["language"] == "de"
+
+
+def test_open_sessions_and_reused_worker_keep_selections_isolated(monkeypatch):
+    service = RealtimeService()
+    first_conn = service.register()
+    second_conn = service.register()
+    handler = _handler(monkeypatch, language="en")
+    turn_number = 0
+
+    def select(conn_id: str, language: str) -> None:
+        update = SessionUpdateEvent.model_validate(
+            {
+                "type": "session.update",
+                "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": language}}}},
+            }
+        )
+        assert service.handle_session_update(conn_id, update) is None
+        assert service.build_session_updated(conn_id).session.audio.input.transcription.language == language
+
+    def transcribe(conn_id: str) -> None:
+        nonlocal turn_number
+        turn_number += 1
+        source = _audio()
+        source.turn_id = f"turn-{turn_number}"
+        source.runtime_config = service._state(conn_id).runtime_config
+        _FakeOperation.results.append(HttpTranscriptionResult(text="hello", language="en"))
+        assert list(handler.process(source)) == []
+        assert handler._final_thread is not None
+        handler._final_thread.join(timeout=1)
+        assert not handler._final_thread.is_alive()
+
+    select(first_conn, "auto")
+    select(second_conn, "fr")
+    transcribe(first_conn)
+    transcribe(second_conn)
+    select(first_conn, "es")
+    transcribe(first_conn)
+    select(first_conn, "de")
+    transcribe(first_conn)
+    select(first_conn, "auto")
+    transcribe(first_conn)
+    service.unregister(first_conn)
+    next_conn = service.register()
+    transcribe(next_conn)
+
+    assert [operation.kwargs["language"] for operation in _FakeOperation.instances[1:]] == [
+        None,
+        "fr",
+        "es",
+        "de",
+        None,
+        "en",
+    ]
+    assert handler.language == "en"
 
 
 def test_remote_progressive_hypotheses_remain_cumulative(monkeypatch):
