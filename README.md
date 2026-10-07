@@ -698,6 +698,13 @@ See [ModuleArguments](./src/speech_to_speech/arguments_classes/module_arguments.
 - transcript logging (`--log_transcripts`)
 - realtime pipeline pool size (`--num_pipelines`)
 
+For `responses-api` and `chat-completions`, pipeline units share one provider
+client and connection pool for the selected backend configuration. Each unit
+keeps its own conversation, cancellation scope, and generation settings. The
+server runtime closes the client after its workers and background provider work
+finish. If a worker exceeds the shutdown timeout, cleanup is deferred until
+that work finishes.
+
 Logs are content-free by default: transcript-bearing records report a character count rather
 than the text, because logs are commonly retained by service managers, containers and hosted
 log aggregators. Pass `--log_transcripts` to include full user and assistant transcripts when
