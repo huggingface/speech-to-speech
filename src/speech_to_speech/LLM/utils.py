@@ -13,6 +13,7 @@ from typing import Any, Optional
 import requests  # type: ignore[import-untyped]
 from PIL import Image
 
+from speech_to_speech.pipeline.transcript_logging import transcript_for_log
 from speech_to_speech.utils.utils import response_wants_audio
 
 logger = logging.getLogger(__name__)
@@ -400,7 +401,7 @@ def run_generator_with_filler_sentences(
                             "LLM response latency (%.2fs) exceeded threshold (%.2fs); emitting filler sentence: '%s'",
                             elapsed,
                             filler_sentence_delay_s,
-                            filler_text,
+                            transcript_for_log(filler_text),
                         )
                         from speech_to_speech.pipeline.messages import LLMResponseChunk
 
@@ -416,8 +417,9 @@ def run_generator_with_filler_sentences(
                             response_key=response_key,
                             prefetch_transaction=prefetch_transaction,
                             selected_language=selected_language,
+                            is_filler=True,
+                            synthetic=True,
                         )
                         filler_emitted = True
     finally:
         worker_thread.join(timeout=1.0)
-

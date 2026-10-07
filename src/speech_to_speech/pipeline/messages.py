@@ -163,9 +163,15 @@ class LLMResponseChunk(PipelineMessage):
     cancel_generation: int | None = None
     response_key: str | None = Field(default=None, exclude=True, repr=False)
     prefetch_transaction: Any = Field(default=None, exclude=True, repr=False)
+    is_filler: bool = False
+    synthetic: bool = False
 
     @model_validator(mode="after")
     def _normalize_ordered_parts(self) -> "LLMResponseChunk":
+        if self.is_filler and not self.synthetic:
+            self.synthetic = True
+        elif self.synthetic and not self.is_filler:
+            self.is_filler = True
         legacy_views = _normalize_assistant_output_fields(self.parts, self.text, self.tools, self.model_fields_set)
         if legacy_views is not None:
             self.text, self.tools = legacy_views
@@ -229,6 +235,7 @@ class TTSInput(PipelineMessage):
     cancel_generation: int | None = None
     response_key: str | None = Field(default=None, exclude=True, repr=False)
     prefetch_transaction: Any = Field(default=None, exclude=True, repr=False)
+    is_filler: bool = False
 
     @model_validator(mode="before")
     @classmethod

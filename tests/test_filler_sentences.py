@@ -4,6 +4,7 @@ from threading import Event, Thread
 from unittest.mock import MagicMock
 
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+from openai.types.realtime.realtime_session_create_request import RealtimeSessionCreateRequest
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import make_user_message
@@ -15,6 +16,7 @@ from speech_to_speech.pipeline.events import AssistantOutputEvent
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import (
     AssistantTextPart,
+    EndOfResponse,
     GenerateResponseRequest,
     LLMResponseChunk,
     TTSInput,
@@ -29,17 +31,19 @@ def _get_language_model_handler_class():
             except ModuleNotFoundError:
                 mock = MagicMock()
                 if mod == "torch":
+
                     class _Tensor:
                         pass
+
                     class _Module:
                         pass
+
                     mock.Tensor = _Tensor
                     mock.nn.Module = _Module
                 sys.modules[mod] = mock
     from speech_to_speech.LLM.language_model import LanguageModelHandler
 
     return LanguageModelHandler
-
 
 
 def test_filler_sentences_disabled_by_default():
@@ -278,6 +282,7 @@ def test_text_only_response_skips_filler_with_lm_output_processor(monkeypatch):
 
 def test_run_generator_with_filler_sentences_text_only_bypass():
     """run_generator_with_filler_sentences directly bypasses filler when response is text-only."""
+
     def slow_gen():
         time.sleep(0.15)
         yield LLMResponseChunk(text='{"data":1}')
@@ -367,10 +372,7 @@ def test_cancellation_blocks_filler_when_blocked_before_first_output(monkeypatch
         worker.join(timeout=2.0)
 
     # Handler must suppress filler chunk tagged with the stale generation 0
-    filler_chunks = [
-        out for out in outputs
-        if isinstance(out, LLMResponseChunk) and "Thinking..." in out.text
-    ]
+    filler_chunks = [out for out in outputs if isinstance(out, LLMResponseChunk) and "Thinking..." in out.text]
     assert len(filler_chunks) == 0
 
 
@@ -432,10 +434,7 @@ def test_shutdown_suppresses_filler(monkeypatch):
         unblock_generate.set()
         worker.join(timeout=2.0)
 
-    filler_chunks = [
-        out for out in outputs
-        if isinstance(out, LLMResponseChunk) and "Thinking..." in out.text
-    ]
+    filler_chunks = [out for out in outputs if isinstance(out, LLMResponseChunk) and "Thinking..." in out.text]
     assert len(filler_chunks) == 0
 
 
@@ -468,3 +467,83 @@ def test_filler_worker_thread_preserves_logging_context():
     assert any(isinstance(c, LLMResponseChunk) and c.text == "Finished" for c in chunks)
 
 
+def test_delayed_spanish_response_preserves_auto_language_selection(monkeypatch):
+    """Regression test [P2]: synthetic filler must not seed language cache for delayed Spanish answer."""
+    monkeypatch.setattr(ChatCompletionsApiModelHandler, "warmup", lambda self: None)
+    stop_event = Event()
+    mock_queue_in = MagicMock()
+    mock_queue_out = MagicMock()
+
+    handler = ChatCompletionsApiModelHandler(
+        stop_event=stop_event,
+        queue_in=mock_queue_in,
+        queue_out=mock_queue_out,
+        setup_kwargs={
+            "api_key": "test-key",
+            "enable_filler_sentences": True,
+            "filler_sentence_delay_s": 0.05,
+            "filler_sentences": ["I am thinking, give me a moment."],
+        },
+    )
+
+    spanish_text = "Puedo ayudarte a encontrar la estación de tren más cercana."
+
+    def slow_spanish_request(*args, **kwargs):
+        time.sleep(0.12)
+        chunk = MagicMock()
+        chunk.choices = [
+            MagicMock(
+                delta=MagicMock(content=spanish_text, refusal=None, tool_calls=None),
+                finish_reason="stop",
+            )
+        ]
+        chunk.usage = None
+        return [chunk]
+
+    handler.client = MagicMock()
+    handler.client.chat.completions.create = slow_spanish_request
+
+    rc = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(
+            type="realtime",
+            audio={"input": {"transcription": {"language": "auto"}}},
+        )
+    )
+    rc.chat.add_item(make_user_message("¿Dónde está la estación?"))
+    req = GenerateResponseRequest(
+        runtime_config=rc,
+        turn_id="turn_spanish",
+        turn_revision=1,
+    )
+
+    outputs = list(handler.process(req))
+    chunks = [out for out in outputs if isinstance(out, LLMResponseChunk)]
+
+    assert len(chunks) == 2
+    filler_chunk = chunks[0]
+    real_chunk = chunks[1]
+
+    assert "thinking" in filler_chunk.text.lower()
+    assert filler_chunk.is_filler is True
+    assert real_chunk.text == spanish_text
+    assert real_chunk.is_filler is False
+
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup(speculative_turns=None, detect_llm_output_language=True)
+
+    tts_inputs = []
+    for chunk in chunks:
+        for event in processor.process(chunk):
+            if isinstance(event, TTSInput):
+                tts_inputs.append(event)
+
+    list(processor.process(EndOfResponse(turn_id="turn_spanish", turn_revision=1, status="completed")))
+
+    assert len(tts_inputs) == 2
+    filler_tts = tts_inputs[0]
+    real_tts = tts_inputs[1]
+
+    assert filler_tts.is_filler is True
+    assert real_tts.is_filler is False
+    assert real_tts.tts_language_code == "es"
+    assert rc.last_assistant_language == "es"

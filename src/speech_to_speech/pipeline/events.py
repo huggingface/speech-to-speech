@@ -124,6 +124,7 @@ class AssistantOutputEvent(PipelineEvent):
     # model part has reached the ordered TTS path, without letting it overtake
     # a preceding assistant message.
     output_sequence: int | None = Field(default=None, exclude=True, repr=False)
+    is_filler: bool = False
 
     @model_validator(mode="after")
     def _normalize_ordered_parts(self) -> "AssistantOutputEvent":

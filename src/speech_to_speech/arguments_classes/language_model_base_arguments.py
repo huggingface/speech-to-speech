@@ -64,8 +64,5 @@ class LanguageModelBaseArguments:
             "Thinking about that.",
             "Let me think about that for a second.",
         ],
-        metadata={
-            "help": "List of filler sentences to choose from when LLM response generation takes too long."
-        },
+        metadata={"help": "List of filler sentences to choose from when LLM response generation takes too long."},
     )
-

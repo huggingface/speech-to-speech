@@ -244,7 +244,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.compactor = build_compactor(self._build_compaction_generate_fn()) if compact_history else None
         self.warmup()
 
-
     @staticmethod
     def _is_official_openai(base_url: Optional[str]) -> bool:
         """Whether ``base_url`` points at the official OpenAI server.
@@ -1198,6 +1197,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             prefetch_transaction=request.prefetch_transaction,
             history_anchor_id=history_anchor_id,
         )
+
         def gen_fn() -> Iterator[LLMOut]:
             return self._generate(active_chat, original_chat, turn, optional_kwargs)
 
@@ -1227,8 +1227,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             selected_language=request.selected_language,
             wants_audio=wants_audio,
         )
-
-
 
     @property
     def timing_log_level(self) -> int:

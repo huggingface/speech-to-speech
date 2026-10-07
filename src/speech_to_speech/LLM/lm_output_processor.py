@@ -86,24 +86,27 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
         self._response_language_resolved = False
         self._assistant_language_probe = ""
 
-    def _observe_assistant_language(self, text: str) -> None:
-        if self._detected_assistant_language is not None:
-            return
-        # A few short streamed parts can make one detectable sentence. Keep only
-        # a bounded window for this response.
-        self._assistant_language_probe = (self._assistant_language_probe + " " + text).strip()[-256:]
-        # The assistant can answer outside Parakeet's recognition languages.
+    def _detect_text_language(self, text: str) -> str | None:
         if self._language_detector is None:
             self._language_detector = language_detection.warm_language_detector()
         try:
-            self._detected_assistant_language = language_detection.detect_language_from_text(
-                self._assistant_language_probe,
+            return language_detection.detect_language_from_text(
+                text,
                 self._language_detector,
                 minimum_confidence_gap=language_detection.MIN_ASSISTANT_CONFIDENCE_GAP,
                 allow_short_cjk=True,
             )
         except Exception:
             logger.exception("Assistant language detection failed; using prior assistant language")
+            return None
+
+    def _observe_assistant_language(self, text: str) -> None:
+        if self._detected_assistant_language is not None:
+            return
+        # A few short streamed parts can make one detectable sentence. Keep only
+        # a bounded window for this response.
+        self._assistant_language_probe = (self._assistant_language_probe + " " + text).strip()[-256:]
+        self._detected_assistant_language = self._detect_text_language(self._assistant_language_probe)
 
     def _notify_generation_done(
         self,
@@ -217,6 +220,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
         logger.debug("LM processor: parts=%s", transcript_for_log(lm_output.parts))
 
         response_key = self._start_response(lm_output.response_key)
+        is_filler = getattr(lm_output, "is_filler", False) or getattr(lm_output, "synthetic", False)
 
         for part in lm_output.parts:
             output_sequence = self._output_sequence
@@ -241,6 +245,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 cancel_generation=lm_output.cancel_generation,
                 response_key=response_key,
                 output_sequence=output_sequence,
+                is_filler=is_filler,
             )
             yield event
             if (
@@ -251,6 +256,52 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 continue
             logger.debug("Forwarding to TTS: %s", transcript_for_log(part.text))
             config = lm_output.runtime_config
+
+            if is_filler:
+                filler_selected = (
+                    lm_output.selected_language
+                    if "selected_language" in lm_output.model_fields_set
+                    else config.selected_language
+                    if config is not None
+                    else None
+                )
+                filler_detected = None
+                if self.detect_llm_output_language or config is not None:
+                    filler_detected = self._detect_text_language(part.text)
+                filler_language_code = filler_detected or lm_output.language_code
+                if self._response_language_resolved:
+                    filler_tts_language = self._response_tts_language
+                elif filler_selected == "auto" or (filler_selected is None and self.detect_llm_output_language):
+                    filler_tts_language = filler_detected or (
+                        config.last_assistant_language if config is not None else None
+                    )
+                elif filler_selected is not None:
+                    filler_tts_language = (
+                        filler_detected if self.detect_llm_output_language else None
+                    ) or filler_selected
+                else:
+                    filler_tts_language = filler_language_code
+
+                yield TTSInput(
+                    text=part.text,
+                    language_code=filler_language_code,
+                    selected_language=filler_selected,
+                    tts_language_code=filler_tts_language if filler_selected is not None else filler_language_code,
+                    response_assistant_language_code=(
+                        filler_tts_language if filler_selected is None and self.detect_llm_output_language else None
+                    ),
+                    runtime_config=lm_output.runtime_config,
+                    response=lm_output.response,
+                    turn_id=lm_output.turn_id,
+                    turn_revision=lm_output.turn_revision,
+                    speech_stopped_at_s=lm_output.speech_stopped_at_s,
+                    cancel_generation=lm_output.cancel_generation,
+                    response_key=response_key,
+                    prefetch_transaction=lm_output.prefetch_transaction,
+                    is_filler=True,
+                )
+                continue
+
             if self.detect_llm_output_language or config is not None:
                 self._observe_assistant_language(part.text)
             self._tts_runtime_config = config

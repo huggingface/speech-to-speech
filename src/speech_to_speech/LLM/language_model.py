@@ -219,7 +219,6 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
         self._load_model(model_name, device, torch_dtype, gen_kwargs)
 
-
         self.user_role = user_role
         # Serializes transformers pipe/model.generate calls between the speech
         # response path and the background compaction worker. MLX paths use
@@ -691,6 +690,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             history_rolled_back = True
 
         try:
+
             def _generate_stream() -> Iterator[LLMResponseChunk]:
                 store = getattr(self, "turn_latency_store", None)
                 tracker = store.get_response(request.response_key) if store else None
@@ -754,7 +754,6 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             )
 
             if ctx.stopped:
-
                 return
 
             turn_output_allowed = not ctx.cancelled and self._turn_output_allowed(ctx.turn_id, ctx.turn_revision)
