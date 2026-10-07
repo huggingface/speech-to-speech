@@ -9,6 +9,7 @@ import httpx
 import pytest
 from openai import AuthenticationError, OpenAI
 
+import speech_to_speech.LLM.base_openai_compatible_language_model as llm_module
 from speech_to_speech import s2s_pipeline
 from speech_to_speech.backend_registry import create_backend_handler
 from speech_to_speech.LLM.shared_client import SharedOpenAIClient
@@ -226,6 +227,56 @@ def test_warmup_failure_closes_the_shared_client(monkeypatch):
     http_client = TrackedHttpClient(fail)
     with pytest.raises(AuthenticationError, match="provider startup failed"):
         _build(monkeypatch, http_client=http_client)
+    assert http_client.close_count == 1
+
+
+def test_cleanup_failure_preserves_backend_startup_error(monkeypatch, caplog):
+    def fail(request):
+        return httpx.Response(401, json={"error": {"message": "original startup failure"}})
+
+    http_client = TrackedHttpClient(fail)
+    close = http_client.close
+
+    def broken_close():
+        close()
+        raise RuntimeError("cleanup also failed")
+
+    monkeypatch.setattr(http_client, "close", broken_close)
+    with pytest.raises(AuthenticationError, match="original startup failure"):
+        _build(monkeypatch, http_client=http_client)
+    assert http_client.close_count == 1
+    assert "Shared LLM client cleanup failed during construction" in caplog.text
+
+
+@pytest.mark.parametrize("failure", ["construction", "start"])
+def test_prefetch_worker_failure_releases_client_and_admission_slot(monkeypatch, failure):
+    runtime, http_client, _ = _build(monkeypatch)
+    handler = runtime.handlers[0]
+    create_thread = llm_module.Thread
+
+    def fail_start():
+        raise RuntimeError("worker initialization failed")
+
+    def broken_thread(*args, **kwargs):
+        if failure == "construction":
+            raise RuntimeError("worker initialization failed")
+        thread = create_thread(*args, **kwargs)
+        thread.start = fail_start
+        return thread
+
+    with monkeypatch.context() as patch:
+        patch.setattr(llm_module, "Thread", broken_thread)
+        with pytest.raises(RuntimeError, match="worker initialization failed"):
+            handler._start_prefetch_worker(lambda: None, name="failed-prefetch")
+
+    # Another real provider operation must still be admitted after the error.
+    worker = handler._start_prefetch_worker(
+        lambda: handler.client.responses.create(model="test", input="hello"), name="successful-prefetch"
+    )
+    assert worker is not None
+    worker.join(timeout=2)
+    runtime.CLEANUP_WAIT_S = 0.1
+    runtime.stop()
     assert http_client.close_count == 1
 
 

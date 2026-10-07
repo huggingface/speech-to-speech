@@ -446,14 +446,16 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     self._prefetch_workers.discard(worker)
                 self._prefetch_worker_slots.release()
 
-        worker = Thread(target=run, name=name, daemon=True)
-        with self._prefetch_workers_lock:
-            self._prefetch_workers.add(worker)
+        worker = None
         try:
+            worker = Thread(target=run, name=name, daemon=True)
+            with self._prefetch_workers_lock:
+                self._prefetch_workers.add(worker)
             worker.start()
         except BaseException:
-            with self._prefetch_workers_lock:
-                self._prefetch_workers.discard(worker)
+            if worker is not None:
+                with self._prefetch_workers_lock:
+                    self._prefetch_workers.discard(worker)
             lease.__exit__(None, None, None)
             self._prefetch_worker_slots.release()
             raise

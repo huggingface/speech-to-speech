@@ -49,6 +49,7 @@ from speech_to_speech.pipeline.queue_types import (
 from speech_to_speech.pipeline.runtime import PipelineRuntime
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import (
+    log_exception,
     set_log_transcripts,
     warn_if_log_transcripts_enabled,
 )
@@ -702,7 +703,10 @@ def build_pipeline(
         return PipelineRuntime(handlers, resource)
     except BaseException:
         if resource is not None:
-            resource.close()
+            try:
+                resource.close()
+            except Exception as exc:
+                log_exception(logger, "Shared LLM client cleanup failed during construction", exc)
         raise
 
 
