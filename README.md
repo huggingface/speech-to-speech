@@ -54,6 +54,20 @@ Run the configuration you chose with this environment activated. Activate the sa
 
 If speaker feedback interrupts replies, add `--local_audio_block_mic_during_playback` to your `speech-to-speech local` command. This pauses microphone capture during playback, so you cannot interrupt the assistant while it speaks. To keep voice interruptions without headphones on Linux, route audio through the PulseAudio/PipeWire echo canceller as described in [Echo cancellation](docs/echo-cancellation.md).
 
+#### Echo cancellation on Linux
+
+From a source checkout, wrap your current microphone and speakers in the WebRTC echo canceller, run the pipeline, then disable it when you are done:
+
+```bash
+scripts/linux_echo_cancel.sh enable    # create the echo-cancelled mic/speaker pair and make it the default
+speech-to-speech local ...             # your usual command, without --local_audio_*_device flags
+scripts/linux_echo_cancel.sh disable   # remove the pair and restore your previous default devices
+```
+
+Run `scripts/linux_echo_cancel.sh status` to check whether it is on. You can keep it enabled across several runs; the canceller adapts better when it stays loaded.
+
+Disable it when you finish testing. While it is on, every application uses the echo-cancelled devices, which add noise suppression and automatic gain to the microphone. It also stays bound to the devices that were the defaults when you enabled it, so newly connected headphones, USB microphones, or Bluetooth devices do not become the default. It is removed automatically when you log out or restart the audio server.
+
 ### Apple Silicon, fully local
 
 Run all three models locally on an Apple Silicon Mac, using a quantized LLM through MLX. No API key is needed.
