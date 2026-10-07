@@ -130,6 +130,7 @@ def _farsi_handler():
 
     calls = []
     handler = PocketTTSHandler.__new__(PocketTTSHandler)
+    handler._failed_responses = set()
     handler.cancel_scope = None
     handler.speculative_turns = None
     handler.voice_state = "voice"
@@ -428,28 +429,33 @@ def test_persian_normalization_signed_numbers(text, expected):
     assert normalize(text) == expected
 
 
-def _run_farsi_worker(handler, tts_input):
+def _run_farsi_inputs(handler, inputs):
     from queue import Queue
 
-    from speech_to_speech.pipeline.messages import PIPELINE_END, EndOfResponse
+    from speech_to_speech.pipeline.messages import PIPELINE_END
 
     handler.stop_event = Event()
     handler.queue_in = Queue()
     handler.queue_out = Queue()
     handler.pipeline_index = None
     handler._times = []
-    handler.queue_in.put(tts_input)
-    handler.queue_in.put(
-        EndOfResponse(
-            turn_id=tts_input.turn_id,
-            turn_revision=tts_input.turn_revision,
-            cancel_generation=tts_input.cancel_generation,
-            response_key=tts_input.response_key,
-        )
-    )
+    for item in inputs:
+        handler.queue_in.put(item)
     handler.queue_in.put(PIPELINE_END)
     handler.run()
     return list(handler.queue_out.queue)
+
+
+def _run_farsi_worker(handler, tts_input):
+    from speech_to_speech.pipeline.messages import EndOfResponse
+
+    terminal = EndOfResponse(
+        turn_id=tts_input.turn_id,
+        turn_revision=tts_input.turn_revision,
+        cancel_generation=tts_input.cancel_generation,
+        response_key=tts_input.response_key,
+    )
+    return _run_farsi_inputs(handler, [tts_input, terminal])
 
 
 @pytest.mark.parametrize("failure_stage", ["silent_retries", "g2p", "phoneme_validation", "pcm_conversion"])
@@ -534,3 +540,133 @@ def test_farsi_cancelled_exception_does_not_report_failure():
     handler.phonemizer = interrupted_g2p
     outputs = _run_farsi_worker(handler, TTSInput(text="سلام", response_key="cancelled", cancel_generation=0))
     assert not any(isinstance(output, ResponseFailedEvent) for output in outputs)
+    assert not handler._failed_responses
+
+
+def test_farsi_failed_response_skips_later_chunks_without_reopening_audio():
+    from queue import Queue
+
+    import torch
+
+    from speech_to_speech.api.openai_realtime.service import RealtimeService
+    from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
+    from speech_to_speech.pipeline.events import PipelineEvent, ResponseFailedEvent
+    from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, AudioOutput, EndOfResponse, LLMResponseChunk
+
+    handler, _ = _farsi_handler()
+    conversions = []
+    attempts = []
+
+    def phonemizer(text):
+        conversions.append(text)
+        return "bad" if text == "خراب" else "salAm"
+
+    def stream(**kwargs):
+        phonemes = kwargs["text_to_generate"]
+        attempts.append(phonemes)
+        audio = torch.zeros(2400) if phonemes == "bad" else torch.full((2400,), 0.1)
+        return iter([audio])
+
+    handler.phonemizer = phonemizer
+    handler.model._generate_audio_stream_short_text = stream
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup()
+    inputs = []
+    for key, texts in [("failed", ["اول", "خراب", "آخر"]), ("next", ["بعدی"])]:
+        identity = dict(response_key=key, turn_id=key, turn_revision=1, cancel_generation=0)
+        for text in texts:
+            inputs.extend(processor.process(LLMResponseChunk(text=text, **identity)))
+        inputs.extend(processor.process(EndOfResponse(**identity)))
+    outputs = _run_farsi_inputs(handler, inputs)
+    assert conversions == ["اول", "خراب", "بعدی"]
+    assert attempts == ["salAm", "bad", "bad", "salAm"]
+    failures = [item for item in outputs if isinstance(item, ResponseFailedEvent)]
+    assert len(failures) == 1
+    assert failures[0].response_key == "failed"
+    assert not handler._failed_responses
+
+    service = RealtimeService(text_prompt_queue=Queue(), should_listen=Event())
+    conn_id = service.register()
+    events = []
+    try:
+        for item in outputs:
+            if isinstance(item, PipelineEvent):
+                events.extend(service.dispatch_pipeline_event(conn_id, item))
+            elif isinstance(item, AudioOutput):
+                if isinstance(item.audio, bytes) and item.audio == AUDIO_RESPONSE_DONE:
+                    events.extend(service.finish_response(conn_id, response_key=item.response_key))
+                else:
+                    events.extend(service.encode_audio_chunk(conn_id, item.audio.tobytes(), item.response_key))
+        terminals = [event for event in events if event.type == "response.done"]
+        assert [event.response.status for event in terminals] == ["failed", "completed"]
+        for terminal in terminals:
+            audio = [
+                event
+                for event in events
+                if event.type.startswith("response.output_audio.") and event.response_id == terminal.response.id
+            ]
+            assert any(event.type == "response.output_audio.delta" for event in audio)
+            assert sum(event.type == "response.output_audio.done" for event in audio) == 1
+            assert audio[-1].type == "response.output_audio.done"
+    finally:
+        service.unregister(conn_id)
+
+
+@pytest.mark.parametrize("cleanup", ["terminal", "session"])
+def test_farsi_failed_response_tracking_clears_on_matching_terminal_or_session_end(cleanup):
+    from queue import Queue
+
+    from speech_to_speech.pipeline.control import SESSION_END
+    from speech_to_speech.pipeline.messages import EndOfResponse, TTSInput
+
+    handler, calls = _farsi_handler()
+    handler.queue_out = Queue()
+
+    def failed_g2p(text):
+        raise ValueError("G2P failed")
+
+    handler.phonemizer = failed_g2p
+    identity = dict(response_key="failed", turn_id="turn-1", turn_revision=1, cancel_generation=0)
+    tts_input = TTSInput(text="سلام", **identity)
+    assert list(handler.process(tts_input)) == []
+    handler.phonemizer = lambda text: "salAm"
+    # An unrelated terminal must not release this failed response.
+    list(handler.process(EndOfResponse(response_key="other", cancel_generation=0)))
+    assert list(handler.process(tts_input)) == []
+    assert not calls
+    terminal = EndOfResponse(**identity)
+    reset = terminal if cleanup == "terminal" else SESSION_END
+    outputs = _run_farsi_inputs(handler, [reset, tts_input, terminal])
+    assert len(calls) == 1
+    assert any(hasattr(output, "audio") and hasattr(output.audio, "dtype") for output in outputs)
+    assert not handler._failed_responses
+
+
+@pytest.mark.parametrize(
+    "other_identity",
+    [
+        {"response_key": "other"},
+        {"turn_id": "turn-2"},
+        {"turn_revision": 2},
+        {"cancel_generation": 1},
+    ],
+)
+def test_farsi_failure_does_not_block_a_different_response_identity(other_identity):
+    from queue import Queue
+
+    from speech_to_speech.pipeline.messages import TTSInput
+
+    handler, calls = _farsi_handler()
+    handler.queue_out = Queue()
+
+    def failed_g2p(text):
+        raise ValueError("G2P failed")
+
+    identity = dict(response_key="failed", turn_id="turn-1", turn_revision=1, cancel_generation=0)
+    handler.phonemizer = failed_g2p
+    assert list(handler.process(TTSInput(text="سلام", **identity))) == []
+    handler.phonemizer = lambda text: "salAm"
+    assert list(handler.process(TTSInput(text="سلام", **(identity | other_identity))))
+    assert len(calls) == 1
+    assert list(handler.process(TTSInput(text="سلام", **identity))) == []
+    assert len(calls) == 1

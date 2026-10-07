@@ -67,6 +67,7 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.should_listen = should_listen
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
+        self._failed_responses: set[tuple[int | None, str | None, str | None, int | None]] = set()
         self.device = resolve_device(device, TORCH_DEVICES, "Pocket TTS")
         self.voice = voice
         self.language = language
@@ -273,6 +274,7 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         speculative_turns = getattr(self, "speculative_turns", None)
         if isinstance(tts_input, EndOfResponse):
+            self._failed_responses.discard(self._response_identity(tts_input))
             if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
                 tts_input.turn_id,
                 tts_input.turn_revision,
@@ -288,6 +290,8 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
             tts_input.turn_revision,
         ):
             logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
+            return
+        if self._response_identity(tts_input) in self._failed_responses:
             return
         if speculative_turns:
             speculative_turns.commit(tts_input.turn_id, tts_input.turn_revision)
@@ -312,6 +316,7 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
             if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
                 logger.info("TTS generation cancelled (interruption)")
                 return
+            self._failed_responses.add(self._response_identity(tts_input))
             logger.exception("Pocket TTS Farsi synthesis failed")
             self.queue_out.put(
                 cast(
@@ -325,6 +330,13 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     ),
                 )
             )
+
+    @staticmethod
+    def _response_identity(message: TTSIn) -> tuple[int | None, str | None, str | None, int | None]:
+        return (message.cancel_generation, message.response_key, message.turn_id, message.turn_revision)
+
+    def on_session_end(self) -> None:
+        self._failed_responses.clear()
 
     def _stream_pcm(self, text: str, gen: int | None) -> Iterator[TTSOut]:
         pipeline_start = perf_counter()
