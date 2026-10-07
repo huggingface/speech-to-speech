@@ -79,12 +79,28 @@ from speech_to_speech.pipeline.events import (
 )
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
 from speech_to_speech.pipeline.queue_types import TextPromptItem
-from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnPhase
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnGateAction, TurnPhase
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
 from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
+
+# Speculative turn work that stops being relevant once its turn is superseded.
+_TURN_INPUT_EVENTS = (
+    PartialTranscriptionEvent,
+    TranscriptionCompletedEvent,
+    TranscriptionFailedEvent,
+    AudioInputCompletedEvent,
+)
+# Assistant output additionally waits for resumed speech and the reopen grace.
+_TURN_OUTPUT_EVENTS = (
+    AssistantOutputEvent,
+    AssistantResponseDoneEvent,
+    AssistantToolCallReadyEvent,
+    ResponseGenerationDoneEvent,
+    ResponseFailedEvent,
+)
 
 PIPELINE_SAMPLE_RATE = 16000
 CHUNK_SAMPLES = 512
@@ -596,39 +612,24 @@ class RealtimeService:
             return []
         return handler(conn_id, event)
 
+    def is_turn_output_held(self, event: object) -> bool:
+        """Whether assistant output must wait for its speculative turn to settle.
+
+        The send loop keeps a held event queued and retries it, so checking
+        resumed speech and the reopen grace never blocks the event loop.
+        """
+        if self.speculative_turns is None or not isinstance(event, _TURN_OUTPUT_EVENTS):
+            return False
+        decision = self.speculative_turns.gate(event.turn_id, event.turn_revision)
+        return decision.action is TurnGateAction.HOLD
+
     def _is_stale_turn_event(self, event: PipelineEvent) -> bool:
-        if self.speculative_turns is None:
+        if self.speculative_turns is None or not isinstance(event, (*_TURN_INPUT_EVENTS, *_TURN_OUTPUT_EVENTS)):
             return False
-        if not isinstance(
-            event,
-            (
-                PartialTranscriptionEvent,
-                TranscriptionCompletedEvent,
-                TranscriptionFailedEvent,
-                AudioInputCompletedEvent,
-                AssistantOutputEvent,
-                AssistantResponseDoneEvent,
-                AssistantToolCallReadyEvent,
-                ResponseGenerationDoneEvent,
-                ResponseFailedEvent,
-            ),
-        ):
-            return False
-        turn_id = getattr(event, "turn_id", None)
-        turn_revision = getattr(event, "turn_revision", None)
-        if isinstance(
-            event,
-            (
-                AssistantOutputEvent,
-                AssistantResponseDoneEvent,
-                AssistantToolCallReadyEvent,
-                ResponseGenerationDoneEvent,
-                ResponseFailedEvent,
-            ),
-        ):
-            is_latest = self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)
-            return not is_latest
-        return not self.speculative_turns.is_latest(turn_id, turn_revision)
+        return not self.speculative_turns.is_latest(
+            getattr(event, "turn_id", None),
+            getattr(event, "turn_revision", None),
+        )
 
     def response_input_turn(self, conn_id: str, *, origin_call_ids: set[str] | None = None) -> InputTurnReference:
         """Resolve generation ownership from supplied conversation input.
