@@ -52,7 +52,7 @@ def _stream(items):
     )
 
 
-def _message(content="mixed"):
+def _message_payload(content="mixed"):
     parts = [
         {
             "type": "output_text",
@@ -70,16 +70,18 @@ def _message(content="mixed"):
         },
         {"type": "refusal", "refusal": "Cannot provide that detail."},
     ]
-    return ResponseOutputMessage.model_validate(
-        {
-            "id": "msg_provider",
-            "type": "message",
-            "role": "assistant",
-            "status": "completed",
-            "phase": "commentary",
-            "content": parts if content == "mixed" else parts[1:] if content == "refusal" else [],
-        }
-    )
+    return {
+        "id": "msg_provider",
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "phase": "commentary",
+        "content": parts if content == "mixed" else parts[1:] if content == "refusal" else [],
+    }
+
+
+def _message(content="mixed"):
+    return ResponseOutputMessage.model_validate(_message_payload(content))
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -334,10 +336,19 @@ def test_fast_output_does_not_allow_eviction_before_late_stream_reasoning_commit
 
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("completed_prefix", [False, True])
-def test_out_of_band_snapshot_omits_reasoning_for_unresolved_call(stream, completed_prefix):
+@pytest.mark.parametrize("with_message", [None, "mixed", "empty"])
+def test_out_of_band_snapshot_omits_reasoning_for_unresolved_call(stream, completed_prefix, with_message):
     handler = _make_handler(stream=stream)
     request = _make_request(chat_size=5)
     responses = [_items("1"), _items("2")] if completed_prefix else [_items("2")]
+    if with_message:
+        for items in responses:
+            message = _message(with_message)
+            if items[0].id == "rs_1":
+                message.id = "msg_prefix"
+            items.insert(1, message)
+            if items[0].id == "rs_1":
+                items.append(_message(with_message).model_copy(update={"id": "msg_completed"}))
     responses.append([])
     replies = iter(responses)
     captured = []
@@ -356,9 +367,10 @@ def test_out_of_band_snapshot_omits_reasoning_for_unresolved_call(stream, comple
     request.response = RealtimeResponseCreateParams(conversation="none")
     outputs = list(handler.process(request))
     assert next(item for item in outputs if isinstance(item, EndOfResponse)).error is None
-    assert not any(item.get("id") in {"rs_2", "fc_2"} for item in captured[-1])
+    assert not any(item.get("id") in {"rs_2", "fc_2", "msg_provider"} for item in captured[-1])
     if completed_prefix:
-        assert captured[-1][2:4] == [item.model_dump(exclude_unset=True) for item in _items("1")]
+        completed = [item for item in captured[-1][2:] if item["type"] != "function_call_output"]
+        assert completed == [item.model_dump(exclude_unset=True) for item in responses[0]]
     assert request.runtime_config.chat.buffer == canonical.buffer
 
 
@@ -493,10 +505,10 @@ def test_provider_payload_fields_and_opaque_ids_are_not_normalized():
 @pytest.mark.parametrize("with_message", [False, True])
 def test_pinned_sdk_parses_and_serializes_reasoning_tool_continuation(stream, reverse_done, with_message):
     """Exercise SDK HTTP/SSE handling; no hosted API is contacted."""
-    items = _items()
+    originals = [item.model_dump(exclude_unset=True) for item in _items()]
     if with_message:
-        items.insert(1, _message())
-    originals = [item.model_dump(exclude_unset=True) for item in items]
+        # Start from raw API data so model validation cannot prime SDK serializers.
+        originals.insert(1, _message_payload())
     requests = []
 
     def respond(request):

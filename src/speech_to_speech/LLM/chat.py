@@ -705,11 +705,19 @@ class Chat:
             elif isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id in (
                 self._ordered_pending_call_ids
             ):
-                # A reasoning item can require its following function call.
+                # Reasoning can require its following message/call context.
                 # Gate that prefix with the call, without touching live history
                 # or reasoning from an earlier, completed tool chain.
-                while kept and isinstance(kept[-1], ResponseReasoningItem):
-                    kept.pop()
+                prefix_start = len(kept)
+                reasoning_start = None
+                while prefix_start and isinstance(
+                    kept[prefix_start - 1], (ResponseReasoningItem, ResponsesAssistantMessage)
+                ):
+                    prefix_start -= 1
+                    if isinstance(kept[prefix_start], ResponseReasoningItem):
+                        reasoning_start = prefix_start
+                if reasoning_start is not None:
+                    del kept[reasoning_start:]
                 skipping = True
             if not skipping:
                 kept.append(item)
