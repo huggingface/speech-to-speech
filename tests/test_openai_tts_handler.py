@@ -79,9 +79,9 @@ class _CountingSpeculativeTurnTracker(SpeculativeTurnTracker):
         super().__init__()
         self.commit_calls = 0
 
-    def commit_if_latest_after_reopen_grace(self, turn_id: str | None, revision: int | None) -> bool:
-        self.commit_calls += 1
-        return super().commit_if_latest_after_reopen_grace(turn_id, revision)
+    def wait_for_gate(self, turn_id: str | None, revision: int | None, **kwargs) -> bool:
+        self.commit_calls += kwargs.get("commit", False)
+        return super().wait_for_gate(turn_id, revision, **kwargs)
 
 
 def _reset_fake_speech_operation() -> None:

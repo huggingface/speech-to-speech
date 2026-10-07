@@ -237,7 +237,7 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         """
         speculative_turns = getattr(self, "speculative_turns", None)
         if isinstance(tts_input, EndOfResponse):
-            if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
+            if speculative_turns and not speculative_turns.wait_for_gate(
                 tts_input.turn_id,
                 tts_input.turn_revision,
             ):
@@ -247,14 +247,13 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
             yield AUDIO_RESPONSE_DONE
             return
 
-        if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
+        if speculative_turns and not speculative_turns.wait_for_gate(
             tts_input.turn_id,
             tts_input.turn_revision,
+            commit=True,
         ):
             logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
             return
-        if speculative_turns:
-            speculative_turns.commit(tts_input.turn_id, tts_input.turn_revision)
 
         runtime_config = tts_input.runtime_config
         response = tts_input.response
@@ -292,6 +291,20 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         else:
             yield from self._process_kokoro(text, language_code)
 
+    def _lang_and_voice_for(self, language_code: str) -> tuple[str, str]:
+        """Pick the Kokoro language and voice for a reply in ``language_code``.
+
+        The English entries in the map point at British English, so an American
+        English setup keeps its own variant. Returning to the setup language
+        restores the configured voice instead of that language's default voice.
+        """
+        new_lang_code = WHISPER_LANGUAGE_TO_KOKORO_LANG.get(language_code, self.lang_code)
+        if new_lang_code == "b" and self._initial_lang_code in ("a", "b"):
+            new_lang_code = self._initial_lang_code
+        if new_lang_code == self._initial_lang_code:
+            return new_lang_code, self._initial_voice
+        return new_lang_code, KOKORO_LANG_DEFAULT_VOICES.get(new_lang_code, self.voice)
+
     def _process_mlx(self, llm_sentence: str, language_code: Optional[str] = None) -> Iterator[np.ndarray]:
         """Process using MLX backend with Apple Silicon optimizations."""
         from scipy.signal import resample_poly
@@ -299,9 +312,8 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         gen = self.cancel_scope.generation if self.cancel_scope else None
         with MLXLockContext(handler_name="KokoroTTS", timeout=10.0):
             if language_code is not None:
-                new_lang_code = WHISPER_LANGUAGE_TO_KOKORO_LANG.get(language_code, self.lang_code)
+                new_lang_code, new_voice = self._lang_and_voice_for(language_code)
                 if new_lang_code != self.lang_code:
-                    new_voice = KOKORO_LANG_DEFAULT_VOICES.get(new_lang_code, self.voice)
                     logger.info(
                         f"Language change detected: {self.lang_code} -> {new_lang_code}, voice: {self.voice} -> {new_voice}"
                     )
@@ -371,9 +383,8 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
         if language_code is not None:
-            new_lang_code = WHISPER_LANGUAGE_TO_KOKORO_LANG.get(language_code, self.lang_code)
+            new_lang_code, new_voice = self._lang_and_voice_for(language_code)
             if new_lang_code != self.lang_code:
-                new_voice = KOKORO_LANG_DEFAULT_VOICES.get(new_lang_code, self.voice)
                 logger.info(
                     f"Language change detected: {self.lang_code} -> {new_lang_code}, voice: {self.voice} -> {new_voice}"
                 )
