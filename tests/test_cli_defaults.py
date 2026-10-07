@@ -436,6 +436,11 @@ def test_packaged_audio_clients_have_no_general_playback_buffer_default():
     assert LocalAudioArguments().local_audio_playback_buffer_ms is None
 
 
+def test_talk_accepts_echo_cancellation_opt_in():
+    assert parse_talk_arguments([]).echo_cancellation is False
+    assert parse_talk_arguments(["--echo-cancellation"]).echo_cancellation is True
+
+
 @pytest.mark.parametrize("flag", ["--log-transcripts", "--log_transcripts"])
 def test_talk_accepts_transcript_logging_opt_in(flag):
     assert parse_talk_arguments([]).log_transcripts is False
@@ -503,7 +508,7 @@ def test_serve_rejects_local_audio_flags():
 
 def test_local_accepts_audio_flags_but_rejects_host():
     args = parse_arguments(
-        ["--port", "9876", "--local_audio_input_device", "2", "--playback-buffer-ms", "240"],
+        ["--port", "9876", "--local_audio_input_device", "2", "--playback-buffer-ms", "240", "--echo-cancellation"],
         command="local",
     )
 
@@ -511,6 +516,7 @@ def test_local_accepts_audio_flags_but_rejects_host():
     assert args.realtime_server_kwargs.port == 9876
     assert args.local_audio_kwargs.local_audio_input_device == 2
     assert args.local_audio_kwargs.local_audio_playback_buffer_ms == 240
+    assert args.local_audio_kwargs.local_audio_echo_cancellation is True
     with pytest.raises(ValueError, match="--host"):
         parse_arguments(["--host", "0.0.0.0"], command="local")
 

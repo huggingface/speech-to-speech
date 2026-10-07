@@ -68,6 +68,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+aec = [
+    "livekit>=1.0.0",
+]
 chattts = [
     "ChatTTS>=0.2.1",
 ]
@@ -126,6 +129,7 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "aiortc>=1.9.0",
+    "livekit>=1.0.0",
 ]
 
 [tool.pytest.ini_options]

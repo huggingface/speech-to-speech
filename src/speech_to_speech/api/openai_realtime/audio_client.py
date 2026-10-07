@@ -27,6 +27,7 @@ from jsonschema import SchemaError, ValidationError
 from jsonschema.validators import validator_for
 from openai import AsyncOpenAI
 
+from speech_to_speech.api.openai_realtime.echo_canceller import EchoCanceller
 from speech_to_speech.pipeline.transcript_logging import log_exception
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ class RealtimeAudioClientConfig:
     voice: Optional[str] = None
     print_json: bool = False
     block_mic_during_playback: bool = False
+    echo_cancellation: bool = False
     log_transcripts: bool = False
     connection_retry_timeout_s: float = 30.0
     tools: list[dict[str, Any]] = field(default_factory=list)
@@ -869,19 +871,27 @@ async def _run_audio_session(
     playback = PlaybackBuffer(config.recv_rate, startup_buffer_ms=config.playback_buffer_ms)
     renderer = _FriendlyEventRenderer()
     tool_calls = _ToolCallCoordinator(conn, config)
+    echo_canceller = EchoCanceller(config.send_rate, config.recv_rate) if config.echo_cancellation else None
 
-    def callback_recv(outdata: Any, _frames: int, _time_info: Any, status: Any) -> None:
+    def callback_recv(outdata: Any, _frames: int, time_info: Any, status: Any) -> None:
         if status:
             logger.warning("Speaker status: %s", status)
         playback.write(outdata)
+        if echo_canceller is not None:
+            echo_canceller.render(bytes(outdata), time_info.outputBufferDacTime - time_info.currentTime)
 
-    def callback_send(indata: Any, _frames: int, _time_info: Any, status: Any) -> None:
+    def callback_send(indata: Any, _frames: int, time_info: Any, status: Any) -> None:
         if status:
             logger.warning("Microphone status: %s", status)
         if config.block_mic_during_playback and playback.is_active():
             return
+        chunk = bytes(indata)
+        if echo_canceller is not None:
+            chunk = echo_canceller.capture(chunk, time_info.currentTime - time_info.inputBufferAdcTime)
+            if not chunk:
+                return
         try:
-            mic_queue.put_nowait(bytes(indata))
+            mic_queue.put_nowait(chunk)
         except Full:
             logger.debug("Dropping local microphone chunk because the send queue is full")
 

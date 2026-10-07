@@ -22,6 +22,7 @@ from speech_to_speech.api.openai_realtime.audio_client import (
     normalize_realtime_url,
     run_realtime_audio_client,
 )
+from speech_to_speech.api.openai_realtime.echo_canceller import EchoCanceller
 
 TOOL_DEFINITION = {
     "type": "function",
@@ -265,6 +266,35 @@ def test_playback_buffer_starts_immediately_by_default():
 
     assert callback == b"\x04" * 100
     assert playback.buffered_bytes == 0
+
+
+def test_echo_canceller_removes_played_audio_from_microphone_blocks():
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("livekit.rtc")
+    rate, block = 16000, 1024  # the client's default chunk is not a whole number of 10 ms frames
+    rng = np.random.default_rng(0)
+    samples = rate * 3
+    envelope = 0.5 + 0.5 * np.sin(2 * np.pi * 4 * np.arange(samples) / rate)
+    played = (rng.standard_normal(samples) * envelope * 3000).astype(np.int16)
+    echo = np.zeros(samples, dtype=np.int16)
+    echo[320:] = (played[:-320] * 0.3).astype(np.int16)  # 20 ms later and quieter, like a laptop speaker
+
+    canceller = EchoCanceller(rate, rate)
+    cleaned = bytearray()
+    for start in range(0, samples, block):
+        canceller.render(played[start : start + block].tobytes(), output_delay_s=0.01)
+        cleaned += canceller.capture(echo[start : start + block].tobytes(), input_delay_s=0.01)
+
+    assert len(cleaned) == samples // 160 * 160 * 2
+    last_second = slice(2 * rate, 3 * rate)
+    output = np.frombuffer(bytes(cleaned), dtype=np.int16)[last_second].astype(float)
+    reduction_db = 10 * np.log10(np.mean(echo[last_second].astype(float) ** 2) / (np.mean(output**2) + 1e-9))
+    assert reduction_db > 30
+
+
+def test_echo_canceller_rejects_unsupported_rates():
+    with pytest.raises(ValueError, match="22050 Hz"):
+        EchoCanceller(22050, 16000)
 
 
 @pytest.mark.parametrize("buffer_ms", [-1, float("inf"), float("nan")])
