@@ -502,6 +502,91 @@ def test_provider_payload_fields_and_opaque_ids_are_not_normalized():
 
 
 @pytest.mark.parametrize("stream, reverse_done", [(False, False), (True, False), (True, True)])
+def test_pinned_sdk_pending_snapshot_preserves_previous_completed_response(stream, reverse_done):
+    """A completed answer without a tool must survive a later pending response."""
+    first = [_items("A")[0].model_dump(exclude_unset=True), {**_message_payload(), "id": "msg_A"}]
+    reasoning, call = _items("B")
+    pending = [
+        reasoning.model_dump(exclude_unset=True),
+        {**_message_payload(), "id": "msg_B"},
+        call.model_dump(exclude_unset=True),
+    ]
+    requests = []
+
+    def respond(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        output = first if len(requests) == 1 else pending if len(requests) == 2 else []
+        response = {
+            "id": f"resp_{len(requests)}",
+            "object": "response",
+            "created_at": 0,
+            "model": "test-model",
+            "status": "completed",
+            "output": output,
+            "error": None,
+            "incomplete_details": None,
+            "instructions": None,
+            "metadata": {},
+            "parallel_tool_calls": True,
+            "temperature": 1,
+            "tool_choice": "auto",
+            "tools": [],
+            "top_p": 1,
+            "usage": None,
+        }
+        if not stream:
+            return httpx.Response(200, json=response)
+        indexes = list(range(len(output)))
+        if reverse_done:
+            indexes.reverse()
+        events = [
+            {
+                "type": "response.output_item.done",
+                "sequence_number": sequence,
+                "output_index": index,
+                "item": output[index],
+            }
+            for sequence, index in enumerate(indexes)
+        ]
+        events.append({"type": "response.completed", "sequence_number": len(events), "response": response})
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content="".join(f"data: {json.dumps(event)}\n\n" for event in events),
+        )
+
+    handler = _make_handler(stream=stream)
+    request = _make_request(chat_size=5)
+    chat = request.runtime_config.chat
+    with OpenAI(api_key="test", http_client=httpx.Client(transport=httpx.MockTransport(respond))) as client:
+        handler.client = client
+        for key in ["response-A", "response-B"]:
+            request.response_key = key
+            outputs = list(handler.process(request))
+            assert next(item for item in outputs if isinstance(item, EndOfResponse)).error is None
+            chat.finalize_provisional_generation(key)
+        assert requests[1]["input"][2:] == first
+        local_call = next(item for item in chat.buffer if isinstance(item, ResponsesFunctionCall))
+        assert local_call.call_id.startswith("call_") and local_call.call_id != "call_B"
+        canonical = chat.copy(deep=True)
+        request.response_key = "snapshot"
+        request.response = RealtimeResponseCreateParams(conversation="none")
+        outputs = list(handler.process(request))
+        assert next(item for item in outputs if isinstance(item, EndOfResponse)).error is None
+        assert requests[2]["input"][2:] == first
+        assert chat.buffer == canonical.buffer
+        _finish(chat, "call_B")
+        request.response_key = "continuation"
+        request.response = None
+        outputs = list(handler.process(request))
+        assert next(item for item in outputs if isinstance(item, EndOfResponse)).error is None
+        assert requests[3]["input"][2:-1] == first + pending
+        assert requests[3]["input"][-1]["call_id"] == "call_B"
+    assert len(requests) == 4
+
+
+@pytest.mark.parametrize("stream, reverse_done", [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize("with_message", [False, True])
 def test_pinned_sdk_parses_and_serializes_reasoning_tool_continuation(stream, reverse_done, with_message):
     """Exercise SDK HTTP/SSE handling; no hosted API is contacted."""

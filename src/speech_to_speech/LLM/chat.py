@@ -113,7 +113,7 @@ HistoryCleanupSnapshot = tuple[
     RealtimeConversationItemSystemMessage | None,
     list[SupportedItem],
     dict[str, RealtimeConversationItemFunctionCall],
-    set[str],
+    dict[str, set[str]],
     int,
     CompactFn | None,
 ]
@@ -149,8 +149,10 @@ class Chat:
         self._pending_tool_calls: dict[str, RealtimeConversationItemFunctionCall] = {}
         # Local models can emit text after a tool call in the same response.
         # Those calls stay in their emitted buffer position, but serializers
-        # omit them until a function_call_output pairs the call.
-        self._ordered_pending_call_ids: set[str] = set()
+        # omit them until a function_call_output pairs the call. Retain each
+        # response's tracked item IDs with its pending calls so prefix gating
+        # cannot cross into an earlier completed response after finalization.
+        self._ordered_pending_calls: dict[str, set[str]] = {}
         # Assistant output is written eagerly when a tool call is exposed to a
         # realtime client. Keep the exact provisional IDs keyed by response so
         # cancellation can roll them back before accepting deferred client items.
@@ -278,14 +280,14 @@ class Chat:
         if self._has_call_id_in_buffer(call_id):
             self._pending_tool_calls.pop(call_id, None)
             self._mark_call_completed(call_id, output_item.status)
-            self._ordered_pending_call_ids.discard(call_id)
+            self._ordered_pending_calls.pop(call_id, None)
             self.buffer.append(output_item)
             return
 
         if call_id in self._pending_tool_calls:
             logger.info("Re-injecting evicted function_call for call_id=%s", call_id)
             fc = self._pending_tool_calls.pop(call_id)
-            self._ordered_pending_call_ids.discard(call_id)
+            self._ordered_pending_calls.pop(call_id, None)
             fc.status = "completed" if output_item.status is None else output_item.status
             self.buffer.append(fc)
             self.buffer.append(output_item)
@@ -383,7 +385,7 @@ class Chat:
             assert item.call_id is not None
             if ordered_function_call:
                 self._place_locked(item, insert_at)
-                self._ordered_pending_call_ids.add(item.call_id)
+                self._ordered_pending_calls.setdefault(item.call_id, set())
             self._pending_tool_calls[item.call_id] = item
             logger.debug("Added function_call to chat (call_id=%s)", item.call_id)
 
@@ -551,7 +553,7 @@ class Chat:
                 return None
             buffer_before = list(self.buffer)
             pending_calls_before = dict(self._pending_tool_calls)
-            ordered_calls_before = set(self._ordered_pending_call_ids)
+            ordered_calls_before = deepcopy(self._ordered_pending_calls)
             user_turn_count_before = self._user_turn_count
             recorded_items: list[SupportedItem] = []
             item_ids: set[str] = set()
@@ -594,7 +596,7 @@ class Chat:
             except Exception:
                 self.buffer = buffer_before
                 self._pending_tool_calls = pending_calls_before
-                self._ordered_pending_call_ids = ordered_calls_before
+                self._ordered_pending_calls = ordered_calls_before
                 self._user_turn_count = user_turn_count_before
                 raise
             tracked_item_ids, tracked_call_ids = self._provisional_generations.setdefault(
@@ -603,6 +605,10 @@ class Chat:
             )
             tracked_item_ids.update(item_ids)
             tracked_call_ids.update(call_ids)
+            for call_id in tracked_call_ids:
+                context = self._ordered_pending_calls.get(call_id)
+                if context is not None:
+                    context.update(tracked_item_ids)
             if committed_item_ids:
                 tracked_item_ids.difference_update(committed_item_ids)
             return recorded_items
@@ -651,7 +657,7 @@ class Chat:
         self.buffer = kept
         for call_id in call_ids:
             self._pending_tool_calls.pop(call_id, None)
-            self._ordered_pending_call_ids.discard(call_id)
+            self._ordered_pending_calls.pop(call_id, None)
         self._user_turn_count = sum(isinstance(item, RealtimeConversationItemUserMessage) for item in self.buffer)
         logger.debug("Rolled back failed generation output for user message %s", user_message_id)
 
@@ -703,15 +709,18 @@ class Chat:
             if isinstance(item, RealtimeConversationItemUserMessage):
                 skipping = False
             elif isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id in (
-                self._ordered_pending_call_ids
+                self._ordered_pending_calls
             ):
                 # Reasoning can require its following message/call context.
                 # Gate that prefix with the call, without touching live history
-                # or reasoning from an earlier, completed tool chain.
+                # or any earlier completed response, even without a tool.
+                response_item_ids = self._ordered_pending_calls[item.call_id]
                 prefix_start = len(kept)
                 reasoning_start = None
-                while prefix_start and isinstance(
-                    kept[prefix_start - 1], (ResponseReasoningItem, ResponsesAssistantMessage)
+                while (
+                    prefix_start
+                    and kept[prefix_start - 1].id in response_item_ids
+                    and isinstance(kept[prefix_start - 1], (ResponseReasoningItem, ResponsesAssistantMessage))
                 ):
                     prefix_start -= 1
                     if isinstance(kept[prefix_start], ResponseReasoningItem):
@@ -928,7 +937,7 @@ class Chat:
                 self.init_chat_message,
                 list(self.buffer),
                 dict(self._pending_tool_calls),
-                set(self._ordered_pending_call_ids),
+                {call_id: set(item_ids) for call_id, item_ids in self._ordered_pending_calls.items()},
                 self._user_turn_count,
             )
             if deep:
@@ -937,7 +946,7 @@ class Chat:
                 clone.init_chat_message,
                 clone.buffer,
                 clone._pending_tool_calls,
-                clone._ordered_pending_call_ids,
+                clone._ordered_pending_calls,
                 clone._user_turn_count,
             ) = state
             return clone
@@ -950,7 +959,7 @@ class Chat:
                     self.init_chat_message,
                     self.buffer,
                     self._pending_tool_calls,
-                    self._ordered_pending_call_ids,
+                    self._ordered_pending_calls,
                     self._user_turn_count,
                 )
             )
@@ -970,7 +979,7 @@ class Chat:
                 self.init_chat_message,
                 self.buffer,
                 self._pending_tool_calls,
-                self._ordered_pending_call_ids,
+                self._ordered_pending_calls,
                 self._user_turn_count,
                 self._deferred_compactor,
             ) = snapshot
@@ -983,14 +992,14 @@ class Chat:
                 clone.init_chat_message,
                 clone.buffer,
                 clone._pending_tool_calls,
-                clone._ordered_pending_call_ids,
+                clone._ordered_pending_calls,
                 clone._user_turn_count,
             ) = deepcopy(
                 (
                     self.init_chat_message,
                     self.buffer,
                     self._pending_tool_calls,
-                    self._ordered_pending_call_ids,
+                    self._ordered_pending_calls,
                     self._user_turn_count,
                 )
             )
@@ -1008,7 +1017,7 @@ class Chat:
             self.buffer = []
             self.init_chat_message = None
             self._pending_tool_calls = {}
-            self._ordered_pending_call_ids = set()
+            self._ordered_pending_calls = {}
             self._provisional_generations = {}
             self._cancelled_provisional_generations = {}
             self._deferred_compactor = None
