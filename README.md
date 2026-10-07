@@ -52,7 +52,7 @@ pip install speech-to-speech
 
 Run the configuration you chose with this environment activated. Activate the same environment in any additional terminal where you run `speech-to-speech`. The first run downloads and warms up the models before connecting the microphone. Allow microphone access if prompted, use headphones to avoid speaker feedback, then speak and pause for a reply. Stop with `Ctrl+C`.
 
-If speaker feedback interrupts replies, add `--local_audio_block_mic_during_playback` to your `speech-to-speech local` command. This pauses microphone capture during playback, so you cannot interrupt the assistant while it speaks.
+If speaker feedback interrupts replies, install the `aec` extra with `pip install "speech-to-speech[aec]"` and add `--echo-cancellation` to your `speech-to-speech local` or `talk` command. The client then removes its own playback from the microphone, so you can still interrupt the assistant by voice. Without the extra, `--local_audio_block_mic_during_playback` pauses microphone capture during playback instead, but you cannot interrupt the assistant while it speaks.
 
 ### Apple Silicon, fully local
 
@@ -198,6 +198,7 @@ pip install "speech-to-speech[paraformer]"      # Paraformer STT through FunASR
 pip install "speech-to-speech[fireredvad]"      # FireRed streaming VAD
 pip install "speech-to-speech[nemo]"            # Parakeet Unified, Nemotron, and Orukeet STT through NeMo
 pip install "speech-to-speech[mlx-lm]"          # mlx-vlm support for vision models on macOS
+pip install "speech-to-speech[aec]"             # Echo cancellation for the packaged mic/speaker client
 ```
 
 Deprecated implementations, including MeloTTS, live in [`archive/`](./archive) and are no longer wired into the CLI.
