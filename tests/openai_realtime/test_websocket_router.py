@@ -913,7 +913,9 @@ class TestSendLoop:
                 requests = []
                 tracker.start_turn()
                 for revision in (0, 1):
-                    tracker.observe("turn_1", revision)
+                    if revision:
+                        assert tracker.begin_reopen_candidate("turn_1", 0) == revision
+                        assert tracker.confirm_reopen_candidate("turn_1", 0, revision)
                     service.dispatch_pipeline_event(
                         conn_id,
                         SpeechStartedEvent(
@@ -1643,7 +1645,7 @@ class TestDrainRelease:
         q: Queue = Queue()
         failure_event = TranscriptionFailedEvent(
             message="transcription request timed out",
-            turn_id="turn-1",
+            turn_id="turn_1",
             turn_revision=0,
         )
         q.put(AssistantOutputEvent(text="stale"))

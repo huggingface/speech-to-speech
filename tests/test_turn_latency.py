@@ -140,7 +140,7 @@ def test_configured_grace_is_not_reported_as_wait_without_a_gate(monkeypatch) ->
     turns = SpeculativeTurnTracker()
     turns._condition = ControlledCondition()
     turns.wait_observer = store.record_smart_wait
-    turns.observe("turn_1", 0)
+    turns.start_turn()
     turns.start_reopen_grace("turn_1", 0, 2.0)
 
     clock[0] = 3.0

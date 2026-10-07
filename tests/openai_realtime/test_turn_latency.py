@@ -213,7 +213,8 @@ def test_stale_final_stt_discards_only_superseded_revision(
     if not stt_finishes_after_reopen:
         stale = final_stt_event("turn_1", 0, "Old transcript")
 
-    service.speculative_turns.observe("turn_1", 1)
+    assert service.speculative_turns.begin_reopen_candidate("turn_1", 0) == 1
+    assert service.speculative_turns.confirm_reopen_candidate("turn_1", 0, 1)
     service.dispatch_pipeline_event(
         conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True, interrupt_response=False)
     )
@@ -272,7 +273,8 @@ def test_stt_worker_discards_latency_when_revision_changes_during_inference(serv
         if len(inference_calls) == 1:
             # Reopening while the model runs makes the final output stale at
             # the worker's output gate, before the notifier/service sees it.
-            speculative_turns.observe("turn_1", 1)
+            assert speculative_turns.begin_reopen_candidate("turn_1", 0) == 1
+            assert speculative_turns.confirm_reopen_candidate("turn_1", 0, 1)
             return "Superseded transcript"
         return "Current transcript"
 

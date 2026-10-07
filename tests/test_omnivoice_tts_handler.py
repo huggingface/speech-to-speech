@@ -287,7 +287,7 @@ def test_process_stops_emitting_blocks_after_cancellation() -> None:
 
 def test_stale_keyed_terminal_becomes_cleanup_after_lm_tts_handoff() -> None:
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     handler = OmniVoiceTTSHandler.__new__(OmniVoiceTTSHandler)
     handler.speculative_turns = tracker
     terminal = EndOfResponse(
@@ -296,7 +296,8 @@ def test_stale_keyed_terminal_becomes_cleanup_after_lm_tts_handoff() -> None:
         turn_revision=0,
         cancel_generation=7,
     )
-    tracker.observe("turn_1", 1)
+    assert tracker.begin_reopen_candidate("turn_1", 0) == 1
+    assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
 
     outputs = list(handler.process(terminal))
     queued = handler.output_for_queue(outputs[0], terminal)

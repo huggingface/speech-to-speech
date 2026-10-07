@@ -26,7 +26,7 @@ def _notifier(
 
 def test_audio_input_notifier_uses_per_endpoint_processing_delay():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     notifier = _notifier(speculative_turns=tracker)
     item = VADAudio(
         audio=np.zeros(1600, dtype=np.float32),
@@ -57,7 +57,9 @@ def test_audio_input_notifier_ignores_progressive_audio():
 
 def test_audio_input_notifier_discards_stale_pending_vad_measurement():
     revisions = SpeculativeTurnTracker()
-    revisions.observe("turn_1", 1)
+    revisions.start_turn()
+    assert revisions.begin_reopen_candidate("turn_1", 0) == 1
+    assert revisions.confirm_reopen_candidate("turn_1", 0, 1)
     notifier = _notifier(speculative_turns=revisions)
     store = TurnLatencyStore()
     notifier.turn_latency_store = store

@@ -161,7 +161,7 @@ def _drive(
         session.tool_choice = tool_choice
     rc = RuntimeConfig(chat=chat, session=session)
     req = GenerateResponseRequest(
-        runtime_config=rc, response=response, language_code="de", turn_id="t", turn_revision=0
+        runtime_config=rc, response=response, language_code="de", turn_id="turn_1", turn_revision=0
     )
     text, tools_out, usage, end = "", [], None, None
     for out in handler.process(req):
@@ -951,12 +951,13 @@ def test_cancelled_provider_failure_does_not_emit_fallback():
 
 def test_stale_provider_failure_does_not_emit_fallback():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("t", 0)
+    tracker.start_turn()
     h = _make_handler(stream=True)
     h.speculative_turns = tracker
 
     def fail(**kwargs):
-        tracker.observe("t", 1)
+        assert tracker.begin_reopen_candidate("turn_1", 0) == 1
+        assert tracker.confirm_reopen_candidate("turn_1", 0, 1)
         raise RuntimeError("stale request failed")
 
     h.client.chat.completions.create = fail
