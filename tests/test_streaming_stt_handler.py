@@ -310,7 +310,7 @@ def test_streaming_vad_gates_idle_audio_and_keeps_partials_and_interruptions(
             assert committed_audio[turn_index] == prefix + b"".join(speech + trailing)
             # Assistant output commits the previous turn. Continued microphone
             # capture must still detect the next user's interruption.
-            vad.speculative_turns.commit(turn_id, 0)
+            vad.speculative_turns.wait_for_gate(turn_id, 0, commit=True)
             vad.text_output_queue.get_nowait()  # speech_stopped
 
         assert len(committed_audio) == 2
