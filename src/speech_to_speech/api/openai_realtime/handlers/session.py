@@ -156,15 +156,21 @@ class SessionHandler(RealtimeBaseHandler):
     def _validate_routed_settings(previous: RuntimeConfig, candidate: RuntimeConfig) -> None:
         assert previous.routing is not None and candidate.routing is not None
         old, new = previous.routing.routes.llm, candidate.routing.routes.llm
+        caps = new.capabilities
+        # A speech-only switch can also introduce new LLM requirements.
+        # Keep unchanged settings valid when the existing route lacks metadata.
+        if (
+            candidate.session.tools
+            and not caps.tools
+            and (new != old or candidate.session.tools != previous.session.tools)
+        ):
+            raise ValueError("The selected LLM does not support the session's tools.")
         if new == old:
             return
-        caps = new.capabilities
         if caps.context_window is None or caps.continuation != "full_context":
             raise ValueError("The selected LLM must declare its context window and support full retained context.")
         if new.protocol != old.protocol or caps.context_window < (old.capabilities.context_window or 0):
             raise ValueError("The destination must use the same protocol and an equal or larger context window.")
-        if candidate.session.tools and not caps.tools:
-            raise ValueError("The selected LLM does not support the session's tools.")
         snapshot = candidate.chat.copy(deep=True)
 
         def validate(value):

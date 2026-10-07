@@ -16,7 +16,7 @@ The internal WebSocket handshake supplies `X-Speech-Session-Routing`:
   "routes": {
     "stt": {"model": "qwen-asr", "provider": "hf", "protocol": "transcriptions"},
     "llm": {"model": "gemma", "provider": "hf", "protocol": "chat_completions"},
-    "tts": {"model": "qwen-tts", "provider": "hf", "protocol": "speech", "voice": "aiden"}
+    "tts": {"model": "qwen-tts", "provider": "hf", "protocol": "speech", "voice": "aiden", "model_family": "qwen3-tts"}
   }
 }
 ```
@@ -107,6 +107,14 @@ envelope to the standard update before forwarding to the private listener:
 
 The envelope accompanies `type`, `event_id` and `session`; it is not a public
 client API. TTS routes also declare a default `voice` and supported `voices`.
+
+For Qwen3-TTS aliases, the proxy must include `"model_family": "qwen3-tts"`
+in each initial or replacement TTS route. This preserves the adapter's existing
+language-name conversion and unsupported-language Auto handling even when the
+alias does not contain `qwen3-tts`. Canonical model names containing that marker
+continue to work without the field. The family is private adapter metadata;
+requests and public acknowledgements still use the selected model alias.
+
 The corresponding `session.updated` or `error` carries the private
 `_session_routing` update ID. The proxy settles the reservation and strips that
 field before forwarding the event. It holds the old/new pool union until this

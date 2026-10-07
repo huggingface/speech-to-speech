@@ -182,15 +182,54 @@ def test_stt_switch_does_not_require_unchanged_llm_capabilities():
     sid = service.register(routing=initial)
     before = service._state(sid).runtime_config
     before.chat.add_item(make_user_message("Remember the blue bicycle."))
+    assert service.handle_session_update(sid, event(tools=[{"type": "function", "name": "look"}])) is None
 
     assert service.handle_session_update(sid, event(models={"stt": "asr-second"}), routing=destination) is None
     after = service._state(sid).runtime_config
     assert after.chat is before.chat
     assert after.routing.routes.llm == initial.routes.llm
+    assert after.session.tools == before.session.tools
     assert service.build_session_updated(sid).session.model_dump()["models"]["stt"] == {
         "model": "asr-second",
         "provider": "other",
     }
+
+
+@pytest.mark.parametrize("supports_tools", [False, True])
+def test_stt_switch_validates_new_tools_against_unchanged_llm(supports_tools):
+    from speech_to_speech.api.openai_realtime.session_routing import TranscriptionRoute
+
+    initial = route(tools=supports_tools)
+    destination = initial.model_copy(
+        update={
+            "routes": initial.routes.model_copy(
+                update={"stt": TranscriptionRoute(model="asr-second", provider="hf", protocol="transcriptions")}
+            )
+        }
+    )
+    service = RealtimeService(text_prompt_queue=Queue(), should_listen=Event())
+    sid = service.register(routing=initial)
+    before = service._state(sid).runtime_config
+    before_session = before.session.model_dump()
+    tools = [{"type": "function", "name": "look", "parameters": {"type": "object", "properties": {}}}]
+
+    error = service.handle_session_update(
+        sid,
+        event(models={"stt": "asr-second"}, tools=tools, instructions="changed"),
+        routing=destination,
+    )
+
+    if supports_tools:
+        assert error is None
+        updated = service.build_session_updated(sid).session.model_dump()
+        assert updated["models"]["stt"]["model"] == "asr-second"
+        assert updated["tools"][0]["name"] == "look"
+        assert updated["instructions"] == "changed"
+    else:
+        assert error is not None
+        assert "does not support the session's tools" in error.error.message
+        assert service._state(sid).runtime_config is before
+        assert before.session.model_dump() == before_session
 
 
 def test_managed_voice_update_fails_before_changing_any_session_setting():

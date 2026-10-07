@@ -37,6 +37,7 @@ class SpeechRoute(Route):
     protocol: Literal["speech"]
     voice: Identity
     voices: list[Identity] = Field(default_factory=list)
+    model_family: Literal["qwen3-tts"] | None = None
 
 
 class SessionRoutes(BaseModel):

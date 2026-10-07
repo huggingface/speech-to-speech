@@ -519,7 +519,9 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         try:
             voice = self._resolve_voice(tts_input.runtime_config, tts_input.response)
             routing = tts_input.runtime_config.routing if tts_input.runtime_config is not None else None
-            model = routing.routes.tts.model if routing is not None else self.model
+            route = routing.routes.tts if routing is not None else None
+            model = route.model if route is not None else self.model
+            is_qwen3_tts = (route is not None and route.model_family == "qwen3-tts") or "qwen3-tts" in model.lower()
             selected = tts_input.selected_language
             use_detected_language = (
                 selected is None
@@ -535,22 +537,18 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 )
                 if (
                     (use_detected_language or selected == "auto")
-                    and "qwen3-tts" in model.lower()
+                    and is_qwen3_tts
                     and language not in QWEN3_TTS_LANGUAGE_CODES
                 ):
                     language = None
-                elif (
-                    selected not in (None, "auto")
-                    and "qwen3-tts" in model.lower()
-                    and language not in QWEN3_TTS_LANGUAGE_CODES
-                ):
+                elif selected not in (None, "auto") and is_qwen3_tts and language not in QWEN3_TTS_LANGUAGE_CODES:
                     # A detected language Qwen3 cannot speak keeps the session language.
                     language = selected
                 if language is None and use_detected_language:
                     language = self.language
-                elif language is None and selected == "auto" and "qwen3-tts" in model.lower():
+                elif language is None and selected == "auto" and is_qwen3_tts:
                     language = "auto"
-                if language is not None and "qwen3-tts" in model.lower():
+                if language is not None and is_qwen3_tts:
                     language = WHISPER_LANGUAGE_TO_LLM_LANGUAGE.get(language, language).title()
                 operation = self._make_operation(
                     text=text,
