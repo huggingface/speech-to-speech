@@ -39,6 +39,16 @@ class LocalAudioArguments:
             "help": "Pause local microphone capture while audio is playing. Disabled by default so barge-in works."
         },
     )
+    local_audio_echo_cancellation: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Remove speaker playback from the local microphone so voice barge-in works on speakers. "
+                "Not needed with headphones or a headset. Requires the 'aec' extra."
+            ),
+            "aliases": ["--echo-cancellation"],
+        },
+    )
     local_audio_print_json: bool = field(
         default=False,
         metadata={"help": "Print raw Realtime events received by the packaged local audio client."},

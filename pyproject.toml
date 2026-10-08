@@ -68,6 +68,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+aec = [
+    "pywebrtc-audio>=0.2.0,<0.3",
+]
 chattts = [
     "ChatTTS>=0.2.1",
 ]
@@ -126,6 +129,7 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "aiortc>=1.9.0",
+    "pywebrtc-audio>=0.2.0,<0.3",
 ]
 
 [tool.pytest.ini_options]
