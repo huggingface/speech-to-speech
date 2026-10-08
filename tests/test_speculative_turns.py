@@ -593,6 +593,23 @@ def test_vad_interruption_uses_active_speech_duration_not_padded_segment():
     assert handler._speech_started_emitted is False
 
 
+def test_vad_detected_speech_blocks_a_route_switch_before_speech_started():
+    iterator = _StaticVADIterator(
+        triggered=True,
+        vad_output=None,
+        buffer_chunks=[torch.zeros(512)],
+        active_speech_samples=512,
+    )
+    handler = _vad_handler_for_iterator(iterator)
+
+    assert list(handler.process(_audio_bytes())) == []
+    assert handler._speech_started_emitted is False
+    assert handler.has_pending_session_work()
+
+    iterator.triggered = False
+    assert not handler.has_pending_session_work()
+
+
 def test_vad_pending_reopen_starts_before_active_speech_threshold():
     chunks = [torch.zeros(512) for _ in range(12)]
     iterator = _StaticVADIterator(
@@ -610,6 +627,7 @@ def test_vad_pending_reopen_starts_before_active_speech_threshold():
     assert list(handler.process(_audio_bytes())) == []
 
     assert tracker._pending_reopen is not None
+    assert handler.has_pending_session_work()
     assert tracker.gate("turn_1", 0, commit=True).action is HOLD
     assert not tracker.is_committed("turn_1", 0)
     assert handler.text_output_queue.empty()
@@ -1134,6 +1152,7 @@ def test_vad_stitches_adjacent_short_segments_before_discarding():
     assert list(handler.process(_audio_bytes())) == []
     assert handler.text_output_queue.empty()
     assert handler._pending_short_segment is not None
+    assert handler.has_pending_session_work()
 
     handler.iterator = _StaticVADIterator(
         triggered=False,
@@ -1150,6 +1169,7 @@ def test_vad_stitches_adjacent_short_segments_before_discarding():
     assert started.interrupt_response is False
     assert isinstance(stopped, SpeechStoppedEvent)
     assert handler._pending_short_segment is None
+    assert not handler.has_pending_session_work()
 
 
 @pytest.mark.parametrize("streaming", [False, True])

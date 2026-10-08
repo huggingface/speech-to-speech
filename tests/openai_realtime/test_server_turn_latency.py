@@ -56,7 +56,9 @@ def test_http_stt_final_request_reaches_response_log_without_progressive_time(se
     monkeypatch.setattr(OpenAICompatibleSTTHandler, "warmup", lambda self: None)
     handler = OpenAICompatibleSTTHandler(Event(), Queue(), Queue(), setup_kwargs={"base_url": "http://fake/v1"})
     handler.turn_latency_store = service.turn_latency_store
-    handler._make_operation = lambda audio: SimpleNamespace(run=lambda cancel_check: HttpTranscriptionResult("hello"))
+    handler._make_operation = lambda audio, **kwargs: SimpleNamespace(
+        run=lambda cancel_check: HttpTranscriptionResult("hello")
+    )
     service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
     progressive = VADAudio(audio=np.zeros(160, dtype=np.float32), mode="progressive", turn_id="turn_1", turn_revision=0)
     handler._run_request(_TranscriptionRequest(progressive, handler._session_generation))

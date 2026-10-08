@@ -1,10 +1,64 @@
+import json
 import sys
 from threading import Event
 from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+from starlette.testclient import TestClient
 
 from speech_to_speech.api.openai_realtime.audio_client import RealtimeAudioClient
 from speech_to_speech.api.openai_realtime.server import RealtimeServer
 from speech_to_speech.s2s_pipeline import build_local_pipeline, build_pipeline, parse_arguments
+
+
+@pytest.mark.parametrize("llm", ["chat-completions", "responses-api"])
+def test_routed_pool_construction_does_not_probe_bootstrap_models(monkeypatch, llm):
+    from speech_to_speech.api.openai_realtime.websocket_router import create_app
+    from speech_to_speech.LLM.base_openai_compatible_language_model import BaseOpenAICompatibleHandler
+    from speech_to_speech.STT.openai_compatible_handler import OpenAICompatibleSTTHandler
+    from speech_to_speech.TTS.openai_compatible_handler import OpenAICompatibleTTSHandler
+
+    args = parse_arguments(["--stt", "openai", "--llm-backend", llm, "--tts", "openai"], command="serve")
+    args.module_kwargs.num_pipelines = 2
+    args.realtime_server_kwargs.session_routing_enabled = True
+    args.llm_backend.config.update(base_url="http://gateway/v1", api_key="test-key")
+    monkeypatch.setattr("speech_to_speech.s2s_pipeline.VADHandler", lambda *a, **kw: SimpleNamespace())
+    probes = []
+    for handler in (OpenAICompatibleSTTHandler, BaseOpenAICompatibleHandler, OpenAICompatibleTTSHandler):
+        probe = Mock(side_effect=RuntimeError("bootstrap model is unavailable"))
+        monkeypatch.setattr(handler, "warmup", probe)
+        probes.append(probe)
+    manager = build_pipeline(args, Event())
+    server = manager.handlers[-1]
+    assert len(server.pool) == 2
+    routes = {
+        "id": "allocated-session",
+        "pipeline": "healthy-alternative",
+        "routes": {
+            "stt": {"model": "healthy-stt", "provider": "test", "protocol": "transcriptions"},
+            "llm": {
+                "model": "healthy-llm",
+                "provider": "test",
+                "protocol": "chat_completions" if llm == "chat-completions" else "responses",
+            },
+            "tts": {"model": "healthy-tts", "provider": "test", "protocol": "speech", "voice": "alloy"},
+        },
+    }
+    with TestClient(create_app(server.pool, server.stop_event, session_routing_enabled=True)) as client:
+        with client.websocket_connect("/v1/realtime", headers={"X-Speech-Session-Routing": json.dumps(routes)}) as ws:
+            event = ws.receive_json()
+            assert event["type"] == "session.created"
+            assert event["session"]["model"] == "healthy-llm"
+    for probe in probes:
+        probe.assert_not_called()
+    # Per-unit routing setup must not mutate the configuration used by legacy builds.
+    assert "warmup_enabled" not in args.stt_backend.config
+    assert "warmup_enabled" not in args.llm_backend.config
+    assert "warmup_enabled" not in args.tts_backend.config
+    args.realtime_server_kwargs.session_routing_enabled = False
+    with pytest.raises(RuntimeError, match="bootstrap model is unavailable"):
+        build_pipeline(args, Event())
 
 
 def _default_args():
