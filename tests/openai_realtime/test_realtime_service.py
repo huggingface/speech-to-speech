@@ -175,7 +175,7 @@ class TestConnectionLifecycle:
         assert evt.session.instructions == "Be concise"
 
     def test_session_language_update_and_auto_reset_are_reported(self, service, conn_id, runtime_config):
-        for requested, expected in (("es", "es"), ("Auto", "auto")):
+        for requested, expected in (("es", "es"), (" EN ", "en"), ("Auto", "auto")):
             update = SessionUpdateEvent.model_validate(
                 {
                     "type": "session.update",
@@ -206,8 +206,8 @@ class TestConnectionLifecycle:
         assert runtime_config.selected_language is None
 
     def test_parakeet_route_rejects_named_session_language(self, service, conn_id, runtime_config):
-        # Parakeet advertises no steerable STT languages to the session handler.
-        service.stt_supported_languages = set()
+        service.stt_supported_languages = {"en", "es"}
+        service.stt_language_hint_supported = False
         update = SessionUpdateEvent.model_validate(
             {
                 "type": "session.update",
@@ -219,15 +219,94 @@ class TestConnectionLifecycle:
 
         assert isinstance(error, RealtimeErrorEvent)
         assert "STT" in error.error.message
+        assert "language hint" in error.error.message
+        assert '"auto"' in error.error.message
+        assert "not supported" not in error.error.message
         assert runtime_config.selected_language is None
 
-    def test_accepted_session_language_is_sent_without_surrounding_space(self, service, conn_id, runtime_config):
+    @pytest.mark.parametrize("backend", ["STT", "TTS"])
+    @pytest.mark.parametrize("supported", [{"en"}, None])
+    def test_unsteerable_language_rejection_preserves_existing_session(
+        self, service, conn_id, runtime_config, backend, supported
+    ):
+        assert (
+            service.handle_session_update(
+                conn_id,
+                SessionUpdateEvent.model_validate(
+                    {
+                        "type": "session.update",
+                        "session": {
+                            "type": "realtime",
+                            "instructions": "Keep this instruction",
+                            "audio": {"input": {"transcription": {"language": "auto"}}},
+                        },
+                    }
+                ),
+            )
+            is None
+        )
+        setattr(service, f"{backend.lower()}_supported_languages", supported)
+        setattr(service, f"{backend.lower()}_language_hint_supported", False)
+        update = SessionUpdateEvent.model_validate(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "realtime",
+                    "instructions": "Must not be applied",
+                    "audio": {"input": {"transcription": {"language": " EN "}}},
+                },
+            }
+        )
+
+        error = service.handle_session_update(conn_id, update)
+
+        assert isinstance(error, RealtimeErrorEvent)
+        assert backend in error.error.message
+        assert "per-session" in error.error.message
+        assert "not supported" not in error.error.message
+        assert runtime_config.selected_language == "auto"
+        assert runtime_config.session.instructions == "Keep this instruction"
+        assert service.build_session_updated(conn_id).session.audio.input.transcription.language == "auto"
+
+    @pytest.mark.parametrize("backend", ["STT", "TTS"])
+    def test_unsupported_language_takes_precedence_over_unsteerable_backend(self, service, conn_id, backend):
+        setattr(service, f"{backend.lower()}_supported_languages", {"en"})
+        setattr(service, f"{backend.lower()}_language_hint_supported", False)
+        update = SessionUpdateEvent.model_validate(
+            {
+                "type": "session.update",
+                "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": "es"}}}},
+            }
+        )
+
+        error = service.handle_session_update(conn_id, update)
+
+        assert isinstance(error, RealtimeErrorEvent)
+        assert f"not supported by the active {backend} backend" in error.error.message
+
+    def test_auto_is_accepted_for_unsteerable_backends(self, service, conn_id, runtime_config):
+        service.stt_supported_languages = {"en"}
+        service.tts_supported_languages = {"en"}
+        service.stt_language_hint_supported = False
+        service.tts_language_hint_supported = False
+        update = SessionUpdateEvent.model_validate(
+            {
+                "type": "session.update",
+                "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": " AUTO "}}}},
+            }
+        )
+
+        assert service.handle_session_update(conn_id, update) is None
+        assert runtime_config.selected_language == "auto"
+
+    @pytest.mark.parametrize("requested", [" es ", " ES "])
+    def test_accepted_session_language_is_normalized(self, service, conn_id, runtime_config, requested):
         service.stt_supported_languages = {"es"}
         service.tts_supported_languages = {"es"}
         update = SessionUpdateEvent.model_validate(
             {
                 "type": "session.update",
-                "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": " es "}}}},
+                "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": requested}}}},
             }
         )
 

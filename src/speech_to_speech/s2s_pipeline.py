@@ -35,6 +35,7 @@ from speech_to_speech.backend_registry import (
     HandlerContext,
     create_backend_handler,
 )
+from speech_to_speech.LLM.utils import WHISPER_LANGUAGE_TO_LLM_LANGUAGE
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.queue_types import (
     AudioInItem,
@@ -515,12 +516,60 @@ def _stt_session_languages(selection: BackendSelection, handler: Any) -> set[str
         return set(supported) if supported is not None else None
     if selection.name == "whisper":
         generation_config = getattr(getattr(handler, "model", None), "generation_config", None)
-        # Transformers rejects any language argument for an English-only checkpoint.
-        return set() if getattr(generation_config, "is_multilingual", None) is False else None
+        return {"en"} if getattr(generation_config, "is_multilingual", None) is False else None
     if selection.name == "qwen3-asr":
         return set(modules[type(handler).__module__].SUPPORTED_LANGUAGES)
-    if selection.name in {"parakeet-tdt", "parakeet-unified", "paraformer", "openai-realtime", "vllm-realtime"}:
-        return set()
+    if selection.name == "parakeet-tdt":
+        model_name = getattr(handler, "model_name", selection.config.get("model_name"))
+        if model_name in {"nvidia/parakeet-tdt-0.6b-v2", "mlx-community/parakeet-tdt-0.6b-v2"}:
+            return {"en"}
+        if model_name is None or model_name in {
+            "nvidia/parakeet-tdt-0.6b-v3",
+            "mlx-community/parakeet-tdt-0.6b-v3",
+        }:
+            return set(modules[type(handler).__module__].SUPPORTED_LANGUAGES)
+        return None
+    if selection.name == "parakeet-unified" and selection.config.get("model_name") == "nvidia/parakeet-unified-en-0.6b":
+        return {"en"}
+    if selection.name == "paraformer":
+        language = getattr(handler, "language", None)
+        return {language} if language in WHISPER_LANGUAGE_TO_LLM_LANGUAGE else None
+    return None
+
+
+def _stt_language_hint_supported(selection: BackendSelection, handler: Any) -> bool:
+    if selection.name == "whisper":
+        generation_config = getattr(getattr(handler, "model", None), "generation_config", None)
+        # Transformers rejects any language argument for an English-only checkpoint.
+        return getattr(generation_config, "is_multilingual", None) is not False
+    return selection.name not in {
+        "parakeet-tdt",
+        "parakeet-unified",
+        "nemotron-streaming",
+        "orukeet",
+        "paraformer",
+        "sense-voice",
+        "openai-realtime",
+        "vllm-realtime",
+    }
+
+
+def _tts_session_languages(selection: BackendSelection, handler: Any) -> set[str] | None:
+    if selection.name == "chatTTS":
+        return {"en", "zh"}
+    if selection.name == "pocket":
+        # Pocket loads one language model, including variants such as italian_24l.
+        language = handler.language.lower().partition("_")[0]
+        return {code for code, name in WHISPER_LANGUAGE_TO_LLM_LANGUAGE.items() if name == language} or None
+    tts_module = modules[type(handler).__module__]
+    if selection.name == "kokoro":
+        return set(tts_module.KOKORO_NATIVE_LANGUAGES)
+    if selection.name == "facebookMMS":
+        return set(tts_module.WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE)
+    if selection.name == "supertonic":
+        return set(tts_module.SUPERTONIC_LANGUAGE_CODES)
+    if selection.name == "qwen3":
+        return {code for code in tts_module.QWEN3_LANGUAGE_ALIASES if len(code) == 2}
     return None
 
 
@@ -605,23 +654,17 @@ def _build_pipeline_unit(
 
     # Validate only against language sets already known to the active backends.
     # Faster Whisper reports the loaded checkpoint's actual language set.
-    service.stt_supported_languages = _stt_session_languages(stt_selection, handlers[1])
+    # Optional side workers precede STT; locate it relative to the fixed output stages.
+    stt_handler = handlers[-4 if stt_selection.spec.capabilities.bypasses_transcription_notifier else -5]
+    service.stt_supported_languages = _stt_session_languages(stt_selection, stt_handler)
+    service.stt_language_hint_supported = _stt_language_hint_supported(stt_selection, stt_handler)
     setup_language = stt_selection.config.get("language")
     service.stt_auto_reset_supported = not (
         stt_selection.name == "openai-realtime" and isinstance(setup_language, str) and bool(setup_language.strip())
     )
 
-    tts_module = modules[type(handlers[-1]).__module__]
-    if tts_selection.name == "kokoro":
-        service.tts_supported_languages = {"en", "ja", "zh", "fr", "es", "it", "pt", "hi"}
-    elif tts_selection.name == "facebookMMS":
-        service.tts_supported_languages = set(tts_module.WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE)
-    elif tts_selection.name == "supertonic":
-        service.tts_supported_languages = set(tts_module.SUPERTONIC_LANGUAGE_CODES)
-    elif tts_selection.name == "qwen3":
-        service.tts_supported_languages = {code for code in tts_module.QWEN3_LANGUAGE_ALIASES if len(code) == 2}
-    elif tts_selection.name in {"chatTTS", "pocket"}:
-        service.tts_supported_languages = set()
+    service.tts_supported_languages = _tts_session_languages(tts_selection, handlers[-1])
+    service.tts_language_hint_supported = tts_selection.name not in {"chatTTS", "pocket"}
 
     return PipelineUnit(
         index=index,

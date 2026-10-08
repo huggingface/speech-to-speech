@@ -218,6 +218,8 @@ def test_builder_loads_and_warms_separate_models_per_pipeline(monkeypatch, caplo
 
     from speech_to_speech import s2s_pipeline
     from speech_to_speech.diarization import StreamingDiarizer
+    from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
+    from speech_to_speech.TTS.pocket_tts_handler import PocketTTSHandler
 
     constructed = []
     warmed = []
@@ -229,11 +231,20 @@ def test_builder_loads_and_warms_separate_models_per_pipeline(monkeypatch, caplo
         constructed.append((model, model_id, kwargs))
         return model
 
+    def create_handler(selection, _context):
+        if selection.spec.kind == "stt":
+            return object.__new__(ParakeetTDTSTTHandler)
+        if selection.spec.kind == "tts":
+            handler = object.__new__(PocketTTSHandler)
+            handler.language = selection.config["language"]
+            return handler
+        return SimpleNamespace()
+
     monkeypatch.setattr(StreamingDiarizer, "from_pretrained", load)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: "cuda" in available)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: "mps" in available)
     monkeypatch.setattr(s2s_pipeline, "VADHandler", lambda *args, **kwargs: SimpleNamespace())
-    monkeypatch.setattr(s2s_pipeline, "create_backend_handler", lambda *args: SimpleNamespace())
+    monkeypatch.setattr(s2s_pipeline, "create_backend_handler", create_handler)
     args = s2s_pipeline.parse_arguments(
         [
             "--diarization_model_name",

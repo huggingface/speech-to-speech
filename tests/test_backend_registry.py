@@ -4,7 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass, fields, replace
 from queue import Queue
 from threading import Event
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from openai.types.realtime import RealtimeErrorEvent, SessionUpdateEvent
@@ -96,9 +96,202 @@ def test_session_language_validation_uses_loaded_faster_whisper_capabilities(mod
 
 
 def test_parakeet_session_language_selection_remains_unsupported():
+    from speech_to_speech.STT.parakeet_tdt_handler import SUPPORTED_LANGUAGES, ParakeetTDTSTTHandler
+
+    selection = BackendSelection(STT_BACKENDS["parakeet-tdt"], {})
+    handler = object.__new__(ParakeetTDTSTTHandler)
+
+    assert s2s_pipeline._stt_session_languages(selection, handler) == set(SUPPORTED_LANGUAGES)
+    assert "es" in s2s_pipeline._stt_session_languages(selection, handler)
+    assert not s2s_pipeline._stt_language_hint_supported(selection, handler)
+
+
+@pytest.mark.parametrize(
+    "model_name", [None, "nvidia/parakeet-tdt-0.6b-v2", "nvidia/parakeet-tdt-0.6b-v3", "custom-checkpoint"]
+)
+def test_parakeet_checkpoint_controls_declared_session_coverage(monkeypatch, model_name):
+    from speech_to_speech.STT import parakeet_tdt_handler
+
+    loaded = []
+    package = ModuleType("nano_parakeet")
+
+    def load(model_name, device):
+        loaded.append(model_name)
+        return SimpleNamespace()
+
+    package.from_pretrained = load
+    monkeypatch.setitem(sys.modules, "nano_parakeet", package)
+    monkeypatch.setattr(parakeet_tdt_handler, "warm_language_detector", lambda candidates: None)
+    monkeypatch.setattr(parakeet_tdt_handler.ParakeetTDTSTTHandler, "warmup", lambda self: None)
+    monkeypatch.setattr(s2s_pipeline, "VADHandler", lambda *args, **kwargs: SimpleNamespace())
+    real_factory = s2s_pipeline.create_backend_handler
+
+    def factory(selection, context):
+        if selection.spec.kind == "stt":
+            return real_factory(selection, context)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(s2s_pipeline, "create_backend_handler", factory)
+    cli = ["--stt", "parakeet-tdt", "--parakeet_tdt_device", "cpu", "--tts", "openai"]
+    if model_name:
+        cli.extend(["--parakeet_tdt_model_name", model_name])
+    args = parse_arguments(cli)
+    unit = s2s_pipeline._build_pipeline_unit(
+        index=0,
+        stop_event=Event(),
+        module_kwargs=args.module_kwargs,
+        vad_handler_kwargs=args.vad_handler_kwargs,
+        stt_backend=args.stt_backend,
+        llm_backend=args.llm_backend,
+        tts_backend=args.tts_backend,
+    )
+    assert loaded == [model_name or "nvidia/parakeet-tdt-0.6b-v3"]
+    conn_id = unit.service.register()
+    try:
+        update = SessionUpdateEvent.model_validate(
+            {
+                "type": "session.update",
+                "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": "es"}}}},
+            }
+        )
+        error = unit.service.handle_session_update(conn_id, update)
+
+        assert isinstance(error, RealtimeErrorEvent)
+        if model_name == "nvidia/parakeet-tdt-0.6b-v2":
+            assert unit.service.stt_supported_languages == {"en"}
+            assert "not supported" in error.error.message
+        else:
+            assert "language hint" in error.error.message
+        if model_name == "custom-checkpoint":
+            assert unit.service.stt_supported_languages is None
+        assert unit.service._state(conn_id).runtime_config.selected_language is None
+    finally:
+        unit.service.unregister(conn_id)
+
+
+@pytest.mark.parametrize(
+    ("model_name", "expected"),
+    [("mlx-community/parakeet-tdt-0.6b-v2", {"en"}), ("mlx-community/parakeet-tdt-0.6b-v3", {"en", "es"})],
+)
+def test_mlx_parakeet_session_coverage_matches_the_loaded_checkpoint(model_name, expected):
+    from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
+
+    handler = object.__new__(ParakeetTDTSTTHandler)
+    handler.model_name = model_name
     selection = BackendSelection(STT_BACKENDS["parakeet-tdt"], {})
 
-    assert s2s_pipeline._stt_session_languages(selection, SimpleNamespace()) == set()
+    supported = s2s_pipeline._stt_session_languages(selection, handler)
+
+    assert expected <= supported
+    if model_name.endswith("-v2"):
+        assert "es" not in supported
+
+
+@pytest.mark.parametrize(
+    ("stt", "tts", "requested", "error_backend", "unsupported"),
+    [
+        ("parakeet-tdt", "openai", "ES", "STT", False),
+        ("parakeet-tdt", "openai", "zh", "STT", True),
+        ("parakeet-unified", "openai", "en", "STT", False),
+        ("orukeet", "openai", "es", "STT", False),
+        ("nemotron-streaming", "openai", "en", "STT", False),
+        ("sense-voice", "openai", "zh", "STT", False),
+        ("paraformer", "openai", "zh", "STT", False),
+        ("paraformer", "openai", "es", "STT", True),
+        ("openai-realtime", "openai", "en", "STT", False),
+        ("vllm-realtime", "openai", "en", "STT", False),
+        ("faster-whisper", "pocket", "en", "TTS", False),
+        ("faster-whisper", "pocket", "es", "TTS", True),
+        ("faster-whisper", "chatTTS", "en", "TTS", False),
+        ("faster-whisper", "chatTTS", "zh", "TTS", False),
+        ("faster-whisper", "chatTTS", "es", "TTS", True),
+    ],
+)
+def test_pipeline_language_validation_distinguishes_coverage_from_session_hints(
+    monkeypatch, stt, tts, requested, error_backend, unsupported
+):
+    from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
+
+    args = parse_arguments(["--stt", stt, "--tts", tts])
+    stt_handler = (
+        object.__new__(ParakeetTDTSTTHandler)
+        if stt == "parakeet-tdt"
+        else SimpleNamespace(model=SimpleNamespace(supported_languages=["en", "es", "zh"]), language="zh")
+    )
+    tts_handler = SimpleNamespace(language="english")
+    speech_handlers = [stt_handler]
+    if not args.stt_backend.spec.capabilities.bypasses_transcription_notifier:
+        speech_handlers.append(SimpleNamespace())
+    # A side worker must not be mistaken for the loaded STT handler.
+    monkeypatch.setattr(
+        s2s_pipeline,
+        "_build_handlers",
+        lambda **_kwargs: [
+            SimpleNamespace(),
+            SimpleNamespace(),
+            *speech_handlers,
+            SimpleNamespace(),
+            SimpleNamespace(),
+            tts_handler,
+        ],
+    )
+    unit = s2s_pipeline._build_pipeline_unit(
+        index=0,
+        stop_event=Event(),
+        module_kwargs=args.module_kwargs,
+        vad_handler_kwargs=args.vad_handler_kwargs,
+        stt_backend=args.stt_backend,
+        llm_backend=args.llm_backend,
+        tts_backend=args.tts_backend,
+    )
+    conn_id = unit.service.register()
+    try:
+        update = SessionUpdateEvent.model_validate(
+            {
+                "type": "session.update",
+                "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": requested}}}},
+            }
+        )
+
+        error = unit.service.handle_session_update(conn_id, update)
+
+        assert isinstance(error, RealtimeErrorEvent)
+        assert error_backend in error.error.message
+        assert ("not supported" in error.error.message) == unsupported
+        if not unsupported:
+            assert "language hint" in error.error.message
+            assert '"auto"' in error.error.message
+        assert unit.service._state(conn_id).runtime_config.selected_language is None
+        auto = SessionUpdateEvent.model_validate(
+            {
+                "type": "session.update",
+                "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": "auto"}}}},
+            }
+        )
+        assert unit.service.handle_session_update(conn_id, auto) is None
+        assert unit.service.build_session_updated(conn_id).session.audio.input.transcription.language == "auto"
+    finally:
+        unit.service.unregister(conn_id)
+
+
+@pytest.mark.parametrize(
+    ("model_language", "supported"),
+    [("english", {"en"}), ("french", {"fr"}), ("italian_24l", {"it"}), ("custom-model", None)],
+)
+def test_pocket_coverage_uses_the_loaded_model_language(model_language, supported):
+    selection = BackendSelection(TTS_BACKENDS["pocket"], {})
+    assert s2s_pipeline._tts_session_languages(selection, SimpleNamespace(language=model_language)) == supported
+
+
+def test_kokoro_session_coverage_uses_native_voices_not_english_fallbacks():
+    from speech_to_speech.TTS.kokoro_handler import KOKORO_NATIVE_LANGUAGES, KokoroTTSHandler
+
+    selection = BackendSelection(TTS_BACKENDS["kokoro"], {})
+    supported = s2s_pipeline._tts_session_languages(selection, object.__new__(KokoroTTSHandler))
+
+    assert supported == set(KOKORO_NATIVE_LANGUAGES)
+    assert "es" in supported
+    assert "de" not in supported
 
 
 @pytest.mark.parametrize(
@@ -116,7 +309,14 @@ def test_faster_whisper_loaded_languages_control_session_update(monkeypatch, mod
     monkeypatch.setattr(
         s2s_pipeline,
         "_build_handlers",
-        lambda **_kwargs: [SimpleNamespace(), stt_handler, SimpleNamespace(), SimpleNamespace(), SimpleNamespace()],
+        lambda **_kwargs: [
+            SimpleNamespace(),
+            stt_handler,
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+        ],
     )
     unit = s2s_pipeline._build_pipeline_unit(
         index=0,
@@ -161,7 +361,14 @@ def test_transformers_whisper_session_language_uses_loaded_generation_config(
     monkeypatch.setattr(
         s2s_pipeline,
         "_build_handlers",
-        lambda **_kwargs: [SimpleNamespace(), stt_handler, SimpleNamespace(), SimpleNamespace(), SimpleNamespace()],
+        lambda **_kwargs: [
+            SimpleNamespace(),
+            stt_handler,
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+        ],
     )
     unit = s2s_pipeline._build_pipeline_unit(
         index=0,
@@ -200,7 +407,7 @@ def test_openai_realtime_stt_auto_reset_is_rejected_only_when_setup_hint_cannot_
     if setup_language is not None:
         cli.extend(["--openai_realtime_stt_language", setup_language])
     args = parse_arguments(cli)
-    monkeypatch.setattr(s2s_pipeline, "_build_handlers", lambda **_kwargs: [SimpleNamespace() for _ in range(5)])
+    monkeypatch.setattr(s2s_pipeline, "_build_handlers", lambda **_kwargs: [SimpleNamespace() for _ in range(6)])
     unit = s2s_pipeline._build_pipeline_unit(
         index=0,
         stop_event=Event(),
@@ -211,6 +418,20 @@ def test_openai_realtime_stt_auto_reset_is_rejected_only_when_setup_hint_cannot_
         tts_backend=args.tts_backend,
     )
     conn_id = unit.service.register()
+    named_update = SessionUpdateEvent.model_validate(
+        {
+            "type": "session.update",
+            "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": "en"}}}},
+        }
+    )
+    named_error = unit.service.handle_session_update(conn_id, named_update)
+    assert isinstance(named_error, RealtimeErrorEvent)
+    assert "language hint" in named_error.error.message
+    if rejected:
+        assert "startup configuration" in named_error.error.message
+        assert 'send "auto"' not in named_error.error.message
+    else:
+        assert 'send "auto"' in named_error.error.message
     update = SessionUpdateEvent.model_validate(
         {
             "type": "session.update",

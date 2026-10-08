@@ -92,6 +92,25 @@ flowchart LR
 | `response.function_call_arguments.done` | Tool call with `call_id`, `name`, and JSON `arguments`. |
 | `response.done` | Response finished: `completed`, `cancelled`, `incomplete`, or `failed`. See terminal status details below. |
 
+### Session language selection
+
+`session.audio.input.transcription.language` accepts a language code or `"auto"`.
+Codes are trimmed and normalized to lowercase, so `" EN "` selects `"en"` on a
+route that accepts language hints. The normalized value appears in `session.updated`.
+
+A named selection must be supported by both active backends, when their language
+coverage is known, and both must accept a per-session language hint. Rejections
+distinguish unsupported languages from supported languages that cannot be selected.
+For example, Parakeet TDT recognizes Spanish automatically but cannot be constrained
+to Spanish by a session hint. Pocket loads its language model at startup, and ChatTTS
+infers from text; neither can select a language per session. Send `"auto"` on these
+routes to use their configured language behavior. This does not switch a fixed
+language model. OpenAI Realtime STT with a configured startup hint still rejects
+`"auto"` because that hint cannot be cleared by this adapter.
+
+A rejected update preserves the effective session configuration, including any
+other fields sent in that update.
+
 ### Terminal status details
 
 For the Chat Completions and Responses LLM backends, an explicit provider token
