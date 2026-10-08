@@ -1,48 +1,62 @@
 # Big Bench Audio system tests
 
-The harness streams a revision-pinned selection of
-[ArtificialAnalysis/big_bench_audio](https://huggingface.co/datasets/ArtificialAnalysis/big_bench_audio)
-through the engine's Realtime WebSocket API. Each recording gets a fresh session.
-It exercises VAD, speech recognition, the language model, and speech synthesis.
+Run pinned [Big Bench Audio](https://huggingface.co/datasets/ArtificialAnalysis/big_bench_audio)
+recordings through the engine's Realtime WebSocket API, exercising VAD, STT,
+the LLM, and TTS. Each question uses a fresh session. Reports contain answer
+accuracy, audio latency, and protocol failures.
 
-The bundled `vibe` subset has 40 questions: ten each for formal fallacies,
-navigation, object counting, and web of lies. Questions alternate categories,
-so `--limit 4` is a small smoke test covering all four. The manifest pins the
-dataset commit and official answers. Selecting `full` loads all 1,000 questions
-directly from the same pinned dataset revision, 250 per category, without filtering
-or a bundled copy of the metadata. Model weights and hosted providers are
-not immutable; hold the server settings fixed and run comparisons close together.
+## Local use
+
+Install the evaluator's dependencies into your existing engine environment:
+
+```bash
+python -m pip install "soundfile>=0.13.0" "websockets>=14.0"
+
+# Inspect the default sample without downloading audio or loading models.
+python -m speech_to_speech.evals.big_bench_audio run --dry-run
+
+# Start an engine for a four-question smoke test.
+python -m speech_to_speech.evals.big_bench_audio run \
+    --spawn --limit 4 --out /tmp/smoke.json --spawn-log /tmp/s2s.log \
+    -- --stt parakeet-tdt --tts qwen3
+
+# Run the whole benchmark.
+python -m speech_to_speech.evals.big_bench_audio run --subset full \
+    --spawn --out /tmp/full.json -- --stt parakeet-tdt --tts qwen3
+
+# Compare saved reports.
+python -m speech_to_speech.evals.big_bench_audio compare \
+    /tmp/baseline.json /tmp/candidate.json
+```
+
+Use `--url` instead of `--spawn` to connect to an existing engine. See
+`run --help` for all options, including custom prompts and an optional
+OpenAI-compatible answer-extraction judge.
 
 ## Question selection
 
-`vibe` is a deterministic stratified random sample, using seed `0`. The builder
-sorts each category/official-answer group by item ID, shuffles it with that seed,
-and selects ten questions per category while cycling through the answer groups.
-For formal fallacies, navigation, and web of lies this gives five questions per
-answer. Object counting includes ten different official counts. This deliberately
-balances answers rather than sampling uniformly from the entire dataset.
-The selected questions are interleaved by category and saved in the manifest;
-no new sample is drawn when an evaluation starts.
+- `vibe` is a committed 40-question sample, stratified by category and official
+  answer with seed `0`. It contains ten questions per category, interleaved so
+  `--limit 4` covers all four categories. No new sample is drawn for a run.
+- `full` loads all 1,000 records from upstream metadata at the same pinned dataset
+  revision, in upstream order. Metadata and audio are cached by the Hub client.
+  A full-selection `--dry-run` loads metadata but does not download audio.
 
-Reproduce the 40-question selection from the pinned metadata with:
+`--limit` only takes a prefix of the selection; it never adds questions.
+A prefix of `full` need not cover every category. To create a custom manifest:
 
 ```bash
 python -m speech_to_speech.evals.big_bench_audio build-subset \
-    --size 40 --name vibe --seed 0 --out /tmp/vibe.json
+    --size 120 --name deep --seed 1 --out /tmp/deep.json
 ```
 
-`full` downloads the small `metadata.jsonl` file at the pinned revision and uses
-every question in upstream order; metadata and audio are cached by the Hub client.
-There is no sampling or reordering. `--limit` takes a prefix of that order, which
-need not cover all categories. Use `--subset vibe --limit 4` for a balanced smoke
-test. A full-selection `--dry-run` loads metadata but does not download audio or
-start the engine.
+Pass that path as `--subset /tmp/deep.json`. Use `--size 40 --name vibe --seed 0`
+to reproduce the bundled sample. In containers, include or mount a custom
+manifest and use its container path.
 
 ## Build and run with Docker
 
-Commit evaluation changes first. From the repository root, create a temporary
-build context from that commit and write the revision file required by
-`Dockerfile.eval`:
+From the repository root, build the committed source with its revision recorded:
 
 ```bash
 EVAL_CONTEXT="$(mktemp -d)"
@@ -54,13 +68,13 @@ docker build --platform linux/amd64 \
 rm -rf "$EVAL_CONTEXT"
 ```
 
-This builds the committed source, including its vibe manifest, without uploading to a
-Space. The image records the same revision in its reports. The CUDA image targets
-Linux/amd64; GPU execution needs an NVIDIA GPU host with the
+Commit changes before building. The image includes evaluator dependencies;
+add `--build-arg EXTRAS="kokoro supertonic"` for optional engine backends.
+GPU execution requires a Linux/amd64 NVIDIA host with the
 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
-Building on another architecture requires Docker's amd64 emulation.
+Building on another architecture requires amd64 emulation.
 
-With `HF_TOKEN` exported in the launching shell, run a four-question smoke test:
+Export `HF_TOKEN` in your shell, then run:
 
 ```bash
 docker run --name s2s-eval-smoke --platform linux/amd64 --gpus all \
@@ -70,46 +84,28 @@ docker cp s2s-eval-smoke:/output ./eval-output
 docker rm s2s-eval-smoke
 ```
 
-The container starts the engine and evaluator together, so no exposed server port
-is needed. Copy `/output` before removing the container, including after an
-unsuccessful run, to retain its report and redacted server log. The default
-container user writes to the image's own output directory, avoiding host bind
-mount permission changes. Provider inference is billed to the token's account.
+The container runs the engine and evaluator together; no exposed port is needed.
+Copy `/output` before removing it, including after failure, to retain the report
+and redacted server log. The settings below also work with `docker run -e`.
+For all questions, add `-e S2S_SUBSET=full` and remove `-e S2S_LIMIT=4`.
 
-The `S2S_*` settings below also work with `docker run -e`. To upload reports and
-logs, add `-e S2S_PUSH_TO_HUB=your-hf-username/s2s-big-bench-audio-results`; an
-existing destination must be private. To run the entire benchmark, use
-`-e S2S_SUBSET=full` and omit `-e S2S_LIMIT=4`. Optional engine extras can be
-installed at build time with `--build-arg EXTRAS="kokoro supertonic"`.
+## Hugging Face Jobs
 
-## Optional image building on Hugging Face
-
-Commit the evaluation code, then create/update an image-building **private Docker
-Space in your authenticated personal profile** (requires `huggingface_hub`):
+Use an existing registry image, or commit your changes and build one in a private
+personal Docker Space:
 
 ```bash
 python scripts/prepare_eval_space.py --space-name s2s-big-bench-audio-dev
 ```
 
-The script uploads only tracked source and container files, records the Git
-revision, and removes stale files within the paths it manages while preserving
-unrelated Space files. It prints your launch command. Wait for the Space build to finish.
-The Space builds the container and exposes it through HF's image registry for
-Jobs. A [storage bucket](https://huggingface.co/docs/hub/storage-buckets) stores
-files but does not build or serve a runnable container image. This follows the
-[HF Docker Space image workflow](https://huggingface.co/docs/hub/jobs-images).
-The Space's default command prints a message and exits, so an app runtime error
-after a successful build is expected. It does not load models or run an idle
-server. Once the build logs confirm the image was pushed, the Space can be paused
-in its settings; Jobs need the built image, not a running Space. GPU inference
-happens in Jobs.
+Wait until the build logs confirm the image was pushed. The default command exits,
+so a Space runtime error after a successful build is expected; the Space can be
+paused. Jobs use the image without a running Space. See the
+[HF image workflow](https://huggingface.co/docs/hub/jobs-images).
+Space registry images use the latest build and may expire; rebuild if a Job
+cannot find the image.
 
-An already-built image in another container registry can also be used: set
-`EVAL_IMAGE` to that registry reference and skip the Space upload. HF Space images
-use the latest build and can be removed by registry maintenance; rebuild the
-Space if Jobs report that the image was not found.
-
-Set your personal namespace and the image/results repositories:
+Launch a smoke test with your namespace and image reference:
 
 ```bash
 HF_NAMESPACE="your-hf-username"
@@ -117,226 +113,101 @@ EVAL_IMAGE="hf.co/spaces/${HF_NAMESPACE}/s2s-big-bench-audio-dev"
 EVAL_RESULTS="${HF_NAMESPACE}/s2s-big-bench-audio-results"
 
 hf jobs run --detach --namespace "$HF_NAMESPACE" --flavor a10g-large --timeout 45m --secrets HF_TOKEN \
-    -e S2S_LIMIT=4 \
-    -e S2S_PUSH_TO_HUB="$EVAL_RESULTS" \
+    -e S2S_LIMIT=4 -e S2S_PUSH_TO_HUB="$EVAL_RESULTS" \
     "$EVAL_IMAGE" vibe-check
 ```
 
-Remove `S2S_LIMIT` and use `--timeout 90m` for all 40 questions. Hardware and
-Inference Providers are billed to the personal account. Only launch the jobs
-you need; no recurring jobs or automatic GPU CI are configured.
-`S2S_LIMIT` only truncates the selected question set: setting it to 1000 does not
-expand the bundled 40-question subset.
+Set `EVAL_IMAGE` to another registry reference to skip the Space build.
+For 40 questions, remove `S2S_LIMIT` and choose an appropriate timeout.
+For all 1,000, also add `-e S2S_SUBSET=full`. Questions run sequentially at real
+time; a full run can require hours. Reports are written after all questions,
+and hard Job timeouts can prevent uploads. Checkpoint/resume is not implemented.
+Leave time for downloads and initialization as well as evaluation.
 
-The default stack is Parakeet TDT, `Qwen/Qwen3.5-9B:together` through HF
-Inference Providers (Chat Completions), and Qwen3-TTS with its default GGML backend.
-The token requires Jobs, repository-write, and Inference Providers permissions.
-Credentials are passed as secrets and read from environment variables.
+GPU Jobs and hosted inference are billed to your account. The default stack is
+Parakeet TDT, `Qwen/Qwen3.5-9B:together` through HF Inference Providers, and
+Qwen3-TTS GGML. `HF_TOKEN` needs Jobs, repository-write, and Inference Providers
+permissions for this configuration.
 
-Reports go to `reports/<timestamp>-<label>.json` and server logs to
-`logs/<label>.log` in the private results dataset. Job IDs are the default labels;
-use unique labels to avoid replacing a previous log. Files also live under
-`/output` inside the ephemeral Job. A hard Job timeout can prevent uploads, so
-leave time for model downloads, initialization, and all questions. Existing
-public result datasets are refused before report or log uploads, including logs
-from startup failures. Repository visibility is never changed automatically.
+## Container settings
 
 | Environment variable | Default | Purpose |
 |---|---|---|
-| `S2S_LIMIT` | all selected questions | Truncate the selected question set |
-| `S2S_SUBSET` | `vibe` | `vibe` (40), `full` (1,000), or a manifest path |
-| `S2S_LABEL` | Job ID | Report label |
+| `S2S_SUBSET` | `vibe` | `vibe`, `full`, or a manifest path |
+| `S2S_LIMIT` | all selected questions | Truncate the selection |
+| `S2S_LABEL` | Job ID, otherwise `local` | Report/log label |
 | `S2S_PUSH_TO_HUB` | unset | Private dataset for reports/logs |
 | `S2S_COMPARE` | unset | Baseline file or `owner/repo:reports/file.json` |
 | `S2S_LLM_MODEL` | `Qwen/Qwen3.5-9B:together` | Hosted model |
 | `S2S_LLM_BASE_URL` | `https://router.huggingface.co/v1` | LLM endpoint |
-| `S2S_SERVE_ARGS` | default stack above | Replace all server arguments, including the model/endpoint shortcuts (shell-style quoting, no expansion) |
-| `S2S_EVAL_ARGS` | unset | Extra evaluation arguments, e.g. `--silence-ms 1200` |
+| `S2S_SERVE_ARGS` | default stack above | Replace all server arguments |
+| `S2S_EVAL_ARGS` | unset | Extra evaluator arguments |
 | `S2S_REPORT_DIR` | `/output` | Local report/log directory |
 
-`Dockerfile.eval` installs the engine from the build context. Dependencies are
-resolved at build time and runtime package versions are recorded in reports.
-The build argument `EXTRAS="kokoro supertonic"` installs extra backends.
-Model weights and evaluation audio download at runtime. The Space upload script creates the
-`source-revision.txt` required by the Dockerfile, as does the ordinary Docker
-recipe above.
+Uploads create a private dataset if needed and refuse existing public datasets,
+including for startup-failure logs; visibility is never changed automatically.
+Reports use `reports/<timestamp>-<label>.json`; logs use `logs/<label>.log`.
+Use unique labels to avoid replacing logs. Copies remain in `S2S_REPORT_DIR`.
 
-## Run the whole benchmark
-
-Select `full` and leave `S2S_LIMIT` unset to run all 1,000 questions. Using the
-image and results variables above:
-
-```bash
-hf jobs run --detach --namespace "$HF_NAMESPACE" --flavor a10g-large --timeout 12h --secrets HF_TOKEN \
-    -e S2S_SUBSET=full \
-    -e S2S_PUSH_TO_HUB="$EVAL_RESULTS" \
-    "$EVAL_IMAGE" vibe-check
-```
-
-This uses the same runner, model settings, and reports as the 40-question sample.
-It streams questions sequentially at real time. Expect hours of GPU and provider
-usage; 12 hours is an example budget, not a measured full-run duration. Choose a
-budget for your configuration. The final report is written after all questions;
-checkpoint/resume is not implemented. To smoke-test this selection first, add
-`-e S2S_LIMIT=4` and use a shorter timeout.
-
-For local use:
-
-```bash
-python -m speech_to_speech.evals.big_bench_audio run --subset full --dry-run
-python -m speech_to_speech.evals.big_bench_audio run --subset full \
-    --spawn --out /tmp/full.json -- --stt parakeet-tdt --tts qwen3
-```
-
-To expand to a custom sample, `build-subset --size 120 --seed 1 --out subset.json`
-creates a revision-pinned manifest. Pass its path to `run --subset subset.json`.
-For Jobs, include the file in the image or mount it into the Job and set
-`S2S_SUBSET` to its container path. Changing `S2S_LIMIT` never adds questions to
-a manifest.
-
-## Model and prompt configurations
-
-The STT and TTS run on the Job GPU. With a hosted LLM, its inference runs at the
-selected provider. Changing the model, endpoint, prompt, or existing engine flags
-does not require rebuilding the image. Installing a new optional backend does.
-
-For the following 40-question examples, define a launcher using the variables
-above. Each invocation submits one paid Job; run only the configurations you need.
-
-```bash
-run_eval() {
-    hf jobs run --detach --namespace "$HF_NAMESPACE" --flavor a10g-large --timeout 90m \
-        --secrets HF_TOKEN -e S2S_LIMIT=40 -e S2S_PUSH_TO_HUB="$EVAL_RESULTS" \
-        "$@" "$EVAL_IMAGE" vibe-check
-}
-
-# These keep the default Parakeet STT, Qwen3-TTS GGML, and LLM request settings.
-run_eval -e S2S_LLM_MODEL="deepseek-ai/DeepSeek-V4.1-Flash:baseten"
-run_eval -e S2S_LLM_MODEL="zai-org/GLM-5.3-Flash:baseten"
-```
-
-Provider-specific request parameters matter. The engine's default Chat Completions
-configuration sends `chat_template_kwargs.enable_thinking=false`. Cerebras
-rejects that parameter; explicitly selecting `reasoning_effort=none` replaces it.
-`S2S_SERVE_ARGS` replaces the entire default argument list, so include STT, TTS,
-the model, and the endpoint:
+To change a model at the configured endpoint, add
+`-e S2S_LLM_MODEL="MODEL_ID:PROVIDER"` to the launch command. To replace the entire
+server configuration, include the STT, TTS, model, and endpoint arguments:
 
 ```bash
 EVAL_SERVER_ARGS="--stt parakeet-tdt --tts qwen3 --qwen3_tts_backend ggml --llm_backend chat-completions"
-
-run_eval -e S2S_SERVE_ARGS="$EVAL_SERVER_ARGS --model_name Qwen/Qwen3.8-27B:cerebras --responses_api_base_url https://router.huggingface.co/v1 --responses_api_reasoning_effort none"
+hf jobs run --detach --namespace "$HF_NAMESPACE" --flavor a10g-large --timeout 90m \
+    --secrets HF_TOKEN --secrets OPENAI_API_KEY \
+    -e S2S_PUSH_TO_HUB="$EVAL_RESULTS" \
+    -e S2S_SERVE_ARGS="$EVAL_SERVER_ARGS --model_name MODEL_ID --responses_api_base_url https://provider.example/v1 --responses_api_reasoning_effort none" \
+    "$EVAL_IMAGE" vibe-check
 ```
 
-To use OpenAI, have `OPENAI_API_KEY` exported in the launching shell, then pass
-its name as a Job secret. `HF_TOKEN` is still used to download assets and upload
-results; an explicit `OPENAI_API_KEY` takes precedence for LLM authentication.
-Never put a credential in `S2S_SERVE_ARGS` or the command line.
+Replace the model and endpoint placeholders and export `OPENAI_API_KEY` for that
+provider. An explicit key takes precedence over `HF_TOKEN` for LLM authentication;
+pass credentials as secrets, never inside arguments. Match reasoning settings
+when comparing providers, and choose options supported by your endpoint.
 
-```bash
-run_eval --secrets OPENAI_API_KEY \
-    -e S2S_SERVE_ARGS="$EVAL_SERVER_ARGS --model_name gpt-6-luna --responses_api_base_url https://api.openai.com/v1 --responses_api_reasoning_effort none"
-```
-
-Hosted availability and provider behavior can change. These examples do not
-cover every supported model.
-For latency comparisons, record explicit reasoning settings and keep them matched
-where providers support the same controls. The default flag is only a request to
-disable thinking; it does not verify the provider's internal behavior.
-
-Override the evaluation system prompt through `S2S_EVAL_ARGS`:
-
-```bash
-run_eval -e S2S_EVAL_ARGS="--instructions 'Answer the spoken question briefly. End with Final answer: X, where X is Yes, No, valid, invalid, or a whole number.'"
-```
-
-This replaces the prompt in every question's fresh session and records it as
-`target.instructions` in the report. Keep the `Final answer: X` convention for
-reliable automatic extraction. `--instructions-file /path/to/prompt.txt` also
-works when the file is available inside the Job container. Both argument
-environment variables use shell-style quoting parsed by `shlex.split`; the Job
-does not execute shell expressions or expand variables inside their values.
-
-## Local use
-
-Outside the Docker image, install the evaluation dependencies into the engine
-environment first:
-
-```bash
-python -m pip install "soundfile>=0.13.0" "websockets>=14.0"
-```
-
-The decoder uses SoundFile and the evaluator uses the modern async WebSocket
-client. These requirements are installed by `Dockerfile.eval`; they do not
-change the engine's base dependencies.
-
-```bash
-# Inspect the sample without downloading audio or loading models.
-python -m speech_to_speech.evals.big_bench_audio run --dry-run
-
-# Start an engine, or use --url to connect to one already running.
-python -m speech_to_speech.evals.big_bench_audio run \
-    --spawn --limit 4 --out /tmp/smoke.json --spawn-log /tmp/s2s.log \
-    -- --stt parakeet-tdt --tts qwen3
-
-# Compare reports, including reports downloaded directly from the Hub.
-python -m speech_to_speech.evals.big_bench_audio compare \
-    /tmp/baseline.json /tmp/candidate.json
-
-# Create a larger reproducible sample.
-python -m speech_to_speech.evals.big_bench_audio build-subset \
-    --size 120 --name deep --seed 1 --out /tmp/deep.json
-```
-
-Use `run --help` for all options, including custom instructions and an optional
-OpenAI-compatible answer-extraction judge. Extra audio decoding dependencies
-(`soundfile`, `scipy`) are included in the evaluation Docker image's installation.
+Pass prompt overrides through `S2S_EVAL_ARGS`, using `--instructions 'PROMPT'` or
+`--instructions-file /path/to/prompt.txt`. Keep `Final answer: X` for reliable
+extraction; the report records the prompt. Argument strings use shell-style
+quoting, with no shell execution or variable expansion inside their values.
+Model and prompt changes need no rebuild; installing another backend does.
 
 ## Reading results
 
-Reports include the input transcript, assistant text, generated audio byte count,
-per-category accuracy, parse rate, errors, time to first **audio**, and turn
-latency. Answer accuracy grades the text sent to TTS; it does **not** transcribe
-the synthesized waveform or measure pronunciation/intelligibility. Audio output
-is required for a successful turn.
+Reports include transcripts, generated audio byte counts, per-category accuracy,
+parse rates, errors, runtime versions, and latency. Accuracy grades the assistant
+transcript; it does not measure synthesized-speech intelligibility. Nonempty
+audio is required for a successful turn.
 
-The prompt requests `Final answer: X`. A rule-based extractor compares X with the
-official answer, with a fallback scan of unstructured replies. Inspect replies
-when extraction is ambiguous. An optional `--judge-model` extracts an answer
-using a second model; reports keep both verdicts. A completed judge verdict takes
-precedence, including `UNPARSED`, which counts as unparsed even if the rule-based
-extractor guessed an answer. A judge outage leaves the rule-based result in use.
+Time to first audio is measured from the end of the streamed question to receipt
+of the first audio delta. Turn latency ends at receipt of `response.done`.
+These include the VAD wait, but not question-streaming time or browser playback.
+Run duration includes engine startup, audio loading, retries, and shutdown;
+it excludes the optional judge. Keep `--speed 1` for realistic latency comparisons.
 
-Errors (including missing audio, failed/cancelled responses, timeouts, and split
-turns) count against accuracy and make the process exit 1 **after** writing the
-report. Incorrect reasoning remains a measured result rather than an engine
-failure. Report comparisons show observed differences without an automatic
-accuracy-regression gate.
-Audio download and decoding failures use the per-item `--retries` budget; if
-they persist, the runner records an item error and continues, preserving the
-other results in the report.
+The rule-based extractor looks for `Final answer: X`, with a fallback scan of the
+reply. `--judge-model` uses another model to extract an answer; both verdicts are
+retained. A completed judge verdict takes precedence, including `UNPARSED`.
+If the judge fails, the rule-based verdict remains in use.
 
-The runner waits for `session.updated` before sending audio, raises the session
-VAD silence threshold to 900 ms, and appends two seconds of silence to finish the
-turn. A new speech-input item after a public response has begun marks the question
-as a split, even if its next response has not arrived. Before any public response,
-item IDs may change when speculative speech reopens after final transcription;
-these changes are allowed. Multiple responses also mark a split. The last received
-transcript is retained for diagnosis but the item is an error. Increase `--silence-ms` and
-`--trailing-silence-ms` together if needed. `--speed 1` uses real-time pacing;
-faster playback changes queueing and invalidates realistic latency comparisons.
-`--response-timeout` bounds the wait after all input audio and trailing silence
-have been sent, even while output events continue arriving. A response completed
-within that budget remains valid during the final observation window.
-Before streaming each question, session-capacity refusals are retried for up to
-`--response-timeout` seconds (180 by default), allowing an earlier provider
-request to drain after disconnection. This wait does not consume question retries
-or send audio. Other connection/configuration errors fail normally.
+Missing audio, failed/cancelled responses, timeouts, and split turns are errors.
+They count against accuracy and cause exit code 1 after the report is written.
+Incorrect answers alone do not cause failure. Persistent audio-loading failures
+are recorded per item so other questions can continue.
 
-Forty questions is a regression sample, not a leaderboard benchmark. Comparisons
-show accuracy changes in percentage points, sample sizes, and latency changes;
-they do not establish statistical significance. Comparisons warn about
-different question sets, dataset revisions, or judge usage. Use matched settings
-and examine individual failures before claiming a quality improvement.
+The defaults use a 900 ms VAD silence threshold and append two seconds of silence.
+Split-turn errors mean a question produced multiple responses or a new input
+item after a response began. Adjust `--silence-ms` and `--trailing-silence-ms`
+if necessary. `--response-timeout` defaults to 180 seconds after all question
+and trailing-silence audio is sent; it also bounds the separate wait for session
+capacity before sending audio.
+
+The 40-question sample is a regression check. Comparisons show observed score and
+latency differences without significance claims or an automatic regression gate.
+Use matched question sets, judge settings, and engine configurations; pinned
+questions do not make hosted models/providers immutable. Inspect individual
+failures before claiming an improvement.
 
 ## Tests
 
@@ -344,10 +215,5 @@ and examine individual failures before claiming a quality improvement.
 python -m pytest tests/evals -q
 ```
 
-Unit tests use synthetic protocol events and do not download models or start
-paid jobs. Job-entrypoint tests exercise environment overrides, quoted prompts,
-provider authentication, failure exit codes, and redaction before log uploads.
-The real GPU smoke run is a separate integration check.
-
-Historical integration runs and provider comparisons are recorded in
-[Big Bench Audio development notes](big-bench-audio-dev-notes.md).
+Tests use synthetic metadata and protocol events, without downloading models or
+starting paid Jobs. GPU smoke runs are separate integration checks.
