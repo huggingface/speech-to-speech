@@ -1,0 +1,29 @@
+# AMD GPU image. PyTorch on ROCm exposes the GPU through the torch.cuda API,
+# so --device cuda and --device rocm both select it.
+ARG ROCM_PYTORCH_IMAGE=rocm/pytorch:latest
+FROM ${ROCM_PYTORCH_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /usr/src/app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        git \
+        libportaudio2 \
+        libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Keep the ROCm build of torch and torchaudio that ships in the base image.
+# pip sees them as already satisfying torch>=2.4.0 and does not swap in CUDA wheels.
+COPY . .
+RUN python -c "import torch; assert torch.version.hip, 'base image must ship ROCm PyTorch'" \
+    && pip install --no-cache-dir . \
+    && python -c "import torch; assert torch.version.hip, 'a dependency replaced ROCm PyTorch'"
+RUN python -c "import nltk; nltk.download('punkt_tab'); nltk.download('averaged_perceptron_tagger_eng')"
+
+# Faster Whisper (CTranslate2) has CUDA and CPU builds only and runs on CPU here.
+# Parakeet TDT, Whisper, Kokoro and Qwen3-TTS with --qwen3_tts_backend torch run on the GPU.
+CMD ["speech-to-speech", "serve", "--device", "rocm", "--stt", "parakeet-tdt", "--tts", "kokoro"]

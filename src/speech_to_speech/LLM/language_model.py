@@ -71,7 +71,7 @@ from speech_to_speech.pipeline.messages import (
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
 from speech_to_speech.pipeline.turn_latency import bind_active_turn_latency_tracker
-from speech_to_speech.utils.utils import is_out_of_band, response_wants_audio
+from speech_to_speech.utils.utils import is_out_of_band, normalize_device, response_wants_audio
 
 try:
     import mlx.core as mx
@@ -194,6 +194,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.backend = backend
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
+        device = normalize_device(device)
         self.device = device
         self.model_name = model_name
         self.enable_thinking = enable_thinking

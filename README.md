@@ -350,6 +350,17 @@ docker compose up
 
 The compose file starts a llama.cpp server with Gemma 4 and the Realtime server, exposing ports `8080` and `8765`.
 
+#### AMD GPUs (ROCm)
+
+PyTorch on ROCm drives AMD GPUs through the `torch.cuda` API, so `--device cuda` and `--device rocm` both select the GPU. Build the ROCm image, which keeps the ROCm PyTorch from the base image:
+
+```bash
+docker build -f Dockerfile.rocm -t speech-to-speech:rocm .
+docker run --device /dev/kfd --device /dev/dri --group-add video -p 8765:8765 speech-to-speech:rocm
+```
+
+Faster Whisper uses CTranslate2, which ships CUDA and CPU builds only, so it runs on CPU under ROCm. `flash_attention_2` falls back to `sdpa` when the flash-attn package is not installed.
+
 ## Realtime API
 
 The server logs per-response STT, LLM, first TTS audio, and speech-to-audio
