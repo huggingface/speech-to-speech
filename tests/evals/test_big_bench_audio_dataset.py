@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
+from speech_to_speech.evals.big_bench_audio import dataset
 from speech_to_speech.evals.big_bench_audio.dataset import (
     DATASET_REPO_ID,
     SAMPLE_RATE_HZ,
@@ -141,7 +142,7 @@ def test_subset_defaults_to_the_pinned_dataset():
     assert Subset(name="x", items=()).dataset == DATASET_REPO_ID
 
 
-def test_full_manifest_covers_all_questions_and_contains_the_smoke_sample():
+def test_full_loads_every_pinned_metadata_record_in_upstream_order(benchmark_metadata):
     full = load_subset("full")
     vibe = load_subset("vibe")
     stats = describe(full)
@@ -149,12 +150,15 @@ def test_full_manifest_covers_all_questions_and_contains_the_smoke_sample():
     assert full.dataset == vibe.dataset and full.revision == vibe.revision
     assert len(full) == len({item.id for item in full.items}) == 1000
     assert stats.by_category == dict.fromkeys(CATEGORIES, 250)
-    by_id = {item.id: item for item in full.items}
-    assert all(by_id[item.id] == item for item in vibe.items)
+    assert full.items == benchmark_metadata
+    assert full.seed is None
+    assert full.head(4).items == benchmark_metadata[:4]
+    assert dataset.available_subsets() == ["full", "vibe"]
 
 
-def test_vibe_can_be_reproduced_from_full_metadata_with_its_recorded_seed():
-    full = load_subset("full")
-    vibe = load_subset("vibe")
+def test_vibe_loads_without_downloading_metadata(monkeypatch):
+    def unexpected_download(*args, **kwargs):
+        pytest.fail("Bundled vibe selection attempted to download metadata")
 
-    assert build_subset(40, items=list(full.items), seed=vibe.seed).items == vibe.items
+    monkeypatch.setattr(dataset, "load_dataset_metadata", unexpected_download)
+    assert len(load_subset("vibe")) == 40

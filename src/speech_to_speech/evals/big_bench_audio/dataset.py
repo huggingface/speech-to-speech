@@ -2,8 +2,9 @@
 
 A vibe check is only useful if two runs saw the same questions, so the subset is
 a committed JSON manifest -- dataset id, dataset revision, and the exact item ids
-with their official answers -- rather than a sample drawn at run time. Audio is
-fetched from the Hub at the pinned revision and cached by ``huggingface_hub``.
+with their official answers -- rather than a sample drawn at run time. Full runs
+load all metadata directly from the same pinned revision. Metadata and audio are
+fetched from the Hub and cached by ``huggingface_hub``.
 """
 
 from __future__ import annotations
@@ -69,8 +70,7 @@ class Subset:
         return len(self.items)
 
     def head(self, limit: Optional[int]) -> Subset:
-        """First *limit* items. Manifest order round-robins categories, so a
-        prefix stays balanced across them."""
+        """Keep the first *limit* items in the selection's existing order."""
         if limit is not None and limit <= 0:
             raise ValueError("limit must be positive")
         if limit is None or limit >= len(self.items):
@@ -111,18 +111,22 @@ class Subset:
 
 
 def available_subsets() -> list[str]:
-    """Names of the subsets bundled with the package."""
-    return sorted(path.stem for path in SUBSETS_DIR.glob("*.json"))
+    """Names of the built-in selections."""
+    return sorted({"full", *(path.stem for path in SUBSETS_DIR.glob("*.json"))})
 
 
 def load_subset(name_or_path: str = DEFAULT_SUBSET) -> Subset:
-    """Load a bundled subset by name, or any manifest by path."""
+    """Load the full pinned dataset, a bundled subset, or a manifest by path."""
+    if name_or_path == "full":
+        return Subset(
+            name="full",
+            items=tuple(load_dataset_metadata()),
+            description="All questions from the pinned Big Bench Audio dataset in upstream order.",
+        )
     bundled = SUBSETS_DIR / f"{name_or_path}.json"
     path = bundled if bundled.is_file() else Path(name_or_path)
     if not path.is_file():
-        raise FileNotFoundError(
-            f"No subset {name_or_path!r}. Bundled subsets: {', '.join(available_subsets()) or 'none'}."
-        )
+        raise FileNotFoundError(f"No subset {name_or_path!r}. Available selections: {', '.join(available_subsets())}.")
     return Subset.from_dict(json.loads(path.read_text()))
 
 

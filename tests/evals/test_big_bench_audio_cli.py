@@ -108,7 +108,9 @@ async def test_item_failure_preserves_and_uploads_other_results(monkeypatch, tmp
 
 
 @pytest.mark.parametrize("limit, expected_count", [(None, 1000), (4, 4)])
-async def test_full_manifest_reaches_every_selected_item_and_the_report(monkeypatch, tmp_path, limit, expected_count):
+async def test_full_dataset_reaches_every_selected_item_and_the_report(
+    monkeypatch, tmp_path, benchmark_metadata, limit, expected_count
+):
     destination = tmp_path / "full.json"
     argv = ["run", "--subset", "full", "--out", str(destination)]
     if limit is not None:
@@ -145,5 +147,7 @@ async def test_full_manifest_reaches_every_selected_item_and_the_report(monkeypa
     assert completed == [item.id for item in full.items[:expected_count]]
     report = json.loads(destination.read_text())
     assert report["subset"]["name"] == "full"
+    assert report["subset"]["revision"] == full.revision
+    assert report["subset"]["ids"] == [item.id for item in benchmark_metadata[:expected_count]]
     assert report["totals"]["n"] == report["totals"]["correct"] == expected_count
     assert [item["id"] for item in report["items"]] == completed

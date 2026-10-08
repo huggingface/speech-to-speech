@@ -299,9 +299,9 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--subset",
         default=DEFAULT_SUBSET,
-        help=f"Bundled subset name or manifest path. Bundled: {', '.join(available_subsets()) or 'none'}.",
+        help=f"Built-in selection or manifest path. Available: {', '.join(available_subsets())}.",
     )
-    parser.add_argument("--limit", type=int, default=None, help="Run only the first N items (stays balanced).")
+    parser.add_argument("--limit", type=int, default=None, help="Run only the first N items in selection order.")
     parser.add_argument("--label", default=None, help="Name for this run in the report and comparisons.")
     parser.add_argument("--out", default=None, help="Write the JSON report here.")
     parser.add_argument(

@@ -8,9 +8,9 @@ It exercises VAD, speech recognition, the language model, and speech synthesis.
 The bundled `vibe` subset has 40 questions: ten each for formal fallacies,
 navigation, object counting, and web of lies. Questions alternate categories,
 so `--limit 4` is a small smoke test covering all four. The manifest pins the
-dataset commit and official answers. The bundled `full` manifest contains all
-1,000 questions from the same revision, 250 per category. Select `full` to run
-the whole benchmark. Model weights and hosted providers are
+dataset commit and official answers. Selecting `full` loads all 1,000 questions
+directly from the same pinned dataset revision, 250 per category, without filtering
+or a bundled copy of the metadata. Model weights and hosted providers are
 not immutable; hold the server settings fixed and run comparisons close together.
 
 ## Question selection
@@ -31,8 +31,12 @@ python -m speech_to_speech.evals.big_bench_audio build-subset \
     --size 40 --name vibe --seed 0 --out /tmp/vibe.json
 ```
 
-`full` includes every question at the same dataset revision. Its seed only affects
-ordering; it does not omit or sample any questions.
+`full` downloads the small `metadata.jsonl` file at the pinned revision and uses
+every question in upstream order; metadata and audio are cached by the Hub client.
+There is no sampling or reordering. `--limit` takes a prefix of that order, which
+need not cover all categories. Use `--subset vibe --limit 4` for a balanced smoke
+test. A full-selection `--dry-run` loads metadata but does not download audio or
+start the engine.
 
 ## Build and run with Docker
 
@@ -50,7 +54,7 @@ docker build --platform linux/amd64 \
 rm -rf "$EVAL_CONTEXT"
 ```
 
-This builds the committed source, including its manifests, without uploading to a
+This builds the committed source, including its vibe manifest, without uploading to a
 Space. The image records the same revision in its reports. The CUDA image targets
 Linux/amd64; GPU execution needs an NVIDIA GPU host with the
 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
@@ -121,7 +125,7 @@ hf jobs run --detach --namespace "$HF_NAMESPACE" --flavor a10g-large --timeout 4
 Remove `S2S_LIMIT` and use `--timeout 90m` for all 40 questions. Hardware and
 Inference Providers are billed to the personal account. Only launch the jobs
 you need; no recurring jobs or automatic GPU CI are configured.
-`S2S_LIMIT` only truncates the selected manifest: setting it to 1000 does not
+`S2S_LIMIT` only truncates the selected question set: setting it to 1000 does not
 expand the bundled 40-question subset.
 
 The default stack is Parakeet TDT, `Qwen/Qwen3.5-9B:together` through HF
@@ -139,7 +143,7 @@ from startup failures. Repository visibility is never changed automatically.
 
 | Environment variable | Default | Purpose |
 |---|---|---|
-| `S2S_LIMIT` | all selected questions | Truncate the selected manifest |
+| `S2S_LIMIT` | all selected questions | Truncate the selected question set |
 | `S2S_SUBSET` | `vibe` | `vibe` (40), `full` (1,000), or a manifest path |
 | `S2S_LABEL` | Job ID | Report label |
 | `S2S_PUSH_TO_HUB` | unset | Private dataset for reports/logs |

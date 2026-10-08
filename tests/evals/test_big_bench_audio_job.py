@@ -186,7 +186,7 @@ def test_startup_failure_without_log_returns_failure_without_hub_upload(monkeypa
     assert not Path(captured["args"].out).exists()
 
 
-def test_full_job_selects_all_1000_questions_without_a_limit(monkeypatch):
+def test_full_job_selects_all_1000_questions_without_a_limit(monkeypatch, benchmark_metadata):
     monkeypatch.setenv("S2S_SUBSET", "full")
     captured = capture_launch(monkeypatch)
 
