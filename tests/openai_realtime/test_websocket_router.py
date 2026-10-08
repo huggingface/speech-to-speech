@@ -1855,3 +1855,111 @@ def test_partial_incomplete_response_drains_audio_before_done(setup, reason):
             assert sum(message["type"] == "response.output_audio.done" for message in messages) == 1
             parsed = parse_wire_events(messages)
             assert_response_lifecycle_contract(parsed, wants_audio=True, expected_status="incomplete")
+
+
+def test_visemes_precede_matching_audio_and_survive_batch_boundaries(setup):
+    from speech_to_speech.pipeline.visemes import Viseme
+
+    app, _, _, output_queue, *_ = setup
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/realtime") as ws:
+            ws.receive_json()
+            output_queue.put(AudioOutput(audio=_pcm_bytes(256), visemes=[Viseme(viseme=21, start_s=0, end_s=0.016)]))
+            output_queue.put(AudioOutput(audio=_pcm_bytes(256), visemes=[Viseme(viseme=6, start_s=0.016, end_s=0.032)]))
+            output_queue.put(AUDIO_RESPONSE_DONE)
+            events = []
+            while not events or events[-1]["type"] != "response.done":
+                events.append(ws.receive_json())
+            kinds = [event["type"] for event in events]
+            assert kinds[:7] == [
+                "response.created",
+                "response.output_item.added",
+                "response.content_part.added",
+                "speech_to_speech.output_audio.visemes",
+                "response.output_audio.delta",
+                "speech_to_speech.output_audio.visemes",
+                "response.output_audio.delta",
+            ]
+            first, second = events[3], events[5]
+            assert first["visemes"] == [{"viseme": 21, "start_s": 0.0, "end_s": 0.016}]
+            assert second["visemes"] == [{"viseme": 6, "start_s": 0.016, "end_s": 0.032}]
+            assert first["response_id"] == second["response_id"] == events[0]["response"]["id"]
+            assert first["item_id"] == second["item_id"] == events[4]["item_id"] == events[6]["item_id"]
+            assert first["output_index"] == first["content_index"] == 0
+            assert base64.b64decode(events[4]["delta"]) == _pcm_bytes(256)
+            assert base64.b64decode(events[6]["delta"]) == _pcm_bytes(256)
+
+
+def test_cancelled_audio_does_not_publish_visemes(setup):
+    from speech_to_speech.pipeline.visemes import Viseme
+
+    app, _, _, output_queue, _, _, _, _, scope = setup
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/realtime") as ws:
+            ws.receive_json()
+            scope.cancel()
+            output_queue.put(
+                AudioOutput(
+                    audio=_pcm_bytes(256),
+                    cancel_generation=0,
+                    visemes=[Viseme(viseme=21, start_s=0, end_s=0.016)],
+                )
+            )
+            output_queue.put(AudioOutput(audio=_pcm_bytes(256), cancel_generation=scope.generation))
+            output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, cancel_generation=scope.generation))
+            events = []
+            while not events or events[-1]["type"] != "response.done":
+                events.append(ws.receive_json())
+            assert not any(event["type"] == "speech_to_speech.output_audio.visemes" for event in events)
+
+
+def test_cancellation_while_visemes_send_does_not_restart_audio(setup, monkeypatch):
+    from speech_to_speech.pipeline.visemes import Viseme
+
+    app, service, _, output_queue, _, _, _, _, scope = setup
+    visemes_sent = ThreadingEvent()
+    release_send = ThreadingEvent()
+    audio_sends = []
+    original_events = router_module.WebSocketTransport.send_events
+    original_audio = router_module.WebSocketTransport.send_audio_chunk
+
+    async def hold_after_visemes(transport, events):
+        await original_events(transport, events)
+        if any(event.type == "speech_to_speech.output_audio.visemes" for event in events):
+            visemes_sent.set()
+            while not release_send.is_set():
+                await asyncio.sleep(0.001)
+
+    async def observe_audio(transport, *args, **kwargs):
+        audio_sends.append(args)
+        await original_audio(transport, *args, **kwargs)
+
+    monkeypatch.setattr(router_module.WebSocketTransport, "send_events", hold_after_visemes)
+    monkeypatch.setattr(router_module.WebSocketTransport, "send_audio_chunk", observe_audio)
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/realtime") as ws:
+            ws.receive_json()
+            ws.send_json({"type": "response.create"})
+            assert ws.receive_json()["type"] == "response.created"
+            conn_id = list(service._conns)[0]
+            response_key = service._state(conn_id).current_response_key
+            output_queue.put(
+                AudioOutput(
+                    audio=_pcm_bytes(256),
+                    response_key=response_key,
+                    cancel_generation=scope.generation,
+                    visemes=[Viseme(viseme=21, start_s=0, end_s=0.016)],
+                )
+            )
+            assert visemes_sent.wait(timeout=1)
+            try:
+                events = [ws.receive_json() for _ in range(3)]
+                assert events[-1]["type"] == "speech_to_speech.output_audio.visemes"
+                ws.send_json({"type": "response.cancel"})
+                while ws.receive_json()["type"] != "response.done":
+                    pass
+            finally:
+                release_send.set()
+            time.sleep(0.1)
+            assert audio_sends == []
+            assert not service._state(conn_id).in_response
