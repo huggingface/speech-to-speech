@@ -20,6 +20,7 @@ import json
 import time
 from queue import Empty, Queue
 from threading import Event as ThreadingEvent
+from unittest.mock import AsyncMock, Mock
 
 import numpy as np
 import pytest
@@ -29,12 +30,14 @@ av = pytest.importorskip("av")
 
 import httpx  # noqa: E402  (ships with the openai dependency)
 from aioice.ice import Connection  # noqa: E402
-from aiortc import RTCPeerConnection, RTCSessionDescription  # noqa: E402
-from aiortc.codecs.opus import OpusEncoder  # noqa: E402
+from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription, clock  # noqa: E402
+from aiortc.codecs.opus import OpusDecoder, OpusEncoder  # noqa: E402
+from aiortc.jitterbuffer import JitterFrame  # noqa: E402
 from aiortc.mediastreams import AudioStreamTrack, MediaStreamError  # noqa: E402
+from aiortc.rtcrtpparameters import RTCRtcpParameters, RTCRtpCodecParameters, RTCRtpSendParameters  # noqa: E402
+from aiortc.rtp import RtcpPacket, RtcpRrPacket, RtcpSrPacket, RtpPacket, is_rtcp  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 
-import speech_to_speech.api.openai_realtime.webrtc_session as webrtc_session_module  # noqa: E402
 import speech_to_speech.api.openai_realtime.websocket_router as router_module  # noqa: E402
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit  # noqa: E402
 from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService  # noqa: E402
@@ -66,8 +69,6 @@ from .test_openai_client import _ServerEnv  # noqa: E402
 
 PIPELINE_SAMPLE_RATE = 16_000
 IDLE_RECV_OBSERVATION_S = AUDIO_PTIME * 2
-POST_IDLE_PAUSE_S = AUDIO_PTIME * 3
-PACING_ASSERTION_MIN_S = AUDIO_PTIME / 2
 RECV_TIMEOUT_S = 1.0
 
 
@@ -231,28 +232,28 @@ class TestPipelineAudioTrack:
         assert np.all(frame.to_ndarray() == 5)
         track.stop()
 
-    async def test_recv_resumes_with_continuous_encoded_timestamps(self, monkeypatch):
-        clock_now = [0.0]
-        monkeypatch.setattr(webrtc_session_module.time, "time", lambda: clock_now[0])
+    async def test_short_buffer_gaps_do_not_bypass_pacing(self):
         track = PipelineAudioTrack()
-        track.write(b"\x00" * WEBRTC_FRAME_SAMPLES * 2)
-        first_frame = await track.recv()
+        payload = (np.ones(WEBRTC_FRAME_SAMPLES, dtype=np.int16) * 5).tobytes()
 
-        recv_task = asyncio.create_task(track.recv())
-        await asyncio.sleep(0)
-        clock_now[0] = POST_IDLE_PAUSE_S
-        track.write(b"\x00" * WEBRTC_FRAME_SAMPLES * 2 * 2)
-        resumed_frame = await asyncio.wait_for(recv_task, timeout=RECV_TIMEOUT_S)
+        async def produce():
+            for _ in range(10):
+                track.write(payload)
+                await asyncio.sleep(AUDIO_PTIME / 4)
 
-        start = time.monotonic()
-        following_frame = await track.recv()
-        elapsed = time.monotonic() - start
-        assert elapsed >= PACING_ASSERTION_MIN_S
-
-        encoder = OpusEncoder()
-        encoded_timestamps = [encoder.encode(frame)[1] for frame in (first_frame, resumed_frame, following_frame)]
-        assert encoded_timestamps[2] - encoded_timestamps[1] == WEBRTC_FRAME_SAMPLES
-        track.stop()
+        producer = asyncio.create_task(produce())
+        try:
+            first = await track.recv()
+            start = time.monotonic()
+            for _ in range(9):
+                frame = await track.recv()
+                assert np.all(frame.to_ndarray() == 5)
+            # 200 ms of audio has a nominal first-to-last span of 180 ms.
+            assert time.monotonic() - start >= 0.16
+            assert np.all(first.to_ndarray() == 5)
+        finally:
+            await producer
+            track.stop()
 
     async def test_recv_returns_written_audio(self):
         track = PipelineAudioTrack()
@@ -294,6 +295,194 @@ class TestPipelineAudioTrack:
 
         with pytest.raises(MediaStreamError):
             await asyncio.wait_for(recv_task, timeout=RECV_TIMEOUT_S)
+
+    async def test_clear_while_pacing_returns_only_new_audio(self):
+        track = PipelineAudioTrack()
+        payload = (np.ones(WEBRTC_FRAME_SAMPLES, dtype=np.int16) * 7).tobytes()
+        track.write(payload * 2)
+        await track.recv()
+        pending = asyncio.create_task(track.recv())
+        try:
+            await asyncio.sleep(0)
+            track.clear()
+            await asyncio.sleep(AUDIO_PTIME * 2)
+            assert not pending.done()
+            track.write((np.ones(WEBRTC_FRAME_SAMPLES, dtype=np.int16) * 3).tobytes())
+            frame = await asyncio.wait_for(pending, timeout=RECV_TIMEOUT_S)
+            assert np.all(frame.to_ndarray() == 3)
+        finally:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+            track.stop()
+
+
+class _PacketCapture:
+    """Capture actual sender serialization without network or encryption."""
+
+    def __init__(self):
+        self.rtp = []
+        self.rtcp = []
+
+    async def send(self, data):
+        now = time.monotonic()
+        if is_rtcp(data):
+            self.rtcp.extend((now, packet) for packet in RtcpPacket.parse(data))
+        else:
+            self.rtp.append((now, RtpPacket.parse(data)))
+
+
+@pytest.fixture
+async def captured_audio_sender(monkeypatch):
+    pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+    session = WebRTCSession(
+        pc,
+        on_client_event=AsyncMock(),
+        on_audio=Mock(),
+        on_open=AsyncMock(),
+        on_closed=Mock(),
+    )
+    session.setup()
+    sender = pc.getSenders()[0]
+    capture = _PacketCapture()
+    monkeypatch.setattr(sender.transport, "_send_rtp", capture.send)
+    await sender.send(
+        RTCRtpSendParameters(
+            codecs=[
+                RTCRtpCodecParameters(mimeType="audio/opus", clockRate=WEBRTC_SAMPLE_RATE, channels=2, payloadType=111)
+            ],
+            rtcp=RTCRtcpParameters(cname="audio-clock-test"),
+        )
+    )
+    try:
+        yield session, sender, capture
+    finally:
+        await session.close()
+
+
+async def _wait_until(predicate, timeout=4.0):
+    async def poll():
+        while not predicate():
+            await asyncio.sleep(0.005)
+
+    await asyncio.wait_for(poll(), timeout=timeout)
+
+
+class TestOutboundAudioPackets:
+    async def test_final_audio_is_encoded_before_idle(self, captured_audio_sender):
+        session, _, capture = captured_audio_sender
+        pcm = np.zeros(WEBRTC_FRAME_SAMPLES * 4, dtype=np.int16)
+        # Speech only in the final 5 ms is otherwise retained in Opus lookahead.
+        pcm[-240:] = (12000 * np.sin(2 * np.pi * 1000 * np.arange(240) / WEBRTC_SAMPLE_RATE)).astype(np.int16)
+        session._track.write(pcm.tobytes())
+        await _wait_until(lambda: len(capture.rtp) >= 4)
+        await asyncio.sleep(AUDIO_PTIME * 3)
+
+        decoder = OpusDecoder()
+        frames = [
+            frame.to_ndarray().astype(np.int32)
+            for _, packet in capture.rtp
+            for frame in decoder.decode(JitterFrame(data=packet.payload, timestamp=packet.timestamp))
+        ]
+        assert max(np.max(np.abs(frame)) for frame in frames) > 1000
+        assert len(capture.rtp) == 5  # four PCM frames plus one bounded drain
+        await asyncio.sleep(IDLE_RECV_OBSERVATION_S)
+        assert len(capture.rtp) == 5
+
+    async def test_rtp_clock_advances_across_idle(self, captured_audio_sender):
+        session, _, capture = captured_audio_sender
+        session._track.write(bytes(WEBRTC_FRAME_SAMPLES * 2 * 2))
+        await _wait_until(lambda: len(capture.rtp) >= 2)
+        await asyncio.sleep(AUDIO_PTIME * 2)
+        count = len(capture.rtp)
+        await asyncio.sleep(0.15)
+        assert len(capture.rtp) == count
+        session._track.write(bytes(WEBRTC_FRAME_SAMPLES * 2 * 2))
+        await _wait_until(lambda: len(capture.rtp) >= count + 2)
+        await asyncio.sleep(AUDIO_PTIME * 2)
+
+        previous_time, previous = capture.rtp[count - 1]
+        resumed_time, resumed = capture.rtp[count]
+        rtp_elapsed = ((resumed.timestamp - previous.timestamp) & 0xFFFFFFFF) / WEBRTC_SAMPLE_RATE
+        assert abs(rtp_elapsed - (resumed_time - previous_time)) < 0.03
+        assert resumed.ssrc == previous.ssrc
+        assert (resumed.sequence_number - previous.sequence_number) & 0xFFFF == 1
+        for (_, a), (_, b) in zip(capture.rtp[count:], capture.rtp[count + 1 :]):
+            assert (b.timestamp - a.timestamp) & 0xFFFFFFFF == WEBRTC_FRAME_SAMPLES
+
+    async def test_initial_idle_sends_rr_without_audio(self, captured_audio_sender):
+        _, _, capture = captured_audio_sender
+        await _wait_until(lambda: any(isinstance(p, RtcpRrPacket) for _, p in capture.rtcp))
+        assert not capture.rtp
+        assert not any(isinstance(p, RtcpSrPacket) for _, p in capture.rtcp)
+
+    async def test_rtcp_reports_current_clock_and_switches_to_rr_when_idle(self, captured_audio_sender):
+        session, sender, capture = captured_audio_sender
+        session._track.write(bytes(WEBRTC_FRAME_SAMPLES * 2 * 4))
+        await _wait_until(lambda: len(capture.rtp) >= 4)
+        await asyncio.sleep(AUDIO_PTIME * 2)
+        count = len(capture.rtp)
+        await _wait_until(lambda: sum(isinstance(p, RtcpSrPacket) for _, p in capture.rtcp) >= 2)
+        reports = [(at, p) for at, p in capture.rtcp if isinstance(p, RtcpSrPacket)]
+        first_time, first = reports[-2]
+        second_time, second = reports[-1]
+        ntp_elapsed = (second.sender_info.ntp_timestamp - first.sender_info.ntp_timestamp) / 2**32
+        rtp_elapsed = (
+            (second.sender_info.rtp_timestamp - first.sender_info.rtp_timestamp) & 0xFFFFFFFF
+        ) / WEBRTC_SAMPLE_RATE
+        assert abs(ntp_elapsed - (second_time - first_time)) < 0.01
+        assert abs(rtp_elapsed - ntp_elapsed) < 0.001
+        assert (clock.current_ntp_time() - second.sender_info.ntp_timestamp) / 2**32 < 0.05
+        assert first.sender_info.packet_count == second.sender_info.packet_count == count
+
+        await _wait_until(lambda: any(at > second_time and isinstance(p, RtcpRrPacket) for at, p in capture.rtcp))
+        assert len(capture.rtp) == count
+        assert getattr(sender, "_RTCRtpSender__lsr") == (second.sender_info.ntp_timestamp >> 16) & 0xFFFFFFFF
+
+    async def test_interruption_discards_encoder_lookahead(self, captured_audio_sender):
+        session, _, capture = captured_audio_sender
+        session._track.write((np.ones(WEBRTC_FRAME_SAMPLES, dtype=np.int16) * 12000).tobytes())
+        await _wait_until(lambda: len(capture.rtp) >= 1)
+        session.discard_pending_audio()
+        count = len(capture.rtp)
+        await asyncio.sleep(AUDIO_PTIME * 2)
+        assert len(capture.rtp) == count
+        session._track.write(bytes(WEBRTC_FRAME_SAMPLES * 2 * 2))
+        await _wait_until(lambda: len(capture.rtp) >= count + 2)
+        await asyncio.sleep(AUDIO_PTIME * 2)
+
+        decoder = OpusDecoder()
+        frames = [
+            frame.to_ndarray().astype(np.int32)
+            for _, packet in capture.rtp[count:]
+            for frame in decoder.decode(JitterFrame(data=packet.payload, timestamp=packet.timestamp))
+        ]
+        assert max(np.max(np.abs(frame)) for frame in frames) < 100
+
+    async def test_interruption_during_encoding_drops_in_flight_packet(self, captured_audio_sender, monkeypatch):
+        session, sender, capture = captured_audio_sender
+        encoding = ThreadingEvent()
+        release = ThreadingEvent()
+        encoder = OpusEncoder()
+        encode = encoder.encode
+
+        def blocked_encode(*args):
+            encoding.set()
+            assert release.wait(timeout=RECV_TIMEOUT_S)
+            return encode(*args)
+
+        monkeypatch.setattr(encoder, "encode", blocked_encode)
+        setattr(sender, "_RTCRtpSender__encoder", encoder)
+        session._track.write((np.ones(WEBRTC_FRAME_SAMPLES, dtype=np.int16) * 12000).tobytes())
+        try:
+            await _wait_until(encoding.is_set)
+            session.discard_pending_audio()
+            release.set()
+            await asyncio.sleep(AUDIO_PTIME * 2)
+            assert not capture.rtp
+            session._track.write(bytes(WEBRTC_FRAME_SAMPLES * 2))
+            await _wait_until(lambda: len(capture.rtp) >= 2)
+        finally:
+            release.set()
 
 
 # ---------------------------------------------------------------------------
