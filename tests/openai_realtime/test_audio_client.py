@@ -273,10 +273,15 @@ def test_playback_buffer_starts_immediately_by_default():
 def test_echo_canceller_removes_played_audio_from_microphone_blocks(mode):
     np = pytest.importorskip("numpy")
     pytest.importorskip("pywebrtc_audio")
-    from scipy.io import wavfile
+    import soundfile
+    import soxr
     from scipy.signal import correlate, correlation_lags
 
-    rate, played = wavfile.read(Path(__file__).parents[1] / "fixtures/aec-speech.wav")
+    rate = 16000
+    speech, source_rate = soundfile.read(
+        Path(__file__).parents[2] / "src/speech_to_speech/TTS/ref_audio.wav", dtype="float32"
+    )
+    played = (soxr.resample(speech.mean(axis=1), source_rate, rate)[: 12 * rate] * 12000).astype(np.int16)
     block = 1024  # Not a whole number of 10 ms frames.
     echo = np.zeros_like(played)
     echo[320:] = (played[:-320] * 0.3).astype(np.int16)
