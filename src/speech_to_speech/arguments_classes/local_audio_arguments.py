@@ -43,8 +43,8 @@ class LocalAudioArguments:
         default=False,
         metadata={
             "help": (
-                "Remove speaker playback from the local microphone so voice barge-in works without "
-                "headphones. Requires the 'aec' extra."
+                "Remove speaker playback from the local microphone so voice barge-in works on speakers. "
+                "Not needed with headphones or a headset. Requires the 'aec' extra."
             ),
             "aliases": ["--echo-cancellation"],
         },

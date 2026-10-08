@@ -73,6 +73,9 @@ class RealtimeAudioClientConfig:
     def __post_init__(self) -> None:
         if not 0 <= self.playback_buffer_ms < float("inf"):
             raise ValueError("playback_buffer_ms must be a finite non-negative number")
+        if self.echo_cancellation and self.block_mic_during_playback:
+            # A paused microphone stops consuming speaker references, so the canceller would fall out of step.
+            raise ValueError("Echo cancellation cannot be combined with blocking the microphone during playback")
 
 
 def load_realtime_tool_module(module_name: str) -> tuple[list[dict[str, Any]], ToolExecutor, bool]:

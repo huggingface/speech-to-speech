@@ -439,6 +439,8 @@ def test_packaged_audio_clients_have_no_general_playback_buffer_default():
 def test_talk_accepts_echo_cancellation_opt_in():
     assert parse_talk_arguments([]).echo_cancellation is False
     assert parse_talk_arguments(["--echo-cancellation"]).echo_cancellation is True
+    with pytest.raises(ValueError, match="cannot be combined"):
+        parse_talk_arguments(["--echo-cancellation", "--block-mic-during-playback"])
 
 
 @pytest.mark.parametrize("flag", ["--log-transcripts", "--log_transcripts"])

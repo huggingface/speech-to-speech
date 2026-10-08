@@ -319,6 +319,24 @@ def test_echo_canceller_rejects_unsupported_rates():
         EchoCanceller(16000, 48000)
 
 
+def test_echo_canceller_passes_raw_audio_after_processor_failure(caplog):
+    pytest.importorskip("pywebrtc_audio")
+
+    def fail(_near, _far):
+        raise RuntimeError("native failure")
+
+    canceller = EchoCanceller(16000, 16000)
+    canceller._apm = SimpleNamespace(process=fail)
+    block = bytes(range(256)) * 8
+
+    canceller.render(block, output_delay_s=0.01)
+    assert canceller.capture(block, input_delay_s=0.01) == block
+    assert canceller.capture(block, input_delay_s=0.01) == block
+    assert [record.getMessage() for record in caplog.records if record.levelname == "ERROR"] == [
+        "Echo cancellation failed; sending raw microphone audio for the rest of the session"
+    ]
+
+
 @pytest.mark.parametrize("buffer_ms", [-1, float("inf"), float("nan")])
 def test_audio_client_rejects_invalid_playback_buffer(buffer_ms):
     with pytest.raises(ValueError, match="playback_buffer_ms"):

@@ -148,8 +148,8 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
         "--echo-cancellation",
         action="store_true",
         default=defaults.echo_cancellation,
-        help="Remove speaker playback from the microphone so voice barge-in works without headphones. "
-        "Requires the 'aec' extra.",
+        help="Remove speaker playback from the microphone so voice barge-in works on speakers. "
+        "Not needed with headphones or a headset. Requires the 'aec' extra.",
     )
     parser.add_argument(
         "--log-transcripts",
