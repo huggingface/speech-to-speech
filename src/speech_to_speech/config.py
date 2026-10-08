@@ -425,12 +425,17 @@ def resolve_config(
     names: Sequence[str] | None = None,
     environ: Mapping[str, str] | None = None,
     include_client: bool = False,
+    client_only: bool = False,
 ) -> ResolvedConfig:
     """Resolve selected definitions to independent settings and existing backend selections."""
     validate_config(document)
     module, server, vad, registries = _metadata()
     definitions = document.data["pipelines"]
-    if names is None:
+    if client_only:
+        if names is not None:
+            _error(document, ("pipelines",), "Client-only resolution does not accept pipeline names.")
+        selected = []
+    elif names is None:
         selected = list(definitions)
     else:
         if isinstance(names, (str, bytes)) or not isinstance(names, Sequence) or not names:
@@ -452,11 +457,12 @@ def resolve_config(
         sources,
         only=_MODULE_PROCESS,
     )
-    runtime["server"] = _settings(
-        document, raw_runtime.get("server", {}), server, ("runtime", "server"), environment, sources
-    )
+    if not client_only:
+        runtime["server"] = _settings(
+            document, raw_runtime.get("server", {}), server, ("runtime", "server"), environment, sources
+        )
     client = None
-    if include_client:
+    if include_client or client_only:
         supplied_client = raw_runtime.get("client", {})
         client = _settings(
             document,

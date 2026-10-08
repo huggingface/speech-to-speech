@@ -1,10 +1,11 @@
-# YAML configuration API
+# YAML configuration and startup
 
 The optional configuration API loads, validates, and resolves reusable blocks
-and named pipelines from a local YAML file. It does not construct handlers,
-download models, call providers, access audio devices, or start threads and
-listeners. Existing Python interfaces, CLI commands, and flat JSON input keep
-their existing behavior.
+and named pipelines from a local YAML file. These offline operations do not
+construct handlers, download models, call providers, access audio devices, or
+start workers and listeners. Explicit runtime construction and CLI file mode
+can start the configured pipeline. Existing Python interfaces, CLI commands,
+and flat JSON input keep their existing behavior.
 
 Install the YAML parser:
 
@@ -47,7 +48,7 @@ including definitions that a caller does not select. It checks field names,
 literal types, environment reference syntax, stage references, and static
 backend capabilities. It does not read environment values.
 
-`resolve_config(document, *, names=None, environ=None, include_client=False)`
+`resolve_config(document, *, names=None, environ=None, include_client=False, client_only=False)`
 validates again, then resolves the selected definitions. With `names=None`, it
 resolves all pipelines. An explicit sequence preserves selection order. An
 empty sequence, a bare string, duplicate names, or unknown names raises
@@ -58,6 +59,11 @@ The resolver copies the supplied environment mapping, or `os.environ` when
 pipelines. It resolves `runtime.client` only with `include_client=True`.
 Inactive definitions need valid structure and literal values, but their
 explicit environment references do not need values.
+
+With `client_only=True`, resolve client and process logging settings without
+resolving server or block environment references. The result has no pipelines
+or server settings. Pipeline names are not accepted in this mode. The full
+document still needs valid structure and literal settings.
 
 The returned `ResolvedConfig` has `runtime`, `client`, and `pipelines` records
 and source metadata. Each pipeline has `stages`, `options`, and `num_pipelines`.
@@ -165,8 +171,8 @@ fields, and backend normalization. Explicit collections replace default
 collections as complete values. It does not recursively merge dictionaries.
 Open generation dictionaries must contain JSON-compatible nested values.
 
-Source metadata preserves omitted versus explicit fields for later runtime
-integration. Resolution does not apply presets, global device overrides,
+Source metadata preserves omitted versus explicit fields for runtime
+construction. Offline resolution does not apply presets, global device overrides,
 hardware checks, handler credential fallback, or local playback defaults.
 An omitted credential retains its dataclass default. A missing explicit
 environment reference fails even if a handler could use another credential.
@@ -231,6 +237,94 @@ A missing parser raises actionable `ImportError` instead.
 
 The new loader rejects `.json` with guidance to use the existing flat JSON
 interface. Existing JSON parsing, including its extra-key behavior, is unchanged.
-Structured JSON support, configured runtime startup, CLI file options, and
-concurrent named-pipeline serving are separate additions. Offline validation
+Structured JSON support and concurrent named-pipeline serving are separate additions. Offline validation
 does not verify provider access, assets, devices, or installed backend extras.
+
+## Configured Python startup
+
+Construct runtime resources explicitly after resolving the file:
+
+```python
+from threading import Event
+from speech_to_speech.config import load_config, resolve_config
+from speech_to_speech.configured_runtime import build_configured_server
+
+document = load_config("voice.yaml")
+resolved = resolve_config(document, names=["primary"], include_client=True)
+stop_event = Event()
+runtime = build_configured_server(resolved, stop_event)
+try:
+    runtime.start()
+    runtime.wait()
+finally:
+    runtime.stop()
+```
+
+Supply the example's `PRIMARY_STT_KEY` environment value before resolution.
+Construction initializes handlers and can download models, warm providers,
+allocate resources, or use existing backend internal threads. Managed pipeline
+workers, the listener, and the packaged client start through `start()`.
+With `local=True`, the server constructor also creates one packaged audio client.
+
+`build_configured_runtime(resolved, stop_event)` constructs worker pools without
+a listener. It supports multiple selected definitions, exposed through the
+runtime's `pools` mapping. Each definition gets its own isolated instances and
+child stop event. Setting the caller's event stops the owned resources.
+
+`build_configured_server` publishes exactly one selected definition. Its
+`num_pipelines` can create multiple instances. Distinct named definitions are
+not combined into the server's anonymous pool. Concurrent named routing is
+deferred to a separate addition.
+
+Library lifecycle methods install no signal handlers. Repeated successful
+`start()` calls are harmless; a stopped or failed runtime cannot restart.
+`stop()` works before startup and is safe to repeat. Construction or startup
+failure cleans completed resources. Shutdown uses bounded joins and reports
+workers that remain alive. Thread startup alone does not prove listener readiness.
+
+## CLI file mode
+
+```bash
+speech-to-speech serve -f voice.yaml --name primary
+speech-to-speech local --file voice.yaml --name primary
+speech-to-speech talk -f voice.yaml
+```
+
+`-f` and `--file` are equivalent. Supply one file option. File mode accepts
+pipeline selection and help, but does not accept legacy settings overrides.
+Repeated `--name` selects distinct names; duplicates, empty names, unknown names,
+and comma-separated names fail. A name without a file fails.
+
+For `serve`, omitted names select all definitions. Server startup currently
+requires exactly one selected definition and rejects larger sets before handler
+construction. For `local`, select exactly one name when the file has several
+definitions. Its packaged client does not use that name as its model.
+
+`talk` resolves only client settings and does not construct server handlers.
+It does not require server or block environment values. It rejects `--name`
+until named client routing is supported. Help does not load the file.
+Configuration errors exit with code 2; construction or startup errors exit
+with code 1. CLI errors omit raw provider messages and credentials.
+
+## Runtime defaults and client behavior
+
+Construction applies dataclass defaults, applicable explicitly enabled macOS
+preset defaults, explicit file values, then the pipeline-wide device override.
+Environment references count as explicit file values. Required stage references
+are never replaced by preset backend choices. All transformations use copies.
+Lists and dictionaries replace complete values without a general deep merge.
+Existing backend credential fallbacks and generation normalization still apply.
+On Apple Silicon, several active instances disable live transcription under
+the existing contention policy. Final transcription remains available.
+
+Local mode binds loopback only. It rejects an explicit non-loopback host and
+derives the client URL from the server port. A conflicting explicit client URL
+fails. Local playback buffering defaults to 196 milliseconds for OpenAI TTS
+and zero otherwise; an explicit zero remains zero. One client runs even when
+the selected definition has multiple instances. Talk retains standalone defaults.
+
+Tool modules load only during explicit client construction. An explicit tools
+list conflicts with a tool module. Tools require an executor, and an explicit
+`tool_response_create` overrides the module default. Conflicting explicit
+runtime and client transcript logging settings fail; otherwise the explicit
+value applies, with the existing disabled default when neither is supplied.

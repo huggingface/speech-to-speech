@@ -619,3 +619,185 @@ def test_additive_config_api_preserves_flat_json_contract(tmp_path):
     assert args.llm_backend.config["stream"] is False
     with pytest.raises(ValueError, match="existing flat JSON interface"):
         load_config(path)
+
+
+@pytest.fixture
+def configured_cli(tmp_path, monkeypatch):
+    path = tmp_path / "config.yaml"
+    path.write_text("""schema_version: 1
+blocks:
+  vad: {kind: vad, backend: silero}
+  stt: {kind: stt, backend: openai}
+  llm: {kind: llm, backend: chat-completions}
+  tts: {kind: tts, backend: openai}
+pipelines:
+  primary:
+    stages: {vad: vad, stt: stt, llm: llm, tts: tts}
+  secondary:
+    stages: {vad: vad, stt: stt, llm: llm, tts: tts}
+""")
+    calls = []
+    monkeypatch.setitem(
+        sys.modules,
+        "speech_to_speech.configured_runtime",
+        SimpleNamespace(run_configured_command=lambda command, config: calls.append((command, config))),
+    )
+    return path, calls
+
+
+@pytest.mark.parametrize("flag", ["-f", "--file"])
+def test_file_cli_dispatches_selected_pipeline(flag, configured_cli, monkeypatch):
+    path, calls = configured_cli
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", "serve", flag, str(path), "--name", "secondary"])
+    main()
+    assert calls[0][0] == "serve"
+    assert list(calls[0][1].pipelines) == ["secondary"]
+
+
+def test_file_talk_resolves_only_client(configured_cli, monkeypatch):
+    path, calls = configured_cli
+    path.write_text(
+        path.read_text().replace(
+            "schema_version: 1",
+            "schema_version: 1\nruntime: {server: {port: {env: MISSING_PORT}}, client: {model: client-model}}",
+        )
+    )
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", "talk", "--file", str(path)])
+    main()
+    assert calls[0][0] == "talk"
+    assert calls[0][1].pipelines == {}
+    assert calls[0][1].client["model"] == "client-model"
+
+
+@pytest.mark.parametrize("command", ["serve", "local"])
+def test_file_cli_rejects_multiple_definitions_before_runtime(command, configured_cli, monkeypatch):
+    path, calls = configured_cli
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", command, "-f", str(path)])
+    with pytest.raises(SystemExit, match="2"):
+        main()
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--name", "primary", "--name", "primary"],
+        ["--name", ""],
+        ["--name", "unknown"],
+        ["--name", "primary,secondary"],
+        ["--port", "9876"],
+        ["--api-key", "SECRET_MARKER"],
+        ["--file", "SECRET_MARKER.yaml"],
+    ],
+)
+def test_file_cli_rejects_invalid_and_mixed_flags(extra, configured_cli, monkeypatch, capsys):
+    path, calls = configured_cli
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", "serve", "-f", str(path), *extra])
+    with pytest.raises(SystemExit, match="2"):
+        main()
+    assert calls == []
+    assert "SECRET_MARKER" not in capsys.readouterr().err
+
+
+def test_file_talk_rejects_name(configured_cli, monkeypatch):
+    path, calls = configured_cli
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", "talk", "-f", str(path), "--name", "primary"])
+    with pytest.raises(SystemExit, match="2"):
+        main()
+    assert calls == []
+
+
+@pytest.mark.parametrize("command", ["serve", "talk", "local"])
+def test_cli_help_does_not_read_file_or_run_runtime(command, configured_cli, monkeypatch):
+    _, calls = configured_cli
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", command, "--file", "missing.yaml", "--help"])
+    with pytest.raises(SystemExit, match="0"):
+        main()
+    assert calls == []
+
+
+def test_name_requires_file(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", "serve", "--name", "primary"])
+    with pytest.raises(SystemExit, match="2"):
+        main()
+
+
+def test_file_cli_hides_runtime_error(configured_cli, monkeypatch, capsys):
+    path, _ = configured_cli
+
+    def fail(*_args):
+        raise RuntimeError("provider SECRET_MARKER https://user:password@host")
+
+    monkeypatch.setitem(
+        sys.modules, "speech_to_speech.configured_runtime", SimpleNamespace(run_configured_command=fail)
+    )
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", "serve", "-f", str(path), "--name", "primary"])
+    with pytest.raises(SystemExit, match="1"):
+        main()
+    error = capsys.readouterr().err
+    assert "SECRET_MARKER" not in error
+    assert "password" not in error
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["serve", "-f", "missing.yaml", "--help"],
+        ["local", "-f", "missing.yaml", "--help"],
+        ["talk", "-f", "missing.yaml", "--help"],
+        ["serve", "--name", "primary"],
+    ],
+)
+def test_configured_cli_rejects_or_helps_before_heavy_imports(arguments):
+    import subprocess
+
+    script = """
+import importlib.abc, sys
+class Block(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, *args):
+        if fullname.endswith("s2s_pipeline") or fullname.endswith("configured_runtime"):
+            raise AssertionError(fullname)
+sys.meta_path.insert(0, Block())
+from speech_to_speech.cli import main
+sys.argv = ["speech-to-speech", *sys.argv[1:]]
+try:
+    main()
+except SystemExit as exc:
+    assert exc.code == (0 if "--help" in sys.argv else 2)
+else:
+    raise AssertionError("expected help or rejection")
+"""
+    result = subprocess.run([sys.executable, "-c", script, *arguments], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_file_cli_accepts_attached_short_file_flag(configured_cli, monkeypatch):
+    path, calls = configured_cli
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", "local", f"-f{path}", "--name=primary"])
+    main()
+    assert calls[0][0] == "local"
+
+
+def test_file_cli_malformed_flags_hide_input_values(configured_cli, monkeypatch, capsys):
+    path, _ = configured_cli
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", "serve", "-f", str(path), "--name", "--SECRET_MARKER"])
+    with pytest.raises(SystemExit, match="2"):
+        main()
+    assert "SECRET_MARKER" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "arguments, flags",
+    [
+        (["serve", "--help"], ["--host", "--port", "--stt"]),
+        (["local", "--help"], ["--port", "--local_audio_input_device"]),
+        (["--mode", "local", "--help"], ["--local_audio_input_device"]),
+    ],
+)
+def test_legacy_help_keeps_command_settings(arguments, flags, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", *arguments])
+    with pytest.raises(SystemExit, match="0"):
+        main()
+    output = capsys.readouterr().out
+    for flag in flags:
+        assert flag in output

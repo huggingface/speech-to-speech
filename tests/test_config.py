@@ -476,3 +476,40 @@ def test_explicit_scope_inventory():
         "tool_executor",
         "tool_response_create",
     }
+
+
+def test_client_only_skips_server_and_pipeline_environment(document):
+    document.data["runtime"] = {
+        "server": {"port": {"env": "MISSING_PORT"}},
+        "log_transcripts": {"env": "LOG_TRANSCRIPTS"},
+        "client": {"api_key": "", "model": "client-model", "playback_buffer_ms": 0},
+    }
+    document.data["blocks"]["llm"]["settings"] = {"responses_api_api_key": {"env": "MISSING_KEY"}}
+    document.data["pipelines"]["primary"]["num_pipelines"] = {"env": "MISSING_COUNT"}
+    original = copy.deepcopy(document.data)
+    result = resolve_config(document, client_only=True, environ={"LOG_TRANSCRIPTS": "false"})
+    assert result.pipelines == {}
+    assert "server" not in result.runtime
+    assert result.runtime["log_transcripts"] is False
+    assert result.client["api_key"] == ""
+    assert result.client["model"] == "client-model"
+    assert result.client["playback_buffer_ms"] == 0
+    assert result.sources[("runtime", "client", "api_key")] == "file"
+    assert not any(path[0] in {"blocks", "pipelines"} for path in result.sources)
+    assert document.data == original
+
+
+@pytest.mark.parametrize("names", [[], ["primary"], ["unknown"]])
+def test_client_only_rejects_names(document, names):
+    with pytest.raises(ConfigurationError, match="Client-only"):
+        resolve_config(document, client_only=True, names=names)
+
+
+def test_client_only_validates_complete_document_and_client_environment(document):
+    document.data["blocks"]["stt"]["backend"] = "missing"
+    with pytest.raises(ConfigurationError):
+        resolve_config(document, client_only=True)
+    document.data["blocks"]["stt"]["backend"] = "openai"
+    document.data["runtime"] = {"client": {"api_key": {"env": "MISSING_CLIENT_KEY"}}}
+    with pytest.raises(ConfigurationError):
+        resolve_config(document, client_only=True, environ={})

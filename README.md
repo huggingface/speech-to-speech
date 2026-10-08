@@ -162,16 +162,25 @@ The default install covers the standard realtime path:
 
 macOS and non-macOS dependencies are resolved automatically via platform markers in `pyproject.toml`.
 
-To load and resolve YAML configuration from Python, install the optional parser:
+To use YAML configuration from Python or the CLI, install the optional parser:
 
 ```bash
 pip install "speech-to-speech[config]"
 ```
 
-See the [configuration API guide](./docs/configuration.md) for reusable blocks,
-named pipelines, and environment references. This API resolves settings without
-starting a pipeline. Existing Python interfaces, CLI commands, and flat JSON
-configuration remain available.
+See the [configuration guide](./docs/configuration.md) for reusable blocks,
+named pipelines, environment references, and explicit Python startup.
+With a configured `primary` pipeline, start its server with:
+
+```bash
+speech-to-speech serve -f voice.yaml --name primary
+```
+
+`local` runs one selected pipeline with the packaged loopback audio client.
+`talk -f voice.yaml` uses only the file's client settings. Configured server
+startup currently supports one named definition per invocation; its
+`num_pipelines` controls the number of isolated instances.
+Existing Python interfaces, CLI commands, and flat JSON configuration remain available.
 
 ### CUDA Note for Qwen3-TTS
 

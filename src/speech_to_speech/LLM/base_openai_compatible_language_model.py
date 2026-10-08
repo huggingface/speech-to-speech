@@ -383,6 +383,12 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 wav_file.writeframes(pcm.tobytes())
             return base64.b64encode(wav_io.getvalue()).decode("ascii")
 
+    def cleanup(self) -> None:
+        client = getattr(self, "client", None)
+        if client is not None:
+            del self.client
+            client.close()
+
     # ── speculative-turn / cancellation gating ─────────────────────────────────
 
     def _turn_is_latest(self, turn_id: str | None, turn_revision: int | None) -> bool:
