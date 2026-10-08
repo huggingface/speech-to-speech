@@ -515,6 +515,7 @@ class _ToolCallCoordinator:
         self._user_turn_item_id: str | None = None
         self._queued_tool_results: dict[str, set[str]] = {}
         self._pending_create_call_ids: set[str] = set()
+        self._pending_create_marked_call_ids: set[str] = set()
         self._answered_tool_call_ids: set[str] = set()
         self._next_create_sequence = 0
         self._tool_batches: dict[str, _ToolResponseBatch] = {}
@@ -538,6 +539,7 @@ class _ToolCallCoordinator:
                 self._pending_create_saw_response = False
                 self._consume_tool_results(self._pending_create_call_ids)
                 self._pending_create_call_ids.clear()
+                self._pending_create_marked_call_ids.clear()
             elif self._pending_create_id is not None:
                 self._pending_create_saw_response = True
         elif event.type == "response.output_item.added":
@@ -805,12 +807,14 @@ class _ToolCallCoordinator:
         self._pending_create_id = None
 
         if TOOL_FOLLOWUP_COVERED in {getattr(error, "type", None), getattr(error, "code", None)}:
-            self._consume_tool_results(self._pending_create_call_ids)
+            self._consume_tool_results(self._pending_create_marked_call_ids)
             self._pending_create_call_ids.clear()
+            self._pending_create_marked_call_ids.clear()
             self._pending_create_saw_response = False
             self._kick_follow_up()
             return
         self._pending_create_call_ids.clear()
+        self._pending_create_marked_call_ids.clear()
         if TOOL_FOLLOWUP_WAIT in {getattr(error, "type", None), getattr(error, "code", None)}:
             self._pending_create_saw_response = False
             self._user_turn_open = True
@@ -852,19 +856,20 @@ class _ToolCallCoordinator:
                 or self._user_turn_open
             ):
                 return
+            pending_call_ids = set().union(*self._queued_tool_results.values())
             call_ids: set[str] = set()
-            for call_id in sorted(set().union(*self._queued_tool_results.values())):
+            for call_id in sorted(pending_call_ids):
                 candidate = call_ids | {call_id}
                 if len(json.dumps(sorted(candidate), separators=(",", ":"))) > 512:
                     break
                 call_ids = candidate
             metadata = {_TOOL_CREATE_ID_METADATA_KEY: f"tool_{self._next_create_sequence + 1}"}
+            # Omit the marker when no provider call IDs fit within its budget.
             if call_ids:
                 metadata[TOOL_FOLLOWUP_METADATA_KEY] = json.dumps(sorted(call_ids), separators=(",", ":"))
-            else:
-                # Keep older endpoints and unusually long provider call IDs usable.
-                call_ids = set().union(*self._queued_tool_results.values())
-            self._pending_create_call_ids = call_ids
+            # Acceptance covers the full snapshot; an already-answered rejection covers only marked IDs.
+            self._pending_create_call_ids = pending_call_ids
+            self._pending_create_marked_call_ids = call_ids
             self._next_create_sequence += 1
             create_id = f"tool_{self._next_create_sequence}"
             self._pending_create_id = create_id
@@ -880,6 +885,7 @@ class _ToolCallCoordinator:
             except BaseException:
                 self._pending_create_id = None
                 self._pending_create_call_ids.clear()
+                self._pending_create_marked_call_ids.clear()
                 self._pending_create_saw_response = False
                 raise
 

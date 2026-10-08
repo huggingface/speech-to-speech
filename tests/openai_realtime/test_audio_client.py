@@ -23,6 +23,8 @@ from speech_to_speech.api.openai_realtime.audio_client import (
     run_realtime_audio_client,
 )
 from speech_to_speech.api.openai_realtime.tool_followup import (
+    TOOL_FOLLOWUP_COVERED,
+    TOOL_FOLLOWUP_METADATA_KEY,
     TOOL_INPUT_METADATA_KEY,
 )
 
@@ -1196,6 +1198,54 @@ async def test_audio_client_one_follow_up_covers_all_queued_tool_outputs():
     await asyncio.sleep(0.05)
     assert len(conn.sent) == 3
     await coordinator.close()
+
+
+@pytest.mark.parametrize("settlement", ["accepted", "covered"])
+async def test_audio_client_tool_follow_up_preserves_batch_beyond_metadata_limit(settlement):
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(
+        conn, RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=done_tool_executor)
+    )
+    call_ids = {f"call_{index:02d}_" + "x" * 24 for index in range(20)}
+    try:
+        coordinator.handle_event(response_done(output=[function_call(call_id) for call_id in sorted(call_ids)]))
+        await wait_until(lambda: len(conn.sent) == len(call_ids) + 1)
+        create = conn.sent[-1]
+        marker = create["response"]["metadata"][TOOL_FOLLOWUP_METADATA_KEY]
+        marked_ids = set(json.loads(marker))
+        assert len(marker) <= 512
+        assert marked_ids < call_ids
+        assert {event["item"]["call_id"] for event in conn.sent[:-1]} == call_ids
+
+        if settlement == "covered":
+            # Only the IDs that fit in the marker have already been answered.
+            coordinator.handle_event(
+                SimpleNamespace(
+                    type="error",
+                    error=SimpleNamespace(type=TOOL_FOLLOWUP_COVERED, code=None, event_id=create["event_id"]),
+                )
+            )
+            await wait_until(lambda: len(conn.sent) == len(call_ids) + 2)
+            create = conn.sent[-1]
+            assert set(json.loads(create["response"]["metadata"][TOOL_FOLLOWUP_METADATA_KEY])) == (
+                call_ids - marked_ids
+            )
+
+        # A server without the acknowledgement extension echoes request metadata.
+        # Acceptance covers every submitted result, even if the marker is partial.
+        coordinator.handle_event(response_created("response_tool", metadata=create["response"]["metadata"]))
+        assert not coordinator._queued_tool_results
+        coordinator.handle_event(
+            response_done(
+                "response_tool",
+                output=[SimpleNamespace(type="message")],
+                metadata=create["response"]["metadata"],
+            )
+        )
+        await asyncio.sleep(0.01)
+        assert len(conn.sent) == len(call_ids) + (2 if settlement == "covered" else 1)
+    finally:
+        await coordinator.close()
 
 
 async def test_audio_client_waits_for_all_tool_flushes_before_follow_up():
