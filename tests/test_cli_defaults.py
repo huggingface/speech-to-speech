@@ -1,3 +1,4 @@
+import json
 import sys
 from types import SimpleNamespace
 
@@ -591,3 +592,30 @@ def test_parse_arguments_stt_none_supports_chat_completions_audio_path():
     assert args.llm_backend.config["model_name"] == "gpt-audio-1.5"
     assert args.llm_backend.config["audio_content_type"] == "audio_url"
     assert args.llm_backend.config["audio_history_turns"] == 2
+
+
+def test_additive_config_api_preserves_flat_json_contract(tmp_path):
+    from speech_to_speech.config import load_config
+
+    path = tmp_path / "legacy.json"
+    path.write_text(
+        json.dumps(
+            {
+                "stt": "openai",
+                "llm_backend": "chat-completions",
+                "tts": "openai",
+                "num_pipelines": 2,
+                "openai_stt_api_key": "",
+                "responses_api_stream": False,
+                "inactive_extra_key": "unchanged",
+                "qwen3_tts_speaker": "unused",
+            }
+        )
+    )
+    args = parse_arguments([str(path)])
+    assert isinstance(args, ParsedArguments)
+    assert args.module_kwargs.num_pipelines == 2
+    assert args.stt_backend.config["api_key"] == ""
+    assert args.llm_backend.config["stream"] is False
+    with pytest.raises(ValueError, match="existing flat JSON interface"):
+        load_config(path)

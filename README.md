@@ -120,6 +120,7 @@ Clients using the implemented core Realtime event set can connect. The official 
 * [How it works](#how-it-works)
 * [Starting configurations](#quickstart)
 * [Installation](#installation)
+* [YAML configuration API](./docs/configuration.md)
 * [Offline operation](#offline-operation)
 * [Supported components](#supported-components)
 * [Commands](#commands)
@@ -160,6 +161,17 @@ The default install covers the standard realtime path:
 - local audio and realtime server modes
 
 macOS and non-macOS dependencies are resolved automatically via platform markers in `pyproject.toml`.
+
+To load and resolve YAML configuration from Python, install the optional parser:
+
+```bash
+pip install "speech-to-speech[config]"
+```
+
+See the [configuration API guide](./docs/configuration.md) for reusable blocks,
+named pipelines, and environment references. This API resolves settings without
+starting a pipeline. Existing Python interfaces, CLI commands, and flat JSON
+configuration remain available.
 
 ### CUDA Note for Qwen3-TTS
 
