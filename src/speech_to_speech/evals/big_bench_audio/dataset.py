@@ -1,10 +1,8 @@
 """Pinned Big Bench Audio subsets and the audio they point at.
 
-A vibe check is only useful if two runs saw the same questions, so the subset is
-a committed JSON manifest -- dataset id, dataset revision, and the exact item ids
-with their official answers -- rather than a sample drawn at run time. Full runs
-load all metadata directly from the same pinned revision. Metadata and audio are
-fetched from the Hub and cached by ``huggingface_hub``.
+The vibe sample uses a fixed seed and pinned dataset revision. Full runs load all
+metadata from that revision; custom samples can be saved as JSON manifests.
+Metadata and audio are fetched from the Hub and cached by ``huggingface_hub``.
 """
 
 from __future__ import annotations
@@ -17,12 +15,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 DATASET_REPO_ID = "ArtificialAnalysis/big_bench_audio"
-# Pinned so a manifest keeps pointing at the same 1000 recordings.
+# Pinned so every run selects from the same 1000 recordings.
 DATASET_REVISION = "af7bb9c25b015792583ca4da3ee27ec62cb79fe6"
 DATASET_METADATA_FILE = "metadata.jsonl"
 
 SUBSET_SCHEMA = "big-bench-audio-subset/1"
-SUBSETS_DIR = Path(__file__).parent / "subsets"
 DEFAULT_SUBSET = "vibe"
 
 SAMPLE_RATE_HZ = 16000
@@ -112,19 +109,20 @@ class Subset:
 
 def available_subsets() -> list[str]:
     """Names of the built-in selections."""
-    return sorted({"full", *(path.stem for path in SUBSETS_DIR.glob("*.json"))})
+    return ["full", "vibe"]
 
 
 def load_subset(name_or_path: str = DEFAULT_SUBSET) -> Subset:
-    """Load the full pinned dataset, a bundled subset, or a manifest by path."""
+    """Select from the pinned dataset, or load a custom manifest by path."""
+    if name_or_path == "vibe":
+        return build_subset(40, seed=0)
     if name_or_path == "full":
         return Subset(
             name="full",
             items=tuple(load_dataset_metadata()),
             description="All questions from the pinned Big Bench Audio dataset in upstream order.",
         )
-    bundled = SUBSETS_DIR / f"{name_or_path}.json"
-    path = bundled if bundled.is_file() else Path(name_or_path)
+    path = Path(name_or_path)
     if not path.is_file():
         raise FileNotFoundError(f"No subset {name_or_path!r}. Available selections: {', '.join(available_subsets())}.")
     return Subset.from_dict(json.loads(path.read_text()))

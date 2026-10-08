@@ -1,4 +1,4 @@
-"""The bundled subset is balanced and pinned, and truncating it keeps it balanced."""
+"""Runtime selections are pinned and the vibe sample stays balanced."""
 
 import json
 from collections import Counter
@@ -46,7 +46,7 @@ def fake_pool():
     return pool
 
 
-def test_bundled_subset_is_pinned_to_one_dataset_revision():
+def test_vibe_is_pinned_to_one_dataset_revision(benchmark_metadata):
     subset = load_subset("vibe")
 
     assert subset.dataset == DATASET_REPO_ID
@@ -54,7 +54,7 @@ def test_bundled_subset_is_pinned_to_one_dataset_revision():
     assert len(subset) == 40
 
 
-def test_bundled_subset_is_balanced_across_categories_and_answers():
+def test_vibe_is_balanced_across_categories_and_answers(benchmark_metadata):
     stats = describe(load_subset("vibe"))
 
     assert stats.by_category == dict.fromkeys(CATEGORIES, 10)
@@ -65,14 +65,15 @@ def test_bundled_subset_is_balanced_across_categories_and_answers():
     assert len(stats.by_answer["object_counting"]) == 10
 
 
-def test_truncating_the_subset_keeps_every_category_represented():
-    head = load_subset("vibe").head(8)
+@pytest.mark.parametrize("limit", [4, 8])
+def test_truncating_the_subset_keeps_every_category_represented(benchmark_metadata, limit):
+    head = load_subset("vibe").head(limit)
 
-    assert len(head) == 8
-    assert Counter(item.category for item in head.items) == dict.fromkeys(CATEGORIES, 2)
+    assert len(head) == limit
+    assert Counter(item.category for item in head.items) == dict.fromkeys(CATEGORIES, limit // 4)
 
 
-def test_head_beyond_the_subset_is_the_whole_subset():
+def test_head_beyond_the_subset_is_the_whole_subset(benchmark_metadata):
     subset = load_subset("vibe")
 
     assert subset.head(None) is subset
@@ -100,7 +101,7 @@ def test_build_subset_rejects_a_size_that_cannot_cover_every_category():
         build_subset(3, items=fake_pool())
 
 
-def test_subset_survives_a_manifest_round_trip(tmp_path):
+def test_subset_survives_a_manifest_round_trip(tmp_path, benchmark_metadata):
     subset = load_subset("vibe")
     path = tmp_path / "subset.json"
     path.write_text(json.dumps(subset.to_dict()))
@@ -116,7 +117,7 @@ def test_a_manifest_from_an_unknown_schema_is_refused(tmp_path):
         load_subset(str(path))
 
 
-def test_missing_subset_names_the_bundled_ones():
+def test_missing_subset_names_the_built_in_selections():
     with pytest.raises(FileNotFoundError, match="vibe"):
         load_subset("not-a-subset")
 
@@ -156,9 +157,9 @@ def test_full_loads_every_pinned_metadata_record_in_upstream_order(benchmark_met
     assert dataset.available_subsets() == ["full", "vibe"]
 
 
-def test_vibe_loads_without_downloading_metadata(monkeypatch):
-    def unexpected_download(*args, **kwargs):
-        pytest.fail("Bundled vibe selection attempted to download metadata")
+def test_vibe_runtime_selection_is_repeatable_with_seed_zero(benchmark_metadata):
+    vibe = load_subset("vibe")
 
-    monkeypatch.setattr(dataset, "load_dataset_metadata", unexpected_download)
-    assert len(load_subset("vibe")) == 40
+    assert vibe.seed == 0
+    assert len({item.id for item in vibe.items}) == 40
+    assert load_subset("vibe").items == vibe.items

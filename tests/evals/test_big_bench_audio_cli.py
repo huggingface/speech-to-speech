@@ -24,7 +24,7 @@ def test_credentials_are_removed_from_report_arguments():
 
 
 @pytest.mark.parametrize("limit", [0, -1])
-def test_nonpositive_limits_are_rejected(limit):
+def test_nonpositive_limits_are_rejected(benchmark_metadata, limit):
     with pytest.raises(ValueError, match="limit"):
         load_subset().head(limit)
 
@@ -36,7 +36,7 @@ def test_invalid_speed_is_rejected(speed):
 
 
 @pytest.mark.parametrize("stage", ["download", "decode", "engine"])
-async def test_item_failure_preserves_and_uploads_other_results(monkeypatch, tmp_path, stage):
+async def test_item_failure_preserves_and_uploads_other_results(monkeypatch, tmp_path, benchmark_metadata, stage):
     destination = tmp_path / "reports" / "run.json"
     args = cli.build_parser().parse_args(
         ["run", "--limit", "4", "--retries", "1", "--out", str(destination), "--push-to-hub", "me/results"]

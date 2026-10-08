@@ -141,7 +141,7 @@ include = ["speech_to_speech*"]
 exclude = ["tests*"]
 
 [tool.setuptools.package-data]
-speech_to_speech = ["TTS/*.wav", "evals/big_bench_audio/subsets/*.json"]
+speech_to_speech = ["TTS/*.wav"]
 
 [tool.ruff]
 src = ["src"]

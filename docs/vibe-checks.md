@@ -35,12 +35,15 @@ OpenAI-compatible answer-extraction judge.
 
 ## Question selection
 
-- `vibe` is a committed 40-question sample, stratified by category and official
+- `vibe` generates a 40-question sample, stratified by category and official
   answer with seed `0`. It contains ten questions per category, interleaved so
-  `--limit 4` covers all four categories. No new sample is drawn for a run.
+  `--limit 4` covers all four categories. The fixed seed reproduces the selection
+  for the same sampler and pinned metadata.
 - `full` loads all 1,000 records from upstream metadata at the same pinned dataset
-  revision, in upstream order. Metadata and audio are cached by the Hub client.
-  A full-selection `--dry-run` loads metadata but does not download audio.
+  revision, in upstream order.
+
+Both selections load the small metadata file, cached by the Hub client along
+with audio. `--dry-run` loads metadata but does not download audio or start models.
 
 `--limit` only takes a prefix of the selection; it never adds questions.
 A prefix of `full` need not cover every category. To create a custom manifest:
@@ -51,7 +54,7 @@ python -m speech_to_speech.evals.big_bench_audio build-subset \
 ```
 
 Pass that path as `--subset /tmp/deep.json`. Use `--size 40 --name vibe --seed 0`
-to reproduce the bundled sample. In containers, include or mount a custom
+to export the default sample. In containers, include or mount a custom
 manifest and use its container path.
 
 ## Build and run with Docker

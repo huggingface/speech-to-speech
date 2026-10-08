@@ -1,4 +1,4 @@
-"""Offline metadata for full-benchmark selection tests."""
+"""Offline metadata for benchmark selection tests."""
 
 import json
 
@@ -11,15 +11,19 @@ from speech_to_speech.evals.big_bench_audio.dataset import DATASET_REPO_ID, DATA
 @pytest.fixture
 def benchmark_metadata(monkeypatch, tmp_path):
     categories = ("formal_fallacies", "navigate", "object_counting", "web_of_lies")
-    records = [
-        {
-            "id": item_id,
-            "category": categories[item_id // 250],
-            "official_answer": str(item_id % 10),
-            "file_name": f"data/question_{item_id}.mp3",
-        }
-        for item_id in range(1000)
-    ]
+    answers = (("invalid", "valid"), ("No", "Yes"), tuple(str(n) for n in range(2, 12)), ("No", "Yes"))
+    records = []
+    for category, choices in zip(categories, answers):
+        for index in range(250):
+            item_id = len(records)
+            records.append(
+                {
+                    "id": item_id,
+                    "category": category,
+                    "official_answer": choices[index % len(choices)],
+                    "file_name": f"data/question_{item_id}.mp3",
+                }
+            )
     path = tmp_path / "metadata.jsonl"
     path.write_text("\n".join(json.dumps(record) for record in records))
 
