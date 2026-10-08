@@ -54,15 +54,7 @@ Run the configuration you chose with this environment activated. Activate the sa
 
 If speaker feedback interrupts replies, install the `aec` extra with `pip install "speech-to-speech[aec]"` and add `--echo-cancellation` to your `speech-to-speech local` or `talk` command. The client then removes its own playback from the microphone, so you can still interrupt the assistant by voice. Only enable it with speakers; headphones or a headset don't need it, and it costs extra CPU. Without the extra, use `--local_audio_block_mic_during_playback` instead. It pauses microphone capture during playback, so you cannot interrupt the assistant while it speaks, and it cannot be combined with `--echo-cancellation`.
 
-Echo cancellation stays off by default. The real MacBook Air M2 client used about 4.6% of one CPU core while listening without cancellation and 7.6% with it, across three trials. Server idle CPU stayed near 3.9%. See [the binding comparison and CPU measurements](docs/echo-cancellation.md) for the full live results and an isolated Linux/Mac processing check. To measure the audio processing on your machine from a source checkout:
-
-```bash
-uv sync --python 3.11 --extra aec
-PYTHONPATH=src .venv/bin/python scripts/benchmark_echo_cancellation.py --seconds 10 --repeats 3 --paced
-
-```
-
-The `aec` extra uses `pywebrtc-audio`. Cancellation requires matching `--send-rate` and `--recv-rate` (both default to 16000). The benchmark prints CPU time and echo reduction as JSON lines. It measures the canceller and callback buffers, excluding model inference, networking, and audio device drivers. Omit `--paced` to process the same audio faster than real time.
+See [echo cancellation](docs/echo-cancellation.md) for requirements, limits and CPU cost.
 
 ### Apple Silicon, fully local
 

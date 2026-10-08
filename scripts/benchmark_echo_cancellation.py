@@ -1,6 +1,6 @@
 """Measure CPU seconds per audio second; optional pacing includes idle wakeups.
 
-Run with the PR checkout's Python and PYTHONPATH=src. Imports, data generation,
+Run from a source checkout with PYTHONPATH=src. Imports, data generation,
 and processor construction happen before timing. CPU % means one full core.
 """
 
