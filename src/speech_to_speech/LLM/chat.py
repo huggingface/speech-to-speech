@@ -157,7 +157,6 @@ class Chat:
         # realtime client. Keep the exact provisional IDs keyed by response so
         # cancellation can roll them back before accepting deferred client items.
         self._provisional_generations: dict[str, tuple[set[str], set[str]]] = {}
-        self._cancelled_provisional_generations: dict[str, None] = {}
         self._user_turn_count: int = 0
 
         # All state mutations and serializations go through _lock. Public methods
@@ -509,29 +508,6 @@ class Chat:
                 return True
         return False
 
-    def rollback_generation(
-        self,
-        user_message_id: str | None,
-        *,
-        item_ids: set[str],
-        call_ids: set[str],
-        response_key: str | None = None,
-    ) -> None:
-        """Remove only the provisional state written by one failed generation.
-
-        A tool output may be appended by a fast client while generation is still
-        streaming, so rollback matches both item IDs and tool ``call_id`` values.
-        ``user_message_id=None`` preserves a pre-existing text input while removing
-        only provisional assistant output. Unrelated later items are preserved.
-        """
-
-        with self._lock:
-            if response_key is not None:
-                self._provisional_generations.pop(response_key, None)
-                self._cancelled_provisional_generations.pop(response_key, None)
-            self._rollback_generation_locked(user_message_id, item_ids=item_ids, call_ids=call_ids)
-            self._run_deferred_compaction_if_ready()
-
     def add_provisional_generation_items(
         self,
         response_key: str,
@@ -539,18 +515,15 @@ class Chat:
         *,
         committed_item_ids: set[str] | None = None,
         after_item_id: str | None = None,
-    ) -> list[SupportedItem] | None:
+    ) -> list[SupportedItem]:
         """Atomically write and track items exposed by an active response.
 
-        ``None`` means cancellation won the race before the items were written.
         Function calls use ordered insertion because these are streamed response
         parts rather than legacy deferred calls. Tracking remains live after model
         generation finishes because slow TTS may not have delivered every part yet.
         """
 
         with self._lock:
-            if response_key in self._cancelled_provisional_generations:
-                return None
             buffer_before = list(self.buffer)
             pending_calls_before = dict(self._pending_tool_calls)
             ordered_calls_before = deepcopy(self._ordered_pending_calls)
@@ -620,7 +593,6 @@ class Chat:
             return
         with self._lock:
             self._provisional_generations.pop(response_key, None)
-            self._cancelled_provisional_generations.pop(response_key, None)
             self._run_deferred_compaction_if_ready()
 
     def rollback_provisional_generation(self, response_key: str | None) -> None:
@@ -629,27 +601,18 @@ class Chat:
         if response_key is None:
             return
         with self._lock:
-            self._cancelled_provisional_generations[response_key] = None
-            while len(self._cancelled_provisional_generations) > 128:
-                self._cancelled_provisional_generations.pop(next(iter(self._cancelled_provisional_generations)))
             tracked = self._provisional_generations.pop(response_key, None)
             if tracked is not None:
                 item_ids, call_ids = tracked
-                self._rollback_generation_locked(None, item_ids=item_ids, call_ids=call_ids)
+                self._rollback_generation_locked(item_ids, call_ids)
             self._run_deferred_compaction_if_ready()
 
-    def _rollback_generation_locked(
-        self,
-        user_message_id: str | None,
-        *,
-        item_ids: set[str],
-        call_ids: set[str],
-    ) -> None:
-        """Body of :meth:`rollback_generation`; caller holds ``_lock``."""
+    def _rollback_generation_locked(self, item_ids: set[str], call_ids: set[str]) -> None:
+        """Remove one generation's items and calls; caller holds ``_lock``."""
 
         kept: list[SupportedItem] = []
         for item in self.buffer:
-            remove = (user_message_id is not None and item.id == user_message_id) or item.id in item_ids
+            remove = item.id in item_ids
             if isinstance(item, (RealtimeConversationItemFunctionCall, RealtimeConversationItemFunctionCallOutput)):
                 remove = remove or item.call_id in call_ids
             if not remove:
@@ -659,7 +622,7 @@ class Chat:
             self._pending_tool_calls.pop(call_id, None)
             self._ordered_pending_calls.pop(call_id, None)
         self._user_turn_count = sum(isinstance(item, RealtimeConversationItemUserMessage) for item in self.buffer)
-        logger.debug("Rolled back failed generation output for user message %s", user_message_id)
+        logger.debug("Rolled back %d provisional items", len(item_ids))
 
     def compact_audio_history(self, max_audio_turns: int) -> None:
         """Retain only the newest bounded set of audio turns.
@@ -984,31 +947,6 @@ class Chat:
                 self._deferred_compactor,
             ) = snapshot
 
-    def copy_without_provisional_generation(self, response_key: str) -> Chat:
-        """Return a deep snapshot excluding one response's reversible output."""
-        with self._lock:
-            clone = Chat(self.size)
-            (
-                clone.init_chat_message,
-                clone.buffer,
-                clone._pending_tool_calls,
-                clone._ordered_pending_calls,
-                clone._user_turn_count,
-            ) = deepcopy(
-                (
-                    self.init_chat_message,
-                    self.buffer,
-                    self._pending_tool_calls,
-                    self._ordered_pending_calls,
-                    self._user_turn_count,
-                )
-            )
-            tracked = deepcopy(self._provisional_generations.get(response_key))
-        if tracked is not None:
-            item_ids, call_ids = tracked
-            clone._rollback_generation_locked(None, item_ids=item_ids, call_ids=call_ids)
-        return clone
-
     def reset(self) -> None:
         """Clear all conversation state. Cancels any in-flight compaction splice."""
         with self._lock:
@@ -1019,7 +957,6 @@ class Chat:
             self._pending_tool_calls = {}
             self._ordered_pending_calls = {}
             self._provisional_generations = {}
-            self._cancelled_provisional_generations = {}
             self._deferred_compactor = None
             self._user_turn_count = 0
 

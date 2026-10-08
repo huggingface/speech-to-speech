@@ -24,6 +24,7 @@ from speech_to_speech.pipeline.events import (
 from speech_to_speech.pipeline.messages import AssistantToolCallPart
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnPhase
 from speech_to_speech.VAD.vad_handler import VADHandler
+from tests.llm_history import drive_llm
 from tests.test_vad_iterator import _FakeVADModel
 
 
@@ -375,7 +376,7 @@ def test_direct_audio_chat_item_retains_its_input_identity(runtime_config):
         ),
     )
     request = prompts.get_nowait()
-    list(_make_handler(stream=False).process(request))
+    list(drive_llm(_make_handler(stream=False), request))
     assert runtime_config.chat.buffer[0].id == request.input_item_id
     tracker.speech_started(200)
     assert service.response_input_turn(conn_id) == ("turn_1", 0, 123.0)

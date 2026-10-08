@@ -1676,14 +1676,6 @@ class TestHandleResponseCreate:
             ),
         )
         prefetch = text_prompt_queue.get_nowait()
-        nested_call = RealtimeConversationItemFunctionCall(
-            type="function_call",
-            id="fc_nested",
-            call_id="call_nested",
-            name="nested",
-            arguments="{}",
-        )
-        assert st.runtime_config.chat.add_provisional_generation_items(prefetch.response_key, [nested_call]) is not None
         service.finish_response(conn_id, response_key=origin_key)
 
         created = service.handle_response_create(

@@ -847,6 +847,9 @@ def create_app(
                         # Unlike the serial output hold, this list does not stall
                         # the origin response whose completion enables the claim,
                         # or speech events while resumed speech is checked.
+                        # Keep its history private; a prefetch claim or the
+                        # later dispatch writes it before anything is exposed.
+                        unit.service.history.hold(session_id, text_msg)
                         session.pending_text_output_items.append(text_msg)
                         text_msg = None
                     if text_msg is None:
@@ -941,6 +944,7 @@ def create_app(
                         # response.create, or before response.created finishes
                         # sending. Keep every lifecycle event private until the
                         # response is publicly announced and its turn has settled.
+                        unit.service.history.hold(session_id, audio_chunk)
                         session.pending_output_item = audio_chunk
                         await asyncio.sleep(0.01)
                         continue
