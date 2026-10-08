@@ -15,6 +15,9 @@ pip install "speech-to-speech[config]"
 Importing `speech_to_speech.config` does not require the parser. Loading YAML
 without the optional dependency raises `ImportError` with installation guidance.
 
+Set `enable_visemes`, `stv_model_name`, and `stv_device` under each pipeline's `options`.
+These fields use the existing viseme argument defaults.
+
 ## Python usage
 
 ```python

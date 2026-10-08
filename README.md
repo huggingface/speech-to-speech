@@ -145,6 +145,10 @@ The pipeline is a cascade of four components, each running in its own thread and
 
 Every stage has multiple interchangeable backends, selected via CLI flags. The code is designed for easy modification, with a focus on models available through Transformers and the Hugging Face Hub.
 
+Optional speech-to-viseme extraction adds timed mouth shapes for avatar and robot
+clients after TTS. Enable it with `--enable_visemes`; see the
+[viseme guide](src/speech_to_speech/STV/README.md) for client events and timing.
+
 ## Installation
 
 Requires Python 3.10+. Install from PyPI in an activated virtual environment (see the [quickstart setup](#install-for-these-examples)):

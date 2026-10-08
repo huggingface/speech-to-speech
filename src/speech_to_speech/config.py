@@ -37,6 +37,9 @@ _MODULE_PIPELINE = {
     "live_transcription_update_interval",
     "enable_llm_proxy",
     "llm_proxy_connect_timeout_s",
+    "enable_visemes",
+    "stv_model_name",
+    "stv_device",
 }
 _PATH_FIELDS = {
     "vad_firered_model_dir",

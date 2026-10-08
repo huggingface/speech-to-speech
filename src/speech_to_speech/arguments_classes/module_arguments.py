@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Optional
 
+from speech_to_speech.arguments_classes.w2v_stv_arguments import Wav2Vec2STVHandlerArguments
 from speech_to_speech.backend_registry import LLM_BACKENDS, STT_BACKENDS, TTS_BACKENDS
 
 _AUDIO_INPUT_LLM_BACKENDS = ", ".join(
@@ -10,7 +11,7 @@ _PROXY_LLM_BACKENDS = ", ".join(name for name, spec in LLM_BACKENDS.items() if s
 
 
 @dataclass
-class ModuleArguments:
+class ModuleArguments(Wav2Vec2STVHandlerArguments):
     diarization: bool = field(
         default=False,
         metadata={"help": "Enable speaker-aware conversation with Nemotron 3 Diarization."},
