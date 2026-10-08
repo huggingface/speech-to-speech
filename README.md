@@ -787,7 +787,8 @@ Other generation parameters can be set using the handler prefix plus `_gen_`, fo
 Run a pinned 40-question audio sample or all 1,000 Big Bench Audio questions
 through VAD, STT, the LLM, and TTS, with
 per-category answer accuracy, audio latency, and protocol failures in JSON reports.
-Build with `docker/Dockerfile.eval` for local GPU runs or Hugging Face Jobs;
+`src/speech_to_speech/evals/big_bench_audio/Dockerfile.eval` builds an image for
+local GPU runs or Hugging Face Jobs;
 `scripts/prepare_eval_space.py` optionally builds the image in a private HF Space.
 Start with four questions, then compare reports across revisions. See
 [Big Bench Audio system tests](docs/vibe-checks.md).

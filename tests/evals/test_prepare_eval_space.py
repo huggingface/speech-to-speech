@@ -19,7 +19,15 @@ def test_space_update_removes_source_deleted_in_the_next_revision(monkeypatch, t
     repo = tmp_path / "checkout"
     repo.mkdir()
     retired = "src/speech_to_speech/retired.py"
-    for name in ["README.md", "LICENSE", "MANIFEST.in", "pyproject.toml", "docker/Dockerfile.eval", retired]:
+    for name in [
+        "README.md",
+        "LICENSE",
+        "MANIFEST.in",
+        "pyproject.toml",
+        "src/speech_to_speech/evals/big_bench_audio/Dockerfile.eval",
+        "src/speech_to_speech/evals/big_bench_audio/big-bench-audio-entrypoint.sh",
+        retired,
+    ]:
         p = repo / name
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("# test source\n")
@@ -30,7 +38,7 @@ def test_space_update_removes_source_deleted_in_the_next_revision(monkeypatch, t
     git("init")
     git("add", ".")
     git("-c", "user.name=Review", "-c", "user.email=review@localhost", "commit", "-m", "first revision")
-    remote = {".gitattributes", "notes/keep.md"}
+    remote = {".gitattributes", "notes/keep.md", "docker/big-bench-audio-entrypoint.sh"}
     api = HfApi(token=False)
 
     def commit(*, operations, **kwargs):
@@ -65,6 +73,7 @@ def test_space_update_removes_source_deleted_in_the_next_revision(monkeypatch, t
     monkeypatch.setattr(sys, "argv", [str(source_script)])
     module.main()  # Uses the actual HfApi.upload_folder operation builder; no network.
     assert retired in remote
+    assert not any(path.startswith("docker/") for path in remote)
     (repo / retired).unlink()
     replacement = "src/speech_to_speech/current.py"
     (repo / replacement).write_text("# replacement source\n")
@@ -75,4 +84,5 @@ def test_space_update_removes_source_deleted_in_the_next_revision(monkeypatch, t
 
     assert replacement in remote
     assert {".gitattributes", "notes/keep.md", "README.md", "Dockerfile", "source-revision.txt"} <= remote
-    assert "docker/Dockerfile.eval" not in remote
+    assert "src/speech_to_speech/evals/big_bench_audio/Dockerfile.eval" not in remote
+    assert "src/speech_to_speech/evals/big_bench_audio/big-bench-audio-entrypoint.sh" in remote

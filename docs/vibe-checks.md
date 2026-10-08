@@ -66,7 +66,7 @@ EVAL_CONTEXT="$(mktemp -d)"
 git archive HEAD | tar -x -C "$EVAL_CONTEXT"
 git rev-parse HEAD > "$EVAL_CONTEXT/source-revision.txt"
 docker build --platform linux/amd64 \
-    -f "$EVAL_CONTEXT/docker/Dockerfile.eval" \
+    -f "$EVAL_CONTEXT/src/speech_to_speech/evals/big_bench_audio/Dockerfile.eval" \
     -t s2s-big-bench-audio:local "$EVAL_CONTEXT"
 rm -rf "$EVAL_CONTEXT"
 ```
