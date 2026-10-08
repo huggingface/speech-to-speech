@@ -49,6 +49,7 @@ from speech_to_speech.pipeline.events import (
 )
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
+from speech_to_speech.pipeline.speculative_turns import TurnOutputHeld
 from speech_to_speech.pipeline.transcript_logging import log_exception
 
 # aiortc (the 'webrtc' extra) is optional. Import it here, at module load,
@@ -166,14 +167,15 @@ def _output_response_key(item: Any) -> str | None:
     return None
 
 
-def _response_key_output_is_blocked(
-    unit: PipelineUnit,
-    session_id: str,
-    response_key: str | None,
-) -> bool:
-    if response_key is None:
-        return False
-    return unit.service.response.is_response_output_blocked(session_id, response_key)
+def _output_is_held(unit: PipelineUnit, session_id: str, item: Any) -> bool:
+    """Whether *item* must stay queued until its response or turn allows it.
+
+    Holding never waits here, so speech and connection events keep flowing.
+    """
+    response_key = _output_response_key(item)
+    if response_key is not None and unit.service.response.is_response_output_blocked(session_id, response_key):
+        return True
+    return unit.service.is_turn_output_held(item)
 
 
 def _discard_obsolete_response_key(unit: PipelineUnit, session_id: str, response_key: str | None) -> None:
@@ -829,32 +831,23 @@ def create_app(
                 # Text events first (speech_started cancels active response).
                 try:
                     text_msg = None
+                    parked_index = None
                     if session is not None and session_id is not None:
                         for index, pending in enumerate(session.pending_text_output_items):
-                            if not _response_key_output_is_blocked(
-                                unit,
-                                session_id,
-                                _output_response_key(pending),
-                            ):
+                            if not _output_is_held(unit, session_id, pending):
                                 text_msg = session.pending_text_output_items.pop(index)
+                                parked_index = index
                                 break
                     if text_msg is None:
                         text_msg = unit.text_output_queue.get_nowait()
 
-                    if (
-                        session is not None
-                        and session_id is not None
-                        and _response_key_output_is_blocked(
-                            unit,
-                            session_id,
-                            _output_response_key(text_msg),
-                        )
-                    ):
+                    if session is not None and session_id is not None and _output_is_held(unit, session_id, text_msg):
                         # Response-dependent side-channel events share the same
                         # exposure barrier as audio/output events. In particular,
                         # an early tool call must never overtake response.created.
                         # Unlike the serial output hold, this list does not stall
-                        # the origin response whose completion enables the claim.
+                        # the origin response whose completion enables the claim,
+                        # or speech events while resumed speech is checked.
                         session.pending_text_output_items.append(text_msg)
                         text_msg = None
                     if text_msg is None:
@@ -876,8 +869,20 @@ def create_app(
                         was_in_response = st.in_response
                         was_response_pending = st.response_pending
 
-                    if transport is not None and isinstance(text_msg, PipelineEvent) and session_id:
-                        events = unit.service.dispatch_pipeline_event(session_id, text_msg)
+                    if (
+                        transport is not None
+                        and isinstance(text_msg, PipelineEvent)
+                        and session is not None
+                        and session_id
+                    ):
+                        try:
+                            events = unit.service.dispatch_pipeline_event(session_id, text_msg)
+                        except TurnOutputHeld:
+                            # Resumed speech started after the hold check. Park
+                            # the event again in its original place.
+                            pending_items = session.pending_text_output_items
+                            pending_items.insert(len(pending_items) if parked_index is None else parked_index, text_msg)
+                            events = []
                         if events:
                             await transport.send_events(events)
 
@@ -931,16 +936,12 @@ def create_app(
                     if (
                         session is not None
                         and session_id is not None
-                        and _response_key_output_is_blocked(
-                            unit,
-                            session_id,
-                            _output_response_key(audio_chunk),
-                        )
+                        and _output_is_held(unit, session_id, audio_chunk)
                     ):
                         # Generation and TTS may complete before the client sends
                         # response.create, or before response.created finishes
                         # sending. Keep every lifecycle event private until the
-                        # response is publicly announced.
+                        # response is publicly announced and its turn has settled.
                         session.pending_output_item = audio_chunk
                         await asyncio.sleep(0.01)
                         continue
@@ -958,8 +959,15 @@ def create_app(
                         if session_id is not None and _response_key_is_obsolete(unit, session_id, response_key):
                             _discard_obsolete_response_key(unit, session_id, response_key)
                             continue
-                        if transport is not None and session_id is not None:
-                            await transport.send_events(unit.service.dispatch_pipeline_event(session_id, audio_chunk))
+                        if transport is not None and session is not None and session_id is not None:
+                            try:
+                                events = unit.service.dispatch_pipeline_event(session_id, audio_chunk)
+                            except TurnOutputHeld:
+                                # Resumed speech started after the hold check.
+                                session.pending_output_item = audio_chunk
+                                await asyncio.sleep(0.01)
+                                continue
+                            await transport.send_events(events)
                         continue
 
                     if _is_pipeline_end(audio_chunk):

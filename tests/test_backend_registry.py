@@ -926,3 +926,25 @@ def test_viseme_cli_and_json_configuration(tmp_path):
         assert args.module_kwargs.stv_device == "cpu"
         assert args.module_kwargs.stv_model_name == "custom/phonemes"
     assert not parse_arguments([]).module_kwargs.enable_visemes
+
+
+def test_pocket_farsi_model_cli_routes_to_setup():
+    args = parse_arguments(
+        [
+            "--tts",
+            "pocket",
+            "--pocket_tts_model_name",
+            "mehdi-hf/pocket-tts-farsi-v2",
+            "--pocket_tts_voice",
+            "/voices/farsi.wav",
+            "--pocket_tts_temperature",
+            "0.3",
+            "--pocket_tts_eos_threshold",
+            "-2",
+        ]
+    )
+    assert args.tts_backend.name == "pocket"
+    assert args.tts_backend.config["model_name"] == "mehdi-hf/pocket-tts-farsi-v2"
+    assert args.tts_backend.config["voice"] == "/voices/farsi.wav"
+    assert args.tts_backend.config["temperature"] == 0.3
+    assert args.tts_backend.config["eos_threshold"] == -2.0

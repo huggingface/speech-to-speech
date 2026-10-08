@@ -38,10 +38,11 @@ class AudioInputNotifier(BaseHandler[VADAudio, LLMIn]):
         if processing_deadline is not None:
             remaining_delay_s = max(0.0, processing_deadline - monotonic())
         wait_started_at_s = perf_counter()
-        is_latest = self.speculative_turns.is_latest_after_stability_window(
+        is_latest = self.speculative_turns.wait_for_gate(
             item.turn_id,
             item.turn_revision,
-            remaining_delay_s,
+            hold_for_grace=False,
+            hold_until=monotonic() + remaining_delay_s,
         )
         store = getattr(self, "turn_latency_store", None)
         if store is not None and remaining_delay_s > 0:

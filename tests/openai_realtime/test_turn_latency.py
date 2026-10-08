@@ -51,6 +51,7 @@ from tests.test_speculative_turns import (
     _vad_handler_for_iterator,
 )
 from tests.test_whisper_progressive_transcription import BUILDERS as WHISPER_BUILDERS
+from tests.turns import reopen
 
 LATENCY_LOGGER = "speech_to_speech.api.openai_realtime.handlers.response"
 
@@ -213,7 +214,7 @@ def test_stale_final_stt_discards_only_superseded_revision(
     if not stt_finishes_after_reopen:
         stale = final_stt_event("turn_1", 0, "Old transcript")
 
-    service.speculative_turns.observe("turn_1", 1)
+    reopen(service.speculative_turns)
     service.dispatch_pipeline_event(
         conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True, interrupt_response=False)
     )
@@ -272,7 +273,7 @@ def test_stt_worker_discards_latency_when_revision_changes_during_inference(serv
         if len(inference_calls) == 1:
             # Reopening while the model runs makes the final output stale at
             # the worker's output gate, before the notifier/service sees it.
-            speculative_turns.observe("turn_1", 1)
+            reopen(speculative_turns)
             return "Superseded transcript"
         return "Current transcript"
 

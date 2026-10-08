@@ -36,6 +36,7 @@ from speech_to_speech.pipeline.messages import (
     TTSInput,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from tests.turns import reopen
 
 
 def _processor(tracker: SpeculativeTurnTracker) -> LMOutputProcessor:
@@ -46,7 +47,9 @@ def _processor(tracker: SpeculativeTurnTracker) -> LMOutputProcessor:
 
 def _tracked_processor(revision: int = 0) -> tuple[SpeculativeTurnTracker, LMOutputProcessor]:
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", revision)
+    tracker.start_turn()
+    for base_revision in range(revision):
+        reopen(tracker, revision=base_revision)
     return tracker, _processor(tracker)
 
 
@@ -327,7 +330,7 @@ def test_latest_end_of_response_follows_ordered_done_event():
 
 def test_generation_done_side_channel_does_not_wait_for_tts_delivery():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     side_events = Queue()
     processor = LMOutputProcessor.__new__(LMOutputProcessor)
     processor.setup(speculative_turns=tracker, text_output_queue=side_events)
@@ -412,7 +415,7 @@ def test_failed_response_event_precedes_terminal_and_keeps_identity():
 
 def test_token_usage_stays_on_ordered_response_path():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     processor = _processor(tracker)
 
     outputs = [

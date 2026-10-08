@@ -685,6 +685,67 @@ speech-to-speech serve \
 
 Available voice presets: `alba`, `marius`, `javert`, `jean`, `fantine`, `cosette`, `eponine`, `azelma`. Custom voice files and Hugging Face paths also work.
 
+### Pocket TTS Farsi v2
+
+Select [mehdi-hf/pocket-tts-farsi-v2](https://huggingface.co/mehdi-hf/pocket-tts-farsi-v2)
+with `--pocket_tts_model_name`. The handler normalizes Persian spelling, expands
+numbers, and converts assistant text to phonemes with
+`mehdi-hf/Homo-GE2PE-Persian-HF` before synthesis. Both models download on first use.
+
+The released Pocket TTS package does not support this model's phoneme frontend
+flags yet. Install the author's fork after the `pocket` extra. This command pins
+an inspected commit for reproducibility:
+
+```bash
+pip install "speech-to-speech[pocket]"
+pip install "pocket-tts @ git+https://github.com/mallahyari/pocket-tts@3807c204babb5fe54be8fe18a362a58315e870d6"
+speech-to-speech serve \
+    --tts pocket \
+    --pocket_tts_model_name mehdi-hf/pocket-tts-farsi-v2 \
+    --pocket_tts_voice /voices/persian-reference.wav \
+    --pocket_tts_device cpu
+```
+
+Use a Persian reference recording as a local audio file or Hugging Face audio
+URL. Preset voice states such as `jean` are incompatible with these weights.
+The handler uses the first five seconds of the recording. It splits text at
+sentence boundaries before phoneme conversion, adds a 0.25-second pause between
+sentences, and limits synthesis chunks to 18 tokens. It keeps ezafe-linked words
+together and rejects a linked phrase that exceeds the budget. Oversized G2P inputs
+raise an error rather than lose text.
+Configure the LLM to respond in Persian. This model choice stays fixed for the
+session and does not switch languages based on STT detection.
+
+Farsi synthesis bypasses the fork's orthographic sentence splitter so that `?`
+remains a glottal-stop phoneme. It uses an EOS threshold of -2 and zero extra
+frames after EOS. `--pocket_tts_temperature` overrides the model's default of
+0.3; `--pocket_tts_eos_threshold` overrides -2. Each phoneme chunk is buffered
+before playback. Silent, non-finite, or length-capped output is retried once,
+then reported as an error. This adds one chunk's generation time before the
+first audio block, but avoids playing a failed attempt. PCM conversion clips
+peaks instead of wrapping, and downsampling preserves filter history across
+playback blocks.
+
+To check the handler with actual weights from a source checkout, run:
+
+```bash
+python scripts/check_pocket_tts_farsi.py --output-dir /tmp/pocket-tts-farsi-check
+```
+
+The check downloads the TTS and G2P models and the author's Persian reference
+`samples/prompt_short_sentence.wav`. It uses seed 42 and temperature 0.3.
+It synthesizes a greeting, a sentence with a Persian number, and a
+two-sentence reply. It checks PCM block format, non-silent output, and response
+completion, then saves WAVs and timing measurements. Listen to the WAVs to assess
+pronunciation. Use `--voice /voices/reference.wav` to test your own recording.
+The check saves native 24 kHz audio by default. Pass `--sample-rate 16000` to
+compare with the pipeline's current 16 kHz playback output. The server and local
+playback path still assume 16 kHz, so changing only `--pocket_tts_sample_rate`
+to 24000 does not enable native-rate playback.
+
+The model weights use [CC-BY-NC-4.0](https://huggingface.co/mehdi-hf/pocket-tts-farsi-v2)
+and are for non-commercial use.
+
 ## CLI Reference
 
 References for pipeline CLI arguments live in the [arguments classes](./src/speech_to_speech/arguments_classes) and in `speech-to-speech serve -h`. Client arguments are listed by `speech-to-speech talk -h`.

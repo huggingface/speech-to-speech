@@ -78,6 +78,7 @@ from speech_to_speech.pipeline.messages import (
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnPhase
 from speech_to_speech.pipeline.turn_latency import TURN_LATENCY_METADATA_KEY
+from tests.turns import reopen
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1860,7 +1861,9 @@ class TestHandleResponseCreate:
 
     def test_response_create_preserves_latest_user_turn_timing(self, service, conn_id, text_prompt_queue):
         service.speculative_turns = SpeculativeTurnTracker()
-        service.speculative_turns.observe("turn_1", 2)
+        service.speculative_turns.start_turn()
+        reopen(service.speculative_turns)
+        reopen(service.speculative_turns, "turn_1", 1)
         service.dispatch_pipeline_event(
             conn_id,
             TranscriptionCompletedEvent(
@@ -1907,7 +1910,9 @@ class TestHandleResponseCreate:
             )
 
         service.speculative_turns = SpeculativeTurnTracker()
-        service.speculative_turns.observe("turn_1", 2)
+        service.speculative_turns.start_turn()
+        reopen(service.speculative_turns)
+        reopen(service.speculative_turns, "turn_1", 1)
         assert select_language("es") is None
         service.dispatch_pipeline_event(
             conn_id,
@@ -2512,7 +2517,8 @@ class TestFinishAudioResponse:
         if reserved:
             metadata[TURN_LATENCY_METADATA_KEY] = "client-value-must-not-win"
         service.speculative_turns = SpeculativeTurnTracker()
-        service.speculative_turns.observe("turn_1", 1)
+        service.speculative_turns.start_turn()
+        reopen(service.speculative_turns)
         service.dispatch_pipeline_event(
             conn_id, TranscriptionCompletedEvent(transcript="Hello", turn_id="turn_1", turn_revision=1)
         )
@@ -3051,7 +3057,8 @@ class TestDispatchPipelineEvent:
             conn_id,
             SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
         )
-        tracker.observe("turn_1", 1)
+        tracker.start_turn()
+        reopen(tracker)
 
         events = service.dispatch_pipeline_event(
             conn_id,
@@ -3904,31 +3911,21 @@ class TestDispatchPipelineEvent:
         runtime_config,
         should_listen,
     ):
+        from tests.reopen_dispatch import pending_dispatch
+
         tracker = SpeculativeTurnTracker()
         service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
         conn_id = service.register()
         service._state(conn_id).runtime_config = runtime_config
-        tracker.observe("turn_1", 0)
+        tracker.start_turn()
         candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
-        done = Event()
-        result = {}
+        event = AssistantOutputEvent(text="stale", turn_id="turn_1", turn_revision=0)
 
-        def dispatch():
-            result["events"] = service.dispatch_pipeline_event(
-                conn_id,
-                AssistantOutputEvent(text="stale", turn_id="turn_1", turn_revision=0),
-            )
-            done.set()
+        with pending_dispatch(service, conn_id, event) as dispatch:
+            assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+            events = dispatch.result(timeout=1.0)
 
-        thread = Thread(target=dispatch)
-        thread.start()
-
-        assert not done.wait(0.05)
-        assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
-        assert done.wait(1.0)
-        thread.join(timeout=1.0)
-
-        assert result["events"] == []
+        assert events == []
         assert service._state(conn_id).current_response_id is None
         service.unregister(conn_id)
 
@@ -4030,34 +4027,24 @@ class TestDispatchPipelineEvent:
         runtime_config,
         should_listen,
     ):
+        from tests.reopen_dispatch import pending_dispatch
+
         tracker = SpeculativeTurnTracker()
         service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
         conn_id = service.register()
         service._state(conn_id).runtime_config = runtime_config
-        tracker.observe("turn_1", 0)
+        tracker.start_turn()
         candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
-        done = Event()
-        result = {}
+        event = AssistantOutputEvent(text="latest", turn_id="turn_1", turn_revision=0)
 
-        def dispatch():
-            result["events"] = service.dispatch_pipeline_event(
-                conn_id,
-                AssistantOutputEvent(text="latest", turn_id="turn_1", turn_revision=0),
-            )
-            done.set()
+        with pending_dispatch(service, conn_id, event) as dispatch:
+            tracker.cancel_reopen_candidate("turn_1", candidate_revision)
+            events = dispatch.result(timeout=1.0)
 
-        thread = Thread(target=dispatch)
-        thread.start()
-
-        assert not done.wait(0.05)
-        tracker.cancel_reopen_candidate("turn_1", candidate_revision)
-        assert done.wait(1.0)
-        thread.join(timeout=1.0)
-
-        assert len(result["events"]) == 4
-        assert isinstance(result["events"][0], ResponseCreatedEvent)
-        assert isinstance(result["events"][3], ResponseAudioTranscriptDeltaEvent)
-        assert result["events"][3].delta == "latest"
+        assert len(events) == 4
+        assert isinstance(events[0], ResponseCreatedEvent)
+        assert isinstance(events[3], ResponseAudioTranscriptDeltaEvent)
+        assert events[3].delta == "latest"
         assert tracker.is_committed("turn_1", 0)
         service.unregister(conn_id)
 
@@ -4070,7 +4057,7 @@ class TestDispatchPipelineEvent:
         service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
         conn_id = service.register()
         service._state(conn_id).runtime_config = runtime_config
-        tracker.observe("turn_1", 0)
+        tracker.start_turn()
         candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
         done = Event()
         result = {}
@@ -4101,7 +4088,7 @@ class TestDispatchPipelineEvent:
         service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
         conn_id = service.register()
         service._state(conn_id).runtime_config = runtime_config
-        tracker.observe("turn_1", 0)
+        tracker.start_turn()
         tracker.start_reopen_grace("turn_1", 0, grace_s=0.2)
         event = AssistantOutputEvent(text="latest", turn_id="turn_1", turn_revision=0)
 
@@ -4695,7 +4682,7 @@ class TestDispatchPipelineEvent:
             TranscriptionCompletedEvent(transcript="hello", turn_id=turn_id, turn_revision=0),
         )
 
-        tracker.observe(turn_id, 1)
+        reopen(tracker, turn_id)
         service.dispatch_pipeline_event(
             conn_id,
             SpeechStartedEvent(turn_id=turn_id, turn_revision=1, reopened=True),
@@ -4747,7 +4734,7 @@ class TestDispatchPipelineEvent:
             TranscriptionCompletedEvent(transcript="hello", turn_id="turn_1", turn_revision=0),
         )
 
-        tracker.observe("turn_1", 1)
+        reopen(tracker)
         service.dispatch_pipeline_event(
             conn_id,
             SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True),
@@ -4848,7 +4835,7 @@ class TestDispatchPipelineEvent:
             SpeechStoppedEvent(duration_s=1.0, turn_id="turn_1", turn_revision=0),
         )
 
-        tracker.observe("turn_1", 1)
+        reopen(tracker)
         second_started = service.dispatch_pipeline_event(
             conn_id,
             SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True),
@@ -4915,7 +4902,8 @@ class TestDispatchPipelineEvent:
         )
         conn_id = service.register()
         service._state(conn_id).runtime_config = runtime_config
-        tracker.observe("turn_1", 1)
+        tracker.start_turn()
+        reopen(tracker)
 
         events = service.dispatch_pipeline_event(
             conn_id,

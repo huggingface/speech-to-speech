@@ -120,7 +120,7 @@ def test_unanswered_reopen_cap_covers_smart_turn_wait(monkeypatch) -> None:
     )
 
     assert handler.unanswered_reopen_ms == 2000
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     tracker.segment_finalized(0)
     assert tracker.can_reopen(1500)
     assert not tracker.can_reopen(2001)

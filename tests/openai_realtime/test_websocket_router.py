@@ -49,6 +49,7 @@ from speech_to_speech.pipeline.messages import (
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
+from tests.turns import reopen
 
 from .realtime_contract import (
     assert_response_lifecycle_contract,
@@ -139,6 +140,28 @@ def _simulate_session_end_drain(input_queue: Queue, output_queue: Queue, timeout
             output_queue.put(item)
             return
     raise AssertionError("SESSION_END did not appear on input_queue within timeout")
+
+
+def _resume_speech(monkeypatch, service, tracker, *, after_hold_check: bool) -> None:
+    """Start a speech candidate now, or once the send loop's next hold check passes.
+
+    VAD runs on its own thread, so resumed speech can start between that check
+    and the output's commit.
+    """
+    if not after_hold_check:
+        assert tracker.speech_candidate_started(1100)
+        return
+    hold_check = service.is_turn_output_held
+    resumed = ThreadingEvent()
+
+    def check_then_resume(event):
+        held = hold_check(event)
+        if not held and not resumed.is_set():
+            resumed.set()
+            assert tracker.speech_candidate_started(1100)
+        return held
+
+    monkeypatch.setattr(service, "is_turn_output_held", check_then_resume)
 
 
 def _pcm_bytes(n_samples: int) -> bytes:
@@ -700,6 +723,77 @@ class TestSendLoop:
                 assert tracker._committed == set()
                 assert tracker.begin_reopen_candidate("turn_1", 0) is None
 
+    @pytest.mark.parametrize("resume_after_hold_check", [False, True], ids=["before_queue", "after_hold_check"])
+    def test_held_answer_keeps_receiving_audio_that_reopens_its_turn(self, setup, monkeypatch, resume_after_hold_check):
+        app, service, input_queue, output_queue, text_output_queue, *_ = setup
+        tracker = SpeculativeTurnTracker()
+        service.speculative_turns = tracker
+        audio_b64 = base64.b64encode(_pcm_bytes(512)).decode("ascii")
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                tracker.speech_started(0)
+                tracker.segment_finalized(1000)
+                # Resumed speech arrives after the grace, as the answer is queued.
+                _resume_speech(monkeypatch, service, tracker, after_hold_check=resume_after_hold_check)
+                output_queue.put(AssistantOutputEvent(text="Stale answer.", turn_id="turn_1", turn_revision=0))
+                time.sleep(0.05)
+
+                # VAD needs more audio to confirm the speech; the held answer
+                # must not stop the server from receiving it.
+                ws.send_json({"type": "input_audio_buffer.append", "audio": audio_b64})
+                assert input_queue.get(timeout=1)
+                assert tracker.speech_started(1300) == ("turn_1", 1, True)
+                text_output_queue.put(SpeechStartedEvent(turn_id="turn_1", turn_revision=1))
+                output_queue.put(AssistantOutputEvent(text="Revised answer.", turn_id="turn_1", turn_revision=1))
+
+                messages = [ws.receive_json()]
+                for _ in range(10):
+                    if "Revised answer." in str(messages[-1]):
+                        break
+                    messages.append(ws.receive_json())
+                assert "Revised answer." in str(messages[-1])
+                assert messages[0]["type"] == "input_audio_buffer.speech_started"
+                assert "Stale answer." not in str(messages)
+                assert not tracker.is_committed("turn_1", 0)
+
+    @pytest.mark.parametrize("resume_after_hold_check", [False, True], ids=["before_queue", "after_hold_check"])
+    def test_held_tool_call_is_dropped_when_its_turn_reopens(self, setup, monkeypatch, resume_after_hold_check):
+        app, service, _, output_queue, text_output_queue, *_ = setup
+        tracker = SpeculativeTurnTracker()
+        service.speculative_turns = tracker
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                tracker.speech_started(0)
+                tracker.segment_finalized(1000)
+                ws.send_json({"type": "response.create"})
+                assert ws.receive_json()["type"] == "response.created"
+                response_key = service._state(list(service._conns)[0]).current_response_key
+                # A tool-call-only answer never commits in TTS, so its early
+                # side-channel copy and its ordered copy both reach the send loop.
+                _resume_speech(monkeypatch, service, tracker, after_hold_check=resume_after_hold_check)
+                part = AssistantToolCallPart(
+                    tool={"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"}
+                )
+                turn = {"turn_id": "turn_1", "turn_revision": 0}
+                text_output_queue.put(
+                    AssistantToolCallReadyEvent(response_key=response_key, output_sequence=0, part=part, **turn)
+                )
+                output_queue.put(
+                    AssistantOutputEvent(response_key=response_key, output_sequence=0, parts=[part], **turn)
+                )
+                time.sleep(0.05)
+
+                assert tracker.speech_started(1300) == ("turn_1", 1, True)
+                text_output_queue.put(SpeechStartedEvent(turn_id="turn_1", turn_revision=1))
+                messages = [ws.receive_json()]
+                while messages[-1]["type"] != "input_audio_buffer.speech_started" and len(messages) < 10:
+                    messages.append(ws.receive_json())
+                assert messages[-1]["type"] == "input_audio_buffer.speech_started"
+                assert "call_1" not in str(messages)
+                assert not tracker.is_committed("turn_1", 0)
+
     def test_barge_in_discard_clears_after_response_done(self, setup):
         """After barge-in sets discarding=True, __RESPONSE_DONE__ must clear it back to False."""
         app, service, _, output_queue, text_output_queue, _, _, response_playing, cancel_scope = setup
@@ -820,7 +914,8 @@ class TestSendLoop:
                 requests = []
                 tracker.start_turn()
                 for revision in (0, 1):
-                    tracker.observe("turn_1", revision)
+                    if revision:
+                        reopen(tracker)
                     service.dispatch_pipeline_event(
                         conn_id,
                         SpeechStartedEvent(
@@ -1550,7 +1645,7 @@ class TestDrainRelease:
         q: Queue = Queue()
         failure_event = TranscriptionFailedEvent(
             message="transcription request timed out",
-            turn_id="turn-1",
+            turn_id="turn_1",
             turn_revision=0,
         )
         q.put(AssistantOutputEvent(text="stale"))
