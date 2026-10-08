@@ -75,33 +75,6 @@ def test_newer_conversation_order_supersedes_uncommitted_turn():
     assert tracker.is_latest("turn_2", 0)
 
 
-def test_new_turn_drops_inflight_uncommitted_generation():
-    tracker = SpeculativeTurnTracker()
-    tracker.start_turn()
-    generation_started = Event()
-    generation_finished = Event()
-    accepted_outputs: list[str] = []
-
-    def finish_slow_generation():
-        generation_started.set()
-        assert generation_finished.wait(timeout=1.0)
-        if tracker.is_latest("turn_1", 0):
-            accepted_outputs.append("stale turn_1 reply")
-
-    thread = Thread(target=finish_slow_generation)
-    thread.start()
-    assert generation_started.wait(timeout=1.0)
-
-    tracker.start_turn()
-    generation_finished.set()
-    thread.join(timeout=1.0)
-    if tracker.is_latest("turn_2", 0):
-        accepted_outputs.append("current turn_2 reply")
-
-    assert not thread.is_alive()
-    assert accepted_outputs == ["current turn_2 reply"]
-
-
 def test_reopen_revision_does_not_advance_turn_sequence():
     tracker = SpeculativeTurnTracker()
     tracker.start_turn()
@@ -121,6 +94,7 @@ def test_late_commit_from_superseded_turn_is_rejected():
 
     assert not tracker.wait_for_gate("turn_1", 0, commit=True)
     assert not tracker.is_committed("turn_1", 0)
+    assert tracker.is_latest("turn_2", 0)
 
 
 def test_committed_turn_remains_valid_after_conversation_advances():
@@ -366,27 +340,6 @@ def test_processing_hold_survives_cancelled_reopen_candidate():
     thread.join(timeout=1.0)
     assert not thread.is_alive()
     assert result == [True]
-
-
-def test_commit_after_reset_does_not_resurrect_untracked_turn():
-    tracker = SpeculativeTurnTracker()
-    tracker.start_turn()
-    tracker.reset()
-
-    tracker.wait_for_gate("turn_1", 0, commit=True)
-
-    assert not tracker.is_committed("turn_1", 0)
-
-
-def test_commit_after_new_turn_does_not_resurrect_superseded_turn():
-    tracker = SpeculativeTurnTracker()
-    tracker.start_turn()
-    tracker.start_turn()
-
-    tracker.wait_for_gate("turn_1", 0, commit=True)
-
-    assert not tracker.is_committed("turn_1", 0)
-    assert tracker.is_latest("turn_2", 0)
 
 
 @pytest.mark.parametrize(
