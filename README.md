@@ -60,12 +60,9 @@ Echo cancellation stays off by default. The real MacBook Air M2 client used abou
 uv sync --python 3.11 --extra aec
 PYTHONPATH=src .venv/bin/python scripts/benchmark_echo_cancellation.py --seconds 10 --repeats 3 --paced
 
-# Optional comparison; this does not change the client's binding.
-uv pip install --python .venv/bin/python pywebrtc-audio==0.2.0
-PYTHONPATH=src .venv/bin/python scripts/benchmark_echo_cancellation.py --seconds 10 --repeats 3 --paced --compare-pywebrtc
 ```
 
-The benchmark prints CPU time and echo reduction as JSON lines. It measures the canceller and callback buffers, excluding model inference, networking, and audio device drivers. Omit `--paced` to process the same audio faster than real time.
+The `aec` extra uses `pywebrtc-audio`. Cancellation requires matching `--send-rate` and `--recv-rate` (both default to 16000). The benchmark prints CPU time and echo reduction as JSON lines. It measures the canceller and callback buffers, excluding model inference, networking, and audio device drivers. Omit `--paced` to process the same audio faster than real time.
 
 ### Apple Silicon, fully local
 

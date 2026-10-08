@@ -15,32 +15,6 @@ import numpy as np
 from speech_to_speech.api.openai_realtime.echo_canceller import EchoCanceller
 
 
-class PairedCanceller:
-    """Comparison adapter only: paired, same-rate, serialized callbacks."""
-
-    def __init__(self, rate):
-        from pywebrtc_audio import AudioProcessor
-
-        self.apm = AudioProcessor(sample_rate=rate, echo_cancellation=True, stream_delay_ms=20)
-        self.frame_bytes = rate // 100 * 2
-        self.rendered = bytearray()
-        self.captured = bytearray()
-
-    def render(self, audio, output_delay_s):
-        self.rendered.extend(audio)
-
-    def capture(self, audio, input_delay_s):
-        self.captured.extend(audio)
-        output = bytearray()
-        while len(self.captured) >= self.frame_bytes:
-            near = np.frombuffer(bytes(self.captured[: self.frame_bytes]), dtype=np.int16)
-            far = np.frombuffer(bytes(self.rendered[: self.frame_bytes]), dtype=np.int16)
-            output.extend(self.apm.process(near, far).tobytes())
-            del self.captured[: self.frame_bytes]
-            del self.rendered[: self.frame_bytes]
-        return bytes(output)
-
-
 def run(backend, scenario, duration, paced):
     rate, block = 16000, 1024
     samples = int(duration * rate) // block * block
@@ -52,10 +26,8 @@ def run(backend, scenario, duration, paced):
         played[:] = 0
         echo[:] = 0
     processor = None
-    if backend == "livekit":
+    if backend == "pywebrtc":
         processor = EchoCanceller(rate, rate)
-    elif backend == "pywebrtc":
-        processor = PairedCanceller(rate)
     rendered = [played[i : i + block].tobytes() for i in range(0, samples, block)]
     captured = [echo[i : i + block].tobytes() for i in range(0, samples, block)]
     cleaned = bytearray()
@@ -97,15 +69,11 @@ if __name__ == "__main__":
     parser.add_argument("--seconds", type=float, default=30)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--paced", action="store_true")
-    parser.add_argument("--compare-pywebrtc", action="store_true")
     args = parser.parse_args()
     if args.seconds < 1 or args.repeats < 1:
         parser.error("seconds and repeats must be at least 1")
-    packages = ["numpy", "livekit"]
-    backends = ["off", "livekit"]
-    if args.compare_pywebrtc:
-        packages.append("pywebrtc-audio")
-        backends.append("pywebrtc")
+    packages = ["numpy", "pywebrtc-audio"]
+    backends = ["off", "pywebrtc"]
     print(
         json.dumps(
             dict(

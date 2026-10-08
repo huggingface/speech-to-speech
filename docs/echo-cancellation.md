@@ -1,45 +1,35 @@
 # Echo cancellation: binding choice and CPU cost
 
-The client uses LiveKit's WebRTC audio processing module. Its separate render
-and capture calls fit the two sounddevice callbacks and accept different input
-and output rates. The original choice followed
-[LiveKit's console client](https://github.com/livekit/agents/blob/main/livekit-agents/livekit/agents/cli/_legacy.py)
-and passed a live MacBook speaker and voice-interruption check. We had not
-compared `pywebrtc-audio` before review.
+The client uses `pywebrtc-audio` 0.2.x through the optional `aec` extra.
+Both input and output default to mono 16 kHz; cancellation requires matching
+`--send-rate` and `--recv-rate`. Without cancellation, those rates can differ.
+Noise suppression and gain control remain off. The binding automatically
+applies a high-pass filter with echo cancellation, as described in its
+[API documentation](https://pypi.org/project/pywebrtc-audio/0.2.0/).
 
-## Smaller binding comparison
+## Why pywebrtc-audio
 
-We tested `livekit` 1.1.20 against `pywebrtc-audio` 0.2.0. Both have macOS,
-Linux and Windows wheels. For CPython 3.11 on Apple Silicon, the compressed
-[pywebrtc-audio wheel](https://pypi.org/project/pywebrtc-audio/0.2.0/) is 358 KiB;
-the [LiveKit wheel](https://pypi.org/project/livekit/1.1.20/) is 8.9 MiB.
-These are download sizes, excluding dependencies.
+The original PR used LiveKit following its console client. We compared the
+smaller binding after review, tested a paired adapter through the actual
+microphone/speaker callbacks, and switched after the user's live speech test
+worked well. For CPython 3.11 on Apple Silicon, the compressed pywebrtc wheel
+is 358 KiB versus 8.9 MiB for LiveKit, excluding dependencies.
 
-`pywebrtc-audio` is a viable smaller alternative. On the same saved 16 kHz
-MacBook speaker recording, both removed all six false VAD barge-ins at a
-20 ms delay hint. After the first two seconds of playback, LiveKit removed
-43.2–43.7 dB of echo; pywebrtc removed 38.7–39.4 dB across delay hints of
-0, 20, 60, 100 and 150 ms. Noise suppression and gain control were off.
+The speaker callback queues reference samples; the microphone callback pairs
+them with capture frames. Incomplete 10 ms frames carry over between callbacks.
+A lock protects the shared queue, only the mic thread calls the native
+processor, and the queue caps references at 500 ms if capture stalls. Missing
+references become silence. Clock drift and mixed-rate resampling remain outside
+this adapter; unequal rates fail with a clear error when cancellation is on.
 
-The synthetic delayed-noise check gives a different result: LiveKit removes
-about 47 dB, while pywebrtc removes 11–15 dB with the comparison adapter.
-Running the exact three-second signal from the existing audio-client test gives
-47.2 dB for LiveKit and 17.3 dB for pywebrtc, below its 30 dB requirement.
-The adapter carries incomplete 10 ms frames between 1024-sample callbacks;
-it does not pass partially filled frames to either binding. This result
-applies to that signal and adapter, not every real speech stream.
-
-LiveKit remains the binding in this PR and passes the existing synthetic
-regression. We also tested the experimental pywebrtc adapter on the real
-microphone and speaker path described below. The
-[pywebrtc API](https://github.com/strands-labs/pywebrtc-audio/blob/main/src/pywebrtc_audio/_webrtc_audio.pyi)
-pairs equal-length microphone and playback arrays at one sample rate.
-Our experimental live adapter queues playback for the microphone callback,
-uses a lock for the shared queue, caps it at 500 ms, and fills missing
-reference samples with silence. It processes whole 10 ms frames and calls
-the native processor only from the microphone thread. It needs equal rates
-and does not correct device clock drift. Switching the production binding
-still needs mixed-rate handling and broader live hardware checks.
+The original delayed-noise regression removed about 47 dB with LiveKit and
+17 dB with pywebrtc. Its 30 dB cutoff over-weighted that signal relative to
+speech behavior. We replaced the noise input with a speech fixture derived
+from the existing package reference recording. The speech regression retains
+the 30 dB requirement (about 53 dB measured) and also checks that an overlapping
+near voice survives with useful amplitude and correlation, allowing for the
+binding's processing delay. This avoids selecting a binding solely by how
+much it suppresses noise or accepting a processor that silences all input.
 
 ## Actual client and server measurements
 
@@ -96,34 +86,17 @@ windows to estimate the added steady cost; do not subtract active CPU as if
 only the binding changed. This short check does not measure battery impact.
 Echo cancellation remains opt-in pending broader hardware checks.
 
-## Isolated processing measurements
 
-CPU percent below means percent of **one core**, computed as process CPU time
-per second of audio. Imports, processor construction and signal generation
-happen before timing. The workload uses mono 16 kHz audio, 1024-sample
-callbacks, silence for idle, and a delayed quieter copy of synthetic playback
-for echo. Both bindings receive a 20 ms delay hint.
+These real-client measurements preceded the production switch: the pywebrtc
+rows used the same paired processing and buffering now in the client, with
+extra telemetry for the measurement. LiveKit is a historical comparison and
+is no longer a project dependency. The overlap transcript misses remain in
+the table; the later human test is a separate qualitative check.
 
-MacBook Air M2, three paced runs of 9.984 seconds per case:
+## Rerunning the processing benchmark
 
-| Binding | Idle CPU | Echo CPU |
-| --- | --- | --- |
-| off | 0.13% (0.10–0.19%) | 0.11% (0.11–0.12%) |
-| livekit | 2.82% (2.55–3.02%) | 2.78% (2.59–2.95%) |
-| pywebrtc | 2.02% (1.85–2.18%) | 2.41% (2.32–2.46%) |
-
-Each cell shows the mean and the range across three runs.
-
-The Linux workstation ran three 29.952-second audio workloads per case without
-pacing: LiveKit used 0.27–0.37% of one core, and pywebrtc used 0.34–0.49%.
-Those numbers express processing cost per audio second, not the CPU percent
-of the accelerated process while it runs.
-
-This isolates audio processing and the callback buffers. It excludes the
-sounddevice driver, WebSocket client, and server models. It does not measure
-idle CPU for the whole pipeline or justify enabling cancellation by default
-on all hardware. Echo cancellation remains opt-in.
-
-See the [README commands](../README.md) to rerun the benchmark. The optional
-pywebrtc comparison uses a same-rate paired adapter; the packaged client
-continues to use LiveKit.
+See the [README commands](../README.md). The script compares cancellation off
+and the production pywebrtc binding. It measures the canceller and buffers,
+excluding audio drivers, networking and server models. CPU percent is process
+CPU time per audio second; `--paced` processes at real-time speed. The synthetic
+noise signal in this CPU workload is not the speech-quality acceptance test.

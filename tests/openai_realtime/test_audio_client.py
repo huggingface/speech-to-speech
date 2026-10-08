@@ -3,6 +3,7 @@ import json
 import logging
 import signal
 import sys
+from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 
@@ -268,33 +269,54 @@ def test_playback_buffer_starts_immediately_by_default():
     assert playback.buffered_bytes == 0
 
 
-def test_echo_canceller_removes_played_audio_from_microphone_blocks():
+@pytest.mark.parametrize("mode", ["echo", "overlap", "no_playback"])
+def test_echo_canceller_removes_played_audio_from_microphone_blocks(mode):
     np = pytest.importorskip("numpy")
-    pytest.importorskip("livekit.rtc")
-    rate, block = 16000, 1024  # the client's default chunk is not a whole number of 10 ms frames
-    rng = np.random.default_rng(0)
-    samples = rate * 3
-    envelope = 0.5 + 0.5 * np.sin(2 * np.pi * 4 * np.arange(samples) / rate)
-    played = (rng.standard_normal(samples) * envelope * 3000).astype(np.int16)
-    echo = np.zeros(samples, dtype=np.int16)
-    echo[320:] = (played[:-320] * 0.3).astype(np.int16)  # 20 ms later and quieter, like a laptop speaker
+    pytest.importorskip("pywebrtc_audio")
+    from scipy.io import wavfile
+    from scipy.signal import correlate, correlation_lags
 
+    rate, played = wavfile.read(Path(__file__).parents[1] / "fixtures/aec-speech.wav")
+    block = 1024  # Not a whole number of 10 ms frames.
+    echo = np.zeros_like(played)
+    echo[320:] = (played[:-320] * 0.3).astype(np.int16)
+    near = np.zeros_like(played)
+    if mode == "overlap":
+        near[6 * rate : 8 * rate] = played[10 * rate : 12 * rate]
+    if mode == "no_playback":
+        echo[:] = 0
+        near = played.copy()
+    microphone = (echo.astype(np.int32) + near).astype(np.int16)
     canceller = EchoCanceller(rate, rate)
     cleaned = bytearray()
-    for start in range(0, samples, block):
-        canceller.render(played[start : start + block].tobytes(), output_delay_s=0.01)
-        cleaned += canceller.capture(echo[start : start + block].tobytes(), input_delay_s=0.01)
+    for start in range(0, len(played), block):
+        if mode != "no_playback":
+            canceller.render(played[start : start + block].tobytes(), output_delay_s=0.01)
+        cleaned += canceller.capture(microphone[start : start + block].tobytes(), input_delay_s=0.01)
 
-    assert len(cleaned) == samples // 160 * 160 * 2
-    last_second = slice(2 * rate, 3 * rate)
-    output = np.frombuffer(bytes(cleaned), dtype=np.int16)[last_second].astype(float)
-    reduction_db = 10 * np.log10(np.mean(echo[last_second].astype(float) ** 2) / (np.mean(output**2) + 1e-9))
-    assert reduction_db > 30
+    assert len(cleaned) == len(played) // (rate // 100) * (rate // 100) * 2
+    output = np.frombuffer(bytes(cleaned), dtype=np.int16).astype(float)
+    if mode != "echo":
+        # The binding's high-pass filter and processing delay change phase.
+        # Require the near speech to survive, allowing up to 10 ms alignment.
+        actual = output[6 * rate : 8 * rate]
+        expected = near[6 * rate : 8 * rate].astype(float)
+        scores = correlate(actual, expected, method="fft")
+        lags = correlation_lags(len(actual), len(expected))
+        correlation = scores[np.abs(lags) < rate // 100].max() / (np.linalg.norm(actual) * np.linalg.norm(expected))
+        assert correlation > 0.6
+        assert np.linalg.norm(actual) > 0.5 * np.linalg.norm(expected)
+    else:
+        tail = slice(8 * rate, len(output))
+        reduction_db = 10 * np.log10(np.mean(echo[tail].astype(float) ** 2) / (np.mean(output[tail] ** 2) + 1e-9))
+        assert reduction_db > 30
 
 
 def test_echo_canceller_rejects_unsupported_rates():
     with pytest.raises(ValueError, match="22050 Hz"):
         EchoCanceller(22050, 16000)
+    with pytest.raises(ValueError, match="matching"):
+        EchoCanceller(16000, 48000)
 
 
 @pytest.mark.parametrize("buffer_ms", [-1, float("inf"), float("nan")])
