@@ -36,6 +36,7 @@ from speech_to_speech.STT.openai_compatible_handler import (
     TranscriptionRequestError,
 )
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
+from tests.turns import reopen
 
 
 class _TranscriptionServer(BaseHTTPRequestHandler):
@@ -222,7 +223,7 @@ def _audio(mode: str = "final", *, revision: int = 0, samples: int = 160) -> VAD
     return VADAudio(
         audio=np.zeros(samples, dtype=np.float32),
         mode=mode,
-        turn_id="turn-1",
+        turn_id="turn_1",
         turn_revision=revision,
     )
 
@@ -433,8 +434,8 @@ def test_remote_progressive_hypotheses_remain_cumulative(monkeypatch):
     first = _run_progressive(handler)
     second = _run_progressive(handler)
 
-    assert first == [PartialTranscription(text="hello", turn_id="turn-1", turn_revision=0)]
-    assert second == [PartialTranscription(text="hello world", turn_id="turn-1", turn_revision=0)]
+    assert first == [PartialTranscription(text="hello", turn_id="turn_1", turn_revision=0)]
+    assert second == [PartialTranscription(text="hello world", turn_id="turn_1", turn_revision=0)]
 
 
 def test_remote_progressive_hypothesis_corrections_reach_the_router(monkeypatch):
@@ -444,8 +445,8 @@ def test_remote_progressive_hypothesis_corrections_reach_the_router(monkeypatch)
         HttpTranscriptionResult(text="hello their"),
     ]
 
-    assert _run_progressive(handler) == [PartialTranscription(text="hello there", turn_id="turn-1", turn_revision=0)]
-    assert _run_progressive(handler) == [PartialTranscription(text="hello their", turn_id="turn-1", turn_revision=0)]
+    assert _run_progressive(handler) == [PartialTranscription(text="hello there", turn_id="turn_1", turn_revision=0)]
+    assert _run_progressive(handler) == [PartialTranscription(text="hello their", turn_id="turn_1", turn_revision=0)]
 
 
 def test_remote_progressive_hypotheses_emit_realtime_deltas(monkeypatch):
@@ -463,7 +464,7 @@ def test_remote_progressive_hypotheses_emit_realtime_deltas(monkeypatch):
     conn_id = service.register()
     service.dispatch_pipeline_event(
         conn_id,
-        SpeechStartedEvent(turn_id="turn-1", turn_revision=0),
+        SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
     )
 
     wire_events = []
@@ -486,7 +487,7 @@ def test_final_transport_failure_does_not_create_a_transcription(monkeypatch):
     assert len(outputs) == 1
     assert isinstance(outputs[0], TranscriptionFailure)
     assert outputs[0].message == "transcription request timed out"
-    assert outputs[0].turn_id == "turn-1"
+    assert outputs[0].turn_id == "turn_1"
 
 
 def test_progressive_transport_failure_is_discarded(monkeypatch):
@@ -528,7 +529,7 @@ def test_final_request_does_not_wait_for_in_flight_progressive(monkeypatch):
         assert isinstance(output, Transcription)
         assert output.text == "final"
         assert output.language_code == "en"
-        assert output.turn_id == "turn-1"
+        assert output.turn_id == "turn_1"
         assert output.turn_revision == 0
         assert not release_progressive.is_set()
 
@@ -604,7 +605,7 @@ def test_pending_progressive_requests_keep_only_the_latest_window(monkeypatch):
     assert handler.queue_out.qsize() == 2
     assert handler.queue_out.get_nowait() == PartialTranscription(
         text="partial",
-        turn_id="turn-1",
+        turn_id="turn_1",
         turn_revision=0,
     )
 
@@ -638,7 +639,7 @@ def test_session_end_suppresses_in_flight_progressive_result(monkeypatch):
 @pytest.mark.filterwarnings("error::pytest.PytestUnhandledThreadExceptionWarning")
 def test_obsolete_progressive_request_is_not_sent_before_worker_starts(monkeypatch, superseded_by):
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn-1", 0)
+    tracker.start_turn()
     handler = _handler(monkeypatch, tracker=tracker)
     worker_started = Event()
     release_worker = Event()
@@ -678,7 +679,7 @@ def test_obsolete_progressive_request_is_not_sent_before_worker_starts(monkeypat
             assert isinstance(outputs[0], Transcription)
             assert outputs[0].text == "final"
         elif superseded_by == "new_revision":
-            tracker.observe("turn-1", 1)
+            reopen(tracker)
         elif superseded_by == "session_end":
             handler.on_session_end()
         elif superseded_by == "shutdown":
@@ -708,12 +709,12 @@ def test_obsolete_progressive_request_is_not_sent_before_worker_starts(monkeypat
 
 def test_stale_revision_is_dropped_after_request(monkeypatch):
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn-1", 0)
+    tracker.start_turn()
     handler = _handler(monkeypatch, tracker=tracker)
 
     class _ReopeningOperation(_FakeOperation):
         def run(self, cancel_check=lambda: False):
-            tracker.observe("turn-1", 1)
+            reopen(tracker)
             return HttpTranscriptionResult(text="stale")
 
     monkeypatch.setattr(stt_module, "HttpTranscriptionOperation", _ReopeningOperation)

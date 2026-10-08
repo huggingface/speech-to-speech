@@ -11,6 +11,7 @@ from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, AudioOutput,
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS import supertonic_tts_handler as supertonic_module
 from speech_to_speech.TTS.supertonic_tts_handler import SupertonicTTSHandler
+from tests.turns import reopen
 
 
 class FakeTTS:
@@ -131,7 +132,7 @@ def test_process_drops_audio_when_cancelled_during_synthesis() -> None:
 
 def test_stale_keyed_terminal_becomes_cleanup_after_lm_tts_handoff() -> None:
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     handler = SupertonicTTSHandler.__new__(SupertonicTTSHandler)
     handler.speculative_turns = tracker
     terminal = EndOfResponse(
@@ -140,7 +141,7 @@ def test_stale_keyed_terminal_becomes_cleanup_after_lm_tts_handoff() -> None:
         turn_revision=0,
         cancel_generation=7,
     )
-    tracker.observe("turn_1", 1)
+    reopen(tracker)
 
     outputs = list(handler.process(terminal))
     queued = handler.output_for_queue(outputs[0], terminal)
