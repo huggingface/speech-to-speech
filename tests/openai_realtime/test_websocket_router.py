@@ -49,6 +49,7 @@ from speech_to_speech.pipeline.messages import (
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
+from tests.turns import reopen
 
 from .realtime_contract import (
     assert_response_lifecycle_contract,
@@ -913,7 +914,8 @@ class TestSendLoop:
                 requests = []
                 tracker.start_turn()
                 for revision in (0, 1):
-                    tracker.observe("turn_1", revision)
+                    if revision:
+                        reopen(tracker)
                     service.dispatch_pipeline_event(
                         conn_id,
                         SpeechStartedEvent(
@@ -1643,7 +1645,7 @@ class TestDrainRelease:
         q: Queue = Queue()
         failure_event = TranscriptionFailedEvent(
             message="transcription request timed out",
-            turn_id="turn-1",
+            turn_id="turn_1",
             turn_revision=0,
         )
         q.put(AssistantOutputEvent(text="stale"))
