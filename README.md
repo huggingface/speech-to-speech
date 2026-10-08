@@ -54,7 +54,7 @@ Run the configuration you chose with this environment activated. Activate the sa
 
 If speaker feedback interrupts replies, install the `aec` extra with `pip install "speech-to-speech[aec]"` and add `--echo-cancellation` to your `speech-to-speech local` or `talk` command. The client then removes its own playback from the microphone, so you can still interrupt the assistant by voice. Without the extra, `--local_audio_block_mic_during_playback` pauses microphone capture during playback instead, but you cannot interrupt the assistant while it speaks.
 
-Echo cancellation stays off by default. See [the binding comparison and CPU measurements](docs/echo-cancellation.md) for the cost on a MacBook Air M2 and a Linux workstation. To measure the audio processing on your machine from a source checkout:
+Echo cancellation stays off by default. The real MacBook Air M2 client used about 4.6% of one CPU core while listening without cancellation and 7.6% with it, across three trials. Server idle CPU stayed near 3.9%. See [the binding comparison and CPU measurements](docs/echo-cancellation.md) for the full live results and an isolated Linux/Mac processing check. To measure the audio processing on your machine from a source checkout:
 
 ```bash
 uv sync --python 3.11 --extra aec
