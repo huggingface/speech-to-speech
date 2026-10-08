@@ -48,8 +48,12 @@ and resets for the next response. `item_id` identifies the assistant item carryi
 that batch. Compound phonemes produce consecutive mouth-shape intervals. IPA
 stress marks are removed before mapping. Unmapped phonemes produce no cue.
 
-Events precede their corresponding audio. Schedule shapes against actual audio
-playback, including any client buffering, rather than the event's arrival time.
+The server submits viseme events before their corresponding audio. WebSocket
+preserves this message order. WebRTC uses separate data and media channels, so
+viseme events are not guaranteed to arrive before the corresponding audio plays.
+See [OpenAI's transport guidance](https://developers.openai.com/api/docs/guides/realtime-conversations#push-to-talk).
+Schedule shapes against actual audio playback, including any client buffering,
+rather than the event's arrival time.
 On interruption or response cancellation, discard scheduled shapes with buffered
 audio and return the mouth to rest. Ignore extension events if your client only
 needs audio. Output resampling changes sample counts but not these time units.

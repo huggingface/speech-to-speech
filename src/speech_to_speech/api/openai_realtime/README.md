@@ -98,8 +98,10 @@ flowchart LR
 ### Optional viseme output
 
 With `--enable_visemes`, an additional stage extracts mouth shapes from TTS audio.
-The existing WebSocket connection or WebRTC data channel receives
-`speech_to_speech.output_audio.visemes` JSON events before the matching audio.
+The server submits `speech_to_speech.output_audio.visemes` JSON events through
+the existing WebSocket connection or WebRTC data channel before submitting the
+matching audio. WebSocket preserves this message order; WebRTC does not guarantee
+that viseme events arrive before the corresponding audio plays.
 Standard Realtime audio events and the current endpoints stay unchanged. See the
 [viseme guide](../../STV/README.md) for the event schema, timing, and model limits.
 
