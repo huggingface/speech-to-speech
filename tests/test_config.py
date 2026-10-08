@@ -454,6 +454,7 @@ def test_explicit_scope_inventory():
     assert _MODULE_PROCESS | _MODULE_PIPELINE | _MODULE_SELECTORS | {"num_pipelines"} == {
         f.name for f in fields(ModuleArguments)
     }
+    assert {"enable_visemes", "stv_model_name", "stv_device"} <= _MODULE_PIPELINE
     assert not _MODULE_PROCESS & _MODULE_PIPELINE
     assert {f.name for f in fields(RealtimeServerArguments)} == {"host", "port"}
     assert {f.name for f in fields(RealtimeAudioClientConfig)} == {
@@ -513,3 +514,35 @@ def test_client_only_validates_complete_document_and_client_environment(document
     document.data["runtime"] = {"client": {"api_key": {"env": "MISSING_CLIENT_KEY"}}}
     with pytest.raises(ConfigurationError):
         resolve_config(document, client_only=True, environ={})
+
+
+def test_inherited_viseme_options_defaults_sources_and_inactive_environment(document):
+    from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
+    from speech_to_speech.arguments_classes.w2v_stv_arguments import Wav2Vec2STVHandlerArguments
+
+    defaults = Wav2Vec2STVHandlerArguments()
+    inherited = {field.name: field for field in fields(ModuleArguments)}
+    result = resolve_config(document, names=["primary"], environ={})
+    for field in fields(defaults):
+        assert result.pipelines["primary"].options[field.name] == getattr(defaults, field.name)
+        assert result.sources[("pipelines", "primary", "options", field.name)] == "default"
+        assert inherited[field.name].metadata == field.metadata
+    document.data["pipelines"]["primary"]["options"] = {
+        "enable_visemes": {"env": "ENABLED"},
+        "stv_model_name": {"env": "MODEL"},
+        "stv_device": {"env": "DEVICE"},
+    }
+    document.data["pipelines"]["secondary"]["options"] = {
+        "enable_visemes": {"env": "UNUSED_ENABLED"},
+        "stv_model_name": {"env": "UNUSED_MODEL"},
+        "stv_device": {"env": "UNUSED_DEVICE"},
+    }
+    validate_config(document)
+    result = resolve_config(document, names=["primary"], environ={"ENABLED": "false", "MODEL": "", "DEVICE": "cpu"})
+    assert result.pipelines["primary"].options["enable_visemes"] is False
+    assert result.pipelines["primary"].options["stv_model_name"] == ""
+    assert result.pipelines["primary"].options["stv_device"] == "cpu"
+    for field in fields(defaults):
+        assert result.sources[("pipelines", "primary", "options", field.name)] == "environment"
+    with pytest.raises(ConfigurationError):
+        resolve_config(document, names=["secondary"], environ={})

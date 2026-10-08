@@ -109,6 +109,10 @@ class BaseHandler(Generic[InT, OutT]):
             )
         return output
 
+    def process_pipeline_event(self, event: PipelineEvent) -> Iterator[Any]:
+        """Forward ordered events, allowing downstream stages to flush audio first."""
+        yield event
+
     def run(self) -> None:
         try:
             self._run_loop()
@@ -154,7 +158,8 @@ class BaseHandler(Generic[InT, OutT]):
             # Response events share the TTS queue with their audio. Forwarding
             # them here preserves the model's exact text/tool/audio order.
             if isinstance(item, PipelineEvent):
-                self.queue_out.put(cast(OutT, item))
+                for output in self.process_pipeline_event(item):
+                    self.queue_out.put(output)
                 continue
 
             start_time = perf_counter()

@@ -539,3 +539,95 @@ def test_monitor_start_failure_cleans_without_joining_unstarted_thread(config, b
     assert result.state == "failed"
     assert result.pools == {}
     assert all(handler.cleaned == 1 for handler in handlers)
+
+
+@pytest.fixture
+def viseme_chain(monkeypatch):
+    import sys
+
+    from speech_to_speech.baseHandler import BaseHandler
+    from speech_to_speech.STV.w2v_stv_handler import Wav2Vec2STVHandler
+
+    class IdleHandler(BaseHandler):
+        pass
+
+    class FakeTTS(IdleHandler):
+        pass
+
+    visemes = []
+    cleaned = []
+    original_setup = Wav2Vec2STVHandler.setup
+    original_cleanup = Wav2Vec2STVHandler.cleanup
+
+    def setup(handler, **kwargs):
+        original_setup(handler, **kwargs, skip=True)
+        handler._pending = [b"pending audio"]
+        visemes.append(handler)
+
+    def cleanup(handler):
+        cleaned.append(handler)
+        original_cleanup(handler)
+
+    def create(selection, context):
+        handler_type = FakeTTS if selection.kind == "tts" else IdleHandler
+        return handler_type(context.stop_event, context.queue_in, context.queue_out)
+
+    monkeypatch.setattr("speech_to_speech.s2s_pipeline.VADHandler", IdleHandler)
+    monkeypatch.setattr("speech_to_speech.s2s_pipeline.TranscriptionNotifier", IdleHandler)
+    monkeypatch.setattr("speech_to_speech.LLM.lm_output_processor.LMOutputProcessor", IdleHandler)
+    monkeypatch.setattr("speech_to_speech.s2s_pipeline.create_backend_handler", create)
+    monkeypatch.setattr(Wav2Vec2STVHandler, "setup", setup)
+    monkeypatch.setattr(Wav2Vec2STVHandler, "cleanup", cleanup)
+    monkeypatch.setattr(
+        sys.modules[__name__], "QWEN3_LANGUAGE_ALIASES", {"en": "English", "zh": "Chinese"}, raising=False
+    )
+    return visemes, cleaned, FakeTTS
+
+
+def test_configured_viseme_ledger_routing_and_tts_metadata(config, viseme_chain):
+    visemes, cleaned, tts_type = viseme_chain
+    config.pipelines = {"primary": config.pipelines["primary"]}
+    pipeline = config.pipelines["primary"]
+    pipeline.options["enable_visemes"] = True
+    pipeline.stages["tts"].backend = "qwen3"
+    pipeline.stages["tts"].settings = {}
+    result = runtime.build_configured_runtime(config, Event())
+    units = result.pools["primary"]
+    assert len(visemes) == 2
+    for unit, viseme in zip(units, visemes):
+        assert unit.handlers[-1] is viseme
+        assert isinstance(unit.handlers[-2], tts_type)
+        assert unit.handlers[-2].queue_out is viseme.queue_in
+        assert viseme.queue_out is unit.output_queue
+        assert unit.service.tts_supported_languages == {"en", "zh"}
+        assert viseme in result._resources
+    assert units[0].handlers[-2].queue_out is not units[1].handlers[-2].queue_out
+    result.stop()
+    result.stop()
+    assert cleaned == list(reversed(visemes))
+    assert all(viseme._pending == [] for viseme in visemes)
+    assert result.pools == {} and result._resources == []
+
+
+def test_later_replica_failure_cleans_completed_viseme_handlers(config, viseme_chain, monkeypatch):
+    from speech_to_speech import s2s_pipeline
+
+    visemes, cleaned, _ = viseme_chain
+    config.pipelines = {"primary": config.pipelines["primary"]}
+    config.pipelines["primary"].options["enable_visemes"] = True
+    original_build = s2s_pipeline._build_pipeline_unit
+    original_error = ValueError("later replica failure")
+
+    def build(**kwargs):
+        unit = original_build(**kwargs)
+        if kwargs["index"] == 1:
+            raise original_error
+        return unit
+
+    monkeypatch.setattr(s2s_pipeline, "_build_pipeline_unit", build)
+    with pytest.raises(runtime.ConfiguredRuntimeError) as exc:
+        runtime.build_configured_runtime(config, Event())
+    assert exc.value.__cause__ is original_error
+    assert len(visemes) == 2
+    assert cleaned == list(reversed(visemes))
+    assert all(viseme.stop_event.is_set() and viseme._pending == [] for viseme in visemes)
