@@ -23,14 +23,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def prepare(destination: Path) -> str:
-    paths = ["src", "docker", "Dockerfile.eval", "pyproject.toml", "README.md", "LICENSE", "MANIFEST.in"]
+    paths = ["src", "docker", "pyproject.toml", "README.md", "LICENSE", "MANIFEST.in"]
     dirty = subprocess.check_output(["git", "status", "--porcelain", "--", *paths], cwd=ROOT, text=True)
     if dirty:
         raise RuntimeError("Commit evaluation source changes before uploading the image.")
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     files = subprocess.check_output(["git", "ls-files", "-z", "--", *paths], cwd=ROOT).decode().split("\0")
     for name in filter(None, files):
-        target = destination / ("Dockerfile" if name == "Dockerfile.eval" else name)
+        target = destination / ("Dockerfile" if name == "docker/Dockerfile.eval" else name)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / name, target)
     (destination / "source-revision.txt").write_text(revision + "\n")
