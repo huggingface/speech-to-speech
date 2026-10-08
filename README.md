@@ -54,6 +54,19 @@ Run the configuration you chose with this environment activated. Activate the sa
 
 If speaker feedback interrupts replies, install the `aec` extra with `pip install "speech-to-speech[aec]"` and add `--echo-cancellation` to your `speech-to-speech local` or `talk` command. The client then removes its own playback from the microphone, so you can still interrupt the assistant by voice. Without the extra, `--local_audio_block_mic_during_playback` pauses microphone capture during playback instead, but you cannot interrupt the assistant while it speaks.
 
+Echo cancellation stays off by default. See [the binding comparison and CPU measurements](docs/echo-cancellation.md) for the cost on a MacBook Air M2 and a Linux workstation. To measure the audio processing on your machine from a source checkout:
+
+```bash
+uv sync --python 3.11 --extra aec
+PYTHONPATH=src .venv/bin/python scripts/benchmark_echo_cancellation.py --seconds 10 --repeats 3 --paced
+
+# Optional comparison; this does not change the client's binding.
+uv pip install --python .venv/bin/python pywebrtc-audio==0.2.0
+PYTHONPATH=src .venv/bin/python scripts/benchmark_echo_cancellation.py --seconds 10 --repeats 3 --paced --compare-pywebrtc
+```
+
+The benchmark prints CPU time and echo reduction as JSON lines. It measures the canceller and callback buffers, excluding model inference, networking, and audio device drivers. Omit `--paced` to process the same audio faster than real time.
+
 ### Apple Silicon, fully local
 
 Run all three models locally on an Apple Silicon Mac, using a quantized LLM through MLX. No API key is needed.
