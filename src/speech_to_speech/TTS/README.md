@@ -101,7 +101,7 @@ speech-to-speech serve \
 
 Behavior:
 - Uses Kitten's English ONNX models on CPU, defaulting to the 80M-parameter mini 0.8 checkpoint.
-- The supported `kittenml` runtime loads the checkpoint's configuration and handles text splitting and voice embeddings. The extra installs the runtime's declared dependencies, including its larger model family's dependencies; this handler uses only the ONNX models.
+- The supported `kittenml` runtime loads the checkpoint's configuration and handles preprocessing and voice embeddings. The handler keeps upstream text boundaries when they fit and subdivides chunks that exceed the checkpoint's 512-token context after phonemization. The extra installs the runtime's declared dependencies, including its larger model family's dependencies; this handler uses only the ONNX models.
 - Synthesizes each incoming text segment before delivering audio in fixed-size blocks. Delivery blocks do not imply incremental model generation.
 - Resamples native 24 kHz output to the pipeline's 16 kHz signed PCM audio.
 - Supports Bella, Jasper, Luna, Bruno, Rosie, Hugo, Kiki, and Leo, as well as their checkpoint voice identifiers. Realtime response voice settings override session voice settings; otherwise the configured voice is used. Unsupported overrides fall back to the configured voice.

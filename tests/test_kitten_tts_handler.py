@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from queue import Queue
 from threading import Event
@@ -28,6 +29,15 @@ class FakeKitten:
     def __init__(self):
         self.calls = []
 
+    def preprocessor(self, text):
+        return text
+
+    def _prepare_inputs(self, text, voice):
+        return {"input_ids": np.zeros((1, len(text) + 3), dtype=np.int64)}
+
+    def generate_single_chunk(self, *, text, voice):
+        return self.generate(text=text, voice=voice)
+
     def generate(self, *, text, voice):
         self.calls.append((text, voice))
         return np.zeros((1, 12), dtype=np.float32)
@@ -36,6 +46,7 @@ class FakeKitten:
 def make_handler(*, cancel_scope=None, speculative_turns=None, blocksize=4):
     handler = KittenTTSHandler.__new__(KittenTTSHandler)
     handler.model = FakeKitten()
+    handler._chunk_text = lambda text: [text]
     handler.voice = "Bruno"
     handler.blocksize = blocksize
     handler.cancel_scope = cancel_scope
@@ -51,6 +62,7 @@ def install_fake_runtime(monkeypatch, model):
         return model
 
     monkeypatch.setitem(sys.modules, "kittenml.kittentts_legacy", SimpleNamespace(download_from_huggingface=load))
+    monkeypatch.setitem(sys.modules, "kittenml.preprocess", SimpleNamespace(chunk_text=lambda text: [text]))
     return loads
 
 
@@ -266,7 +278,8 @@ def test_generation_errors_use_base_handler_privacy_gate(caplog, enabled):
         set_log_transcripts(False)
 
 
-def test_supported_runtime_splits_long_text_and_selects_length_dependent_styles(monkeypatch, tmp_path):
+@pytest.mark.parametrize("real_phonemizer", [False, True], ids=["long-reply", "acronym-expansion"])
+def test_supported_runtime_splits_long_text_and_selects_length_dependent_styles(monkeypatch, tmp_path, real_phonemizer):
     """Exercise the published runtime when the optional Kitten extra is installed."""
     runtime = pytest.importorskip("kittenml.kittentts_legacy.onnx_model")
     loader = pytest.importorskip("kittenml.kittentts_legacy.model")
@@ -294,17 +307,76 @@ def test_supported_runtime_splits_long_text_and_selects_length_dependent_styles(
             return [np.zeros((1, 5012), dtype=np.float32)]
 
     monkeypatch.setattr(runtime.ort, "InferenceSession", Session)
-    monkeypatch.setattr(
-        runtime.phonemizer.backend, "EspeakBackend", lambda **_kwargs: SimpleNamespace(phonemize=lambda text: text)
-    )
+    if not real_phonemizer:
+        monkeypatch.setattr(
+            runtime.phonemizer.backend, "EspeakBackend", lambda **_kwargs: SimpleNamespace(phonemize=lambda text: text)
+        )
     handler = KittenTTSHandler.__new__(KittenTTSHandler)
     handler.setup(Event(), model_name="KittenML/kitten-tts-mini-0.8", blocksize=4)
     calls.clear()
-    text = " ".join(["The quick brown fox jumps over the lazy dog"] * 16) + "."
+    if real_phonemizer:
+        text = (
+            "To debug the connection, use the HTTP API to send XML and JSON data to the CPU over USB, "
+            "check the HTTPS URL and the DNS record, inspect the TCP and UDP ports on the LAN, "
+            "verify the TLS and SSL settings in the UI, compare the HTML and CSS files with the SVG "
+            "and PNG assets, and check whether the GPU supports FP16 and INT8 before restarting "
+            "the CLI, the SDK, and the SQL database."
+        )
+        prepared = runtime.chunk_text(handler.model.preprocessor(text))
+        assert len(text) == 380
+        assert len(prepared) == 1
+        assert handler.model._prepare_inputs(prepared[0], "Bruno")["input_ids"].shape[-1] > 512
+    else:
+        text = " ".join(["The quick brown fox jumps over the lazy dog"] * 16) + "."
 
+    generated_texts = []
+    generate_single_chunk = handler.model.generate_single_chunk
+
+    def record_generation(**kwargs):
+        generated_texts.append(kwargs["text"])
+        return generate_single_chunk(**kwargs)
+
+    monkeypatch.setattr(handler.model, "generate_single_chunk", record_generation)
     chunks = list(handler.process(TTSInput(text=text)))
 
-    assert len(text) == 704
+    assert re.findall(r"\w+", " ".join(generated_texts)) == re.findall(r"\w+", handler.model.preprocessor(text))
+    assert calls == [min(len(chunk), 399) for chunk in generated_texts]
     assert len(calls) == 2
-    assert calls == [399, 304]
+    if not real_phonemizer:
+        assert len(text) == 704
+        assert calls == [399, 304]
     assert chunks
+
+
+@pytest.mark.parametrize(("characters", "expected_chunks"), [(509, 1), (510, 2)])
+def test_token_bound_includes_start_and_end_tokens(characters, expected_chunks):
+    handler = make_handler()
+    text = "x" * characters
+
+    list(handler.process(TTSInput(text=text)))
+
+    assert len(handler.model.calls) == expected_chunks
+    assert "".join(chunk for chunk, _ in handler.model.calls) == text
+    assert all(len(chunk) + 3 <= 512 for chunk, _ in handler.model.calls)
+
+
+def test_oversized_single_word_is_split_without_dropping_text():
+    handler = make_handler()
+    handler.model._prepare_inputs = lambda text, voice: {"input_ids": np.zeros((1, len(text) * 4 + 3), dtype=np.int64)}
+    text = "x" * 300
+
+    list(handler.process(TTSInput(text=text)))
+
+    assert len(handler.model.calls) > 1
+    assert "".join(chunk for chunk, _ in handler.model.calls) == text
+    assert all(len(chunk) * 4 + 3 <= 512 for chunk, _ in handler.model.calls)
+
+
+def test_unsplittable_token_overflow_fails_instead_of_retrying_forever():
+    handler = make_handler()
+    handler.model._prepare_inputs = lambda text, voice: {"input_ids": np.zeros((1, 513), dtype=np.int64)}
+    handler._chunk_text = lambda text: [text if text.endswith(",") else text + ","]
+
+    with pytest.raises(ValueError, match="cannot fit the checkpoint's token limit"):
+        list(handler.process(TTSInput(text="a,")))
+    assert handler.model.calls == []

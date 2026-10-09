@@ -20,6 +20,9 @@ from speech_to_speech.pipeline.transcript_logging import transcript_for_log
 logger = logging.getLogger(__name__)
 console = Console()
 
+# Legacy Kitten ONNX checkpoints have 512 positions, including boundary tokens.
+KITTEN_MAX_TOKENS = 512
+
 
 class KittenTTSHandler(BaseHandler[TTSIn, TTSOut]):
     def setup(
@@ -46,11 +49,12 @@ class KittenTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         try:
             from kittenml.kittentts_legacy import download_from_huggingface
+            from kittenml.preprocess import chunk_text
         except ImportError as exc:
             raise ImportError("Install KittenTTS with: pip install 'speech-to-speech[kitten]'") from exc
 
-        # The supported ONNX loader follows config.json, retains all voice rows,
-        # and supplies checkpoint-compatible text chunking and style selection.
+        # Keep checkpoint loading, preprocessing, and style selection upstream.
+        self._chunk_text = chunk_text
         logger.info("Loading KittenTTS model: %s on cpu", model_name)
         self.model = download_from_huggingface(model_name, backend="cpu")
         if not self._voice_available(voice):
@@ -81,8 +85,32 @@ class KittenTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
     def warmup(self) -> None:
         logger.info("Warming up KittenTTSHandler")
-        self.model.generate(text="Hello", voice=self.voice)
+        self._generate_audio(text="Hello", voice=self.voice)
         logger.info("KittenTTSHandler warmed up")
+
+    def _generate_audio(self, text: str, voice: str) -> np.ndarray:
+        pending = list(reversed(self._chunk_text(self.model.preprocessor(text))))
+        audio = []
+        while pending:
+            chunk = pending.pop()
+            # Character bounds alone do not bound phonemes: acronyms can expand.
+            # Use the pinned runtime's input preparation to count the exact tokens,
+            # then leave inference and length-dependent styles to its public API.
+            inputs = self.model._prepare_inputs(chunk, voice)
+            if inputs["input_ids"].shape[-1] > KITTEN_MAX_TOKENS:
+                midpoint = len(chunk) // 2
+                if midpoint == 0:
+                    raise ValueError("KittenTTS text cannot fit the checkpoint's token limit")
+                split_at = chunk.rfind(" ", 0, midpoint + 1)
+                if split_at <= 0:
+                    split_at = midpoint
+                parts = self._chunk_text(chunk[:split_at]) + self._chunk_text(chunk[split_at:])
+                if any(len(part) >= len(chunk) for part in parts):
+                    raise ValueError("KittenTTS text cannot fit the checkpoint's token limit")
+                pending.extend(reversed(parts))
+                continue
+            audio.append(self.model.generate_single_chunk(text=chunk, voice=voice))
+        return np.concatenate(audio, axis=-1)
 
     def _is_cancelled(self, generation: int | None) -> bool:
         return generation is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(generation)
@@ -111,9 +139,9 @@ class KittenTTSHandler(BaseHandler[TTSIn, TTSOut]):
         console.print(f"[green]ASSISTANT: {text}")
         logger.debug("KittenTTS synthesizing: %s", transcript_for_log(text))
 
-        # Synthesis completes before delivery; upstream handles bounded text chunks.
+        # Synthesis completes before delivery; every inference fits the token limit.
         # Let BaseHandler report failures through its privacy-safe exception logger.
-        audio_chunk = self.model.generate(text=text, voice=voice)
+        audio_chunk = self._generate_audio(text=text, voice=voice)
         if self._is_cancelled(cancel_gen):
             return
 
