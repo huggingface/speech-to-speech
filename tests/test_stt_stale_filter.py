@@ -74,6 +74,7 @@ def _handler(
 
 def test_final_input_gate_records_vad_settle_on_the_pending_turn():
     tracker = SpeculativeTurnTracker()
+    tracker.start_turn()
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out, final_revision_settle_s=0.05)
@@ -84,10 +85,12 @@ def test_final_input_gate_records_vad_settle_on_the_pending_turn():
     assert store.pending_for_turn("turn_1", 0) is None
 
     # A gate that returned immediately stays out of the line entirely.
-    quiet = _handler(SpeculativeTurnTracker(), Queue(), Queue())
-    quiet.turn_latency_store = store
-    assert quiet.should_process_input(_vad_audio(turn_id="turn_quiet", mode="final"))
-    assert store.pending_for_turn("turn_quiet", 0) is None
+    quiet_turns = SpeculativeTurnTracker()
+    quiet_turn_id, quiet_revision = quiet_turns.start_turn()
+    quiet = _handler(quiet_turns, Queue(), Queue())
+    quiet_store = quiet.turn_latency_store = TurnLatencyStore()
+    assert quiet.should_process_input(_vad_audio(turn_id=quiet_turn_id, revision=quiet_revision, mode="final"))
+    assert quiet_store.pending_for_turn(quiet_turn_id, quiet_revision) is None
 
     assert handler.should_process_input(_vad_audio(mode="final"))
     pending = store.pending_for_turn("turn_1", 0)
@@ -340,3 +343,38 @@ def test_stt_handler_bulk_drops_progressives_queued_before_matching_final():
     assert isinstance(remaining, VADAudio)
     assert remaining.turn_id == "turn_2"
     assert queue_in.empty()
+
+
+def test_rejected_stale_partial_discards_only_its_pending_latency():
+    revisions = SpeculativeTurnTracker()
+    revisions.start_turn()
+    revisions.observe("turn_1", 1)
+    handler = _handler(revisions, Queue(), Queue())
+    store = handler.turn_latency_store = TurnLatencyStore()
+    store.get_or_create_for_turn("turn_1", 0)
+    current = store.get_or_create_for_turn("turn_1", 1)
+
+    assert not handler.should_emit_output(PartialTranscription(text="old", turn_id="turn_1", turn_revision=0))
+    assert store._pending_turn == {("turn_1", 1): current}
+
+
+def test_bulk_progressive_cleanup_preserves_same_revision_queued_final_latency():
+    revisions = SpeculativeTurnTracker()
+    revisions.start_turn()
+    revisions.observe("turn_1", 1)
+    queue = Queue()
+    handler = _handler(revisions, queue, Queue())
+    store = handler.turn_latency_store = TurnLatencyStore()
+    store.get_or_create_for_turn("turn_1", 0)
+    current = store.get_or_create_for_turn("turn_1", 1)
+    current.record_mlx_lock_wait(0.02, "ParakeetSTT-Progressive")
+    queue.put(_vad_audio(revision=0, mode="progressive"))
+    queue.put(_vad_audio(revision=1, mode="progressive"))
+    final = _vad_audio(revision=1, mode="final")
+    queue.put(final)
+
+    assert handler._drop_stale_queued_inputs() == 2
+    assert queue.get_nowait() is final
+    assert queue.empty()
+    assert store._pending_turn == {("turn_1", 1): current}
+    assert current.mlx_lock_wait_s == 0.02

@@ -677,3 +677,50 @@ def test_faster_whisper_silent_final_leaves_no_pending_stt(service, monkeypatch)
 
     assert list(handler.process(final)) == []
     assert service.turn_latency_store._pending_turn == {}
+
+
+@pytest.mark.parametrize("late_mode", ["progressive", "final"])
+@pytest.mark.parametrize("queued_duplicate", [False, True])
+def test_queued_final_keeps_latency_until_notifier_consumes_it(
+    service, conn_id, monkeypatch, late_mode, queued_duplicate
+):
+    from tests.test_stt_stale_filter import RecordingSTTHandler, _handler, _vad_audio
+
+    revisions = SpeculativeTurnTracker()
+    turn_id, revision = revisions.start_turn()
+    service.speculative_turns = revisions
+    service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id=turn_id, turn_revision=revision))
+    handler = _handler(revisions, Queue(), Queue())
+    store = handler.turn_latency_store = service.turn_latency_store
+    pending = store.get_or_create_for_turn(turn_id, revision)
+    pending.record_vad_settle(0.61)
+    pending.record_mlx_lock_hold(0.88, "ParakeetSTT-Final")
+
+    def transcribe(self, audio):
+        self._record_final_stt(audio, 0.12)
+        yield Transcription(text="Hello", turn_id=audio.turn_id, turn_revision=audio.turn_revision)
+
+    monkeypatch.setattr(RecordingSTTHandler, "process", transcribe)
+    handler.queue_in.put(_vad_audio(mode="final"))
+    handler.queue_in.put(_vad_audio(mode=late_mode))
+    if queued_duplicate:
+        handler.queue_in.put(_vad_audio(mode="final"))
+    handler.queue_in.put(PIPELINE_END)
+    handler.run()
+
+    final = handler.queue_out.get_nowait()
+    assert isinstance(final, Transcription)
+    assert handler.queue_out.get_nowait() == PIPELINE_END
+    assert handler.queue_out.empty()
+    assert store.pending_for_turn(turn_id, revision) is pending
+
+    notifier = object.__new__(TranscriptionNotifier)
+    notifier.setup(text_output_queue=Queue(), should_listen=Event())
+    list(notifier.process(final))
+    service.dispatch_pipeline_event(conn_id, notifier.text_output_queue.get_nowait())
+    request = service.text_prompt_queue.get_nowait()
+    response = store.get_response(request.response_key)
+    assert response.stt_s == 0.12
+    assert response.vad_settle_s == 0.61
+    assert response.mlx_lock_hold_s == 0.88
+    assert store.pending_for_turn(turn_id, revision) is None

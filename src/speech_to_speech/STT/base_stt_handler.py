@@ -34,8 +34,8 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
         turn_id = getattr(item, "turn_id", None)
         turn_revision = getattr(item, "turn_revision", None)
         if self._is_completed_final_revision(item):
+            # The emitted final can still be queued for the notifier/service.
             queued_drops = self._drop_stale_queued_inputs()
-            self._discard_pending_latency(item)
             self._log_stale_turn_item(item, "input-after-final", queued_drops=queued_drops)
             return False
         if mode == "progressive" and self._has_queued_final_for_revision(item):
@@ -106,11 +106,9 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
             return False
 
         if not self._is_latest_turn_item(output, wait_for_pending_reopen=True, wait_for_stability=False):
-            if isinstance(output, Transcription):
+            if isinstance(output, (Transcription, PartialTranscription)):
                 # Rejected output never reaches the service's final-STT cleanup.
-                store = getattr(self, "turn_latency_store", None)
-                if store is not None:
-                    store.discard_pending_turn(output.turn_id, output.turn_revision)
+                self._discard_pending_latency(output)
             self._log_stale_turn_item(output, "output")
             return False
         return True
@@ -157,7 +155,7 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
             return 0
 
         dropped = 0
-        dropped_finals: list[tuple[str | None, int | None]] = []
+        dropped_pending: list[tuple[str | None, int | None]] = []
         with self.queue_in.mutex:
             kept: list[Any] = []
             while self.queue_in.queue:
@@ -172,8 +170,12 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
                     )
                 ):
                     dropped += 1
-                    if queued_item.mode == "final":
-                        dropped_finals.append((queued_item.turn_id, queued_item.turn_revision))
+                    # A completed final still owns its pending timings.
+                    # Skipping a progressive before its queued final also keeps them.
+                    if not self._is_completed_final_revision(queued_item) and not self._is_latest_turn_item(
+                        queued_item, wait_for_pending_reopen=False, wait_for_stability=False
+                    ):
+                        dropped_pending.append((queued_item.turn_id, queued_item.turn_revision))
                 else:
                     kept.append(queued_item)
             self.queue_in.queue.extend(kept)
@@ -181,7 +183,7 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
                 self.queue_in.not_full.notify_all()
         store = getattr(self, "turn_latency_store", None)
         if store is not None:
-            for turn_id, revision in dropped_finals:
+            for turn_id, revision in dropped_pending:
                 store.discard_pending_turn(turn_id, revision)
         return dropped
 
