@@ -1048,3 +1048,35 @@ async def test_viseme_send_rechecks_response_and_session_before_audio(change):
         await asyncio.wait_for(metadata_sent.wait(), timeout=1)
         await asyncio.sleep(0.05)
     assert audio_sends == []
+
+
+@pytest.mark.asyncio
+async def test_conversation_delete_uses_shared_data_channel_dispatch():
+    unit = _make_unit()
+    conn_id = unit.service.register()
+    transport = _FakeTransport()
+    try:
+        for payload in [
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "id": "chat_context_1",
+                    "type": "message",
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": "context"}],
+                },
+            },
+            {"type": "conversation.item.delete", "item_id": "chat_context_1"},
+            {"type": "conversation.item.delete", "item_id": "chat_context_1", "event_id": "repeat_delete"},
+        ]:
+            await router_module._dispatch_client_event(unit, conn_id, payload, transport, transport_kind="webrtc")
+        assert [event["type"] for event in transport.sent] == [
+            "conversation.item.created",
+            "conversation.item.deleted",
+            "error",
+        ]
+        assert transport.sent[1]["item_id"] == "chat_context_1"
+        assert transport.sent[2]["error"]["event_id"] == "repeat_delete"
+        assert unit.service._state(conn_id).runtime_config.chat.init_chat_message is None
+    finally:
+        unit.service.unregister(conn_id)

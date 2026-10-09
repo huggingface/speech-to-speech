@@ -159,6 +159,9 @@ class Chat:
         # cancellation can roll them back before accepting deferred client items.
         self._provisional_generations: dict[str, tuple[set[str], set[str]]] = {}
         self._cancelled_provisional_generations: dict[str, None] = {}
+        self._provisional_output_items: dict[str, list[tuple[str, str]]] = {}
+        self._assistant_item_aliases: dict[str, set[str]] = {}
+        self._deleted_tool_output_ids: set[str] = set()
         self._user_turn_count: int = 0
 
         # All state mutations and serializations go through _lock. Public methods
@@ -514,6 +517,121 @@ class Chat:
                 return True
         return False
 
+    def item_ids(self) -> set[str]:
+        """IDs of retained items, including staged function calls."""
+        with self._lock:
+            items: list[SupportedItem] = [*self.buffer, *self._pending_tool_calls.values()]
+            if self.init_chat_message is not None:
+                items.append(self.init_chat_message)
+            ids = {item.id for item in items if item.id is not None}
+            return ids | {wire_id for wire_id, message_ids in self._assistant_item_aliases.items() if message_ids & ids}
+
+    def delete_item(self, item_id: str) -> SupportedItem | None:
+        """Delete exactly one retained item and repair its history bookkeeping."""
+        with self._lock:
+            removed: SupportedItem | None = None
+            target_ids = self._assistant_item_aliases.pop(item_id, {item_id})
+            if self.init_chat_message is not None and self.init_chat_message.id == item_id:
+                removed = self.init_chat_message
+                self.init_chat_message = None
+            else:
+                for index, item in enumerate(self.buffer):
+                    if item.id in target_ids:
+                        removed = self.buffer.pop(index)
+                        break
+                if removed is not None and len(target_ids) > 1:
+                    self.buffer = [item for item in self.buffer if item.id not in target_ids]
+                if removed is None:
+                    removed = next((call for call in self._pending_tool_calls.values() if call.id == item_id), None)
+            if removed is None:
+                return None
+            if isinstance(removed, RealtimeConversationItemUserMessage):
+                self._user_turn_count -= 1
+            elif isinstance(removed, RealtimeConversationItemFunctionCall):
+                if removed.call_id is not None:
+                    self._deleted_tool_output_ids.update(
+                        item.id
+                        for item in self.buffer
+                        if item.type == "function_call_output"
+                        and item.call_id == removed.call_id
+                        and item.id is not None
+                    )
+                    self._pending_tool_calls.pop(removed.call_id, None)
+                    self._ordered_pending_calls.pop(removed.call_id, None)
+            elif isinstance(removed, RealtimeConversationItemFunctionCallOutput):
+                if not any(
+                    item.type == "function_call_output" and item.call_id == removed.call_id for item in self.buffer
+                ):
+                    call = next(
+                        (
+                            item
+                            for item in self.buffer
+                            if item.type == "function_call" and item.call_id == removed.call_id
+                        ),
+                        None,
+                    )
+                    if call is not None:
+                        self._pending_tool_calls[removed.call_id] = call
+            self._deleted_tool_output_ids.intersection_update(item.id for item in self.buffer if item.id is not None)
+            for tracked_ids, tracked_call_ids in self._provisional_generations.values():
+                tracked_ids.difference_update(target_ids)
+                if isinstance(removed, RealtimeConversationItemFunctionCall) and removed.call_id is not None:
+                    tracked_call_ids.discard(removed.call_id)
+            for context in self._ordered_pending_calls.values():
+                context.difference_update(target_ids)
+            # A summary calculated before deletion must not restore deleted text.
+            self._gen_counter += 1
+            self._compact_in_flight = False
+            return removed
+
+    def bind_assistant_item_ids(self, response_key: str | None, item_ids: Sequence[str]) -> None:
+        """Give delivered assistant history the IDs exposed by Realtime."""
+        with self._lock:
+            tracked = self._provisional_generations.get(response_key or "")
+            if tracked is None:
+                return
+            tracked_ids, _ = tracked
+            retained_ids = {item.id for item in self.buffer}
+            self._assistant_item_aliases = {
+                wire_id: ids for wire_id, ids in self._assistant_item_aliases.items() if ids & retained_ids
+            }
+            # The wire merges adjacent text chunks until a function call. A
+            # Responses provider may retain several opaque messages in that
+            # same wire item; preserve their provider data and delete them together.
+            messages_by_id = {
+                item.id: item for item in self.buffer if isinstance(item, RealtimeConversationItemAssistantMessage)
+            }
+            groups: list[list[str]] = []
+            group: list[str] = []
+            # Keep evicted groups in the sequence: later retained messages must
+            # not inherit an earlier wire item's ID after history trimming.
+            for native_id, kind in self._provisional_output_items.get(response_key or "", []):
+                if kind == "message":
+                    group.append(native_id)
+                elif group:
+                    groups.append(group)
+                    group = []
+            if group:
+                groups.append(group)
+            for native_ids, item_id in zip(groups, item_ids):
+                messages = [messages_by_id[native_id] for native_id in native_ids if native_id in messages_by_id]
+                if not messages:
+                    continue
+                if len(messages) > 1:
+                    self._assistant_item_aliases[item_id] = {
+                        message.id for message in messages if message.id is not None
+                    }
+                    continue
+                message = messages[0]
+                old_id = message.id
+                message.id = item_id
+                tracked_ids.discard(old_id)
+                tracked_ids.add(item_id)
+                for context in self._ordered_pending_calls.values():
+                    if old_id in context:
+                        context.remove(old_id)
+                        context.add(item_id)
+
     def remove_user_message(self, item_id: str) -> bool:
         """Remove an existing user message from the bounded chat buffer."""
 
@@ -623,6 +741,13 @@ class Chat:
             )
             tracked_item_ids.update(item_ids)
             tracked_call_ids.update(call_ids)
+            output_items = self._provisional_output_items.setdefault(response_key, [])
+            output_items.extend(
+                (item.id, item.type)
+                for item in recorded_items
+                if item.id is not None
+                and isinstance(item, (RealtimeConversationItemAssistantMessage, RealtimeConversationItemFunctionCall))
+            )
             for call_id in tracked_call_ids:
                 context = self._ordered_pending_calls.get(call_id)
                 if context is not None:
@@ -638,6 +763,7 @@ class Chat:
             return
         with self._lock:
             self._provisional_generations.pop(response_key, None)
+            self._provisional_output_items.pop(response_key, None)
             self._cancelled_provisional_generations.pop(response_key, None)
             self._run_deferred_compaction_if_ready()
 
@@ -651,6 +777,7 @@ class Chat:
             while len(self._cancelled_provisional_generations) > 128:
                 self._cancelled_provisional_generations.pop(next(iter(self._cancelled_provisional_generations)))
             tracked = self._provisional_generations.pop(response_key, None)
+            self._provisional_output_items.pop(response_key, None)
             if tracked is not None:
                 item_ids, call_ids = tracked
                 self._rollback_generation_locked(None, item_ids=item_ids, call_ids=call_ids)
@@ -764,9 +891,11 @@ class Chat:
             for index, item in zip(positions, ordered):
                 self.buffer[index] = item
 
-    @staticmethod
-    def _with_adjacent_tool_outputs(items: Sequence[SupportedItem]) -> list[SupportedItem]:
+    def _with_adjacent_tool_outputs(self, items: Sequence[SupportedItem]) -> list[SupportedItem]:
         """Return a backend-safe snapshot without rewriting canonical chronology."""
+        # Deleting a call does not delete its output from wire history, but the
+        # remaining result cannot be submitted to a model without that call.
+        items = [item for item in items if item.id not in self._deleted_tool_output_ids]
         call_ids = {
             item.call_id
             for item in items
@@ -958,6 +1087,8 @@ class Chat:
                 {call_id: set(item_ids) for call_id, item_ids in self._ordered_pending_calls.items()},
                 self._user_turn_count,
             )
+            clone._deleted_tool_output_ids = set(self._deleted_tool_output_ids)
+            clone._assistant_item_aliases = {wire_id: set(ids) for wire_id, ids in self._assistant_item_aliases.items()}
             if deep:
                 state = deepcopy(state)
             (
@@ -1021,6 +1152,8 @@ class Chat:
                     self._user_turn_count,
                 )
             )
+            clone._deleted_tool_output_ids = set(self._deleted_tool_output_ids)
+            clone._assistant_item_aliases = {wire_id: set(ids) for wire_id, ids in self._assistant_item_aliases.items()}
             tracked = deepcopy(self._provisional_generations.get(response_key))
         if tracked is not None:
             item_ids, call_ids = tracked
@@ -1037,9 +1170,12 @@ class Chat:
             self._pending_tool_calls = {}
             self._ordered_pending_calls = {}
             self._provisional_generations = {}
+            self._provisional_output_items = {}
             self._cancelled_provisional_generations = {}
             self._deferred_compactor = None
             self._user_turn_count = 0
+            self._deleted_tool_output_ids.clear()
+            self._assistant_item_aliases.clear()
 
     def close(self) -> None:
         """Permanently shut down the chat. In-flight compaction splice is suppressed.

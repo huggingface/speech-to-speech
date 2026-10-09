@@ -428,7 +428,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.pending_assistant_item_id = item_id
         st.pending_assistant_output_index = output_index
         if st.last_item_id is None:
-            st.last_item_id = item_id
+            self._service.conversation.record_acknowledged_item(conn_id, item_id)
         return item_id, output_index
 
     def _next_content_index(self, conn_id: str) -> int:
@@ -901,8 +901,11 @@ class ResponseHandler(RealtimeBaseHandler):
 
     def handle_response_cancel(self, conn_id: str) -> list[ServerEvent]:
         """Cancel the in-progress response and re-enable listening."""
+        if not self._state(conn_id).in_response:
+            self._service.close_pending_responses(conn_id)
         events = self.finish_response(conn_id, status="cancelled", reason="client_cancelled")
         self._service.close_pending_responses(conn_id)
+        events.extend(self._service.conversation.flush_deferred_items(conn_id))
         should_listen = self._should_listen(conn_id)
         if should_listen:
             should_listen.set()
@@ -1032,6 +1035,10 @@ class ResponseHandler(RealtimeBaseHandler):
                 while len(st.answered_tool_call_ids) > TOOL_FOLLOWUP_ACK_LIMIT:
                     st.answered_tool_call_ids.pop(next(iter(st.answered_tool_call_ids)))
             if status == "completed":
+                st.runtime_config.chat.bind_assistant_item_ids(
+                    st.current_response_key,
+                    [str(item["item_id"]) for item in st.pending_text_outputs],
+                )
                 st.runtime_config.chat.finalize_provisional_generation(st.current_response_key)
             elif status in ("cancelled", "failed", "incomplete"):
                 # Tool calls are recorded before their chunks reach the client.
@@ -1157,7 +1164,7 @@ class ResponseHandler(RealtimeBaseHandler):
                             delta=text,
                         )
                     )
-                st.last_item_id = item_id
+                self._service.conversation.record_acknowledged_item(conn_id, item_id)
             elif isinstance(part, AssistantToolCallPart):
                 # An early tool call defers closing the message only while TTS
                 # still owes it audio. Text-only output has nothing to wait for,
@@ -1227,7 +1234,7 @@ class ResponseHandler(RealtimeBaseHandler):
                 # Explicitly in-progress calls receive output_item.done at
                 # response close, once the outcome is known.
                 st.pending_function_calls[output_idx] = pending_call
-                st.last_item_id = function_item_id
+                self._service.conversation.record_acknowledged_item(conn_id, function_item_id)
         if output_sequence is not None:
             st.pending_early_tool_calls.pop(output_sequence, None)
             st.next_assistant_output_sequence = max(st.next_assistant_output_sequence, output_sequence + 1)

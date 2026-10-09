@@ -8,6 +8,8 @@ from openai.types.realtime import (
     ConversationItem,
     ConversationItemCreatedEvent,
     ConversationItemCreateEvent,
+    ConversationItemDeletedEvent,
+    ConversationItemDeleteEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
     ConversationItemInputAudioTranscriptionFailedEvent,
@@ -89,7 +91,7 @@ class ConversationHandler(RealtimeBaseHandler):
     def _tool_followup_inputs_are_ordered(
         self,
         conn_id: str,
-        items: list[ConversationItem],
+        items: list[ConversationItem | ConversationItemDeleteEvent],
     ) -> bool:
         """Return whether deferred items form a prefetch-safe tool batch.
 
@@ -100,6 +102,8 @@ class ConversationHandler(RealtimeBaseHandler):
         """
         st = self._state(conn_id)
         for index, item in enumerate(items):
+            if isinstance(item, ConversationItemDeleteEvent):
+                return False
             if isinstance(item, RealtimeConversationItemFunctionCallOutput):
                 continue
             if not self._is_image_message(item) or item.id is None or index + 1 >= len(items):
@@ -129,7 +133,7 @@ class ConversationHandler(RealtimeBaseHandler):
         behind the response's still-buffered output.
         """
         st = self._state(conn_id)
-        if st.in_response:
+        if st.in_response or st.response_pending:
             if isinstance(event.item, RealtimeConversationItemFunctionCallOutput):
                 st.deferred_function_output_previous_item_ids[event.item.call_id] = event.previous_item_id
             st.deferred_items.append(event.item)
@@ -146,6 +150,41 @@ class ConversationHandler(RealtimeBaseHandler):
             logger.debug("Deferred conversation item until the active response completes")
             return []
         return self._apply_item(conn_id, event.item)
+
+    def handle_conversation_item_delete(self, conn_id: str, event: ConversationItemDeleteEvent) -> list[ServerEvent]:
+        st = self._state(conn_id)
+        if st.in_response or st.response_pending:
+            st.deferred_items.append(event)
+            return []
+        return self._apply_delete(conn_id, event)
+
+    def _apply_delete(self, conn_id: str, event: ConversationItemDeleteEvent) -> list[ServerEvent]:
+        st = self._state(conn_id)
+        chat = st.runtime_config.chat
+        removed = chat.delete_item(event.item_id)
+        if removed is None:
+            error = self.make_error(
+                f"No conversation item with id '{event.item_id}' found.", "conversation_item_not_found"
+            )
+            # Deferred errors are emitted outside the client dispatch callback.
+            error.error.event_id = event.event_id
+            return [error]
+        reference = st.input_turn_by_item_id.pop(event.item_id, None)
+        if reference is not None and reference[0] is not None:
+            st.deleted_input_turn_ids[reference[0]] = None
+            while len(st.deleted_input_turn_ids) > 128:
+                st.deleted_input_turn_ids.pop(next(iter(st.deleted_input_turn_ids)))
+        retained_ids = chat.item_ids()
+        st.acknowledged_item_ids = [item_id for item_id in st.acknowledged_item_ids if item_id in retained_ids]
+        if removed.type == "function_call" and removed.call_id is not None:
+            st.input_turn_by_call_id.pop(removed.call_id, None)
+        if st.last_item_id == event.item_id:
+            st.last_item_id = st.acknowledged_item_ids[-1] if st.acknowledged_item_ids else None
+        return [
+            ConversationItemDeletedEvent(
+                type="conversation.item.deleted", event_id=self._next_event_id(), item_id=event.item_id
+            )
+        ]
 
     def _apply_item(
         self,
@@ -180,8 +219,21 @@ class ConversationHandler(RealtimeBaseHandler):
             previous_item_id=st.last_item_id,
             item=item,
         )
-        st.last_item_id = item.id
+        if item.id is not None:
+            self.record_acknowledged_item(conn_id, item.id)
         return event
+
+    def record_acknowledged_item(self, conn_id: str, item_id: str) -> None:
+        """Track retained wire chronology so deleting the tail restores its predecessor."""
+        st = self._state(conn_id)
+        retained_ids = st.runtime_config.chat.item_ids() | st.input_items.keys()
+        retained_ids.update(str(item["item_id"]) for item in st.pending_text_outputs)
+        retained_ids.update(call.id for call in st.pending_function_calls.values() if call.id is not None)
+        st.acknowledged_item_ids = [
+            known_id for known_id in st.acknowledged_item_ids if known_id in retained_ids and known_id != item_id
+        ]
+        st.acknowledged_item_ids.append(item_id)
+        st.last_item_id = item_id
 
     def flush_deferred_items(
         self,
@@ -198,6 +250,8 @@ class ConversationHandler(RealtimeBaseHandler):
         st = self._state(conn_id)
         if not st.deferred_items:
             return []
+        if st.response_pending and not tool_followup_inputs_only:
+            return []
         has_function_output = any(
             isinstance(item, RealtimeConversationItemFunctionCallOutput) for item in st.deferred_items
         )
@@ -211,6 +265,9 @@ class ConversationHandler(RealtimeBaseHandler):
                 st.deferred_function_output_previous_item_ids.pop(item.call_id, None)
         events: list[ServerEvent] = []
         for item in items:
+            if isinstance(item, ConversationItemDeleteEvent):
+                events.extend(self._apply_delete(conn_id, item))
+                continue
             events.extend(
                 self._apply_item(
                     conn_id,
