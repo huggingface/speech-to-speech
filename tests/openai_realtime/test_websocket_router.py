@@ -72,6 +72,77 @@ from .realtime_contract import (
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("direct_audio", [False, True])
+def test_manual_response_mode_delivers_one_reply_per_explicit_request(setup, direct_audio):
+    app, service, _, output_queue, text_output_queue, *_ = setup
+    tracker = SpeculativeTurnTracker()
+    service.speculative_turns = tracker
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/realtime") as ws:
+            ws.receive_json()
+            ws.send_json(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "type": "realtime",
+                        "audio": {
+                            "input": {
+                                "turn_detection": {
+                                    "type": "server_vad",
+                                    "create_response": False,
+                                    "interrupt_response": True,
+                                }
+                            }
+                        },
+                    },
+                }
+            )
+            updated = ws.receive_json()
+            assert updated["type"] == "session.updated"
+            assert updated["session"]["audio"]["input"]["turn_detection"]["create_response"] is False
+            for number in (1, 2):
+                turn_id, revision = tracker.start_turn()
+                turn = {"turn_id": turn_id, "turn_revision": revision}
+                text_output_queue.put(SpeechStartedEvent(**turn))
+                started = ws.receive_json()
+                assert started["type"] == "input_audio_buffer.speech_started"
+                tracker.segment_finalized(number * 100)
+                text_output_queue.put(SpeechStoppedEvent(duration_s=0.1, **turn))
+                text_output_queue.put(
+                    AudioInputCompletedEvent(audio=np.zeros(1600, dtype=np.float32), audio_duration_s=0.1, **turn)
+                    if direct_audio
+                    else TranscriptionCompletedEvent(transcript=f"Question {number}", **turn)
+                )
+                terminals = [ws.receive_json() for _ in range(3 if direct_audio else 4)]
+                assert [event["type"] for event in terminals[:3]] == [
+                    "input_audio_buffer.speech_stopped",
+                    "input_audio_buffer.committed",
+                    "conversation.item.created",
+                ]
+                assert terminals[1]["item_id"] == terminals[2]["item"]["id"] == started["item_id"]
+                if not direct_audio:
+                    assert terminals[-1]["type"] == "conversation.item.input_audio_transcription.completed"
+                    assert terminals[-1]["item_id"] == started["item_id"]
+                assert service.text_prompt_queue.empty()
+                ws.send_json({"type": "response.create"})
+                created = ws.receive_json()
+                assert created["type"] == "response.created"
+                request = service.text_prompt_queue.get(timeout=1)
+                assert request.turn_id == turn["turn_id"]
+                output_queue.put(AssistantOutputEvent(text=f"Answer {number}", response_key=request.response_key))
+                output_queue.put(AudioOutput(audio=_pcm_bytes(256), response_key=request.response_key))
+                output_queue.put(AssistantResponseDoneEvent(response_key=request.response_key))
+                output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=request.response_key))
+                emitted = []
+                while not emitted or emitted[-1]["type"] != "response.done":
+                    emitted.append(ws.receive_json())
+                assert all(event["type"] != "response.created" for event in emitted)
+                assert emitted[-1]["response"]["id"] == created["response"]["id"]
+                assert emitted[-1]["response"]["status"] == "completed"
+                assert any(event["type"] == "response.output_audio.delta" for event in emitted)
+                assert service.text_prompt_queue.empty()
+
+
 @pytest.fixture(autouse=True)
 def short_drain_timeout(monkeypatch):
     """Shorten the SESSION_END drain warning threshold so tests don't wait 10s.

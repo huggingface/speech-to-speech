@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import base64
-import io
 import ipaddress
 import logging
 import os
-import wave
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator, Iterator
 from queue import Empty, Full, Queue
@@ -16,12 +13,12 @@ from typing import Any, Literal, Optional
 from urllib.parse import urlparse
 
 import httpx
-import numpy as np
 from nltk import sent_tokenize
 from openai import OpenAI
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemAssistantMessage,
     RealtimeConversationItemFunctionCall,
+    RealtimeConversationItemUserMessage,
 )
 from openai.types.realtime.realtime_conversation_item_assistant_message import (
     Content as AssistantContent,
@@ -60,7 +57,7 @@ from speech_to_speech.pipeline.messages import (
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
-from speech_to_speech.utils.utils import is_out_of_band, response_wants_audio
+from speech_to_speech.utils.utils import audio_to_wav_base64, is_out_of_band, response_wants_audio
 
 logger = logging.getLogger(__name__)
 
@@ -363,24 +360,13 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
     def _iter_audio_events(self, api_response: Any) -> Iterator[ProviderEvent]:
         yield from self._iter_events(api_response)
 
-    @staticmethod
-    def _audio_to_wav_base64(audio: np.ndarray, sample_rate: int) -> str:
-        """Encode a mono 16-bit WAV payload without touching the filesystem."""
-        audio_array = np.asarray(audio)
-        if audio_array.ndim > 1:
-            audio_array = np.mean(audio_array, axis=1)
-        if np.issubdtype(audio_array.dtype, np.floating):
-            pcm = (np.clip(audio_array, -1.0, 1.0) * 32767.0).astype("<i2")
-        else:
-            pcm = np.clip(audio_array, -32768, 32767).astype("<i2")
+    _audio_to_wav_base64 = staticmethod(audio_to_wav_base64)
 
-        with io.BytesIO() as wav_io:
-            with wave.open(wav_io, "wb") as wav_file:
-                wav_file.setnchannels(1)
-                wav_file.setsampwidth(2)
-                wav_file.setframerate(sample_rate)
-                wav_file.writeframes(pcm.tobytes())
-            return base64.b64encode(wav_io.getvalue()).decode("ascii")
+    def cleanup(self) -> None:
+        client = getattr(self, "client", None)
+        if client is not None:
+            del self.client
+            client.close()
 
     # ── speculative-turn / cancellation gating ─────────────────────────────────
 
@@ -999,7 +985,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
     def _process_audio(self, request: LLMIn) -> Iterator[LLMOut]:
         """Process an audio-input turn through the selected backend protocol."""
-        assert request.audio is not None
         runtime_config = request.runtime_config
         response = request.response
         turn_id = request.turn_id
@@ -1017,7 +1002,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             return
 
         original_chat = runtime_config.chat
-        history_anchor_id: str | None = None
+        history_anchor_id = original_chat.history_anchor_id()
         if not is_out_of_band(response) and original_chat.has_pending_tool_calls():
             yield EndOfResponse(
                 turn_id=turn_id,
@@ -1060,38 +1045,45 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         wants_audio = response_wants_audio(response)
         self._apply_config(active_chat, instructions, wants_audio, language_name=lang_name)
 
-        audio_b64 = self._audio_to_wav_base64(request.audio, request.audio_sample_rate)
-        audio_message = make_user_audio_message(audio_b64)
-        if request.input_item_id is not None:
-            audio_message.id = request.input_item_id
-        active_chat.add_item(audio_message)
         optional_kwargs = self._build_audio_optional_kwargs(response, req_tools, req_tool_choice)
-
         transactional_user_message_id: str | None = None
         history_commit_fn: Callable[[], None] | None = None
-        if not is_out_of_band(response):
-            provisional_message = make_user_audio_message(audio_b64)
-            provisional_message.id = audio_message.id
-            recorded_items = original_chat.add_provisional_generation_items(
-                request.response_key,
-                [provisional_message],
-            )
-            if recorded_items is None:
-                yield EndOfResponse(
-                    turn_id=turn_id,
-                    turn_revision=turn_revision,
-                    cancel_generation=gen,
-                    response_key=request.response_key,
+        if request.audio is not None:
+            audio_b64 = self._audio_to_wav_base64(request.audio, request.audio_sample_rate)
+            audio_message = make_user_audio_message(audio_b64)
+            if request.input_item_id is not None:
+                audio_message.id = request.input_item_id
+            active_chat.add_item(audio_message)
+            if not is_out_of_band(response):
+                provisional_message = make_user_audio_message(audio_b64)
+                provisional_message.id = audio_message.id
+                recorded_items = original_chat.add_provisional_generation_items(
+                    request.response_key,
+                    [provisional_message],
                 )
-                return
-            assert provisional_message.id is not None
-            transactional_user_message_id = provisional_message.id
-            # This turn writes its own user message, so anchor its output after
-            # that message: speech arriving later must not overtake it.
-            history_anchor_id = transactional_user_message_id
+                if recorded_items is None:
+                    yield EndOfResponse(
+                        turn_id=turn_id,
+                        turn_revision=turn_revision,
+                        cancel_generation=gen,
+                        response_key=request.response_key,
+                    )
+                    return
+                assert provisional_message.id is not None
+                transactional_user_message_id = provisional_message.id
+                history_anchor_id = transactional_user_message_id
+
+        if not is_out_of_band(response):
+            # Manually requested audio is already retained input. Only audio
+            # newly supplied by this generation is provisional and rolled back.
+            consumed_items = [
+                item.model_copy(deep=True)
+                for item in active_chat.buffer
+                if isinstance(item, RealtimeConversationItemUserMessage)
+            ]
 
             def commit_audio_history() -> None:
-                original_chat.compact_audio_history(self.audio_history_turns)
+                original_chat.compact_audio_history(self.audio_history_turns, consumed_items=consumed_items)
 
             history_commit_fn = commit_audio_history
 
@@ -1126,7 +1118,13 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
     def process(self, request: LLMIn) -> Iterator[LLMOut]:
         """Process a language model request and yield LLMResponseChunks."""
-        if request.audio is not None:
+        retained_audio = not is_out_of_band(request.response) and any(
+            part.type == "input_audio"
+            for item in request.runtime_config.chat.copy().buffer
+            if isinstance(item, RealtimeConversationItemUserMessage)
+            for part in item.content
+        )
+        if request.audio is not None or retained_audio:
             yield from self._process_audio(request)
             return
 

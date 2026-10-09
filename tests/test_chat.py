@@ -884,6 +884,52 @@ class TestToTransformersChat:
         result = chat.to_transformers_chat()
         assert result[0]["name"] == ""
 
+    def test_adjacent_user_messages_serialize_as_one_without_changing_history(self):
+        # An interrupted or failed reply leaves user turns back to back; strict
+        # templates (Gemma, Mistral) reject that, so they render as one message.
+        chat = Chat(size=5)
+        chat.add_item(_user("Find a flight"))
+        chat.add_item(_user("Actually, a hotel"))
+        assert chat.to_transformers_chat() == [{"role": "user", "content": "Find a flight\nActually, a hotel"}]
+        assert chat.to_responses_api_chat() == [
+            {
+                "role": "user",
+                "type": "message",
+                "content": [{"type": "input_text", "text": "Find a flight\nActually, a hotel"}],
+            }
+        ]
+
+        chat.add_item(_user_msg_with_parts(("text", "look"), ("image", "http://img.png")))
+        result = chat.to_transformers_chat()
+        assert len(result) == 1
+        assert [part.get("text") for part in result[0]["content"]] == ["Find a flight\nActually, a hotel\nlook", None]
+        assert len(chat.buffer) == 3
+
+    @pytest.mark.parametrize("image_in_first_message", [False, True])
+    def test_adjacent_mixed_user_messages_preserve_text_boundary(self, image_in_first_message):
+        chat = Chat(size=5)
+        first_parts = [("text", "The access code is 12")]
+        second_parts = [("text", "34 is a different code.")]
+        if image_in_first_message:
+            first_parts.insert(0, ("image", "http://img.png"))
+        else:
+            second_parts.append(("image", "http://img.png"))
+        chat.add_item(_user_msg_with_parts(*first_parts))
+        chat.add_item(_user_msg_with_parts(*second_parts))
+        stored = [item.model_dump() for item in chat.buffer]
+
+        expected_text = "The access code is 12\n34 is a different code."
+        for messages in (chat.to_transformers_chat(), chat.to_responses_api_chat()):
+            assert len(messages) == 1
+            content = messages[0]["content"]
+            # VLM templates concatenate text blocks without adding separators.
+            assert "".join(part.get("text", "") for part in content) == expected_text
+            assert [part["type"] for part in content] == (
+                ["input_image", "input_text"] if image_in_first_message else ["input_text", "input_image"]
+            )
+            assert next(part["image_url"] for part in content if part["type"] == "input_image") == "http://img.png"
+        assert [item.model_dump() for item in chat.buffer] == stored
+
     def test_full_mixed_conversation(self):
         chat = Chat(size=10)
         chat.add_item(_system("System prompt"))

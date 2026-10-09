@@ -814,19 +814,27 @@ class Chat:
         self._user_turn_count = sum(isinstance(item, RealtimeConversationItemUserMessage) for item in self.buffer)
         logger.debug("Rolled back failed generation output for user message %s", user_message_id)
 
-    def compact_audio_history(self, max_audio_turns: int) -> None:
+    def compact_audio_history(
+        self, max_audio_turns: int, *, consumed_items: Sequence[RealtimeConversationItemUserMessage] | None = None
+    ) -> None:
         """Retain only the newest bounded set of audio turns.
 
         Older audio parts are replaced with a textual placeholder so the user
         role and its paired assistant response remain valid in serialized
         history. The newest turns keep their audio semantics for subsequent
         Chat Completions requests.
+
+        When consumed_items is supplied, only clean up unchanged input from
+        that snapshot. New audio and later revisions remain available.
         """
 
         with self._lock:
+            consumed = {item.id: item.content for item in consumed_items} if consumed_items is not None else None
             remaining = max(0, max_audio_turns)
             for item in reversed(self.buffer):
                 if not isinstance(item, RealtimeConversationItemUserMessage):
+                    continue
+                if consumed is not None and item.content != consumed.get(item.id):
                     continue
                 if not any(part.type == "input_audio" for part in item.content):
                     continue
@@ -967,7 +975,7 @@ class Chat:
                         content.append(ResponseInputTextParam(text=AUDIO_INPUT_HISTORY_PLACEHOLDER, type="input_text"))
                         audio_placeholder_added = True
                 if content:
-                    result.append(ResponseMessage(content=content, role="user", type="message"))
+                    _append_user_input(result, content)
             elif isinstance(item, ResponsesAssistantMessage):
                 result.append(cast(ResponseInputItemParam, item.response_item.model_dump(exclude_unset=True)))
             elif isinstance(item, RealtimeConversationItemAssistantMessage):
@@ -1036,13 +1044,12 @@ class Chat:
             for item in self._drop_unpaired_ordered_turns_locked(self._with_adjacent_tool_outputs(self.buffer)):
                 if isinstance(item, RealtimeConversationItemUserMessage):
                     has_media = any(p.type in {"input_image", "input_audio"} for p in item.content)
+                    content: str | list[dict[str, Any]]
                     if has_media:
-                        messages.append(
-                            TransformersUserMessage(content=[p.model_dump(exclude_none=True) for p in item.content])
-                        )
+                        content = [p.model_dump(exclude_none=True) for p in item.content]
                     else:
-                        text = " ".join(p.text for p in item.content if p.type == "input_text" and p.text)
-                        messages.append(TransformersUserMessage(content=text))
+                        content = " ".join(p.text for p in item.content if p.type == "input_text" and p.text)
+                    _append_user_message(messages, content)
                 elif isinstance(item, RealtimeConversationItemAssistantMessage):
                     text = " ".join(p.text for p in item.content if p.text)
                     messages.append(TransformersAssistantMessage(content=text))
@@ -1475,6 +1482,51 @@ TransformersChatMessage = Union[
     TransformersFunctionCallMessage,
     TransformersToolMessage,
 ]
+
+
+def _append_user_message(messages: list[TransformersChatMessage], content: str | list[dict[str, Any]]) -> None:
+    """Append a user message, merging it into a directly preceding one.
+
+    History keeps unanswered user turns (an interrupted or failed reply, or a
+    turn past its reopen cap), but strict chat templates such as Gemma's and
+    Mistral's reject two user messages in a row. Merge them only when
+    rendering, so stored history is unchanged.
+    """
+    previous = messages[-1] if messages else None
+    if not isinstance(previous, TransformersUserMessage):
+        messages.append(TransformersUserMessage(content=content))
+    elif isinstance(previous.content, str) and isinstance(content, str):
+        previous.content = "\n".join(text for text in (previous.content, content) if text)
+    else:
+        merged = list(_user_content_parts(previous.content))
+        parts = _user_content_parts(content)
+        last, first = (merged[-1] if merged else None), (parts[0] if parts else None)
+        if last is not None and first is not None and last["type"] == "input_text" and first["type"] == "input_text":
+            merged[-1] = {**last, "text": f"{last['text']}\n{first['text']}"}
+            parts = parts[1:]
+        previous.content = merged + parts
+
+
+def _user_content_parts(content: str | list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if isinstance(content, list):
+        return content
+    return [{"type": "input_text", "text": content}] if content else []
+
+
+def _append_user_input(result: list[ResponseInputItemParam], content: ResponseInputMessageContentListParam) -> None:
+    """Responses API counterpart of :func:`_append_user_message`."""
+    previous = result[-1] if result else None
+    if previous is None or previous.get("type") != "message" or previous.get("role") != "user":
+        result.append(ResponseMessage(content=content, role="user", type="message"))
+        return
+    message = cast(ResponseMessage, previous)
+    merged = list(message["content"])
+    parts = list(content)
+    last, first = (merged[-1] if merged else None), (parts[0] if parts else None)
+    if last is not None and first is not None and last["type"] == "input_text" and first["type"] == "input_text":
+        merged[-1] = ResponseInputTextParam(text=f"{last['text']}\n{first['text']}", type="input_text")
+        parts = parts[1:]
+    message["content"] = merged + parts
 
 
 # ---------------------------------------------------------------------------
