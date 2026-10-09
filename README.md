@@ -115,6 +115,8 @@ For a browser interface, start your chosen configuration with `serve`, then foll
 
 Clients using the implemented core Realtime event set can connect. The official OpenAI Agents SDK is tested over both stock transports; see [Realtime API](#realtime-api) for the tested surface and [LLM backends](#llm-backends) for provider and local-server options.
 
+To use the server as the realtime model of a [LiveKit Agents](https://docs.livekit.io/agents/) voice agent, see the optional [LiveKit example](./demo/livekit/README.md).
+
 ## Index
 
 * [How it works](#how-it-works)
