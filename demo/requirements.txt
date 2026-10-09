@@ -1,0 +1,5 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+httpx==0.28.1
+# [oauth] extra pulls authlib + itsdangerous for attach_huggingface_oauth.
+huggingface_hub[oauth]>=0.30,<1.0

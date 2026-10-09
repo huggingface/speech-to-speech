@@ -18,42 +18,56 @@ import asyncio
 import base64
 import json
 import socket
+import sys
 import threading
 import time
+from queue import Empty, Queue
+from threading import Event as ThreadingEvent
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import uvicorn
-from queue import Queue
-from threading import Event as ThreadingEvent
-
 from openai import AsyncOpenAI
+from openai.types.realtime import RealtimeConversationItemFunctionCall
 
-from openai.types.realtime import RealtimeSessionCreateRequest
-from openai.types.realtime.realtime_audio_config import RealtimeAudioConfig
-from openai.types.realtime.realtime_audio_config_input import RealtimeAudioConfigInput
-from openai.types.realtime.realtime_audio_config_output import RealtimeAudioConfigOutput
-from openai.types.realtime.realtime_audio_formats import AudioPCM
-
-from cancel_scope import CancelScope
-from api.openai_realtime.runtime_config import RuntimeConfig
-from api.openai_realtime.service import RealtimeService
-from api.openai_realtime.websocket_router import create_app
-
-
-def _session_16k() -> RealtimeSessionCreateRequest:
-    fmt = AudioPCM.model_construct(rate=16000, type="audio/pcm")
-    return RealtimeSessionCreateRequest.model_construct(
-        type="realtime",
-        audio=RealtimeAudioConfig.model_construct(
-            input=RealtimeAudioConfigInput.model_construct(format=fmt),
-            output=RealtimeAudioConfigOutput.model_construct(format=fmt),
-        ),
-    )
-
+import speech_to_speech.api.openai_realtime.audio_client as audio_client_module
+from speech_to_speech.api.openai_realtime.audio_client import (
+    RealtimeAudioClientConfig,
+    ToolResult,
+    listen_and_play_realtime,
+)
+from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
+from speech_to_speech.api.openai_realtime.service import RealtimeService
+from speech_to_speech.api.openai_realtime.websocket_router import create_app
+from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
+from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.events import (
+    AssistantOutputEvent,
+    AssistantToolCallReadyEvent,
+    AudioInputCompletedEvent,
+    PartialTranscriptionEvent,
+    SpeechStartedEvent,
+    SpeechStoppedEvent,
+    TranscriptionCompletedEvent,
+)
+from speech_to_speech.pipeline.messages import (
+    AUDIO_RESPONSE_DONE,
+    PIPELINE_END,
+    AssistantTextPart,
+    AssistantToolCallPart,
+    EndOfResponse,
+    GenerateResponseRequest,
+    LLMResponseChunk,
+    TTSInput,
+)
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -69,13 +83,10 @@ class _ServerEnv:
     """Wraps a running uvicorn server + all pipeline queues."""
 
     def __init__(self):
-        self.runtime_config = RuntimeConfig()
-        self.runtime_config.session = _session_16k()
         self.text_prompt_queue: Queue = Queue()
         self.should_listen = ThreadingEvent()
         self.should_listen.set()
         self.service = RealtimeService(
-            runtime_config=self.runtime_config,
             text_prompt_queue=self.text_prompt_queue,
             should_listen=self.should_listen,
         )
@@ -85,16 +96,19 @@ class _ServerEnv:
         self.stop_event = ThreadingEvent()
         self.response_playing = ThreadingEvent()
         self.cancel_scope = CancelScope()
-        self.app = create_app(
-            self.service,
-            self.input_queue,
-            self.output_queue,
-            self.text_output_queue,
-            self.should_listen,
-            self.response_playing,
-            self.cancel_scope,
-            self.stop_event,
+        self.unit = PipelineUnit(
+            index=0,
+            service=self.service,
+            cancel_scope=self.cancel_scope,
+            should_listen=self.should_listen,
+            response_playing=self.response_playing,
+            input_queue=self.input_queue,
+            output_queue=self.output_queue,
+            text_output_queue=self.text_output_queue,
+            text_prompt_queue=self.text_prompt_queue,
+            handlers=[],
         )
+        self.app = create_app(pool=[self.unit], stop_event=self.stop_event)
         self.port = _free_port()
         self._server_thread: threading.Thread | None = None
 
@@ -158,14 +172,20 @@ RESPONSE_CREATED = "response.created"
 RESPONSE_DONE = "response.done"
 AUDIO_DELTA = "response.output_audio.delta"
 AUDIO_DONE = "response.output_audio.done"
+TRANSCRIPT_DELTA = "response.output_audio_transcript.delta"
 TRANSCRIPT_DONE = "response.output_audio_transcript.done"
 FUNCTION_CALL_DONE = "response.function_call_arguments.done"
+OUTPUT_ITEM_ADDED = "response.output_item.added"
+OUTPUT_ITEM_DONE = "response.output_item.done"
+CONTENT_PART_ADDED = "response.content_part.added"
+CONTENT_PART_DONE = "response.content_part.done"
 ERROR = "error"
 
 
 # ===================================================================
 # 1. Connection and session.created
 # ===================================================================
+
 
 class TestSDKConnection:
     @pytest.mark.asyncio
@@ -183,6 +203,7 @@ class TestSDKConnection:
 # 2. Session update
 # ===================================================================
 
+
 class TestSDKSessionUpdate:
     @pytest.mark.asyncio
     async def test_session_update_applies_config(self, server_env):
@@ -191,30 +212,33 @@ class TestSDKSessionUpdate:
         async with client.realtime.connect(model="test") as conn:
             await _recv(conn)  # session.created
 
-            await conn.send({
-                "type": "session.update",
-                "session": {
-                    "type": "realtime",
-                    "instructions": "You are a helpful robot",
-                    "audio": {
-                        "input": {
-                            "transcription": {"model": "gpt-4o-transcribe", "language": "en"},
-                            "turn_detection": {
-                                "type": "server_vad",
-                                "interrupt_response": True,
+            await conn.send(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "type": "realtime",
+                        "instructions": "You are a helpful robot",
+                        "audio": {
+                            "input": {
+                                "transcription": {"model": "gpt-4o-transcribe", "language": "en"},
+                                "turn_detection": {
+                                    "type": "server_vad",
+                                    "interrupt_response": True,
+                                },
+                            },
+                            "output": {
+                                "voice": "alloy",
                             },
                         },
-                        "output": {
-                            "voice": "alloy",
-                        },
+                        "tools": [{"type": "function", "name": "get_weather"}],
+                        "tool_choice": "auto",
                     },
-                    "tools": [{"type": "function", "name": "get_weather"}],
-                    "tool_choice": "auto",
-                },
-            })
+                }
+            )
             await asyncio.sleep(0.2)
 
-            s = server_env.runtime_config.session
+            cid = list(server_env.service._conns)[0]
+            s = server_env.service._state(cid).runtime_config.session
             assert s.audio.output.voice == "alloy"
             assert s.instructions == "You are a helpful robot"
             assert s.audio.input.turn_detection.type == "server_vad"
@@ -225,6 +249,7 @@ class TestSDKSessionUpdate:
 # ===================================================================
 # 3. Full voice conversation turn
 # ===================================================================
+
 
 class TestSDKVoiceTurn:
     @pytest.mark.asyncio
@@ -239,25 +264,34 @@ class TestSDKVoiceTurn:
             await _recv(conn)  # session.created
 
             # -- User speech --
-            server_env.text_output_queue.put({"type": "speech_started", "audio_start_ms": 100})
+            server_env.text_output_queue.put(SpeechStartedEvent())
             event = await _recv(conn)
             assert event.type == SPEECH_STARTED
-            assert event.audio_start_ms == 100
+            assert event.audio_start_ms == 0
             item_id = event.item_id
 
-            server_env.text_output_queue.put({"type": "partial_transcription", "delta": "hel"})
+            server_env.text_output_queue.put(PartialTranscriptionEvent(delta="hello there"))
+            server_env.text_output_queue.put(PartialTranscriptionEvent(delta="hello there friend"))
             event = await _recv(conn)
             assert event.type == TRANSCRIPTION_DELTA
-            assert event.delta == "hel"
+            assert event.delta == "hello"
             assert event.item_id == item_id
 
-            server_env.text_output_queue.put({"type": "speech_stopped", "audio_end_ms": 2000, "duration_s": 1.9})
+            server_env.text_output_queue.put(SpeechStoppedEvent(duration_s=1.9))
             event = await _recv(conn)
             assert event.type == SPEECH_STOPPED
-            assert event.audio_end_ms == 2000
+            assert event.audio_end_ms == 0
             assert event.item_id == item_id
+            committed = await _recv(conn)
+            created = await _recv(conn)
+            assert committed.type == "input_audio_buffer.committed"
+            assert created.type == "conversation.item.created"
+            assert committed.item_id == created.item.id == item_id
+            assert committed.previous_item_id is None
+            assert created.previous_item_id is None
+            assert created.item.content[0].type == "input_audio"
 
-            server_env.text_output_queue.put({"type": "transcription_completed", "transcript": "hello"})
+            server_env.text_output_queue.put(TranscriptionCompletedEvent(transcript="hello"))
             event = await _recv(conn)
             assert event.type == TRANSCRIPTION_COMPLETED
             assert event.transcript == "hello"
@@ -272,19 +306,31 @@ class TestSDKVoiceTurn:
             conversation_id = event.response.conversation_id
 
             event = await _recv(conn)
+            assert event.type == OUTPUT_ITEM_ADDED
+            event = await _recv(conn)
+            assert event.type == CONTENT_PART_ADDED
+            event = await _recv(conn)
             assert event.type == AUDIO_DELTA
             decoded = base64.b64decode(event.delta)
             assert len(decoded) == len(_pcm_bytes(256))
 
-            server_env.text_output_queue.put({"type": "assistant_text", "text": "Hi there!"})
+            server_env.text_output_queue.put(AssistantOutputEvent(text="Hi there!"))
+            event = await _recv(conn)
+            assert event.type == TRANSCRIPT_DELTA
+            assert event.delta == "Hi there!"
+
+            server_env.output_queue.put(PIPELINE_END)
+            event = await _recv(conn)
+            assert event.type == AUDIO_DONE
+
             event = await _recv(conn)
             assert event.type == TRANSCRIPT_DONE
             assert event.transcript == "Hi there!"
 
-            server_env.output_queue.put(b"END")
             event = await _recv(conn)
-            assert event.type == AUDIO_DONE
-
+            assert event.type == CONTENT_PART_DONE
+            event = await _recv(conn)
+            assert event.type == OUTPUT_ITEM_DONE
             event = await _recv(conn)
             assert event.type == RESPONSE_DONE
             assert event.response.status == "completed"
@@ -292,8 +338,434 @@ class TestSDKVoiceTurn:
 
 
 # ===================================================================
+# 3b. Packaged local client parity
+# ===================================================================
+
+
+class TestPackagedAudioClient:
+    @pytest.mark.asyncio
+    async def test_direct_audio_reopen_cancels_revision_zero_over_loopback(
+        self,
+        server_env,
+        monkeypatch,
+        capsys,
+    ):
+        """The embedded client uses the public WebSocket revision/cancellation lifecycle."""
+
+        tracker = SpeculativeTurnTracker()
+        server_env.service.speculative_turns = tracker
+        client_stop = ThreadingEvent()
+        received_events = []
+
+        class FakeInputStream:
+            def __init__(self, *, callback, **_kwargs):
+                self.callback = callback
+
+            def start(self):
+                # Two microphone callbacks become the original segment and its
+                # resumed continuation in the deterministic pipeline driver below.
+                self.callback(_pcm_bytes(512), 512, None, None)
+                self.callback(_pcm_bytes(512), 512, None, None)
+
+            def stop(self):
+                pass
+
+            def close(self):
+                pass
+
+        class FakeOutputStream:
+            def __init__(self, **_kwargs):
+                pass
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+            def close(self):
+                pass
+
+        monkeypatch.setitem(
+            sys.modules,
+            "sounddevice",
+            SimpleNamespace(RawInputStream=FakeInputStream, RawOutputStream=FakeOutputStream),
+        )
+
+        original_handle_server_event = audio_client_module.handle_server_event
+
+        def record_server_event(event, **kwargs):
+            received_events.append(event)
+            original_handle_server_event(event, **kwargs)
+            if event.type == TRANSCRIPT_DELTA and event.delta == "fresh revision one":
+                client_stop.set()
+
+        monkeypatch.setattr(audio_client_module, "handle_server_event", record_server_event)
+
+        async def queue_get(queue: Queue, timeout: float = 3.0):
+            deadline = asyncio.get_running_loop().time() + timeout
+            while asyncio.get_running_loop().time() < deadline:
+                try:
+                    return queue.get_nowait()
+                except Empty:
+                    await asyncio.sleep(0.01)
+            raise AssertionError("Timed out waiting for the loopback pipeline queue")
+
+        async def wait_until(predicate, timeout: float = 3.0):
+            deadline = asyncio.get_running_loop().time() + timeout
+            while asyncio.get_running_loop().time() < deadline:
+                if predicate():
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError("Timed out waiting for the loopback pipeline state")
+
+        async def drive_direct_audio_reopen():
+            first_chunk, first_config = await queue_get(server_env.input_queue)
+            assert len(first_chunk) == 1024
+            first_generation = server_env.cancel_scope.generation
+
+            tracker.start_turn()
+            tracker.start_reopen_grace("turn_1", 0, 5.0)
+            server_env.text_output_queue.put(SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
+            server_env.text_output_queue.put(
+                SpeechStoppedEvent(
+                    duration_s=0.032,
+                    audio_end_ms=32,
+                    turn_id="turn_1",
+                    turn_revision=0,
+                )
+            )
+            server_env.text_output_queue.put(
+                AudioInputCompletedEvent(
+                    audio=np.zeros(512, dtype=np.float32),
+                    audio_sample_rate=16000,
+                    audio_duration_s=0.032,
+                    turn_id="turn_1",
+                    turn_revision=0,
+                )
+            )
+            first_request = await queue_get(server_env.text_prompt_queue)
+
+            second_chunk, second_config = await queue_get(server_env.input_queue)
+            assert len(second_chunk) == 1024
+            assert second_config is first_config
+
+            candidate = tracker.begin_reopen_candidate("turn_1", 0)
+            assert candidate == 1
+            assert tracker.confirm_reopen_candidate("turn_1", 0, candidate)
+            server_env.text_output_queue.put(SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True))
+            await wait_until(lambda: server_env.cancel_scope.generation == first_generation + 1)
+            reopened_generation = server_env.cancel_scope.generation
+
+            server_env.text_output_queue.put(
+                SpeechStoppedEvent(
+                    duration_s=0.064,
+                    audio_end_ms=64,
+                    turn_id="turn_1",
+                    turn_revision=1,
+                )
+            )
+            server_env.text_output_queue.put(
+                AudioInputCompletedEvent(
+                    audio=np.zeros(1024, dtype=np.float32),
+                    audio_sample_rate=16000,
+                    audio_duration_s=0.064,
+                    turn_id="turn_1",
+                    turn_revision=1,
+                )
+            )
+            second_request = await queue_get(server_env.text_prompt_queue)
+
+            server_env.text_output_queue.put(
+                AssistantOutputEvent(
+                    text="stale revision zero",
+                    turn_id="turn_1",
+                    turn_revision=0,
+                    cancel_generation=first_generation,
+                )
+            )
+            server_env.text_output_queue.put(
+                AssistantOutputEvent(
+                    text="fresh revision one",
+                    turn_id="turn_1",
+                    turn_revision=1,
+                    cancel_generation=first_generation + 1,
+                )
+            )
+            await wait_until(client_stop.is_set)
+            return (first_request, second_request), first_generation, reopened_generation
+
+        pipeline_task = asyncio.create_task(drive_direct_audio_reopen())
+        client_task = asyncio.create_task(
+            listen_and_play_realtime(
+                RealtimeAudioClientConfig(
+                    url=f"ws://127.0.0.1:{server_env.port}/v1/realtime",
+                    api_key="local",
+                ),
+                stop_event=client_stop,
+            )
+        )
+        pipeline_result, _ = await asyncio.wait_for(
+            asyncio.gather(pipeline_task, client_task),
+            timeout=5.0,
+        )
+        requests, first_generation, reopened_generation = pipeline_result
+
+        assert all(isinstance(request, GenerateResponseRequest) for request in requests)
+        assert [request.turn_revision for request in requests] == [0, 1]
+        assert reopened_generation == first_generation + 1
+        transcript_deltas = [event.delta for event in received_events if event.type == TRANSCRIPT_DELTA]
+        assert transcript_deltas == ["fresh revision one"]
+        capsys.readouterr()
+
+    @pytest.mark.asyncio
+    async def test_tool_loop_runs_through_sdk_server_and_follow_up_response(
+        self,
+        server_env,
+        monkeypatch,
+        capsys,
+    ):
+        """The SDK client starts tool follow-up generation while TTS is blocked."""
+
+        class FakeStream:
+            def __init__(self, **_kwargs):
+                pass
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+            def close(self):
+                pass
+
+        monkeypatch.setitem(
+            sys.modules,
+            "sounddevice",
+            SimpleNamespace(RawInputStream=FakeStream, RawOutputStream=FakeStream),
+        )
+
+        calls = []
+        first_tool_started = asyncio.Event()
+        second_tool_started = asyncio.Event()
+        follow_up_created = asyncio.Event()
+        tts_started = [ThreadingEvent(), ThreadingEvent()]
+        release_tts = [ThreadingEvent(), ThreadingEvent()]
+        tts_invocations = 0
+        received_events = []
+
+        async def executor(name, arguments):
+            calls.append((name, arguments))
+            if arguments["index"] == 7:
+                first_tool_started.set()
+                return {"value": "first"}
+            second_tool_started.set()
+            return ToolResult({"value": "second"}, create_response=False)
+
+        class BlockingTTS(BaseHandler):
+            def process(self, item):
+                nonlocal tts_invocations
+                if isinstance(item, TTSInput):
+                    invocation = tts_invocations
+                    tts_invocations += 1
+                    tts_started[invocation].set()
+                    while not release_tts[invocation].wait(0.01):
+                        if self.stop_event.is_set():
+                            return
+                    yield _pcm_bytes(256)
+                elif isinstance(item, EndOfResponse):
+                    yield AUDIO_RESPONSE_DONE
+
+        client_stop = ThreadingEvent()
+        config = RealtimeAudioClientConfig(
+            url=f"ws://127.0.0.1:{server_env.port}/v1/realtime",
+            api_key="local",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "lookup",
+                    "description": "Look up a value.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"index": {"type": "integer"}},
+                        "required": ["index"],
+                    },
+                }
+            ],
+            tool_executor=executor,
+        )
+
+        async def wait_until(predicate, timeout: float = 3.0):
+            deadline = asyncio.get_running_loop().time() + timeout
+            while asyncio.get_running_loop().time() < deadline:
+                if predicate():
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError("Timed out waiting for the packaged tool loop")
+
+        original_handle_server_event = audio_client_module.handle_server_event
+
+        def record_server_event(event, **kwargs):
+            received_events.append(event)
+            original_handle_server_event(event, **kwargs)
+            metadata = getattr(getattr(event, "response", None), "metadata", None)
+            if event.type == RESPONSE_CREATED and isinstance(metadata, dict) and "s2s_local_tool_create_id" in metadata:
+                follow_up_created.set()
+
+        monkeypatch.setattr(audio_client_module, "handle_server_event", record_server_event)
+
+        lm_output_queue: Queue = Queue()
+        tts_input_queue: Queue = Queue()
+        lm_output_processor = LMOutputProcessor(
+            server_env.stop_event,
+            lm_output_queue,
+            tts_input_queue,
+            setup_kwargs={"text_output_queue": server_env.text_output_queue},
+        )
+        blocking_tts = BlockingTTS(
+            server_env.stop_event,
+            tts_input_queue,
+            server_env.output_queue,
+        )
+        processor_thread = threading.Thread(target=lm_output_processor.run, daemon=True)
+        tts_thread = threading.Thread(target=blocking_tts.run, daemon=True)
+        processor_thread.start()
+        tts_thread.start()
+
+        client_task = asyncio.create_task(listen_and_play_realtime(config, stop_event=client_stop))
+        try:
+            await wait_until(
+                lambda: (
+                    bool(list(server_env.service._conns))
+                    and bool(server_env.service._state(list(server_env.service._conns)[0]).runtime_config.session.tools)
+                )
+            )
+            conn_id = list(server_env.service._conns)[0]
+            chat = server_env.service._state(conn_id).runtime_config.chat
+            chat.add_item(
+                RealtimeConversationItemFunctionCall(
+                    type="function_call",
+                    call_id="call_integration",
+                    name="lookup",
+                    arguments='{"index": 7}',
+                )
+            )
+
+            response_key = "response_blocked_tts"
+            lm_output_queue.put(
+                LLMResponseChunk(
+                    response_key=response_key,
+                    parts=[
+                        AssistantTextPart(text="One moment."),
+                        AssistantToolCallPart(
+                            tool={
+                                "type": "function_call",
+                                "call_id": "call_integration",
+                                "name": "lookup",
+                                "arguments": '{"index": 7}',
+                            }
+                        ),
+                    ],
+                )
+            )
+            lm_output_queue.put(EndOfResponse(response_key=response_key))
+
+            assert await asyncio.to_thread(tts_started[0].wait, 1.0)
+            await asyncio.wait_for(first_tool_started.wait(), timeout=1.0)
+            await wait_until(lambda: not server_env.text_prompt_queue.empty())
+            follow_up = server_env.text_prompt_queue.get_nowait()
+
+            assert isinstance(follow_up, GenerateResponseRequest)
+            assert follow_up.prefetch_transaction is not None
+            assert calls == [("lookup", {"index": 7})]
+            assert [item.type for item in chat.buffer[-2:]] == ["function_call", "function_call_output"]
+            assert json.loads(chat.buffer[-1].output) == {"value": "first"}
+            assert not release_tts[0].is_set()
+            assert not any(event.type == RESPONSE_DONE for event in received_events)
+
+            second_call = RealtimeConversationItemFunctionCall(
+                type="function_call",
+                id="fc_second_integration",
+                call_id="call_second_integration",
+                name="lookup",
+                arguments='{"index": 8}',
+            )
+            assert chat.add_provisional_generation_items(follow_up.response_key, [second_call]) is not None
+            lm_output_queue.put(
+                LLMResponseChunk(
+                    response_key=follow_up.response_key,
+                    prefetch_transaction=follow_up.prefetch_transaction,
+                    parts=[
+                        AssistantTextPart(text="One more check."),
+                        AssistantToolCallPart(
+                            tool={
+                                "type": "function_call",
+                                "id": second_call.id,
+                                "call_id": second_call.call_id,
+                                "name": second_call.name,
+                                "arguments": second_call.arguments,
+                            }
+                        ),
+                    ],
+                )
+            )
+            lm_output_queue.put(
+                EndOfResponse(
+                    response_key=follow_up.response_key,
+                )
+            )
+            await wait_until(
+                lambda: bool(
+                    server_env.unit.session
+                    and any(
+                        isinstance(item, AssistantToolCallReadyEvent) and item.part.tool.call_id == second_call.call_id
+                        for item in server_env.unit.session.pending_text_output_items
+                    )
+                )
+            )
+            assert not second_tool_started.is_set()
+
+            release_tts[0].set()
+            await asyncio.wait_for(follow_up_created.wait(), timeout=2.0)
+            assert await asyncio.to_thread(tts_started[1].wait, 1.0)
+            await asyncio.wait_for(second_tool_started.wait(), timeout=1.0)
+            await wait_until(
+                lambda: (
+                    sum(
+                        event.type == OUTPUT_ITEM_DONE and getattr(event.item, "type", None) == "function_call"
+                        for event in received_events
+                    )
+                    == 2
+                )
+            )
+
+            event_types = [event.type for event in received_events]
+            assert event_types.index(FUNCTION_CALL_DONE) < event_types.index(AUDIO_DONE)
+            assert event_types.index(AUDIO_DONE) < event_types.index(RESPONSE_DONE)
+            assert event_types.count(OUTPUT_ITEM_ADDED) == 4
+            assert event_types.count(OUTPUT_ITEM_DONE) >= 2
+            assert event_types.count(FUNCTION_CALL_DONE) == 2
+            assert event_types.count(RESPONSE_CREATED) == 2
+            assert calls == [("lookup", {"index": 7}), ("lookup", {"index": 8})]
+            assert not release_tts[1].is_set()
+        finally:
+            for release in release_tts:
+                release.set()
+            client_stop.set()
+            await asyncio.wait_for(client_task, timeout=3.0)
+            lm_output_queue.put(PIPELINE_END)
+            processor_thread.join(timeout=1.0)
+            tts_thread.join(timeout=1.0)
+            assert not processor_thread.is_alive()
+            assert not tts_thread.is_alive()
+            capsys.readouterr()
+
+
+# ===================================================================
 # 4. Interruption (barge-in)
 # ===================================================================
+
 
 class TestSDKBargeIn:
     @pytest.mark.asyncio
@@ -306,12 +778,14 @@ class TestSDKBargeIn:
             server_env.output_queue.put(_pcm_bytes(256))
             event = await _recv(conn)
             assert event.type == RESPONSE_CREATED
-            await _recv(conn)  # audio delta
+            assert (await _recv(conn)).type == OUTPUT_ITEM_ADDED
+            assert (await _recv(conn)).type == CONTENT_PART_ADDED
+            assert (await _recv(conn)).type == AUDIO_DELTA
 
-            server_env.text_output_queue.put({"type": "speech_started", "audio_start_ms": 500})
+            server_env.text_output_queue.put(SpeechStartedEvent())
 
             events = []
-            for _ in range(3):
+            for _ in range(5):
                 events.append(await _recv(conn))
 
             types = [e.type for e in events]
@@ -333,13 +807,15 @@ class TestSDKBargeIn:
             server_env.output_queue.put(_pcm_bytes(256))
             event = await _recv(conn)
             assert event.type == RESPONSE_CREATED
-            await _recv(conn)  # audio delta
+            assert (await _recv(conn)).type == OUTPUT_ITEM_ADDED
+            assert (await _recv(conn)).type == CONTENT_PART_ADDED
+            assert (await _recv(conn)).type == AUDIO_DELTA
 
-            server_env.text_output_queue.put({"type": "speech_started", "audio_start_ms": 500})
-            server_env.text_output_queue.put({"type": "assistant_text", "text": "stale response text"})
+            server_env.text_output_queue.put(SpeechStartedEvent())
+            server_env.text_output_queue.put(AssistantOutputEvent(text="stale response text"))
 
             events = []
-            for _ in range(3):
+            for _ in range(5):
                 events.append(await _recv(conn))
 
             types = [e.type for e in events]
@@ -358,6 +834,7 @@ class TestSDKBargeIn:
 # 4b. Phantom speech & interruption state
 # ===================================================================
 
+
 class TestSDKPhantomSpeech:
     @pytest.mark.asyncio
     async def test_phantom_speech_does_not_block_pipeline(self, server_env):
@@ -366,32 +843,40 @@ class TestSDKPhantomSpeech:
         async with client.realtime.connect(model="test") as conn:
             await _recv(conn)  # session.created
 
-            server_env.text_output_queue.put({"type": "speech_started", "audio_start_ms": 0})
+            server_env.text_output_queue.put(SpeechStartedEvent())
             event = await _recv(conn)
             assert event.type == SPEECH_STARTED
 
-            server_env.text_output_queue.put({"type": "speech_stopped", "duration_s": 0})
+            server_env.text_output_queue.put(SpeechStoppedEvent())
             event = await _recv(conn)
             assert event.type == SPEECH_STOPPED
+            assert (await _recv(conn)).type == "input_audio_buffer.committed"
+            assert (await _recv(conn)).type == "conversation.item.created"
 
-            server_env.text_output_queue.put({"type": "speech_started", "audio_start_ms": 1000})
+            server_env.text_output_queue.put(SpeechStartedEvent())
             event = await _recv(conn)
             assert event.type == SPEECH_STARTED
 
-            server_env.text_output_queue.put(
-                {"type": "speech_stopped", "duration_s": 2.0, "audio_end_ms": 3000},
-            )
+            server_env.text_output_queue.put(SpeechStoppedEvent(duration_s=2.0))
             event = await _recv(conn)
             assert event.type == SPEECH_STOPPED
+            assert (await _recv(conn)).type == "input_audio_buffer.committed"
+            assert (await _recv(conn)).type == "conversation.item.created"
 
             server_env.output_queue.put(_pcm_bytes(256))
             event = await _recv(conn)
             assert event.type == RESPONSE_CREATED
-            await _recv(conn)  # audio delta
+            assert (await _recv(conn)).type == OUTPUT_ITEM_ADDED
+            assert (await _recv(conn)).type == CONTENT_PART_ADDED
+            assert (await _recv(conn)).type == AUDIO_DELTA
 
-            server_env.output_queue.put(b"__RESPONSE_DONE__")
+            server_env.output_queue.put(AUDIO_RESPONSE_DONE)
             event = await _recv(conn)
             assert event.type == AUDIO_DONE
+            event = await _recv(conn)
+            assert event.type == CONTENT_PART_DONE
+            event = await _recv(conn)
+            assert event.type == OUTPUT_ITEM_DONE
             event = await _recv(conn)
             assert event.type == RESPONSE_DONE
             assert event.response.status == "completed"
@@ -411,14 +896,14 @@ class TestSDKInterruptionState:
 
             server_env.output_queue.put(_pcm_bytes(256))
             await _recv(conn)  # response.created
-            await _recv(conn)  # audio delta
+            assert (await _recv(conn)).type == OUTPUT_ITEM_ADDED
+            assert (await _recv(conn)).type == CONTENT_PART_ADDED
+            assert (await _recv(conn)).type == AUDIO_DELTA
             assert server_env.response_playing.is_set()
 
-            server_env.text_output_queue.put(
-                {"type": "speech_started", "audio_start_ms": 500},
-            )
+            server_env.text_output_queue.put(SpeechStartedEvent())
             events = []
-            for _ in range(3):
+            for _ in range(5):
                 events.append(await _recv(conn))
 
             types = [e.type for e in events]
@@ -434,6 +919,7 @@ class TestSDKInterruptionState:
 # 5. Tool calling
 # ===================================================================
 
+
 class TestSDKToolCalling:
     @pytest.mark.asyncio
     async def test_tool_call_events(self, server_env):
@@ -442,25 +928,59 @@ class TestSDKToolCalling:
         async with client.realtime.connect(model="test") as conn:
             await _recv(conn)
 
-            server_env.text_output_queue.put({
-                "type": "assistant_text",
-                "text": "Checking weather",
-                "tools": [{
-                    "call_id": "call_xyz",
-                    "name": "get_weather",
-                    "arguments": {"city": "Tokyo"},
-                }],
-            })
+            server_env.text_output_queue.put(
+                AssistantOutputEvent(
+                    text="Checking weather",
+                    tools=[
+                        {
+                            "type": "function_call",
+                            "call_id": "call_xyz",
+                            "name": "get_weather",
+                            "arguments": '{"city": "Tokyo"}',
+                        }
+                    ],
+                )
+            )
+            server_env.output_queue.put(AUDIO_RESPONSE_DONE)
 
             event = await _recv(conn)
+            assert event.type == RESPONSE_CREATED
+
+            event = await _recv(conn)
+            assert event.type == OUTPUT_ITEM_ADDED
+            assert event.item.type == "message"
+            event = await _recv(conn)
+            assert event.type == CONTENT_PART_ADDED
+            event = await _recv(conn)
+            assert event.type == TRANSCRIPT_DELTA
+            assert event.delta == "Checking weather"
+
+            # The ordered tool call closes the message item before its own item begins.
+            event = await _recv(conn)
             assert event.type == TRANSCRIPT_DONE
-            assert event.transcript == "Checking weather"
+            event = await _recv(conn)
+            assert event.type == CONTENT_PART_DONE
+            event = await _recv(conn)
+            assert event.type == OUTPUT_ITEM_DONE
+            assert event.item.type == "message"
+
+            event = await _recv(conn)
+            assert event.type == OUTPUT_ITEM_ADDED
+            assert event.item.call_id == "call_xyz"
 
             event = await _recv(conn)
             assert event.type == FUNCTION_CALL_DONE
             assert event.name == "get_weather"
             assert event.call_id == "call_xyz"
             assert json.loads(event.arguments) == {"city": "Tokyo"}
+
+            event = await _recv(conn)
+            assert event.type == OUTPUT_ITEM_DONE
+            assert event.item.call_id == "call_xyz"
+            assert event.item.status == "completed"
+
+            event = await _recv(conn)
+            assert event.type == RESPONSE_DONE
 
     @pytest.mark.asyncio
     async def test_multiple_tool_calls_output_index(self, server_env):
@@ -469,19 +989,33 @@ class TestSDKToolCalling:
         async with client.realtime.connect(model="test") as conn:
             await _recv(conn)
 
-            server_env.text_output_queue.put({
-                "type": "assistant_text",
-                "text": "",
-                "tools": [
-                    {"call_id": "c1", "name": "tool_a", "arguments": {}},
-                    {"call_id": "c2", "name": "tool_b", "arguments": {"x": 1}},
-                ],
-            })
+            server_env.text_output_queue.put(
+                AssistantOutputEvent(
+                    text="",
+                    tools=[
+                        {"type": "function_call", "call_id": "c1", "name": "tool_a", "arguments": "{}"},
+                        {"type": "function_call", "call_id": "c2", "name": "tool_b", "arguments": '{"x": 1}'},
+                    ],
+                )
+            )
+            server_env.output_queue.put(AUDIO_RESPONSE_DONE)
 
+            created = await _recv(conn)
+            added_1 = await _recv(conn)
             e1 = await _recv(conn)
+            done_1 = await _recv(conn)
+            added_2 = await _recv(conn)
             e2 = await _recv(conn)
+            done_2 = await _recv(conn)
+            response_terminal = await _recv(conn)
+            assert created.type == RESPONSE_CREATED
+            assert added_1.type == OUTPUT_ITEM_ADDED
             assert e1.type == FUNCTION_CALL_DONE
+            assert done_1.type == OUTPUT_ITEM_DONE
+            assert added_2.type == OUTPUT_ITEM_ADDED
             assert e2.type == FUNCTION_CALL_DONE
+            assert done_2.type == OUTPUT_ITEM_DONE
+            assert response_terminal.type == RESPONSE_DONE
             assert e1.output_index == 0
             assert e2.output_index == 1
 
@@ -489,6 +1023,7 @@ class TestSDKToolCalling:
 # ===================================================================
 # 6. Text input via SDK
 # ===================================================================
+
 
 class TestSDKTextInput:
     @pytest.mark.asyncio
@@ -498,15 +1033,17 @@ class TestSDKTextInput:
         async with client.realtime.connect(model="test") as conn:
             await _recv(conn)
 
-            await conn.send({
-                "type": "conversation.item.create",
-                "item": {
-                    "id": "item_sdk_1",
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": "Hello from SDK"}],
-                },
-            })
+            await conn.send(
+                {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "id": "msg_sdk_1",
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Hello from SDK"}],
+                    },
+                }
+            )
 
             event = await _recv(conn)
             assert event.type == ITEM_CREATED
@@ -521,34 +1058,39 @@ class TestSDKTextInput:
         async with client.realtime.connect(model="test") as conn:
             await _recv(conn)
 
-            await conn.send({
-                "type": "conversation.item.create",
-                "item": {
-                    "id": "item_a",
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": "first"}],
-                },
-            })
+            await conn.send(
+                {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "id": "msg_a",
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "first"}],
+                    },
+                }
+            )
             e1 = await _recv(conn)
             assert e1.previous_item_id is None
 
-            await conn.send({
-                "type": "conversation.item.create",
-                "item": {
-                    "id": "item_b",
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": "second"}],
-                },
-            })
+            await conn.send(
+                {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "id": "msg_b",
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "second"}],
+                    },
+                }
+            )
             e2 = await _recv(conn)
-            assert e2.previous_item_id == "item_a"
+            assert e2.previous_item_id == e1.item.id
 
 
 # ===================================================================
 # 7. Error handling
 # ===================================================================
+
 
 class TestSDKErrorHandling:
     @pytest.mark.asyncio
@@ -558,10 +1100,11 @@ class TestSDKErrorHandling:
         async with client.realtime.connect(model="test") as conn:
             await _recv(conn)
 
-            await conn.send({"type": "bogus.nonexistent"})
+            await conn.send({"type": "bogus.nonexistent", "event_id": "client_bogus_1"})
             event = await _recv(conn)
             assert event.type == ERROR
             assert event.error is not None
+            assert event.error.event_id == "client_bogus_1"
 
     @pytest.mark.asyncio
     async def test_duplicate_response_create_error(self, server_env):
@@ -572,17 +1115,22 @@ class TestSDKErrorHandling:
 
             server_env.output_queue.put(_pcm_bytes(256))
             await _recv(conn)  # response.created
-            await _recv(conn)  # audio delta
+            assert (await _recv(conn)).type == OUTPUT_ITEM_ADDED
+            assert (await _recv(conn)).type == CONTENT_PART_ADDED
+            assert (await _recv(conn)).type == AUDIO_DELTA
 
-            await conn.send({"type": "response.create"})
+            await conn.send({"type": "response.create", "event_id": "client_create_1"})
             event = await _recv(conn)
             assert event.type == ERROR
             assert event.error.type == "conversation_already_has_active_response"
+            assert event.error.event_id == "client_create_1"
+            assert event.event_id != "client_create_1"
 
 
 # ===================================================================
 # 8. Response cancel
 # ===================================================================
+
 
 class TestSDKResponseCancel:
     @pytest.mark.asyncio
@@ -594,13 +1142,20 @@ class TestSDKResponseCancel:
 
             server_env.output_queue.put(_pcm_bytes(256))
             await _recv(conn)  # response.created
-            await _recv(conn)  # audio delta
+            assert (await _recv(conn)).type == OUTPUT_ITEM_ADDED
+            assert (await _recv(conn)).type == CONTENT_PART_ADDED
+            assert (await _recv(conn)).type == AUDIO_DELTA
 
             await conn.send({"type": "response.cancel"})
 
             event = await _recv(conn)
             assert event.type == AUDIO_DONE
 
+            event = await _recv(conn)
+            assert event.type == CONTENT_PART_DONE
+            event = await _recv(conn)
+            assert event.type == OUTPUT_ITEM_DONE
+            assert event.item.status == "incomplete"
             event = await _recv(conn)
             assert event.type == RESPONSE_DONE
             assert event.response.status == "cancelled"
@@ -611,6 +1166,7 @@ class TestSDKResponseCancel:
 # 9. Multi-turn conversation_id consistency
 # ===================================================================
 
+
 class TestSDKMultiTurn:
     @pytest.mark.asyncio
     async def test_two_turns_same_conversation(self, server_env):
@@ -620,46 +1176,56 @@ class TestSDKMultiTurn:
             await _recv(conn)  # session.created
 
             # Turn 1
-            server_env.text_output_queue.put({"type": "speech_started", "audio_start_ms": 0})
+            server_env.text_output_queue.put(SpeechStartedEvent())
             await _recv(conn)
 
-            server_env.text_output_queue.put({"type": "speech_stopped", "audio_end_ms": 500})
-            await _recv(conn)
+            server_env.text_output_queue.put(SpeechStoppedEvent())
+            assert (await _recv(conn)).type == SPEECH_STOPPED
+            assert (await _recv(conn)).type == "input_audio_buffer.committed"
+            assert (await _recv(conn)).type == "conversation.item.created"
 
-            server_env.text_output_queue.put({"type": "transcription_completed", "transcript": "hi"})
+            server_env.text_output_queue.put(TranscriptionCompletedEvent(transcript="hi"))
             await _recv(conn)
 
             server_env.output_queue.put(_pcm_bytes(128))
             t1_created = await _recv(conn)
             assert t1_created.type == RESPONSE_CREATED
-            await _recv(conn)  # audio delta
+            assert (await _recv(conn)).type == OUTPUT_ITEM_ADDED
+            assert (await _recv(conn)).type == CONTENT_PART_ADDED
+            assert (await _recv(conn)).type == AUDIO_DELTA
 
             # Barge-in
-            server_env.text_output_queue.put({"type": "speech_started", "audio_start_ms": 2000})
+            server_env.text_output_queue.put(SpeechStartedEvent())
             events = []
-            for _ in range(3):
+            for _ in range(5):
                 events.append(await _recv(conn))
 
             t1_done = next(e for e in events if e.type == RESPONSE_DONE)
 
             # Simulate pipeline acknowledging cancellation so discard guard clears
-            server_env.output_queue.put(b"__RESPONSE_DONE__")
+            server_env.output_queue.put(AUDIO_RESPONSE_DONE)
             await asyncio.sleep(0.15)
 
             # Turn 2
-            server_env.text_output_queue.put({"type": "speech_stopped", "audio_end_ms": 3000})
-            await _recv(conn)
+            server_env.text_output_queue.put(SpeechStoppedEvent())
+            assert (await _recv(conn)).type == SPEECH_STOPPED
+            assert (await _recv(conn)).type == "input_audio_buffer.committed"
+            assert (await _recv(conn)).type == "conversation.item.created"
 
-            server_env.text_output_queue.put({"type": "transcription_completed", "transcript": "bye"})
+            server_env.text_output_queue.put(TranscriptionCompletedEvent(transcript="bye"))
             await _recv(conn)
 
             server_env.output_queue.put(_pcm_bytes(128))
             t2_created = await _recv(conn)
             assert t2_created.type == RESPONSE_CREATED
-            await _recv(conn)  # audio delta
+            assert (await _recv(conn)).type == OUTPUT_ITEM_ADDED
+            assert (await _recv(conn)).type == CONTENT_PART_ADDED
+            assert (await _recv(conn)).type == AUDIO_DELTA
 
-            server_env.output_queue.put(b"END")
+            server_env.output_queue.put(PIPELINE_END)
             await _recv(conn)  # audio done
+            assert (await _recv(conn)).type == CONTENT_PART_DONE
+            assert (await _recv(conn)).type == OUTPUT_ITEM_DONE
             t2_done = await _recv(conn)
             assert t2_done.type == RESPONSE_DONE
 

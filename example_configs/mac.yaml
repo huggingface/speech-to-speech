@@ -1,0 +1,17 @@
+schema_version: 1
+
+blocks:
+  vad: {kind: vad, backend: silero}
+  stt: {kind: stt, backend: parakeet-tdt}
+  llm:
+    kind: llm
+    backend: mlx-lm
+    settings:
+      model_name: mlx-community/Qwen3-4B-Instruct-2507-4bit
+  tts: {kind: tts, backend: qwen3}
+
+pipelines:
+  mac:
+    options:
+      mac_optimal_settings: true
+    stages: {vad: vad, stt: stt, llm: llm, tts: tts}

@@ -1,0 +1,36 @@
+from dataclasses import dataclass, field
+from typing import Optional
+
+
+@dataclass
+class ParakeetTDTSTTHandlerArguments:
+    """
+    Arguments for the Parakeet TDT Speech-to-Text handler.
+
+    Parakeet TDT 0.6B v3 is a 600M parameter multilingual ASR model from NVIDIA.
+    - On MPS (Apple Silicon): Uses mlx-audio with mlx-community/parakeet-tdt-0.6b-v3
+    - On CUDA/CPU: Uses nano-parakeet (pure PyTorch) with nvidia/parakeet-tdt-0.6b-v3
+    """
+
+    parakeet_tdt_model_name: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "The Parakeet TDT model to use. Defaults to 'mlx-community/parakeet-tdt-0.6b-v3' "
+            "for MPS or 'nvidia/parakeet-tdt-0.6b-v3' for CUDA/CPU."
+        },
+    )
+    parakeet_tdt_device: str = field(
+        default="auto",
+        metadata={
+            "help": "Device to run the model on. 'auto' will use MPS on macOS, otherwise CUDA, then NPU, then CPU. "
+            "Options: 'auto', 'cuda', 'npu', 'mps', 'cpu'. Default is 'auto'."
+        },
+    )
+    parakeet_tdt_language: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Accepted for compatibility with existing commands. Parakeet decoders always select the language "
+            "automatically; this value does not constrain transcription or replace detected language metadata. "
+            "Use 'auto' or leave unset for automatic language detection."
+        },
+    )

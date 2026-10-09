@@ -1,0 +1,133 @@
+from dataclasses import dataclass, field
+from typing import Optional
+
+from speech_to_speech.arguments_classes.w2v_stv_arguments import Wav2Vec2STVHandlerArguments
+from speech_to_speech.backend_registry import LLM_BACKENDS, STT_BACKENDS, TTS_BACKENDS
+
+_AUDIO_INPUT_LLM_BACKENDS = ", ".join(
+    name for name, spec in LLM_BACKENDS.items() if spec.capabilities.supports_audio_input
+)
+_PROXY_LLM_BACKENDS = ", ".join(name for name, spec in LLM_BACKENDS.items() if spec.capabilities.supports_llm_proxy)
+
+
+@dataclass
+class ModuleArguments(Wav2Vec2STVHandlerArguments):
+    diarization: bool = field(
+        default=False,
+        metadata={"help": "Enable speaker-aware conversation with Nemotron 3 Diarization."},
+    )
+    diarization_model_name: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Optional Transformers streaming diarization checkpoint. Adds session-local speaker metadata to LLM input."
+        },
+    )
+    diarization_revision: Optional[str] = field(default=None, metadata={"help": "Diarization checkpoint revision."})
+    diarization_device: str = field(
+        default="auto",
+        metadata={
+            "help": "Diarization device: auto, cuda, mps, or cpu. Auto selects CUDA, then MPS, then CPU. "
+            "The global --device overrides this setting. CUDA or MPS is recommended for live sessions."
+        },
+    )
+    diarization_dtype: str = field(default="float32", metadata={"choices": ("float32", "float16", "bfloat16")})
+    diarization_streaming_mode: str = field(
+        default="low_latency",
+        metadata={"choices": ("low_latency", "very_low_latency", "ultra_low_latency")},
+    )
+    diarization_threshold: float = field(
+        default=0.5, metadata={"help": "Speaker activity probability cutoff, between 0 and 1."}
+    )
+    detect_llm_output_language: bool = field(
+        default=False,
+        metadata={
+            "help": "Detect the language of each assistant text chunk before TTS and pass that code to the TTS "
+            "backend. Sends no code for an initial chunk that is too short or ambiguous to classify. "
+            "The detector is warmed at startup. Off by default."
+        },
+    )
+    device: Optional[str] = field(
+        default=None,
+        metadata={"help": "If specified, overrides the device for all handlers."},
+    )
+    mac_optimal_settings: bool = field(
+        default=False,
+        metadata={
+            "help": "If specified, provides macOS defaults: Parakeet TDT for STT, MLX LM for the language "
+            "model, Qwen3-TTS for TTS, and MPS for supported component devices. Explicit component, model, "
+            "global-device, and component-device flags override these defaults. It does not select a command.",
+        },
+    )
+    stt: Optional[str] = field(
+        default="parakeet-tdt",
+        metadata={
+            "choices": tuple(STT_BACKENDS),
+            "help": "The STT to use. Use 'none' to send VAD audio directly to an audio-input LLM. "
+            f"Audio-input LLM backends: {_AUDIO_INPUT_LLM_BACKENDS}. Select an explicitly audio-capable "
+            "model with --model_name. Default is 'parakeet-tdt'.",
+        },
+    )
+    llm_backend: Optional[str] = field(
+        default="responses-api",
+        metadata={
+            "choices": tuple(LLM_BACKENDS),
+            "help": "The LLM backend to use. Default is 'responses-api'.",
+        },
+    )
+    tts: Optional[str] = field(
+        default="qwen3",
+        metadata={
+            "choices": tuple(TTS_BACKENDS),
+            "help": "The TTS backend to use. Default is 'qwen3'.",
+        },
+    )
+    log_level: str = field(
+        default="info",
+        metadata={"help": "Provide logging level. Example --log_level debug, default=info."},
+    )
+    log_transcripts: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Write full user and assistant transcript text to the application log, for "
+                "debugging STT, LLM, TTS and Realtime flows. Off by default: logs are often "
+                "retained by service managers, containers and hosted log aggregators, so "
+                "conversation content would outlive the conversation there. Default is False."
+            )
+        },
+    )
+    enable_live_transcription: bool = field(
+        default=True,
+        metadata={
+            "help": "Enable live transcription display while user is speaking (works with parakeet-tdt). Default is true."
+        },
+    )
+    live_transcription_update_interval: float = field(
+        default=0.5,
+        metadata={"help": "Update interval for live transcription in seconds (default: 0.5s = 500ms)"},
+    )
+    enable_llm_proxy: bool = field(
+        default=False,
+        metadata={
+            "help": f"Expose a proxy-capable LLM backend ({_PROXY_LLM_BACKENDS}) as an "
+            "OpenAI-compatible HTTP endpoint on the realtime server. The server performs no authentication of "
+            "its own: enable it only on a trusted network or behind a gateway that owns access control. Off by "
+            "default."
+        },
+    )
+    llm_proxy_connect_timeout_s: float = field(
+        default=10.0,
+        metadata={
+            "help": "Connect timeout in seconds for LLM proxy requests to the upstream provider. Reads have no "
+            "timeout (generation may take minutes). Default is 10.0."
+        },
+    )
+    num_pipelines: int = field(
+        default=1,
+        metadata={
+            "help": "Number of isolated pipeline instances in the pool. One uvicorn server listens on "
+            "--port and routes each incoming client to the next free pipeline (each has its own "
+            "VAD/STT/LM/TTS handlers and conversation state). Max concurrent websocket sessions equals "
+            "num_pipelines; further connections are rejected. Default is 1."
+        },
+    )

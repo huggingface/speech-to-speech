@@ -1,0 +1,231 @@
+from __future__ import annotations
+
+import logging
+from threading import Event
+from typing import Any, Iterator
+
+import librosa
+import numpy as np
+import torch
+from rich.console import Console
+from transformers import AutoTokenizer, VitsModel
+
+from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
+from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
+
+logger = logging.getLogger(__name__)
+
+console = Console()
+
+WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE = {
+    "en": "eng",  # English
+    "fr": "fra",  # French
+    "es": "spa",  # Spanish
+    "ko": "kor",  # Korean
+    "hi": "hin",  # Hindi
+    "ar": "ara",  # Arabic
+    "hy": "hyw",  # Armenian
+    "az": "azb",  # Azerbaijani
+    "bg": "bul",  # Bulgarian
+    "ca": "cat",  # Catalan
+    "nl": "nld",  # Dutch
+    "fi": "fin",  # Finnish
+    "de": "deu",  # German
+    "el": "ell",  # Greek
+    "he": "heb",  # Hebrew
+    "hu": "hun",  # Hungarian
+    "is": "isl",  # Icelandic
+    "id": "ind",  # Indonesian
+    "kn": "kan",  # Kannada (Whisper uses "kn"; "ka" is Georgian)
+    "kk": "kaz",  # Kazakh
+    "lv": "lav",  # Latvian
+    "ms": "zlm",  # Malay
+    "mr": "mar",  # Marathi
+    "fa": "fas",  # Persian
+    "pl": "pol",  # Polish
+    "pt": "por",  # Portuguese
+    "ro": "ron",  # Romanian
+    "ru": "rus",  # Russian
+    "sw": "swh",  # Swahili
+    "sv": "swe",  # Swedish
+    "tl": "tgl",  # Tagalog (Whisper uses "tl"; "tg" is Tajik)
+    "ta": "tam",  # Tamil
+    "th": "tha",  # Thai
+    "tr": "tur",  # Turkish
+    "uk": "ukr",  # Ukrainian
+    "ur": "urd",  # Urdu
+    "vi": "vie",  # Vietnamese
+    "cy": "cym",  # Welsh
+}
+
+
+class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
+    def setup(
+        self,
+        should_listen: Event,
+        model_name: str | None = None,
+        device: str = "cuda",
+        torch_dtype: str = "float32",
+        language: str = "en",
+        stream: bool = True,
+        chunk_size: int = 512,
+        cancel_scope: CancelScope | None = None,
+        speculative_turns: SpeculativeTurnTracker | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.should_listen = should_listen
+        self.cancel_scope = cancel_scope
+        self.speculative_turns = speculative_turns
+        self.device = resolve_device(device, TORCH_DEVICES, "Facebook MMS TTS")
+        self.torch_dtype = getattr(torch, torch_dtype)
+        self.stream = stream
+        self.chunk_size = chunk_size
+        self.language = language
+
+        self._initial_language = self.language
+        self._initial_model_name = model_name
+        self.load_model(self.language, model_name)
+        self.warmup()
+
+    def load_model(self, language_code: str, model_name: str | None = None) -> None:
+        try:
+            resolved_model_name = model_name or (
+                f"facebook/mms-tts-{WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE[language_code]}"
+            )
+            logger.info(f"Loading model: {resolved_model_name}")
+            self.model = VitsModel.from_pretrained(resolved_model_name).to(self.device)  # type: ignore[arg-type]
+            self.tokenizer = AutoTokenizer.from_pretrained(resolved_model_name)
+            self.model_name = resolved_model_name
+            self.language = language_code
+        except KeyError:
+            logger.warning(f"Unsupported language: {language_code}. Falling back to English.")
+            self.load_model("en")
+
+    def warmup(self) -> None:
+        logger.info(f"Warming up {self.__class__.__name__}")
+        self.generate_audio("Hello, this is a test")
+
+    def generate_audio(self, text: str) -> torch.Tensor | None:
+        if not text:
+            logger.warning("Received empty text input")
+            return None
+
+        try:
+            logger.debug("Tokenizing text: %s", transcript_for_log(text))
+            logger.debug(f"Current language: {self.language}")
+            logger.debug(f"Tokenizer: {self.tokenizer}")
+
+            inputs = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True)
+            input_ids = inputs.input_ids.to(self.device).long()
+            attention_mask = inputs.attention_mask.to(self.device)
+
+            logger.debug(f"Input IDs shape: {input_ids.shape}, dtype: {input_ids.dtype}")
+            logger.debug("Input IDs: %s", transcript_for_log(input_ids))
+
+            if input_ids.numel() == 0:
+                logger.error("Input IDs tensor is empty")
+                return None
+
+            with torch.no_grad():
+                output = self.model(input_ids=input_ids, attention_mask=attention_mask)
+
+            logger.debug(f"Output waveform shape: {output.waveform.shape}")
+            return output.waveform
+        except Exception as exc:
+            log_exception(logger, "Error in generate_audio", exc)
+            return None
+
+    def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
+        speculative_turns = getattr(self, "speculative_turns", None)
+        if isinstance(tts_input, EndOfResponse):
+            if speculative_turns and not speculative_turns.wait_for_gate(
+                tts_input.turn_id,
+                tts_input.turn_revision,
+            ):
+                if tts_input.response_key is None:
+                    return
+                tts_input.cleanup_only = True
+            yield AUDIO_RESPONSE_DONE
+            return
+
+        if speculative_turns and not speculative_turns.wait_for_gate(
+            tts_input.turn_id,
+            tts_input.turn_revision,
+            commit=True,
+        ):
+            logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
+            return
+
+        gen = self.cancel_scope.generation if self.cancel_scope else None
+        language_code = tts_input.tts_language_code
+        selected = tts_input.selected_language
+        if selected not in (None, "auto") and language_code not in WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE:
+            # A detected language without an MMS checkpoint keeps the session language.
+            language_code = selected
+        runtime_config = tts_input.runtime_config
+        if language_code is None and runtime_config is not None and tts_input.selected_language == "auto":
+            language_code = self._initial_language
+        text = tts_input.text
+
+        console.print(f"[green]ASSISTANT: {text}")
+        logger.debug("Processing text: %s", transcript_for_log(text))
+        logger.debug(f"Language code: {language_code}")
+
+        restore_initial_model = (
+            language_code == self._initial_language
+            and self._initial_model_name is not None
+            and self.model_name != self._initial_model_name
+        )
+        if language_code is not None and (self.language != language_code or restore_initial_model):
+            try:
+                logger.info("Loading TTS model for language %s", language_code)
+                model_name = self._initial_model_name if language_code == self._initial_language else None
+                self.load_model(language_code, model_name)
+            except KeyError:
+                console.print(
+                    f"[red]Language {language_code} not supported by Facebook MMS. Using {self.language} instead."
+                )
+                logger.warning(f"Unsupported language: {language_code}")
+
+        audio_output = self.generate_audio(text)
+
+        if audio_output is None or audio_output.numel() == 0:
+            logger.warning("No audio output generated")
+            return
+
+        audio_numpy = audio_output.cpu().numpy().squeeze()
+        logger.debug(f"Raw audio shape: {audio_numpy.shape}, dtype: {audio_numpy.dtype}")
+
+        audio_resampled = librosa.resample(audio_numpy, orig_sr=self.model.config.sampling_rate, target_sr=16000)
+        logger.debug(f"Resampled audio shape: {audio_resampled.shape}, dtype: {audio_resampled.dtype}")
+
+        audio_int16 = (audio_resampled * 32768).astype(np.int16)
+        logger.debug(f"Final audio shape: {audio_int16.shape}, dtype: {audio_int16.dtype}")
+
+        if self.stream:
+            for i in range(0, len(audio_int16), self.chunk_size):
+                if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
+                    logger.info("TTS generation cancelled (interruption)")
+                    return
+                chunk = audio_int16[i : i + self.chunk_size]
+                yield np.pad(chunk, (0, self.chunk_size - len(chunk)))
+        else:
+            for i in range(0, len(audio_int16), self.chunk_size):
+                if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
+                    logger.info("TTS generation cancelled (interruption)")
+                    return
+                yield np.pad(
+                    audio_int16[i : i + self.chunk_size],
+                    (0, self.chunk_size - len(audio_int16[i : i + self.chunk_size])),
+                )
+
+    def on_session_end(self) -> None:
+        custom_model_changed = self._initial_model_name is not None and self.model_name != self._initial_model_name
+        if self.language != self._initial_language or custom_model_changed:
+            self.load_model(self._initial_language, self._initial_model_name)
+        logger.debug("Facebook MMS TTS session state reset")

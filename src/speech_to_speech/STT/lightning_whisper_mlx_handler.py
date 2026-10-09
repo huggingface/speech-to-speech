@@ -1,0 +1,119 @@
+from __future__ import annotations
+
+import logging
+from time import perf_counter
+from typing import Any, Iterator, Optional
+
+import numpy as np
+import torch
+from lightning_whisper_mlx import LightningWhisperMLX
+from rich.console import Console
+
+from speech_to_speech.pipeline.handler_types import STTIn, STTOut
+from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
+from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
+from speech_to_speech.utils.mlx_lock import MLXLockContext
+
+logger = logging.getLogger(__name__)
+
+console = Console()
+
+SUPPORTED_LANGUAGES = [
+    "en",
+    "fr",
+    "es",
+    "zh",
+    "ja",
+    "ko",
+    "hi",
+    "de",
+    "pt",
+    "pl",
+    "it",
+    "nl",
+]
+
+
+class LightningWhisperSTTHandler(BaseSTTHandler):
+    """
+    Handles the Speech To Text generation using a Whisper model.
+    """
+
+    def setup(
+        self,
+        model_name: str = "distil-large-v3",
+        device: str = "mps",
+        torch_dtype: str = "float16",
+        compile_mode: Optional[str] = None,
+        language: Optional[str] = None,
+        gen_kwargs: dict[str, Any] = {},
+    ) -> None:
+        if len(model_name.split("/")) > 1:
+            model_name = model_name.split("/")[-1]
+        self.device = device
+        self.model = LightningWhisperMLX(model=model_name, batch_size=6, quant=None)
+        language = self.canonical_language(language)
+        self.start_language = language
+        self.last_language = language
+
+        self.warmup()
+
+    def warmup(self) -> None:
+        logger.info(f"Warming up {self.__class__.__name__}")
+
+        # 2 warmup steps for no compile or compile mode with CUDA graphs capture
+        n_steps = 1
+        dummy_input = np.array([0] * 512)
+
+        for _ in range(n_steps):
+            with MLXLockContext(handler_name=self.__class__.__name__):
+                _ = self.model.transcribe(dummy_input)["text"].strip()
+
+    def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
+        logger.debug("infering whisper...")
+        started_at_s = perf_counter()
+
+        audio = vad_audio.audio
+        selected = vad_audio.runtime_config.selected_language if vad_audio.runtime_config else None
+        request_language = self.start_language if selected is None else selected
+        if request_language != "auto":
+            with MLXLockContext(handler_name=self.__class__.__name__):
+                transcription_dict = self.model.transcribe(audio, language=request_language)
+        else:
+            with MLXLockContext(handler_name=self.__class__.__name__):
+                transcription_dict = self.model.transcribe(audio)
+            language_code = transcription_dict["language"]
+            if language_code not in SUPPORTED_LANGUAGES:
+                logger.warning(f"Whisper detected unsupported language: {language_code}")
+            else:
+                self.last_language = language_code
+
+        pred_text = transcription_dict["text"].strip()
+        language_code = transcription_dict["language"]
+        # Same idea as ChatTTSHandler: MPS cache clear only on Apple Silicon.
+        if self.device == "mps":
+            torch.mps.empty_cache()
+
+        logger.debug("finished whisper inference")
+        console.print(f"[yellow]USER: {pred_text}")
+        logger.debug(f"Language Code Whisper: {language_code}")
+
+        if request_language == "auto":
+            language_code += "-auto"
+
+        if vad_audio.mode == "progressive":
+            yield PartialTranscription(
+                text=pred_text,
+                turn_id=vad_audio.turn_id,
+                turn_revision=vad_audio.turn_revision,
+            )
+            return
+
+        self._record_final_stt(vad_audio, perf_counter() - started_at_s)
+        yield Transcription(
+            text=pred_text,
+            language_code=language_code,
+            turn_id=vad_audio.turn_id,
+            turn_revision=vad_audio.turn_revision,
+            speech_stopped_at_s=vad_audio.speech_end_at_s,
+        )

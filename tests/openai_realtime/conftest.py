@@ -1,15 +1,15 @@
-import pytest
 from queue import Queue
 from threading import Event as ThreadingEvent
 
+import pytest
 from openai.types.realtime import RealtimeSessionCreateRequest
 from openai.types.realtime.realtime_audio_config import RealtimeAudioConfig
 from openai.types.realtime.realtime_audio_config_input import RealtimeAudioConfigInput
 from openai.types.realtime.realtime_audio_config_output import RealtimeAudioConfigOutput
 from openai.types.realtime.realtime_audio_formats import AudioPCM
 
-from api.openai_realtime.service import RealtimeService
-from api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.api.openai_realtime.service import RealtimeService
 
 
 def _session_16k() -> RealtimeSessionCreateRequest:
@@ -45,15 +45,16 @@ def should_listen():
 
 @pytest.fixture
 def service(runtime_config, text_prompt_queue, should_listen):
-    return RealtimeService(
-        runtime_config=runtime_config,
+    svc = RealtimeService(
         text_prompt_queue=text_prompt_queue,
         should_listen=should_listen,
     )
+    return svc
 
 
 @pytest.fixture
-def conn_id(service):
+def conn_id(service, runtime_config):
     cid = service.register()
+    service._state(cid).runtime_config = runtime_config
     yield cid
     service.unregister(cid)

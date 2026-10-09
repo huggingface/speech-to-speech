@@ -1,18 +1,21 @@
 import os
+
 os.environ['KERAS_BACKEND'] = 'torch'
 
-from time import perf_counter
+import logging
+
 import moonshine
 import torch
-from baseHandler import BaseHandler
 from rich.console import Console
-import logging
+
+from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.pipeline.messages import VADAudio
 
 logger = logging.getLogger(__name__)
 console = Console()
 
 
-class MoonshineSTTHandler(BaseHandler):
+class MoonshineSTTHandler(BaseHandler[VADAudio]):
     """
     Handles the Speech To Text generation using a Moonshine model.
     """
@@ -57,13 +60,10 @@ class MoonshineSTTHandler(BaseHandler):
                 f"{self.__class__.__name__}:  warmed up! time: {start_event.elapsed_time(end_event) * 1e-3:.3f} s"
             )
 
-    def process(self, spoken_prompt):
+    def process(self, vad_audio: VADAudio):
         logger.debug("infering moonshine...")
 
-        global pipeline_start
-        pipeline_start = perf_counter()
-
-        pred_ids = self.model.generate(spoken_prompt[None, :])
+        pred_ids = self.model.generate(vad_audio.audio[None, :])
         pred_text = self.tokenizer.decode_batch(pred_ids)[0]
 
         logger.debug("finished whisper inference")

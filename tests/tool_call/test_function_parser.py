@@ -2,38 +2,41 @@ import json
 
 import pytest
 
-from LLM.tool_call.function_call import (
+from speech_to_speech.LLM.tool_call import function_call as function_call_module
+from speech_to_speech.LLM.tool_call.function_call import (
     FunctionToolCall,
     extract_function_calls_from_text,
     parse_function_call,
 )
-from LLM.tool_call.function_tool import FunctionTool
-
+from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 
 # ---------------------------------------------------------------------------
 # parse_function_call – single calls
 # ---------------------------------------------------------------------------
 
-class TestParseFunctionCall:
 
-    @pytest.mark.parametrize("call_str, expected_name, expected_params", [
-        ("mobile.home()", "mobile.home", {}),
-        ("mobile.back()", "mobile.back", {}),
-        ("mobile.open_app(app_name='drupe')", "mobile.open_app", {"app_name": "drupe"}),
-        ("mobile.long_press(x=0.799, y=0.911)", "mobile.long_press", {"x": 0.799, "y": 0.911}),
-        ("mobile.terminate(status='success')", "mobile.terminate", {"status": "success"}),
-        ("answer('text')", "answer", {"__arg_0__": "text"}),
-        ("pyautogui.hscroll(page=-0.1)", "pyautogui.hscroll", {"page": -0.1}),
-        ("pyautogui.scroll(page=-0.1)", "pyautogui.scroll", {"page": -0.1}),
-        ("pyautogui.scroll(0.13)", "pyautogui.scroll", {"__arg_0__": 0.13}),
-        ("pyautogui.click(x=0.8102, y=0.9463)", "pyautogui.click", {"x": 0.8102, "y": 0.9463}),
-        ("pyautogui.hotkey(keys=['ctrl', 'c'])", "pyautogui.hotkey", {"keys": ["ctrl", "c"]}),
-        ("pyautogui.press(keys='enter')", "pyautogui.press", {"keys": "enter"}),
-        ("pyautogui.press(keys=['enter'])", "pyautogui.press", {"keys": ["enter"]}),
-        ("pyautogui.moveTo(x=0.04, y=0.405)", "pyautogui.moveTo", {"x": 0.04, "y": 0.405}),
-        ("pyautogui.write(message='bread buns')", "pyautogui.write", {"message": "bread buns"}),
-        ("pyautogui.dragTo(x=0.8102, y=0.9463)", "pyautogui.dragTo", {"x": 0.8102, "y": 0.9463}),
-    ])
+class TestParseFunctionCall:
+    @pytest.mark.parametrize(
+        "call_str, expected_name, expected_params",
+        [
+            ("mobile.home()", "mobile.home", {}),
+            ("mobile.back()", "mobile.back", {}),
+            ("mobile.open_app(app_name='drupe')", "mobile.open_app", {"app_name": "drupe"}),
+            ("mobile.long_press(x=0.799, y=0.911)", "mobile.long_press", {"x": 0.799, "y": 0.911}),
+            ("mobile.terminate(status='success')", "mobile.terminate", {"status": "success"}),
+            ("answer('text')", "answer", {"__arg_0__": "text"}),
+            ("pyautogui.hscroll(page=-0.1)", "pyautogui.hscroll", {"page": -0.1}),
+            ("pyautogui.scroll(page=-0.1)", "pyautogui.scroll", {"page": -0.1}),
+            ("pyautogui.scroll(0.13)", "pyautogui.scroll", {"__arg_0__": 0.13}),
+            ("pyautogui.click(x=0.8102, y=0.9463)", "pyautogui.click", {"x": 0.8102, "y": 0.9463}),
+            ("pyautogui.hotkey(keys=['ctrl', 'c'])", "pyautogui.hotkey", {"keys": ["ctrl", "c"]}),
+            ("pyautogui.press(keys='enter')", "pyautogui.press", {"keys": "enter"}),
+            ("pyautogui.press(keys=['enter'])", "pyautogui.press", {"keys": ["enter"]}),
+            ("pyautogui.moveTo(x=0.04, y=0.405)", "pyautogui.moveTo", {"x": 0.04, "y": 0.405}),
+            ("pyautogui.write(message='bread buns')", "pyautogui.write", {"message": "bread buns"}),
+            ("pyautogui.dragTo(x=0.8102, y=0.9463)", "pyautogui.dragTo", {"x": 0.8102, "y": 0.9463}),
+        ],
+    )
     def test_single_call(self, call_str, expected_name, expected_params):
         results = parse_function_call(call_str)
         assert len(results) == 1
@@ -41,9 +44,7 @@ class TestParseFunctionCall:
         assert results[0].parameters == expected_params
 
     def test_swipe_with_list_params(self):
-        results = parse_function_call(
-            "mobile.swipe(from_coord=[0.581, 0.898], to_coord=[0.601, 0.518])"
-        )
+        results = parse_function_call("mobile.swipe(from_coord=[0.581, 0.898], to_coord=[0.601, 0.518])")
         assert len(results) == 1
         assert results[0].function_name == "mobile.swipe"
         assert results[0].parameters["from_coord"] == [0.581, 0.898]
@@ -54,8 +55,8 @@ class TestParseFunctionCall:
 # parse_function_call – multiple positional arguments
 # ---------------------------------------------------------------------------
 
-class TestPositionalArguments:
 
+class TestPositionalArguments:
     def test_bare_identifiers(self):
         results = parse_function_call("function(arg1, arg2, arg3)")
         assert len(results) == 1
@@ -92,8 +93,8 @@ class TestPositionalArguments:
 # parse_function_call – nested parens / special characters (Bug 1 fixes)
 # ---------------------------------------------------------------------------
 
-class TestNestedParens:
 
+class TestNestedParens:
     def test_closing_paren_inside_string(self):
         results = parse_function_call("tool(msg='hello ) world')")
         assert len(results) == 1
@@ -120,8 +121,8 @@ class TestNestedParens:
 # parse_function_call – multi-line (multiple calls)
 # ---------------------------------------------------------------------------
 
-class TestMultiLineParsing:
 
+class TestMultiLineParsing:
     def test_two_calls_on_separate_lines(self):
         text = "mobile.wait(seconds=3)\nmobile.swipe(from_coord=[0.581, 0.898], to_coord=[0.601, 0.518])"
         results = parse_function_call(text)
@@ -134,8 +135,8 @@ class TestMultiLineParsing:
 # extract_function_calls_from_text
 # ---------------------------------------------------------------------------
 
-class TestExtractFromText:
 
+class TestExtractFromText:
     CODE_BLOCK_REGEX = r"<code>.*?</code>"
 
     def test_no_code_block_returns_original_text_no_calls(self):
@@ -165,6 +166,12 @@ class TestExtractFromText:
         assert "do.b" in names
         assert len(calls) == 2
 
+    def test_indented_multiline_code_block(self):
+        text = "Here:\n<code>\n    do.a(x=1)\n    do.b()\n</code>\nDone."
+        outside, calls = extract_function_calls_from_text(text, block_regex=self.CODE_BLOCK_REGEX)
+        assert [c.function_name for c in calls] == ["do.a", "do.b"]
+        assert calls[0].parameters == {"x": 1}
+
     def test_multiple_code_blocks(self):
         text = "Step 1\n<code>a.first()</code>\nStep 2\n<code>b.second()</code>\nDone"
         outside, calls = extract_function_calls_from_text(text, block_regex=self.CODE_BLOCK_REGEX)
@@ -190,10 +197,29 @@ class TestExtractFromText:
         assert len(calls) == 1
         assert calls[0].parameters == {"msg": "hello ) world"}
 
+    def test_recovers_simple_sibling_call_from_malformed_code_block(self, monkeypatch):
+        fallback_used = False
+        original_fallback = function_call_module._split_simple_calls_with_regex
+
+        def spy_fallback(source: str) -> list[str]:
+            nonlocal fallback_used
+            fallback_used = True
+            return original_fallback(source)
+
+        monkeypatch.setattr(function_call_module, "_split_simple_calls_with_regex", spy_fallback)
+        text = "Let me check.\n<code>camera(question='What is in front of me?') dance(</code>"
+        outside, calls = extract_function_calls_from_text(text, block_regex=self.CODE_BLOCK_REGEX)
+        assert "Let me check." in outside
+        assert fallback_used
+        assert len(calls) == 1
+        assert calls[0].function_name == "camera"
+        assert calls[0].parameters == {"question": "What is in front of me?"}
+
 
 # ---------------------------------------------------------------------------
 # to_realtime_function_tool_call – arg stripping & validation (Bug 2 fixes)
 # ---------------------------------------------------------------------------
+
 
 def _make_tool(name: str, properties: dict, required: list[str] | None = None) -> FunctionTool:
     schema = {"type": "object", "properties": properties}
@@ -203,18 +229,15 @@ def _make_tool(name: str, properties: dict, required: list[str] | None = None) -
 
 
 class TestToRealtimeToolCall:
-
-    def test_positional_args_stripped_when_required_present(self):
+    def test_positional_and_named_for_same_parameter_raises(self):
         fc = FunctionToolCall(
             function_name="greet",
             parameters={"__arg_0__": 1, "msg": "hi"},
             original_string="greet(1, msg='hi')",
         )
         tool = _make_tool("greet", {"msg": {"type": "string"}}, required=["msg"])
-        result = fc.to_realtime_function_tool_call([tool])
-        args = json.loads(result.arguments)
-        assert "__arg_0__" not in args
-        assert args == {"msg": "hi"}
+        with pytest.raises(ValueError, match="both a positional and a named value"):
+            fc.to_realtime_function_tool_call([tool])
 
     def test_undeclared_args_stripped_when_required_present(self):
         fc = FunctionToolCall(
@@ -228,17 +251,27 @@ class TestToRealtimeToolCall:
         assert "bogus" not in args
         assert args == {"msg": "hi"}
 
-    def test_raises_when_required_missing_after_strip(self):
+    def test_positional_binds_and_undeclared_named_still_stripped(self):
         fc = FunctionToolCall(
             function_name="greet",
             parameters={"__arg_0__": 1, "bogus": 2},
             original_string="greet(1, bogus=2)",
         )
         tool = _make_tool("greet", {"msg": {"type": "string"}}, required=["msg"])
+        result = fc.to_realtime_function_tool_call([tool])
+        assert json.loads(result.arguments) == {"msg": 1}
+
+    def test_raises_when_required_missing_and_nothing_to_bind(self):
+        fc = FunctionToolCall(
+            function_name="greet",
+            parameters={"bogus": 2},
+            original_string="greet(bogus=2)",
+        )
+        tool = _make_tool("greet", {"msg": {"type": "string"}}, required=["msg"])
         with pytest.raises(ValueError, match="Missing required"):
             fc.to_realtime_function_tool_call([tool])
 
-    def test_succeeds_with_no_required_after_full_strip(self):
+    def test_optional_only_tool_keeps_the_positional_value(self):
         fc = FunctionToolCall(
             function_name="noop",
             parameters={"__arg_0__": 1, "yy": 2},
@@ -246,8 +279,7 @@ class TestToRealtimeToolCall:
         )
         tool = _make_tool("noop", {"x": {"type": "integer"}})
         result = fc.to_realtime_function_tool_call([tool])
-        args = json.loads(result.arguments)
-        assert args == {}
+        assert json.loads(result.arguments) == {"x": 1}
 
     def test_no_collision_with_real_arg_prefix(self):
         """A real parameter named 'arg_0' should NOT be stripped."""
@@ -264,3 +296,99 @@ class TestToRealtimeToolCall:
         result = fc.to_realtime_function_tool_call([tool])
         args = json.loads(result.arguments)
         assert args == {"arg_0": 10, "x": 5}
+
+
+class TestPositionalArgumentBinding:
+    """Positional calls bind against the signature the tool prompt renders."""
+
+    def test_single_positional_binds_to_required_parameter(self):
+        tool = _make_tool("list_slots", {"month": {"type": "string"}}, required=["month"])
+        (call,) = parse_function_call("list_slots('June')")
+        result = call.to_realtime_function_tool_call([tool])
+        assert result.name == "list_slots"
+        assert json.loads(result.arguments) == {"month": "June"}
+
+    def test_multiple_positionals_bind_in_order(self):
+        tool = _make_tool(
+            "hold_slot",
+            {"date": {"type": "string"}, "time": {"type": "string"}},
+            required=["date", "time"],
+        )
+        (call,) = parse_function_call("hold_slot('2026-06-01', '14:30')")
+        result = call.to_realtime_function_tool_call([tool])
+        assert json.loads(result.arguments) == {"date": "2026-06-01", "time": "14:30"}
+
+    def test_mixed_positional_and_named(self):
+        tool = _make_tool(
+            "hold_slot",
+            {"date": {"type": "string"}, "time": {"type": "string"}},
+            required=["date"],
+        )
+        (call,) = parse_function_call("hold_slot('2026-06-01', time='14:30')")
+        result = call.to_realtime_function_tool_call([tool])
+        assert json.loads(result.arguments) == {"date": "2026-06-01", "time": "14:30"}
+
+    def test_named_only_call_is_unchanged(self):
+        tool = _make_tool("list_slots", {"month": {"type": "string"}}, required=["month"])
+        (call,) = parse_function_call("list_slots(month='June')")
+        result = call.to_realtime_function_tool_call([tool])
+        assert json.loads(result.arguments) == {"month": "June"}
+
+    def test_binds_against_signature_order_not_schema_order(self):
+        # signature_from_schema moves required-without-default parameters first,
+        # so a positional value binds to 'month', not to the optional 'limit'.
+        tool = _make_tool(
+            "list_slots",
+            {"limit": {"type": "integer", "default": 10}, "month": {"type": "string"}},
+            required=["month"],
+        )
+        (call,) = parse_function_call("list_slots('June')")
+        result = call.to_realtime_function_tool_call([tool])
+        assert json.loads(result.arguments) == {"month": "June"}
+
+    def test_positional_can_fill_an_optional_parameter(self):
+        tool = _make_tool(
+            "list_slots",
+            {"month": {"type": "string"}, "limit": {"type": "integer", "default": 10}},
+            required=["month"],
+        )
+        (call,) = parse_function_call("list_slots('June', 5)")
+        result = call.to_realtime_function_tool_call([tool])
+        assert json.loads(result.arguments) == {"month": "June", "limit": 5}
+
+    def test_too_many_positionals_raise(self):
+        tool = _make_tool("list_slots", {"month": {"type": "string"}}, required=["month"])
+        (call,) = parse_function_call("list_slots('June', 5)")
+        with pytest.raises(ValueError, match="Too many positional arguments"):
+            call.to_realtime_function_tool_call([tool])
+
+    def test_duplicate_positional_and_named_raises(self):
+        tool = _make_tool("list_slots", {"month": {"type": "string"}}, required=["month"])
+        (call,) = parse_function_call("list_slots('June', month='July')")
+        with pytest.raises(ValueError, match="both a positional and a named value"):
+            call.to_realtime_function_tool_call([tool])
+
+    def test_without_tools_positional_arguments_are_still_dropped(self):
+        (call,) = parse_function_call("list_slots('June')")
+        result = call.to_realtime_function_tool_call()
+        assert json.loads(result.arguments) == {}
+
+    def test_issue_577_ordering_example(self):
+        # From the issue: properties declared limit, then required query, render
+        # as search(query: str, limit: int = None), so the first positional
+        # argument binds to query.
+        tool = _make_tool(
+            "search",
+            {"limit": {"type": "integer"}, "query": {"type": "string"}},
+            required=["query"],
+        )
+        assert tool.to_code_prompt(include_args_doc=False).startswith("def search(query: str, limit: int = None)")
+        (call,) = parse_function_call("search('slots in June')")
+        result = call.to_realtime_function_tool_call([tool])
+        assert json.loads(result.arguments) == {"query": "slots in June"}
+
+    def test_positional_call_on_a_no_parameter_tool_raises(self):
+        tool = _make_tool("ping", {})
+        (call,) = parse_function_call("ping('now')")
+        with pytest.raises(ValueError, match="Too many positional arguments"):
+            call.to_realtime_function_tool_call([tool])
