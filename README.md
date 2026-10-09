@@ -168,10 +168,11 @@ macOS and non-macOS dependencies are resolved automatically via platform markers
 
 See the [configuration guide](./docs/configuration.md) for reusable blocks,
 named pipelines, environment references, and explicit Python startup.
-With a configured `primary` pipeline, start its server with:
+With a configured `primary` pipeline, start its server or run locally:
 
 ```bash
 speech-to-speech serve -f voice.yaml --name primary
+speech-to-speech local -f voice.yaml --name primary
 ```
 
 `local` runs one selected pipeline with the packaged loopback audio client.
