@@ -8,6 +8,8 @@ from openai.types.realtime import (
     ConversationItem,
     ConversationItemCreatedEvent,
     ConversationItemCreateEvent,
+    ConversationItemDeletedEvent,
+    ConversationItemDeleteEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
     ConversationItemInputAudioTranscriptionFailedEvent,
@@ -117,6 +119,7 @@ _EVENT_TYPE_TO_MODEL: dict[str, type[BaseModel]] = {
     "output_audio_buffer.clear": OutputAudioBufferClearEvent,
     "session.update": SessionUpdateEvent,
     "conversation.item.create": ConversationItemCreateEvent,
+    "conversation.item.delete": ConversationItemDeleteEvent,
     "conversation.item.truncate": ConversationItemTruncateEvent,
     "response.create": ResponseCreateEvent,
     "response.cancel": ResponseCancelEvent,
@@ -128,6 +131,7 @@ ClientEvent = Union[
     OutputAudioBufferClearEvent,
     SessionUpdateEvent,
     ConversationItemCreateEvent,
+    ConversationItemDeleteEvent,
     ConversationItemTruncateEvent,
     ResponseCreateEvent,
     ResponseCancelEvent,
@@ -142,6 +146,7 @@ ServerEvent = Union[
     InputAudioBufferSpeechStoppedEvent,
     InputAudioBufferCommittedEvent,
     ConversationItemCreatedEvent,
+    ConversationItemDeletedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionFailedEvent,
@@ -256,6 +261,8 @@ class ConnState(BaseModel):
     pending_input_terminals: dict[str, PendingInputTerminal] = Field(default_factory=dict)
     input_audio_duration_s: float = 0.0
     last_item_id: Optional[str] = None
+    acknowledged_item_ids: list[str] = Field(default_factory=list)
+    deleted_input_turn_ids: dict[str, None] = Field(default_factory=dict)
     current_response_params: RealtimeResponseCreateParams | None = None
     pending_assistant_item_id: Optional[str] = None
     pending_assistant_output_index: Optional[int] = None
@@ -297,7 +304,7 @@ class ConnState(BaseModel):
     # generating. Applying them mid-generation races the LLM handler's chat
     # write-back (cross-thread), so they are buffered here and flushed in order
     # once the response completes. See ConversationHandler.flush_deferred_items.
-    deferred_items: list[ConversationItem] = Field(default_factory=list)
+    deferred_items: list[ConversationItem | ConversationItemDeleteEvent] = Field(default_factory=list)
     # Preserve the standard insertion anchor supplied with deferred function
     # outputs so an image/output sequence can be applied in the intended order.
     # The anchor does not imply that the output owns the preceding image.
@@ -576,6 +583,11 @@ class RealtimeService:
         self.response.maybe_start_tool_followup_prefetch(conn_id)
         return events
 
+    def handle_conversation_item_delete(self, conn_id: str, event: ConversationItemDeleteEvent) -> list[ServerEvent]:
+        # Hidden follow-up work captured the old history; it cannot be reused.
+        self.response.discard_tool_followup_prefetch(conn_id)
+        return self.conversation.handle_conversation_item_delete(conn_id, event)
+
     def dispatch_pipeline_event(self, conn_id: str, event: PipelineEvent) -> list[ServerEvent]:
         """Route an internal pipeline event to the appropriate handler."""
         # Provider-reported usage is billable accounting, not client-visible
@@ -595,6 +607,10 @@ class RealtimeService:
             if failed_response_owns_event:
                 logger.info("Ignoring %s after response failure", event.type)
                 return []
+
+        if isinstance(event, _TURN_INPUT_EVENTS) and event.turn_id in self._state(conn_id).deleted_input_turn_ids:
+            self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
+            return []
 
         if self._is_stale_turn_event(event):
             if isinstance(event, (TranscriptionCompletedEvent, TranscriptionFailedEvent)):
@@ -707,6 +723,7 @@ class RealtimeService:
     def _on_transcription_completed(self, conn_id: str, event: TranscriptionCompletedEvent) -> list[ServerEvent]:
         """Handle a final STT transcription: emit protocol event, append to chat, trigger LM."""
         st = self._state(conn_id)
+        protocol_item_id = self.audio._input_item_id(conn_id, event.turn_id, event.turn_revision)
         completed_events = self.conversation.on_transcription_completed(conn_id, event)
         if not completed_events:
             self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
@@ -726,14 +743,17 @@ class RealtimeService:
         if event.speaker_attribution is not None:
             transcript = event.speaker_attribution.for_llm(transcript)
         user_item_id = accounting.user_item_id if accounting is not None else None
+        user_message = make_user_message(transcript)
+        if protocol_item_id is not None:
+            user_message.id = protocol_item_id
         if transcript:
             if accounting is not None and user_item_id:
                 replaced = cfg.chat.replace_user_message_text(user_item_id, transcript)
                 if not replaced:
-                    item = cfg.chat.add_item(make_user_message(transcript))
+                    item = cfg.chat.add_item(user_message)
                     accounting.user_item_id = item.id
             else:
-                item = cfg.chat.add_item(make_user_message(transcript))
+                item = cfg.chat.add_item(user_message)
                 if accounting is not None:
                     accounting.user_item_id = item.id
             supplied_item_id = accounting.user_item_id if accounting is not None else item.id
@@ -807,6 +827,7 @@ class RealtimeService:
     def _on_audio_input_completed(self, conn_id: str, event: AudioInputCompletedEvent) -> list[ServerEvent]:
         """Record final input audio and queue its realtime LM request."""
         st = self._state(conn_id)
+        protocol_item_id = self.audio._input_item_id(conn_id, event.turn_id, event.turn_revision)
         self.audio.release_input_item_state(conn_id, event.turn_id, event.turn_revision)
         self.response.discard_tool_followup_prefetch(conn_id)
         st.generation_done_tool_calls.clear()
@@ -827,6 +848,8 @@ class RealtimeService:
             if accounting is not None and accounting.user_item_id is not None:
                 st.runtime_config.chat.remove_user_message(accounting.user_item_id)
                 item.id = accounting.user_item_id
+            if protocol_item_id is not None:
+                item.id = protocol_item_id
             retained_item = st.runtime_config.chat.add_item(item)
             if accounting is not None:
                 accounting.user_item_id = retained_item.id
@@ -839,7 +862,7 @@ class RealtimeService:
 
         queue = self.text_prompt_queue
         if queue:
-            input_item_id = _generate_id("msg")
+            input_item_id = protocol_item_id or _generate_id("msg")
             self.record_input_turn(
                 conn_id, input_item_id, event.turn_id, event.turn_revision, event.speech_stopped_at_s
             )

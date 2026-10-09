@@ -32,6 +32,7 @@ from speech_to_speech.LLM.base_openai_compatible_language_model import WARMUP_MA
 from speech_to_speech.LLM.chat import (
     AUDIO_INPUT_HISTORY_PLACEHOLDER,
     Chat,
+    make_system_message,
     make_user_message,
 )
 from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
@@ -1824,3 +1825,26 @@ def test_response_history_precedes_speech_that_arrived_during_generation():
     list(handler.process(request))
 
     assert [part.text for item in chat.buffer for part in item.content if part.text] == ["A", "answer A", "B"]
+
+
+def test_responses_backend_keeps_injected_context_with_session_instructions():
+    handler = _make_handler(stream=False)
+    captured = []
+
+    def create(**kwargs):
+        captured.append(kwargs)
+        return _make_response([])
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    request = _make_request(chat_size=10)
+    request.runtime_config.session.instructions = "SESSION INSTRUCTIONS"
+    snapshot = make_system_message("CURRENT CHAT SNAPSHOT")
+    request.runtime_config.chat.add_item(snapshot)
+
+    for _ in range(2):
+        list(handler.process(request))
+        prompt = captured[-1]["input"][0]["content"][0]["text"]
+        assert "SESSION INSTRUCTIONS" in prompt
+        assert prompt.count("CURRENT CHAT SNAPSHOT") == 1
+        assert request.runtime_config.chat.init_chat_message is snapshot
+        assert snapshot.content[0].text == "CURRENT CHAT SNAPSHOT"
