@@ -173,7 +173,7 @@ class TokenUsageEvent(PipelineEvent):
 
 
 class AssistantResponseDoneEvent(PipelineEvent):
-    """Marks the end of ordered assistant output for one response."""
+    """Marks ordered output completion and the tool results used by this response."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
     history: ResponseHistory | None = Field(default=None, exclude=True, repr=False)
@@ -182,6 +182,7 @@ class AssistantResponseDoneEvent(PipelineEvent):
     status: Literal["completed", "incomplete"] = "completed"
     reason: ResponseIncompleteReason | None = None
     response_key: str | None = Field(default=None, exclude=True, repr=False)
+    input_tool_call_ids: list[str] = Field(default_factory=list)
     turn_id: str | None = None
     turn_revision: int | None = None
     cancel_generation: int | None = None

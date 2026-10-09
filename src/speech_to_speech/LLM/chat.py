@@ -448,6 +448,11 @@ class Chat:
             assert isinstance(recorded, RealtimeConversationItemFunctionCall)
             return recorded
 
+    def tool_output_call_ids(self) -> list[str]:
+        """Return the tool-result IDs present in this chat snapshot."""
+        with self._lock:
+            return sorted({item.call_id for item in self.buffer if item.type == "function_call_output"})
+
     def has_pending_tool_calls(self) -> bool:
         """Whether the conversation is waiting for any function-call output."""
         with self._lock:

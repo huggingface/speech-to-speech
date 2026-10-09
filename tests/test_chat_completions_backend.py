@@ -50,6 +50,7 @@ from speech_to_speech.pipeline.messages import (
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from tests.llm_history import drive_llm
+from tests.turns import reopen
 
 # ── Fakes ────────────────────────────────────────────────────────────────────
 
@@ -162,7 +163,7 @@ def _drive(
         session.tool_choice = tool_choice
     rc = RuntimeConfig(chat=chat, session=session)
     req = GenerateResponseRequest(
-        runtime_config=rc, response=response, language_code="de", turn_id="t", turn_revision=0
+        runtime_config=rc, response=response, language_code="de", turn_id="turn_1", turn_revision=0
     )
     text, tools_out, usage, end = "", [], None, None
     for out in drive_llm(handler, req):
@@ -953,12 +954,12 @@ def test_cancelled_provider_failure_does_not_emit_fallback():
 
 def test_stale_provider_failure_does_not_emit_fallback():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("t", 0)
+    tracker.start_turn()
     h = _make_handler(stream=True)
     h.speculative_turns = tracker
 
     def fail(**kwargs):
-        tracker.observe("t", 1)
+        reopen(tracker)
         raise RuntimeError("stale request failed")
 
     h.client.chat.completions.create = fail

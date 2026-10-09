@@ -16,6 +16,7 @@ from speech_to_speech.LLM.chat import make_user_audio_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AudioInputCompletedEvent,
+    PipelineEvent,
     ResponseFailedEvent,
     SpeechStartedEvent,
     SpeechStoppedEvent,
@@ -154,10 +155,14 @@ async def test_late_client_tool_followup_does_not_commit_unfinished_speech(monke
         assert tracker.phase == TurnPhase.LISTENING
         tool_release.set()
         for _ in range(100):
-            if any(p["type"] == "response.create" for p in sent):
+            if sent:
                 break
             await asyncio.sleep(0.01)
-        assert [p["type"] for p in sent] == ["conversation.item.create", "response.create"]
+        await asyncio.sleep(0.05)
+        # The packaged client submits the output but does not talk over the user.
+        assert [p["type"] for p in sent] == ["conversation.item.create"]
+        # Another Realtime client can still request a reply during speech.
+        coordinator.handle_event(service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create")))
         followup = prompts.get_nowait()
         service.dispatch_pipeline_event(
             conn_id,
@@ -382,3 +387,154 @@ def test_direct_audio_chat_item_retains_its_input_identity(runtime_config):
     assert service.response_input_turn(conn_id) == ("turn_1", 0, 123.0)
     assert tracker.phase == TurnPhase.LISTENING
     service.unregister(conn_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "backend,history_size",
+    [
+        pytest.param("local", 10, id="local-backend"),
+        pytest.param("responses", 1, id="trimmed-history"),
+    ],
+)
+async def test_completed_answer_suppresses_duplicate_tool_followup(
+    service, conn_id, runtime_config, text_prompt_queue, backend, history_size
+):
+    """Real completion/service/client flow; only model output and speech events are scripted."""
+    import json
+    from types import SimpleNamespace
+
+    from openai.types.responses import ResponseCompletedEvent
+
+    from speech_to_speech.api.openai_realtime.tool_followup import TOOL_FOLLOWUP_COVERED
+    from speech_to_speech.LLM.chat import Chat, make_user_message
+    from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
+    from speech_to_speech.pipeline.messages import EndOfResponse, LLMResponseChunk
+    from tests.openai_realtime.test_audio_client import (
+        TOOL_DEFINITION,
+        RecordingConnection,
+        done_tool_executor,
+        function_call,
+        response_done,
+        wait_until,
+    )
+    from tests.test_response_overrides import _RecordingLocalHandler
+    from tests.test_responses_api_language_model import (
+        _make_handler,
+        _make_output_item_done_event,
+        _make_stream,
+        _make_text_delta_event,
+    )
+
+    runtime_config.chat = Chat(history_size)
+    runtime_config.chat.add_item(make_user_message("Find flights to Paris."))
+    runtime_config.chat.add_ordered_function_call(
+        RealtimeConversationItemFunctionCall(
+            type="function_call", id="fc_1", call_id="call_1", name="lookup", arguments="{}"
+        )
+    )
+    connection = RecordingConnection()
+    coordinator = _ToolCallCoordinator(
+        connection, RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=done_tool_executor)
+    )
+    try:
+        coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.speech_started", item_id="user_2"))
+        coordinator.handle_event(response_done(output=[function_call("call_1")]))
+        await wait_until(lambda: len(connection.sent) == 1)
+        service.handle_conversation_item_create(conn_id, ConversationItemCreateEvent.model_validate(connection.sent[0]))
+        runtime_config.chat.add_item(make_user_message("And hotels?"))
+        created = service.handle_response_create(
+            conn_id, ResponseCreateEvent(type="response.create", response={"output_modalities": ["text"]})
+        )
+        delayed_create = None
+        if backend == "responses":
+            # Commitment can arrive before response.created reaches the client.
+            # Save the resulting create and deliver it only after the answer.
+            coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.committed", item_id="user_2"))
+            await coordinator._maybe_send_follow_up()
+            delayed_create = ResponseCreateEvent.model_validate(connection.sent[-1])
+            assert delayed_create.type == "response.create"
+        coordinator.handle_event(created)
+        coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.committed", item_id="user_2"))
+        request = text_prompt_queue.get_nowait()
+        model_input_ids = []
+        if backend == "local":
+            # Transformers and MLX share this real BaseLanguageModelHandler.process.
+            handler = object.__new__(_RecordingLocalHandler)
+            handler.cancel_scope = handler.speculative_turns = handler.compactor = None
+            handler.enable_lang_prompt = False
+            handler.tokenizer = SimpleNamespace(encode=lambda _text: [])
+            handler.emit_text = True
+        else:
+            handler = _make_handler()
+
+            def provider_create(**kwargs):
+                model_input_ids.extend(
+                    item["call_id"] for item in kwargs["input"] if item.get("type") == "function_call_output"
+                )
+                return _make_stream(
+                    [
+                        _make_text_delta_event("Flights are ready."),
+                        _make_output_item_done_event(content="Flights are ready."),
+                        ResponseCompletedEvent.model_construct(
+                            type="response.completed", response=SimpleNamespace(status="completed", usage=None)
+                        ),
+                    ]
+                )
+
+            handler.client = SimpleNamespace(responses=SimpleNamespace(create=provider_create))
+        outputs = list(handler.process(request))
+        terminal = next(item for item in outputs if isinstance(item, EndOfResponse))
+        assert terminal.error is None
+        if backend == "local":
+            model_input_ids = [item.call_id for item in handler.seen_chat.buffer if item.type == "function_call_output"]
+        assert model_input_ids == ["call_1"]
+        for chunk in outputs:
+            if isinstance(chunk, LLMResponseChunk):
+                for reply in service.dispatch_pipeline_event(
+                    conn_id, AssistantOutputEvent(response_key=request.response_key, parts=chunk.parts)
+                ):
+                    coordinator.handle_event(reply)
+        # Use the actual processor to forward completion facts; do not forge an acknowledgement.
+        logical_done = Queue()
+        processor = LMOutputProcessor.__new__(LMOutputProcessor)
+        processor.setup(text_output_queue=logical_done)
+        for completion in processor.process(terminal):
+            if isinstance(completion, PipelineEvent):
+                service.dispatch_pipeline_event(conn_id, completion)
+        while not logical_done.empty():
+            service.dispatch_pipeline_event(conn_id, logical_done.get_nowait())
+        finished = service.finish_response(conn_id, response_key=request.response_key)
+        answer = next(event.response for event in finished if event.type == "response.done")
+        assert answer.status == "completed" and answer.output
+        for reply in finished:
+            coordinator.handle_event(reply)
+        await coordinator._maybe_send_follow_up()
+        creates = [event for event in connection.sent if event["type"] == "response.create"]
+        followup = delayed_create or (ResponseCreateEvent.model_validate(creates[-1]) if creates else None)
+        result = service.handle_response_create(conn_id, followup) if followup else None
+        print(
+            json.dumps(
+                {
+                    "backend": backend,
+                    "model_input_tool_ids": model_input_ids,
+                    "completion_ack_ids": terminal.input_tool_call_ids,
+                    "answer_status": answer.status,
+                    "answer_output_items": len(answer.output),
+                    "retained_tool_ids": [
+                        item.call_id for item in runtime_config.chat.buffer if item.type == "function_call_output"
+                    ],
+                    "automatic_creates_sent": len(creates),
+                    "server_followup_result": result.type if result else None,
+                },
+                indent=2,
+            )
+        )
+        if backend == "local":
+            assert not creates, "local answer included call_1, but client sent a redundant follow-up"
+        else:
+            assert result.type == "error" and result.error.type == TOOL_FOLLOWUP_COVERED, (
+                "answer included call_1, but trimming let a delayed duplicate create through"
+            )
+    finally:
+        await coordinator.close()

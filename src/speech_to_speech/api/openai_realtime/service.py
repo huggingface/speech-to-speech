@@ -63,6 +63,7 @@ from speech_to_speech.api.openai_realtime.input_state import (
     SpeechToSpeechInputAudioTranscriptionSnapshotEvent,
 )
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.api.openai_realtime.visemes import SpeechToSpeechVisemesEvent
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
@@ -135,6 +136,7 @@ ClientEvent = Union[
 ]
 
 ServerEvent = Union[
+    SpeechToSpeechVisemesEvent,
     SessionCreatedEvent,
     SessionUpdatedEvent,
     RealtimeErrorEvent,
@@ -290,6 +292,9 @@ class ConnState(BaseModel):
     # calls establish which turn a later generation can actually answer.
     input_turn_by_item_id: dict[str, InputTurnReference] = Field(default_factory=dict)
     input_turn_by_call_id: dict[str, InputTurnReference] = Field(default_factory=dict)
+    response_tool_inputs: dict[str, set[str]] = Field(default_factory=dict)
+    # Recent acknowledgements outlive history trimming, with bounded retention.
+    answered_tool_call_ids: dict[str, None] = Field(default_factory=dict)
     # Client conversation.item.create items that arrived while a response was
     # generating. Applying them mid-generation races the LLM handler's chat
     # write-back (cross-thread), so they are buffered here and flushed in order

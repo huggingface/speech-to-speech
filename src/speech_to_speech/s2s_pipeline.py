@@ -498,13 +498,30 @@ def _build_handlers(
         },
     )
 
-    tts_context = handler_context(lm_processed_queue, send_audio_chunks_queue)
+    tts_output_queue: Queue[AudioOutItem] = Queue() if module_kwargs.enable_visemes else send_audio_chunks_queue
+    tts_context = handler_context(lm_processed_queue, tts_output_queue)
     tts = create_backend_handler(
         tts_backend,
         tts_context,
     )
 
-    return [vad, *side_handlers, *speech_input_handlers, lm, lm_processor, tts]
+    handlers = [vad, *side_handlers, *speech_input_handlers, lm, lm_processor, tts]
+    if module_kwargs.enable_visemes:
+        from speech_to_speech.STV.w2v_stv_handler import Wav2Vec2STVHandler
+
+        handlers.append(
+            Wav2Vec2STVHandler(
+                stop_event,
+                queue_in=tts_output_queue,
+                queue_out=send_audio_chunks_queue,
+                setup_kwargs={
+                    "model_name": module_kwargs.stv_model_name,
+                    "device": module_kwargs.device or module_kwargs.stv_device,
+                    "cancel_scope": cancel_scope,
+                },
+            )
+        )
+    return handlers
 
 
 def _stt_session_languages(selection: BackendSelection, handler: Any) -> set[str] | None:
@@ -611,7 +628,8 @@ def _build_pipeline_unit(
         stt_selection.name == "openai-realtime" and isinstance(setup_language, str) and bool(setup_language.strip())
     )
 
-    tts_module = modules[type(handlers[-1]).__module__]
+    tts_handler = handlers[-2] if module_kwargs.enable_visemes else handlers[-1]
+    tts_module = modules[type(tts_handler).__module__]
     if tts_selection.name == "kokoro":
         service.tts_supported_languages = {"en", "ja", "zh", "fr", "es", "it", "pt", "hi"}
     elif tts_selection.name == "facebookMMS":
