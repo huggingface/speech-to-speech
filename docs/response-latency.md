@@ -44,7 +44,7 @@ are added only to terminal responses.
 | --- | --- | --- |
 | `stt` | `parakeet-tdt`, `openai`, `openai-realtime`, `vllm-realtime`, `whisper`, `whisper-mlx`, `mlx-audio-whisper`, `faster-whisper`, `qwen3-asr` | `parakeet-unified`, `paraformer` |
 | `llm` | `transformers`, `mlx-lm`, `responses-api`, `chat-completions` | None of the built-in LLM backends |
-| `tts_ttfa`, `e2e` | `qwen3`, `openai` | `chatTTS`, `facebookMMS`, `omnivoice`, `pocket`, `kokoro`, `supertonic` |
+| `tts_ttfa`, `e2e` | `qwen3`, `openai`, `pocket` | `chatTTS`, `facebookMMS`, `omnivoice`, `kokoro`, `supertonic` |
 
 `--stt none` deliberately has no STT measurement. Any field is also `n/a`
 when its stage did not run, produced no audio, or its measurement was unavailable.

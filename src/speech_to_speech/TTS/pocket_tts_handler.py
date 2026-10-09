@@ -308,7 +308,7 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
         logger.debug("Generating audio: %s", transcript_for_log(text))
 
         try:
-            yield from self._stream_pcm(text, gen)
+            yield from self._stream_pcm(tts_input, text, gen)
         except Exception:
             if getattr(self, "phonemizer", None) is None:
                 raise
@@ -337,9 +337,10 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
     def on_session_end(self) -> None:
         self._failed_responses.clear()
 
-    def _stream_pcm(self, text: str, gen: int | None) -> Iterator[TTSOut]:
+    def _stream_pcm(self, tts_input: TTSIn, text: str, gen: int | None) -> Iterator[TTSOut]:
         pipeline_start = perf_counter()
         first_chunk = True
+        first_yielded = True
 
         from speech_to_speech.api.openai_realtime.utils import StreamingPcm16Resampler
 
@@ -349,12 +350,37 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
         def cancelled() -> bool:
             return gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen)
 
+        def emit(block: np.ndarray) -> Iterator[TTSOut]:
+            nonlocal first_yielded
+            if first_yielded:
+                if tts_input.speech_stopped_at_s is not None:
+                    latency_s = max(0.0, perf_counter() - tts_input.speech_stopped_at_s)
+                    store = getattr(self, "turn_latency_store", None)
+                    tracker = store.get_response(tts_input.response_key) if store else None
+                    if tracker is not None:
+                        tracker.record_e2e(latency_s)
+                    logger.info(
+                        "Last speech detected to first speech out: %.3fs (turn=%s rev=%s)",
+                        latency_s,
+                        tts_input.turn_id,
+                        tts_input.turn_revision,
+                    )
+                first_yielded = False
+            yield block
+
         for audio_chunk in self._generate_audio(text, gen):
             if cancelled():
                 logger.info("TTS generation cancelled (interruption)")
                 return
             if first_chunk:
-                logger.debug(f"Time to first audio: {perf_counter() - pipeline_start:.3f}s")
+                # Provider audio, before resample / blocksize assembly — same
+                # contract as OpenAI-compatible / Qwen3 tts_ttfa.
+                ttfa_s = perf_counter() - pipeline_start
+                logger.debug(f"Time to first audio: {ttfa_s:.3f}s")
+                store = getattr(self, "turn_latency_store", None)
+                tracker = store.get_response(tts_input.response_key) if store else None
+                if tracker is not None:
+                    tracker.record_tts_ttfa(ttfa_s)
                 first_chunk = False
 
             # Saturate before converting, so peaks cannot wrap around as int16.
@@ -367,7 +393,7 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
             while len(pending) >= self.blocksize:
                 if cancelled():
                     return
-                yield pending[: self.blocksize].copy()
+                yield from emit(pending[: self.blocksize].copy())
                 pending = pending[self.blocksize :]
 
         if cancelled():
@@ -380,4 +406,4 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
             block = pending[index : index + self.blocksize]
             if len(block) < self.blocksize:
                 block = np.pad(block, (0, self.blocksize - len(block)))
-            yield block.copy()
+            yield from emit(block.copy())

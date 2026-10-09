@@ -379,6 +379,70 @@ def test_pocket_pcm_conversion_saturates_instead_of_wrapping():
     assert np.array_equal(output[0][:4], np.array([32767, -32767, 32767, -32767], dtype=np.int16))
 
 
+def test_pocket_records_ttfa_at_first_provider_chunk_and_preserves_first_audio(monkeypatch):
+    """TTFA is provider audio; later segments must not overwrite first-audio fields."""
+    import torch
+
+    import speech_to_speech.TTS.pocket_tts_handler as pocket_module
+    from speech_to_speech.pipeline.messages import TTSInput
+    from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
+
+    clock = [100.0]
+    monkeypatch.setattr(pocket_module, "perf_counter", lambda: clock[0])
+
+    handler, _ = _farsi_handler()
+    handler.phonemizer = None
+    handler.sample_rate = handler.model.sample_rate
+    handler.blocksize = 4
+    store = handler.turn_latency_store = TurnLatencyStore()
+    tracker = store.get_or_create_response("resp-1", turn_id="turn_1", turn_revision=0)
+
+    def stream(*args, **kwargs):
+        clock[0] = 100.05
+        yield torch.full((4,), 0.1)
+        clock[0] = 100.50
+        yield torch.full((4,), 0.2)
+
+    handler.model.generate_audio_stream = stream
+    outputs = list(
+        handler.process(
+            TTSInput(
+                text="Hello",
+                response_key="resp-1",
+                turn_id="turn_1",
+                turn_revision=0,
+                speech_stopped_at_s=99.0,
+            )
+        )
+    )
+
+    assert outputs
+    assert tracker.tts_ttfa_s == pytest.approx(0.05)
+    assert tracker.e2e_s == pytest.approx(1.05)
+
+    clock[0] = 200.0
+
+    def later_stream(*args, **kwargs):
+        clock[0] = 200.40
+        yield torch.full((4,), 0.3)
+
+    handler.model.generate_audio_stream = later_stream
+    list(
+        handler.process(
+            TTSInput(
+                text="Again",
+                response_key="resp-1",
+                turn_id="turn_1",
+                turn_revision=0,
+                speech_stopped_at_s=99.0,
+            )
+        )
+    )
+
+    assert tracker.tts_ttfa_s == pytest.approx(0.05)
+    assert tracker.e2e_s == pytest.approx(1.05)
+
+
 @pytest.mark.parametrize("output_rate", [16000, 24000])
 def test_pocket_resampling_matches_whole_signal_across_chunk_boundaries(output_rate):
     import numpy as np
