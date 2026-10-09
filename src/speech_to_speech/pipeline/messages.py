@@ -208,6 +208,7 @@ class EndOfResponse(PipelineMessage):
     status: Literal["completed", "incomplete"] = "completed"
     reason: ResponseIncompleteReason | None = None
     cleanup_only: bool = False
+    input_tool_call_ids: list[str] = Field(default_factory=list)
 
 
 # ── LMOutputProcessor → TTS ──────────────────────────────────────────

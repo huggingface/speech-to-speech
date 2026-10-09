@@ -800,6 +800,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             turn_revision=ctx.turn_revision,
             cancel_generation=ctx.cancel_generation,
             response_key=request.response_key,
+            input_tool_call_ids=active_chat.tool_output_call_ids() if history_committed else [],
         )
 
     def on_session_end(self) -> None:
