@@ -27,9 +27,11 @@ from speech_to_speech.LLM.chat import (
 )
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
+    PartialTranscriptionEvent,
     SpeechStartedEvent,
     SpeechStoppedEvent,
     TranscriptionCompletedEvent,
+    TranscriptionFailedEvent,
 )
 from speech_to_speech.pipeline.messages import AssistantTextPart, EndOfResponse, LLMResponseChunk
 from tests.test_response_overrides import _RecordingLocalHandler
@@ -221,6 +223,76 @@ def test_spoken_user_is_deletable_by_wire_id(service, conn_id):
     )
     assert not service._state(conn_id).runtime_config.chat.buffer
     assert service.text_prompt_queue.qsize() == queued
+
+
+@pytest.mark.parametrize("delete_newest", [False, True])
+def test_delete_committed_speech_before_transcription_preserves_other_item(service, conn_id, delete_newest):
+    st = service._state(conn_id)
+    items = []
+    for turn_id, duration_s in [("first", 1.25), ("second", 2.5)]:
+        started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id=turn_id, turn_revision=0))
+        item_id = next(event.item_id for event in started if event.type == "input_audio_buffer.speech_started")
+        stopped = service.dispatch_pipeline_event(
+            conn_id, SpeechStoppedEvent(turn_id=turn_id, turn_revision=0, duration_s=duration_s)
+        )
+        assert any(event.type == "conversation.item.created" and event.item.id == item_id for event in stopped)
+        items.append((turn_id, item_id, duration_s))
+    assert not st.runtime_config.chat.buffer
+    deleted_turn, deleted_id, _ = items[int(delete_newest)]
+    kept_turn, kept_id, kept_duration = items[int(not delete_newest)]
+    events = service.handle_conversation_item_delete(
+        conn_id, ConversationItemDeleteEvent(type="conversation.item.delete", item_id=deleted_id)
+    )
+    assert [event.type for event in events] == ["conversation.item.deleted"]
+    assert events[0].item_id == deleted_id
+    assert set(st.input_items) == {kept_id}
+    assert set(st.pending_input_terminals) == {kept_id}
+    assert st.input_item_by_turn_revision == {(kept_turn, 0): kept_id}
+    assert st.acknowledged_item_ids == [kept_id]
+    assert st.last_item_id == kept_id
+
+    for late_event in [
+        PartialTranscriptionEvent(delta="deleted speech", turn_id=deleted_turn, turn_revision=0),
+        TranscriptionCompletedEvent(transcript="deleted speech", turn_id=deleted_turn, turn_revision=0),
+        TranscriptionFailedEvent(message="late failure", turn_id=deleted_turn, turn_revision=0),
+    ]:
+        assert service.dispatch_pipeline_event(conn_id, late_event) == []
+    assert service.audio.resolve_input_terminals(conn_id) == []
+    assert not st.runtime_config.chat.buffer
+    assert service.text_prompt_queue.empty()
+    assert st.response_usage.audio_duration_s == 0.0
+
+    repeated = service.handle_conversation_item_delete(
+        conn_id,
+        ConversationItemDeleteEvent(type="conversation.item.delete", item_id=deleted_id, event_id="repeated_delete"),
+    )
+    assert repeated[0].type == "error"
+    assert repeated[0].error.type == "conversation_item_not_found"
+    assert repeated[0].error.event_id == "repeated_delete"
+
+    completed = service.dispatch_pipeline_event(
+        conn_id, TranscriptionCompletedEvent(transcript="keep this speech", turn_id=kept_turn, turn_revision=0)
+    )
+    assert len(completed) == 1
+    assert completed[0].item_id == kept_id
+    assert completed[0].usage.seconds == kept_duration
+    assert st.runtime_config.chat.buffer[0].id == kept_id
+    assert st.response_usage.audio_duration_s == kept_duration
+    assert service.text_prompt_queue.qsize() == 1
+
+
+def test_delete_uncommitted_speech_does_not_remove_input_state(service, conn_id):
+    started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="speaking", turn_revision=0))
+    item_id = started[0].item_id
+    events = service.handle_conversation_item_delete(
+        conn_id, ConversationItemDeleteEvent(type="conversation.item.delete", item_id=item_id, event_id="too_early")
+    )
+    assert events[0].type == "error"
+    assert events[0].error.event_id == "too_early"
+    st = service._state(conn_id)
+    assert item_id in st.input_items
+    assert st.input_item_by_turn_revision == {("speaking", 0): item_id}
+    assert not st.deleted_input_turn_ids
 
 
 def test_delete_tail_restores_staged_call_predecessor(service, conn_id):

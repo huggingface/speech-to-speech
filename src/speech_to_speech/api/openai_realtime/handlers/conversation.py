@@ -162,7 +162,10 @@ class ConversationHandler(RealtimeBaseHandler):
         st = self._state(conn_id)
         chat = st.runtime_config.chat
         removed = chat.delete_item(event.item_id)
-        if removed is None:
+        # Committed speech is already on the wire while STT still owns its
+        # input state; its Chat entry is only written when transcription ends.
+        committed_input = event.item_id in st.input_items and event.item_id in st.acknowledged_item_ids
+        if removed is None and not committed_input:
             error = self.make_error(
                 f"No conversation item with id '{event.item_id}' found.", "conversation_item_not_found"
             )
@@ -170,13 +173,24 @@ class ConversationHandler(RealtimeBaseHandler):
             error.error.event_id = event.event_id
             return [error]
         reference = st.input_turn_by_item_id.pop(event.item_id, None)
+        if reference is None:
+            reference = next(
+                (
+                    (turn_id, revision, None)
+                    for (turn_id, revision), item_id in st.input_item_by_turn_revision.items()
+                    if item_id == event.item_id
+                ),
+                None,
+            )
         if reference is not None and reference[0] is not None:
             st.deleted_input_turn_ids[reference[0]] = None
             while len(st.deleted_input_turn_ids) > 128:
                 st.deleted_input_turn_ids.pop(next(iter(st.deleted_input_turn_ids)))
-        retained_ids = chat.item_ids()
+        st.pending_input_terminals.pop(event.item_id, None)
+        self._service.audio._release_input_item_state_by_id(conn_id, event.item_id)
+        retained_ids = chat.item_ids() | st.input_items.keys()
         st.acknowledged_item_ids = [item_id for item_id in st.acknowledged_item_ids if item_id in retained_ids]
-        if removed.type == "function_call" and removed.call_id is not None:
+        if removed is not None and removed.type == "function_call" and removed.call_id is not None:
             st.input_turn_by_call_id.pop(removed.call_id, None)
         if st.last_item_id == event.item_id:
             st.last_item_id = st.acknowledged_item_ids[-1] if st.acknowledged_item_ids else None
