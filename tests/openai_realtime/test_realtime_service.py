@@ -5,6 +5,7 @@ validated for correct type, attributes, and state transitions.
 """
 
 import base64
+import hashlib
 import json
 from queue import Queue
 from threading import Event, Thread
@@ -54,6 +55,7 @@ from speech_to_speech.api.openai_realtime.service import (
     SpeechToSpeechInputAudioTranscriptionSnapshotEvent,
 )
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
+from speech_to_speech.LLM.tool_call.function_call import FunctionToolCall
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
@@ -2730,6 +2732,55 @@ class TestResponseDoneOutputItems:
     calls from response.done (rather than only the incremental
     response.function_call_arguments.done event) never see them.
     """
+
+    def test_generated_tool_call_accepts_livekit_output_and_followup(self, service, conn_id, text_prompt_queue):
+        tool = (
+            FunctionToolCall(function_name="lookup", parameters={}, original_string="lookup()")
+            .to_realtime_function_tool_call()
+            .model_copy(update={"status": "completed"})
+        )
+        chat = service._state(conn_id).runtime_config.chat
+        call = RealtimeConversationItemFunctionCall.model_validate(tool.model_dump())
+        chat.add_ordered_function_call(call)
+        stream_events = service.dispatch_pipeline_event(conn_id, AssistantOutputEvent(tools=[tool]))
+        done = next(e for e in service.finish_response(conn_id) if isinstance(e, ResponseDoneEvent))
+        emitted_call = next(item for item in done.response.output if item.type == "function_call")
+        assert emitted_call.call_id == tool.call_id
+        for event in stream_events:
+            if isinstance(event, ResponseFunctionCallArgumentsDoneEvent):
+                assert event.call_id == tool.call_id
+                assert event.item_id == tool.id
+            elif isinstance(event, (ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent)):
+                assert event.item.call_id == tool.call_id
+                assert event.item.id == tool.id
+
+        # LiveKit Agents 1.8.5's _shorten_call_id hashes IDs longer than 32 characters.
+        output_call_id = emitted_call.call_id
+        if len(output_call_id) > 32:
+            output_call_id = hashlib.sha256(output_call_id.encode()).hexdigest()[:32]
+        result = service.handle_conversation_item_create(
+            conn_id,
+            ConversationItemCreateEvent(
+                type="conversation.item.create",
+                item={"type": "function_call_output", "call_id": output_call_id, "output": "sunny"},
+            ),
+        )
+        assert len(result) == 1 and isinstance(result[0], ConversationItemCreatedEvent)
+        assert output_call_id == tool.call_id
+        assert len(tool.call_id) <= 32
+        assert chat.buffer[-1].call_id == tool.call_id
+        assert not chat.has_pending_tool_calls()
+        assert not chat._ordered_pending_calls
+
+        result = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
+        assert isinstance(result, ResponseCreatedEvent)
+        request = text_prompt_queue.get_nowait()
+        assert isinstance(request, GenerateResponseRequest)
+        assert request.runtime_config.chat.tool_output_call_ids() == [tool.call_id]
+        service.dispatch_pipeline_event(conn_id, AssistantOutputEvent(text="It is sunny."))
+        followup_done = next(e for e in service.finish_response(conn_id) if isinstance(e, ResponseDoneEvent))
+        assert followup_done.response.status == "completed"
+        assert followup_done.response.output[0].content[0].transcript == "It is sunny."
 
     def test_output_includes_function_call_item(self, service, conn_id):
         service.dispatch_pipeline_event(
