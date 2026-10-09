@@ -5,14 +5,15 @@ includes its turn, revision, response key, terminal status, and available stage
 durations:
 
 ```text
-Turn turn_3 rev=0 latency: stt=0.18s llm=1.24s tts_ttfa=0.12s e2e=2.01s vad_decision=0.36s hold=0.24s smart_turn_status=complete status=completed response_key=...
+Turn turn_3 rev=0 latency: stt=0.18s llm=1.24s tts_ttfa=0.12s e2e=2.01s vad_settle=0.61s vad_decision=0.36s hold=0.24s smart_turn_status=complete status=completed mlx_lock_wait=0.02s[ParakeetSTT-Progressive:0.02s] mlx_lock_hold=0.88s[Qwen3TTS:0.88s]
 ```
 
 The same record is available with `speech-to-speech local` and
 `speech-to-speech serve`.
 `response_key` distinguishes a tool call from its spoken follow-up; both can
 belong to the same turn and revision. A follow-up does not repeat the original
-STT duration.
+STT duration. Optional log-only fields such as `vad_settle`, `mlx_lock_*`, and
+`tts=cut` appear only when they have something to report.
 
 The terminal `response.done` event also carries the record in the
 reserved `response.metadata["speech_to_speech.turn_latency"]` key. Realtime
@@ -27,6 +28,8 @@ first generated audio. It renames `smart_wait_s` to `hold_s` and removes
 `llm_ttft_s`, `smart_analysis_s`, `smart_grace_s`, `smart_delay_s`, and
 `mlx_lock_wait_s` from metadata. The demo accepts version 1 records but labels
 their old handoff boundary explicitly instead of presenting them as new E2E.
+Log-only fields from later work (`vad_settle`, `mlx_lock_hold`, `tts=cut`) stay
+out of metadata and the demo so the v2 payload size and schema remain stable.
 
 Durations are seconds; existing fields retain their original precision and
 the new VAD/Smart Turn fields use nanosecond precision in metadata. The
@@ -48,9 +51,10 @@ are added only to terminal responses.
 
 `--stt none` deliberately has no STT measurement. Any field is also `n/a`
 when its stage did not run, produced no audio, or its measurement was unavailable.
-An abandoned response has no terminal record. `mlx_lock_wait` is included only
-in terminal logs on macOS, never in response metadata or the demo. It measures
-the existing MLX lock and can be zero when that lock is not used.
+An abandoned response has no terminal record. `mlx_lock_wait` and
+`mlx_lock_hold` are included only in terminal logs on macOS, never in response
+metadata or the demo. They measure the existing MLX lock; wait can be zero when
+that lock is not contended, and hold is omitted entirely when nothing held it.
 
 - `stt` covers final transcription processing only. Repeated progressive HTTP
   transcriptions and Realtime partial deltas are excluded. For HTTP STT, it
@@ -71,6 +75,12 @@ the existing MLX lock and can be zero when that lock is not used.
   existing timing. It is unavailable when no speech-end estimate exists; there
   is no fallback to the old handoff boundary. Later synthesis segments cannot
   overwrite first audio. This is generated audio, not browser playback.
+- `vad_settle` is the whole wait at the final STT input gate before a settled
+  revision is accepted. It is not the same as `hold`: `hold` counts only the
+  client-requested processing delay, while `vad_settle` covers every cause of
+  gate wait. It is recorded only past a 0.05s threshold, so an immediately
+  returning gate does not add a permanent `vad_settle=0.00s` to every line. It
+  is log-only and is never part of response metadata.
 - `vad_decision_s` starts at an **estimated end of voiced audio** and ends
   immediately when the VAD iterator returns the final segment, before Smart
   Turn analysis. Silero uses the first low-confidence chunk's start; FireRed
@@ -87,6 +97,19 @@ the existing MLX lock and can be zero when that lock is not used.
   or response-release gates. Overlapping worker waits count once. Time spent
   doing useful work during a configured grace window is not hold time. Disabled
   Smart Turn has `null`; an enabled decision without a blocked gate has zero.
+- `mlx_lock_wait` / `mlx_lock_hold` (macOS terminal logs only) are time spent
+  waiting for and holding the global MLX/Metal lock. Totals are attributed per
+  handler name in brackets (`handler:0.88s`, with an `xN` suffix when the same
+  handler acquired the lock several times). The bracketed sums always match the
+  printed total. Progressive Parakeet binds the pending turn tracker so a failed
+  short-timeout acquire still attributes wait time; the final transcription of
+  the same revision reuses that slot. Hold is recorded on the outer release of a
+  reentrant acquire only, so nested takes are not double-counted.
+- `tts=cut` marks a cancelled turn that had already produced TTS audio
+  (`tts_ttfa` was recorded). It means the cancellation arrived after synthesis
+  had started, not that a sentence was chopped mid-word: a cancellation that
+  lands just after the final chunk gets the marker too. It distinguishes
+  "cancelled before it spoke" from "cancelled after it spoke".
 
 Tool follow-ups have separate response keys and do not repeat the originating
 turn's VAD/Smart Turn measurements. Their E2E retains the originating speech-end
