@@ -64,6 +64,10 @@ the existing MLX lock and can be zero when that lock is not used.
 - `tts_ttfa` starts when synthesis of the first text segment begins and ends
   when the first provider audio samples arrive. For HTTP TTS, WAV headers are
   excluded, and resampling and output block assembly happen afterward.
+  Pocket Farsi captures this timestamp before buffering and validating the
+  phrase, including across retries; it publishes the measurement only if
+  validation produces usable audio. Generated sentence pauses are excluded
+  from provider TTFA.
 - `e2e` runs from estimated speech end to the first audio block yielded by TTS.
   It includes VAD decision time, Smart Turn analysis, audio enhancement, and
   subsequent processing/hold time before that block. The timestamp is propagated

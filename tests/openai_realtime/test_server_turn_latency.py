@@ -13,8 +13,9 @@ import pytest
 
 import speech_to_speech.LLM.base_openai_compatible_language_model as llm_module
 import speech_to_speech.TTS.openai_compatible_handler as tts_module
+import speech_to_speech.TTS.pocket_tts_handler as pocket_module
 from speech_to_speech.pipeline.events import AssistantResponseDoneEvent, SpeechStartedEvent, TranscriptionCompletedEvent
-from speech_to_speech.pipeline.messages import EndOfResponse, TTSInput, VADAudio
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, AudioOutput, EndOfResponse, TTSInput, VADAudio
 from speech_to_speech.pipeline.turn_latency import TURN_LATENCY_METADATA_KEY
 from speech_to_speech.STT.openai_compatible_handler import (
     HttpTranscriptionResult,
@@ -25,6 +26,7 @@ from speech_to_speech.STT.streaming_handler import VLLMRealtimeSTTHandler
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 from tests.test_chat_completions_backend import _make_handler as make_chat_handler
 from tests.test_openai_tts_handler import _openai_tts_handler
+from tests.test_pocket_tts_handler import _farsi_handler, _run_farsi_inputs, _run_farsi_worker
 from tests.test_responses_api_language_model import _make_handler as make_responses_handler
 from tests.test_streaming_stt_handler import _handler as make_streaming_handler
 from tests.test_streaming_stt_handler import _SocketFactory
@@ -184,6 +186,57 @@ def test_remote_tts_tracks_provider_audio_before_block_assembly_and_preserves_fi
     clock[0] = 30.0
     assert list(handler.process(first))
     assert service.turn_latency_store.get_response(request.response_key) is None
+
+
+def test_pocket_worker_timings_reach_terminal_response_before_tracker_cleanup(service, conn_id, caplog, monkeypatch):
+    import torch
+
+    service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
+    service.dispatch_pipeline_event(
+        conn_id,
+        TranscriptionCompletedEvent(transcript="hello", turn_id="turn_1", turn_revision=0, speech_stopped_at_s=9.0),
+    )
+    request = service.text_prompt_queue.get_nowait()
+    handler, _ = _farsi_handler()
+    handler.phonemizer = None
+    handler.turn_latency_store = service.turn_latency_store
+    clock = [10.0]
+    monkeypatch.setattr(pocket_module, "perf_counter", lambda: clock[0])
+
+    def stream(voice, text, **kwargs):
+        if text == "First":
+            clock[0] = 10.1
+            yield torch.full((256,), 0.1)  # Too little audio for the first output block.
+            clock[0] = 10.8
+            yield torch.full((1024,), 0.2)
+            clock[0] = 11.0
+        else:
+            clock[0] = 20.4
+            yield torch.full((1024,), 0.3)
+
+    handler.model.generate_audio_stream = stream
+    identity = dict(response_key=request.response_key, turn_id=request.turn_id, turn_revision=request.turn_revision)
+    first = TTSInput(text="First", speech_stopped_at_s=request.speech_stopped_at_s, **identity)
+    second = TTSInput(text="Second", speech_stopped_at_s=request.speech_stopped_at_s, **identity)
+    outputs = _run_farsi_inputs(handler, [first, second, EndOfResponse(**identity)])
+    audio = [item for item in outputs if isinstance(item, AudioOutput)]
+    assert audio[-1].audio == AUDIO_RESPONSE_DONE
+    assert all(item.response_key == request.response_key for item in audio)
+    for item in audio[:-1]:
+        service.encode_audio_chunk(conn_id, item.audio.tobytes(), item.response_key)
+
+    line, metadata = _finish(service, conn_id, request.response_key, caplog)
+    assert "tts_ttfa=0.10s e2e=1.80s" in line
+    assert metadata["tts_ttfa_s"] == pytest.approx(0.1)
+    assert metadata["e2e_s"] == pytest.approx(1.8)
+    assert metadata["response_key"] == request.response_key
+    assert service.turn_latency_store.get_response(request.response_key) is None
+
+    fresh = service.turn_latency_store.get_or_create_response("fresh", turn_id=request.turn_id, session_id=conn_id)
+    _run_farsi_worker(handler, second)
+    assert service.turn_latency_store.get_response(request.response_key) is None
+    assert fresh.tts_ttfa_s is None
+    assert fresh.e2e_s is None
 
 
 def test_wav_tts_records_first_provider_audio_before_later_chunks(service, conn_id, caplog, monkeypatch):
