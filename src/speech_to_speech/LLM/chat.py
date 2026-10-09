@@ -531,6 +531,18 @@ class Chat:
         with self._lock:
             removed: SupportedItem | None = None
             target_ids = self._assistant_item_aliases.pop(item_id, {item_id})
+            # Native reasoning requires its following provider message/call.
+            # Find that companion before deleting it, allowing interleaved user
+            # inputs and tool results without consuming another response's pair.
+            reasoning_prefix: set[str] = set()
+            orphaned_reasoning_ids: set[str] = set()
+            for item in self.buffer:
+                if isinstance(item, ResponseReasoningItem):
+                    reasoning_prefix.add(item.id)
+                elif isinstance(item, (RealtimeConversationItemAssistantMessage, RealtimeConversationItemFunctionCall)):
+                    if isinstance(item, (ResponsesAssistantMessage, ResponsesFunctionCall)) and item.id in target_ids:
+                        orphaned_reasoning_ids.update(reasoning_prefix)
+                    reasoning_prefix.clear()
             if self.init_chat_message is not None and self.init_chat_message.id == item_id:
                 removed = self.init_chat_message
                 self.init_chat_message = None
@@ -545,6 +557,9 @@ class Chat:
                     removed = next((call for call in self._pending_tool_calls.values() if call.id == item_id), None)
             if removed is None:
                 return None
+            if orphaned_reasoning_ids:
+                self.buffer = [item for item in self.buffer if item.id not in orphaned_reasoning_ids]
+                target_ids = target_ids | orphaned_reasoning_ids
             if isinstance(removed, RealtimeConversationItemUserMessage):
                 self._user_turn_count -= 1
             elif isinstance(removed, RealtimeConversationItemFunctionCall):

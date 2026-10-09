@@ -14,6 +14,7 @@ from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
+    ResponseReasoningItem,
     ResponseTextDeltaEvent,
 )
 from starlette.testclient import TestClient
@@ -21,6 +22,7 @@ from starlette.testclient import TestClient
 from speech_to_speech.LLM.chat import (
     Chat,
     CompactionResult,
+    ResponsesAssistantMessage,
     make_assistant_message,
     make_system_message,
     make_user_message,
@@ -608,3 +610,124 @@ def test_filtered_provider_message_does_not_steal_visible_reply_identity(
     )
     assert any(part.text == "✅" for item in chat.buffer if item.type == "message" for part in item.content)
     assert [item.model_dump() for item in chat.buffer if item.type == "function_call"] == calls_before
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "kind, leading_message", [("assistant", False), ("function_call", False), ("function_call", True)]
+)
+@pytest.mark.parametrize("interleaved_input", [False, True])
+def test_delete_provider_companion_keeps_next_responses_request_valid(
+    service, conn_id, stream, kind, leading_message, interleaved_input
+):
+    def reasoning(item_id):
+        return ResponseReasoningItem(id=item_id, type="reasoning", summary=[], encrypted_content="opaque")
+
+    def message(item_id, text):
+        return ResponseOutputMessage(
+            id=item_id,
+            type="message",
+            role="assistant",
+            status="completed",
+            content=[{"type": "output_text", "text": text, "annotations": []}],
+        )
+
+    chat = service._state(conn_id).runtime_config.chat
+    previous = [reasoning("rs_previous"), message("msg_previous", "Earlier answer.")]
+    chat.add_item(previous[0])
+    chat.add_item(
+        ResponsesAssistantMessage(**make_assistant_message("Earlier answer.").model_dump(), response_item=previous[1])
+    )
+    chat.add_item(make_user_message("Please answer."))
+    provider_items = [reasoning("rs_deleted")]
+    if leading_message:
+        provider_items.append(message("msg_kept", "Keep this answer."))
+    if kind == "assistant":
+        provider_items.append(message("msg_deleted", "Delete this answer."))
+    else:
+        provider_items.append(
+            ResponseFunctionToolCall(
+                id="fc_deleted", type="function_call", call_id="call_provider", name="lookup", arguments="{}"
+            )
+        )
+    if stream:
+        events = []
+        for index, item in enumerate(provider_items):
+            if item.type == "message":
+                events.append(
+                    ResponseTextDeltaEvent(
+                        type="response.output_text.delta",
+                        item_id=item.id,
+                        output_index=index,
+                        content_index=0,
+                        delta=item.content[0].text,
+                        logprobs=[],
+                        sequence_number=len(events),
+                    )
+                )
+            events.append(
+                ResponseOutputItemDoneEvent(
+                    type="response.output_item.done", output_index=index, sequence_number=len(events), item=item
+                )
+            )
+        provider_response = _make_stream(events)
+    else:
+        provider_response = _make_response(provider_items)
+    requests = []
+
+    def create(**kwargs):
+        requests.append(kwargs)
+        if len(requests) == 1:
+            return provider_response
+        return _make_stream([]) if stream else _make_response([])
+
+    handler = _make_handler(stream=stream)
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    service.handle_response_create(
+        conn_id, ResponseCreateEvent(type="response.create", response={"output_modalities": ["text"]})
+    )
+    request = service.text_prompt_queue.get_nowait()
+    output_items = []
+    chunks = list(handler.process(request))
+    assert any(isinstance(chunk, EndOfResponse) and chunk.error is None for chunk in chunks)
+    for chunk in chunks:
+        if isinstance(chunk, LLMResponseChunk):
+            output_items.extend(
+                event.item
+                for event in service.dispatch_pipeline_event(
+                    conn_id, AssistantOutputEvent(parts=chunk.parts, response_key=request.response_key)
+                )
+                if event.type == "response.output_item.added"
+            )
+    service.finish_response(conn_id)
+    if interleaved_input:
+        overlapping = chat.add_item(make_user_message("Overlapping question."))
+        chat.buffer.remove(overlapping)
+        reasoning_index = next(i for i, item in enumerate(chat.buffer) if item.id == "rs_deleted")
+        chat.buffer.insert(reasoning_index + 1, overlapping)
+    wire_item = next(item for item in output_items if item.type == ("message" if kind == "assistant" else kind))
+    if kind == "function_call":
+        result = chat.add_item(_output().model_copy(update={"call_id": wire_item.call_id}))
+    deleted = service.handle_conversation_item_delete(
+        conn_id, ConversationItemDeleteEvent(type="conversation.item.delete", item_id=wire_item.id)
+    )
+    assert [(event.type, event.item_id) for event in deleted] == [("conversation.item.deleted", wire_item.id)]
+    if kind == "function_call":
+        assert result in chat.buffer  # Exact wire deletion does not cascade to the tool result.
+    chat.add_item(make_user_message("Next question."))
+    service.handle_response_create(
+        conn_id, ResponseCreateEvent(type="response.create", response={"output_modalities": ["text"]})
+    )
+    chunks = list(handler.process(service.text_prompt_queue.get_nowait()))
+    assert any(isinstance(chunk, EndOfResponse) and chunk.error is None for chunk in chunks)
+    provider_input = requests[-1]["input"]
+    deleted_ids = {"msg_deleted", "fc_deleted"} if leading_message else {"rs_deleted", "msg_deleted", "fc_deleted"}
+    assert not any(item.get("id") in deleted_ids for item in provider_input)
+    if leading_message:
+        assert [item for item in provider_input if item.get("id") in {"rs_deleted", "msg_kept"}] == [
+            item.model_dump(exclude_unset=True) for item in provider_items[:2]
+        ]
+    assert [item for item in provider_input if item.get("id") in {"rs_previous", "msg_previous"}] == [
+        item.model_dump(exclude_unset=True) for item in previous
+    ]
+    assert provider_input[-1]["content"][0]["text"].endswith("Next question.")
