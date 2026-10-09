@@ -306,6 +306,28 @@ class TestClientEventDispatch:
                 assert msg["type"] == "conversation.item.created"
                 assert msg["item"]["content"][0]["text"] == "ping"
 
+    def test_openwebui_history_snapshot_id_is_accepted(self, setup):
+        app, service, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime?model=faster-qwen3-tts") as ws:
+                ws.receive_json()
+                ws.send_json(
+                    {
+                        "type": "conversation.item.create",
+                        "item": {
+                            "id": "chat_context_1",
+                            "type": "message",
+                            "role": "system",
+                            "content": [{"type": "input_text", "text": "Current chat snapshot"}],
+                        },
+                    }
+                )
+                event = ws.receive_json()
+                assert event["type"] == "conversation.item.created"
+                assert event["item"]["id"] == "chat_context_1"
+                config = next(iter(service._conns.values())).runtime_config
+                assert config.chat.to_transformers_chat()[0]["content"] == "Current chat snapshot"
+
     def test_response_create_error_when_active(self, setup):
         app, service, *_ = setup
         with TestClient(app) as client:

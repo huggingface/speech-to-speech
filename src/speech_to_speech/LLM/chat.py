@@ -55,7 +55,8 @@ AUDIO_INPUT_HISTORY_PLACEHOLDER = "[User audio input]"
 # Anchor returned by :meth:`Chat.history_anchor_id` for an empty conversation,
 # so a generation that starts from empty history is still written before user
 # messages that arrive while it runs.
-HISTORY_START_ANCHOR = "__history_start__"
+# Client item IDs are nonempty, so this internal marker cannot collide with one.
+HISTORY_START_ANCHOR = ""
 
 
 class ChatItemError(Exception):
@@ -72,8 +73,8 @@ class CompactionResult(BaseModel):
 def _ensure_id(value: str | None, prefix: str) -> str:
     if value is None:
         return _generate_id(prefix)
-    if not value.startswith(f"{prefix}_"):
-        raise ChatItemError(f"ID must start with '{prefix}_', got {value!r}")
+    if not value:
+        raise ChatItemError("ID must not be empty")
     return value
 
 
@@ -381,6 +382,8 @@ class Chat:
 
         elif isinstance(item, RealtimeConversationItemFunctionCall):
             item.id = _ensure_id(item.id, "fc")
+            if item.call_id is not None and not item.call_id.startswith("call_"):
+                raise ChatItemError(f"ID must start with 'call_', got {item.call_id!r}")
             item.call_id = _ensure_id(item.call_id, "call")
             assert item.call_id is not None
             if ordered_function_call:
@@ -435,6 +438,16 @@ class Chat:
         """
         with self._lock:
             return self._add_item_locked(item, insert_at=self._turn_insertion_index_locked(after_item_id))
+
+    def prepend_instructions(self, instructions: str) -> None:
+        """Combine request instructions with the injected system context on a chat copy."""
+        with self._lock:
+            context = (
+                "\n".join(part.text for part in self.init_chat_message.content if part.text)
+                if self.init_chat_message
+                else ""
+            )
+            self.init_chat_message = make_system_message("\n\n".join(text for text in (instructions, context) if text))
 
     def add_ordered_function_call(
         self, item: RealtimeConversationItemFunctionCall, *, after_item_id: str | None = None

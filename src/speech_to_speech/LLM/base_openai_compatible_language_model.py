@@ -37,7 +37,6 @@ from speech_to_speech.LLM.chat import (
     ResponsesFunctionCall,
     SupportedItem,
     build_active_chat,
-    make_system_message,
     make_user_audio_message,
 )
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
@@ -539,7 +538,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             return
         builder = build_voice_system_prompt if wants_audio else build_text_system_prompt
         full_instructions = builder(instructions or "", language_name=language_name)
-        chat.add_item(make_system_message(full_instructions))
+        chat.prepend_instructions(full_instructions)
 
     # ── output helpers ──────────────────────────────────────────────────────--
 

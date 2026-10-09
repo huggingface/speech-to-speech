@@ -40,7 +40,6 @@ from speech_to_speech.LLM.chat import (
     ChatItemError,
     build_active_chat,
     make_assistant_message,
-    make_system_message,
 )
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
 from speech_to_speech.LLM.text_prompt import build_text_system_prompt
@@ -307,7 +306,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             enter_code = None
             end_code = None
 
-        chat.add_item(make_system_message(full_instructions))
+        chat.prepend_instructions(full_instructions)
 
         if ctx is not None:
             ctx.function_tools = function_tools
