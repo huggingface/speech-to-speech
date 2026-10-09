@@ -159,7 +159,7 @@ class Chat:
         # cancellation can roll them back before accepting deferred client items.
         self._provisional_generations: dict[str, tuple[set[str], set[str]]] = {}
         self._cancelled_provisional_generations: dict[str, None] = {}
-        self._provisional_output_items: dict[str, list[tuple[str, str]]] = {}
+        self._provisional_output_items: dict[str, list[tuple[str, str, str | None]]] = {}
         self._assistant_item_aliases: dict[str, set[str]] = {}
         self._deleted_tool_output_ids: set[str] = set()
         self._user_turn_count: int = 0
@@ -584,7 +584,7 @@ class Chat:
             self._compact_in_flight = False
             return removed
 
-    def bind_assistant_item_ids(self, response_key: str | None, item_ids: Sequence[str]) -> None:
+    def bind_assistant_item_ids(self, response_key: str | None, output_items: Sequence[ConversationItem]) -> None:
         """Give delivered assistant history the IDs exposed by Realtime."""
         with self._lock:
             tracked = self._provisional_generations.get(response_key or "")
@@ -601,20 +601,28 @@ class Chat:
             messages_by_id = {
                 item.id: item for item in self.buffer if isinstance(item, RealtimeConversationItemAssistantMessage)
             }
-            groups: list[list[str]] = []
-            group: list[str] = []
-            # Keep evicted groups in the sequence: later retained messages must
-            # not inherit an earlier wire item's ID after history trimming.
-            for native_id, kind in self._provisional_output_items.get(response_key or "", []):
+            groups: dict[str | None, list[str]] = {}
+            preceding_call_id: str | None = None
+            # Tool boundaries survive text filtering and history eviction, so a
+            # hidden or evicted interval cannot take a later wire message's ID.
+            for native_id, kind, call_id in self._provisional_output_items.get(response_key or "", []):
                 if kind == "message":
-                    group.append(native_id)
-                elif group:
-                    groups.append(group)
-                    group = []
-            if group:
-                groups.append(group)
-            for native_ids, item_id in zip(groups, item_ids):
-                messages = [messages_by_id[native_id] for native_id in native_ids if native_id in messages_by_id]
+                    groups.setdefault(preceding_call_id, []).append(native_id)
+                else:
+                    preceding_call_id = call_id
+            preceding_call_id = None
+            for output_item in output_items:
+                if isinstance(output_item, RealtimeConversationItemFunctionCall):
+                    preceding_call_id = output_item.call_id
+                    continue
+                if not isinstance(output_item, RealtimeConversationItemAssistantMessage) or output_item.id is None:
+                    continue
+                item_id = output_item.id
+                messages = [
+                    messages_by_id[native_id]
+                    for native_id in groups.get(preceding_call_id, [])
+                    if native_id in messages_by_id
+                ]
                 if not messages:
                     continue
                 if len(messages) > 1:
@@ -743,7 +751,7 @@ class Chat:
             tracked_call_ids.update(call_ids)
             output_items = self._provisional_output_items.setdefault(response_key, [])
             output_items.extend(
-                (item.id, item.type)
+                (item.id, item.type, item.call_id if isinstance(item, RealtimeConversationItemFunctionCall) else None)
                 for item in recorded_items
                 if item.id is not None
                 and isinstance(item, (RealtimeConversationItemAssistantMessage, RealtimeConversationItemFunctionCall))

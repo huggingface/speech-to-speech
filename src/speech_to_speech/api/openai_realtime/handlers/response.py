@@ -1037,7 +1037,7 @@ class ResponseHandler(RealtimeBaseHandler):
             if status == "completed":
                 st.runtime_config.chat.bind_assistant_item_ids(
                     st.current_response_key,
-                    [str(item["item_id"]) for item in st.pending_text_outputs],
+                    terminal_response.output or [],
                 )
                 st.runtime_config.chat.finalize_provisional_generation(st.current_response_key)
             elif status in ("cancelled", "failed", "incomplete"):

@@ -10,6 +10,12 @@ from openai.types.realtime import (
     RealtimeConversationItemFunctionCallOutput,
     ResponseCreateEvent,
 )
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputItemDoneEvent,
+    ResponseOutputMessage,
+    ResponseTextDeltaEvent,
+)
 from starlette.testclient import TestClient
 
 from speech_to_speech.LLM.chat import (
@@ -25,8 +31,9 @@ from speech_to_speech.pipeline.events import (
     SpeechStoppedEvent,
     TranscriptionCompletedEvent,
 )
-from speech_to_speech.pipeline.messages import AssistantTextPart, EndOfResponse
+from speech_to_speech.pipeline.messages import AssistantTextPart, EndOfResponse, LLMResponseChunk
 from tests.test_response_overrides import _RecordingLocalHandler
+from tests.test_responses_api_language_model import _make_handler, _make_response, _make_stream
 
 from .test_websocket_router import setup as setup
 
@@ -35,6 +42,10 @@ def _call():
     return RealtimeConversationItemFunctionCall(
         type="function_call", id="client_call", call_id="call_test", name="lookup", arguments="{}"
     )
+
+
+def _wire_message(item_id):
+    return make_assistant_message("wire output").model_copy(update={"id": item_id})
 
 
 def _output():
@@ -329,7 +340,7 @@ def test_generated_message_binding_preserves_pending_tool_context():
     first = make_assistant_message("before")
     last = make_assistant_message("after")
     chat.add_provisional_generation_items("response", [first, _call(), last])
-    chat.bind_assistant_item_ids("response", ["wire_first", "wire_last"])
+    chat.bind_assistant_item_ids("response", [_wire_message("wire_first"), _call(), _wire_message("wire_last")])
     assert [item.id for item in chat.buffer] == ["wire_first", "client_call", "wire_last"]
     assert chat._ordered_pending_calls["call_test"] == {"wire_first", "client_call", "wire_last"}
     chat.rollback_provisional_generation("response")
@@ -342,7 +353,7 @@ def test_one_wire_message_deletes_all_retained_provider_fragments():
     before = [make_assistant_message("first"), make_assistant_message("second")]
     after = make_assistant_message("after call")
     chat.add_provisional_generation_items("response", [*before, _call(), after])
-    chat.bind_assistant_item_ids("response", ["wire_before", "wire_after"])
+    chat.bind_assistant_item_ids("response", [_wire_message("wire_before"), _call(), _wire_message("wire_after")])
     chat.finalize_provisional_generation("response")
     assert "wire_before" in chat.item_ids()
     assert "wire_before" in chat.copy(deep=True).item_ids()
@@ -394,8 +405,110 @@ def test_evicted_message_does_not_steal_later_wire_identity():
     assert before not in chat.buffer
     after = make_assistant_message("after call")
     chat.add_provisional_generation_items("response", [after])
-    chat.bind_assistant_item_ids("response", ["wire_before", "wire_after"])
+    chat.bind_assistant_item_ids("response", [_wire_message("wire_before"), _call(), _wire_message("wire_after")])
     chat.finalize_provisional_generation("response")
     assert after.id == "wire_after"
     assert chat.delete_item("wire_before") is None
     assert chat.delete_item("wire_after") is after
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("modality", ["audio", "text"])
+@pytest.mark.parametrize("hidden_interval", ["before_call", "between_calls"])
+def test_filtered_provider_message_does_not_steal_visible_reply_identity(
+    service, conn_id, stream, modality, hidden_interval
+):
+    def message(item_id, text):
+        return ResponseOutputMessage(
+            id=item_id,
+            type="message",
+            role="assistant",
+            status="completed",
+            content=[{"type": "output_text", "text": text, "annotations": []}],
+        )
+
+    def call(number):
+        return ResponseFunctionToolCall(
+            id=f"provider_call_{number}",
+            type="function_call",
+            call_id=f"call_{number}",
+            name="lookup",
+            arguments="{}",
+            status="completed",
+        )
+
+    provider_items = [message("provider_hidden", "✅"), call(1)]
+    if hidden_interval == "between_calls":
+        provider_items = [
+            message("provider_first", "Visible first reply."),
+            call(1),
+            message("provider_hidden", "✅"),
+            call(2),
+        ]
+    provider_items.append(message("provider_last", "Visible reply after call."))
+    service._state(conn_id).runtime_config.chat.add_item(make_user_message("Please look it up."))
+    service.handle_response_create(
+        conn_id, ResponseCreateEvent(type="response.create", response={"output_modalities": [modality]})
+    )
+    request = service.text_prompt_queue.get_nowait()
+    if stream:
+        events = []
+        for index, item in enumerate(provider_items):
+            if item.type == "message":
+                events.append(
+                    ResponseTextDeltaEvent(
+                        type="response.output_text.delta",
+                        item_id=item.id,
+                        output_index=index,
+                        content_index=0,
+                        delta=item.content[0].text,
+                        logprobs=[],
+                        sequence_number=len(events),
+                    )
+                )
+            events.append(
+                ResponseOutputItemDoneEvent(
+                    type="response.output_item.done",
+                    output_index=index,
+                    sequence_number=len(events),
+                    item=item,
+                )
+            )
+        provider_response = _make_stream(events)
+    else:
+        provider_response = _make_response(provider_items)
+    handler = _make_handler(stream=stream)
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **_kwargs: provider_response))
+    wire_messages = []
+    chunks = list(handler.process(request))
+    assert any(isinstance(chunk, EndOfResponse) and chunk.error is None for chunk in chunks)
+    for chunk in chunks:
+        if not isinstance(chunk, LLMResponseChunk):
+            continue
+        wire_events = service.dispatch_pipeline_event(
+            conn_id, AssistantOutputEvent(parts=chunk.parts, response_key=request.response_key)
+        )
+        wire_messages.extend(
+            event.item
+            for event in wire_events
+            if event.type == "response.output_item.added" and event.item.type == "message"
+        )
+    assert wire_messages, repr(chunks)
+    service.finish_response(conn_id)
+    reply_id = wire_messages[-1].id
+    chat = service._state(conn_id).runtime_config.chat
+    calls_before = [item.model_dump() for item in chat.buffer if item.type == "function_call"]
+    deleted = service.handle_conversation_item_delete(
+        conn_id, ConversationItemDeleteEvent(type="conversation.item.delete", item_id=reply_id)
+    )
+    assert deleted[0].type == "conversation.item.deleted"
+    assert deleted[0].item_id == reply_id
+    chat = service._state(conn_id).runtime_config.chat
+    assert not any(
+        part.text == "Visible reply after call."
+        for item in chat.buffer
+        if item.type == "message"
+        for part in item.content
+    )
+    assert any(part.text == "✅" for item in chat.buffer if item.type == "message" for part in item.content)
+    assert [item.model_dump() for item in chat.buffer if item.type == "function_call"] == calls_before
