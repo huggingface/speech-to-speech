@@ -9,7 +9,9 @@ import numpy as np
 
 from speech_to_speech.pipeline.messages import PIPELINE_END, PartialTranscription, Transcription, VADAudio
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
+from tests.turns import reopen
 
 
 class RecordingSTTHandler(BaseSTTHandler):
@@ -28,7 +30,7 @@ class RecordingSTTHandler(BaseSTTHandler):
         self.processed.append((vad_audio.turn_id, vad_audio.turn_revision))
         if self.mark_stale_during_process and vad_audio.turn_id is not None and vad_audio.turn_revision is not None:
             assert self.speculative_turns is not None
-            self.speculative_turns.observe(vad_audio.turn_id, vad_audio.turn_revision + 1)
+            reopen(self.speculative_turns, vad_audio.turn_id, vad_audio.turn_revision)
         yield Transcription(
             text="hello",
             turn_id=vad_audio.turn_id,
@@ -40,8 +42,15 @@ def _vad_audio(
     turn_id: str = "turn_1",
     revision: int = 0,
     mode: Literal["progressive", "final"] | None = None,
+    processing_delay_s: float = 0.0,
 ) -> VADAudio:
-    return VADAudio(audio=np.zeros(512, dtype=np.float32), mode=mode, turn_id=turn_id, turn_revision=revision)
+    return VADAudio(
+        audio=np.zeros(512, dtype=np.float32),
+        mode=mode,
+        turn_id=turn_id,
+        turn_revision=revision,
+        processing_delay_s=processing_delay_s,
+    )
 
 
 def _handler(
@@ -64,9 +73,55 @@ def _handler(
     )
 
 
+def test_final_input_gate_records_vad_settle_on_the_pending_turn():
+    tracker = SpeculativeTurnTracker()
+    tracker.start_turn()
+    queue_in = Queue()
+    queue_out = Queue()
+    handler = _handler(tracker, queue_in, queue_out, final_revision_settle_s=0.05)
+    store = TurnLatencyStore()
+    handler.turn_latency_store = store
+
+    assert handler.should_process_input(_vad_audio(mode="progressive"))
+    assert store.pending_for_turn("turn_1", 0) is None
+
+    # A gate that returned immediately stays out of the line entirely.
+    quiet_turns = SpeculativeTurnTracker()
+    quiet_turn_id, quiet_revision = quiet_turns.start_turn()
+    quiet = _handler(quiet_turns, Queue(), Queue())
+    quiet_store = quiet.turn_latency_store = TurnLatencyStore()
+    assert quiet.should_process_input(_vad_audio(turn_id=quiet_turn_id, revision=quiet_revision, mode="final"))
+    assert quiet_store.pending_for_turn(quiet_turn_id, quiet_revision) is None
+
+    assert handler.should_process_input(_vad_audio(mode="final"))
+    pending = store.pending_for_turn("turn_1", 0)
+    assert pending is not None
+    assert pending.vad_settle_s is not None
+    assert pending.vad_settle_s >= 0.05
+
+
+def test_superseded_revision_drops_its_pending_latency_slot():
+    """A progressive update opens a pending slot; if the revision is then
+    superseded no transcription will ever consume it."""
+    tracker = SpeculativeTurnTracker()
+    queue_in = Queue()
+    queue_out = Queue()
+    handler = _handler(tracker, queue_in, queue_out)
+    store = TurnLatencyStore()
+    handler.turn_latency_store = store
+    store.get_or_create_for_turn("turn_1", 0).record_mlx_lock_wait(0.01, "ParakeetSTT-Progressive")
+
+    tracker.start_turn()
+    reopen(tracker)
+    assert not handler.should_process_input(_vad_audio(revision=0, mode="final"))
+
+    assert store.pending_for_turn("turn_1", 0) is None
+
+
 def test_stt_handler_drops_stale_queued_audio_without_processing():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 1)
+    tracker.start_turn()
+    reopen(tracker)
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out)
@@ -82,7 +137,8 @@ def test_stt_handler_drops_stale_queued_audio_without_processing():
 
 def test_stt_handler_bulk_drops_stale_queued_audio():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 1)
+    tracker.start_turn()
+    reopen(tracker)
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out)
@@ -103,7 +159,7 @@ def test_stt_handler_bulk_drops_stale_queued_audio():
 
 def test_stt_handler_waits_for_pending_reopen_before_processing():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
     queue_in = Queue()
     queue_out = Queue()
@@ -128,7 +184,7 @@ def test_stt_handler_waits_for_pending_reopen_before_processing():
 
 def test_stt_handler_waits_for_final_revision_stability_window():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out, final_revision_settle_s=0.2)
@@ -148,9 +204,44 @@ def test_stt_handler_waits_for_final_revision_stability_window():
     assert queue_out.get_nowait() == PIPELINE_END
 
 
+def test_stt_handler_uses_per_endpoint_processing_delay():
+    tracker = SpeculativeTurnTracker()
+    tracker.start_turn()
+    queue_in = Queue()
+    queue_out = Queue()
+    handler = _handler(tracker, queue_in, queue_out)
+
+    queue_in.put(_vad_audio(revision=0, mode="final", processing_delay_s=0.2))
+    queue_in.put(PIPELINE_END)
+    thread = Thread(target=handler.run)
+    thread.start()
+
+    sleep(0.05)
+    candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
+    assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert handler.processed == []
+    assert queue_out.get_nowait() == PIPELINE_END
+
+
+def test_stale_final_input_discards_pending_vad_measurement():
+    revisions = SpeculativeTurnTracker()
+    revisions.start_turn()
+    reopen(revisions)
+    handler = _handler(revisions, Queue(), Queue())
+    store = TurnLatencyStore()
+    handler.turn_latency_store = store
+    store.get_or_create_for_turn("turn_1", 0).vad_decision_s = 0.3
+
+    assert not handler.should_process_input(_vad_audio(revision=0, mode="final"))
+    assert store._pending_turn == {}
+
+
 def test_stt_handler_drops_output_that_became_stale_during_processing():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out, mark_stale_during_process=True)
@@ -172,7 +263,7 @@ def test_stt_handler_drops_output_that_became_stale_during_processing():
 
 def test_stt_handler_drops_progressive_input_after_final_emit():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out)
@@ -184,7 +275,7 @@ def test_stt_handler_drops_progressive_input_after_final_emit():
 
 def test_stt_handler_drops_partial_output_after_final_emit():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out)
@@ -196,7 +287,7 @@ def test_stt_handler_drops_partial_output_after_final_emit():
 
 def test_stt_handler_bulk_drops_queued_progressives_after_final_emit():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out)
@@ -205,6 +296,7 @@ def test_stt_handler_bulk_drops_queued_progressives_after_final_emit():
     for _ in range(3):
         queue_in.put(_vad_audio(revision=0, mode="progressive"))
     queue_in.put(_vad_audio(turn_id="turn_2", revision=0, mode="progressive"))
+    tracker.start_turn()
 
     assert not handler.should_process_input(_vad_audio(revision=0, mode="progressive"))
     remaining = queue_in.get_nowait()
@@ -216,7 +308,7 @@ def test_stt_handler_bulk_drops_queued_progressives_after_final_emit():
 
 def test_stt_handler_drops_progressive_when_final_for_same_revision_is_queued():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out)
@@ -228,7 +320,7 @@ def test_stt_handler_drops_progressive_when_final_for_same_revision_is_queued():
 
 def test_stt_handler_keeps_progressive_when_final_for_different_turn_is_queued():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out)
@@ -240,7 +332,7 @@ def test_stt_handler_keeps_progressive_when_final_for_different_turn_is_queued()
 
 def test_stt_handler_bulk_drops_progressives_queued_before_matching_final():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     queue_in = Queue()
     queue_out = Queue()
     handler = _handler(tracker, queue_in, queue_out)
@@ -248,14 +340,67 @@ def test_stt_handler_bulk_drops_progressives_queued_before_matching_final():
     queue_in.put(_vad_audio(revision=0, mode="progressive"))
     queue_in.put(_vad_audio(revision=0, mode="final"))
     queue_in.put(_vad_audio(turn_id="turn_2", revision=0, mode="progressive"))
+    tracker.start_turn()
 
-    assert handler._drop_stale_queued_inputs() == 1
-    first = queue_in.get_nowait()
-    second = queue_in.get_nowait()
+    assert handler._drop_stale_queued_inputs() == 2
+    remaining = queue_in.get_nowait()
 
-    assert isinstance(first, VADAudio)
-    assert first.mode == "final"
-    assert first.turn_id == "turn_1"
-    assert isinstance(second, VADAudio)
-    assert second.turn_id == "turn_2"
+    assert isinstance(remaining, VADAudio)
+    assert remaining.turn_id == "turn_2"
     assert queue_in.empty()
+
+
+def test_rejected_stale_partial_discards_only_its_pending_latency():
+    revisions = SpeculativeTurnTracker()
+    revisions.start_turn()
+    reopen(revisions)
+    handler = _handler(revisions, Queue(), Queue())
+    store = handler.turn_latency_store = TurnLatencyStore()
+    store.get_or_create_for_turn("turn_1", 0)
+    current = store.get_or_create_for_turn("turn_1", 1)
+
+    assert not handler.should_emit_output(PartialTranscription(text="old", turn_id="turn_1", turn_revision=0))
+    assert store._pending_turn == {("turn_1", 1): current}
+
+
+def test_bulk_progressive_cleanup_preserves_same_revision_queued_final_latency():
+    revisions = SpeculativeTurnTracker()
+    revisions.start_turn()
+    reopen(revisions)
+    queue = Queue()
+    handler = _handler(revisions, queue, Queue())
+    store = handler.turn_latency_store = TurnLatencyStore()
+    store.get_or_create_for_turn("turn_1", 0)
+    current = store.get_or_create_for_turn("turn_1", 1)
+    current.record_mlx_lock_wait(0.02, "ParakeetSTT-Progressive")
+    queue.put(_vad_audio(revision=0, mode="progressive"))
+    queue.put(_vad_audio(revision=1, mode="progressive"))
+    final = _vad_audio(revision=1, mode="final")
+    queue.put(final)
+
+    assert handler._drop_stale_queued_inputs() == 2
+    assert queue.get_nowait() is final
+    assert queue.empty()
+    assert store._pending_turn == {("turn_1", 1): current}
+    assert current.mlx_lock_wait_s == 0.02
+
+
+def test_stt_does_not_restart_expired_tracker_processing_delay(monkeypatch):
+    clock = [10.0]
+    monkeypatch.setattr("speech_to_speech.pipeline.speculative_turns.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.STT.base_stt_handler.monotonic", lambda: clock[0])
+    tracker = SpeculativeTurnTracker()
+    tracker.start_turn()
+    tracker.segment_finalized(1000, output_hold_ms=2000, processing_delay_ms=600)
+    clock[0] = 10.7
+    handler = _handler(tracker, Queue(), Queue())
+    item = _vad_audio(mode="final", processing_delay_s=0.6)
+    result = []
+    thread = Thread(target=lambda: result.append(handler.should_process_input(item)))
+    thread.start()
+    thread.join(timeout=0.2)
+    completed_without_new_wait = not thread.is_alive()
+    tracker.start_turn()
+    thread.join(timeout=1.0)
+    assert completed_without_new_wait
+    assert result == [True]

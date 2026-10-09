@@ -6,7 +6,7 @@ class PocketTTSHandlerArguments:
     pocket_tts_device: str = field(
         default="cpu",
         metadata={
-            "help": "The device type on which the Pocket TTS model will run. Options: 'cpu', 'cuda', 'mps'. Default is 'cpu'."
+            "help": "The device type on which the Pocket TTS model will run. Options: 'auto' (first available of CUDA, NPU, XPU, MPS, CPU), 'cuda', 'npu', 'xpu', 'mps', or 'cpu'. Default is 'cpu'."
         },
     )
     pocket_tts_voice: str = field(
@@ -28,4 +28,24 @@ class PocketTTSHandlerArguments:
     pocket_tts_max_tokens: int = field(
         default=50,
         metadata={"help": "Maximum number of tokens to generate per sentence in Pocket TTS. Default is 50."},
+    )
+    pocket_tts_language: str = field(
+        default="english",
+        metadata={"help": "PocketTTS language/model configuration to load."},
+    )
+    pocket_tts_model_name: str | None = field(
+        default=None,
+        metadata={
+            "help": "Optional Farsi model selection. Use 'mehdi-hf/pocket-tts-farsi-v2' for Persian with automatic phoneme conversion. Overrides pocket_tts_language."
+        },
+    )
+    pocket_tts_temperature: float | None = field(
+        default=None,
+        metadata={"help": "Sampling temperature. Uses the model config default when unset, 0.3 for Farsi v2."},
+    )
+    pocket_tts_eos_threshold: float | None = field(
+        default=None,
+        metadata={
+            "help": "End-of-speech threshold. Defaults to -2 for Farsi v2 and the Pocket TTS default for other models."
+        },
     )

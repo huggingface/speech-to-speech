@@ -3,9 +3,9 @@ from dataclasses import dataclass, field
 
 @dataclass
 class FacebookMMSTTSHandlerArguments:
-    facebook_mms_model_name: str = field(
-        default="facebook/mms-tts-eng",
-        metadata={"help": "The model name to use. Default is 'facebook/mms-tts-eng'."},
+    facebook_mms_model_name: str | None = field(
+        default=None,
+        metadata={"help": "Optional model override. By default, select the Facebook MMS model from --tts_language."},
     )
     tts_language: str = field(
         default="en",
@@ -13,7 +13,9 @@ class FacebookMMSTTSHandlerArguments:
     )
     facebook_mms_device: str = field(
         default="cuda",
-        metadata={"help": "The device to use for the TTS model. Default is 'cuda'."},
+        metadata={
+            "help": "The device to use for the TTS model: 'auto' (first available of CUDA, NPU, XPU, MPS, CPU), 'cuda', 'npu', 'xpu', 'mps', or 'cpu'. Default is 'cuda'."
+        },
     )
     facebook_mms_torch_dtype: str = field(
         default="float32",

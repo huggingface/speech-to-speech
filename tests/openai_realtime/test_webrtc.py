@@ -16,20 +16,28 @@ The whole module is skipped when the ``webrtc`` extra (aiortc) isn't installed.
 """
 
 import asyncio
+import base64
 import json
 import time
 from queue import Empty, Queue
 from threading import Event as ThreadingEvent
+from unittest.mock import AsyncMock, Mock
 
 import numpy as np
 import pytest
+from scipy.signal import resample_poly
 
 aiortc = pytest.importorskip("aiortc")
 av = pytest.importorskip("av")
 
 import httpx  # noqa: E402  (ships with the openai dependency)
-from aiortc import RTCPeerConnection, RTCSessionDescription  # noqa: E402
+from aioice.ice import Connection  # noqa: E402
+from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription, clock  # noqa: E402
+from aiortc.codecs.opus import OpusDecoder, OpusEncoder  # noqa: E402
+from aiortc.jitterbuffer import JitterFrame  # noqa: E402
 from aiortc.mediastreams import AudioStreamTrack, MediaStreamError  # noqa: E402
+from aiortc.rtcrtpparameters import RTCRtcpParameters, RTCRtpCodecParameters, RTCRtpSendParameters  # noqa: E402
+from aiortc.rtp import RtcpPacket, RtcpRrPacket, RtcpSrPacket, RtpPacket, is_rtcp  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 
 import speech_to_speech.api.openai_realtime.websocket_router as router_module  # noqa: E402
@@ -37,18 +45,33 @@ from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit  # n
 from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService  # noqa: E402
 from speech_to_speech.api.openai_realtime.transports import SessionTransport  # noqa: E402
 from speech_to_speech.api.openai_realtime.webrtc_session import (  # noqa: E402
+    AUDIO_PTIME,
     WEBRTC_FRAME_SAMPLES,
     WEBRTC_SAMPLE_RATE,
     PcmResampler,
     PipelineAudioTrack,
+    WebRTCSession,
 )
 from speech_to_speech.pipeline.cancel_scope import CancelScope  # noqa: E402
-from speech_to_speech.pipeline.events import SpeechStartedEvent  # noqa: E402
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE  # noqa: E402
+from speech_to_speech.pipeline.events import (  # noqa: E402
+    AssistantOutputEvent,
+    AssistantResponseDoneEvent,
+    ResponseFailedEvent,
+    SpeechStartedEvent,
+    TokenUsageEvent,
+)
+from speech_to_speech.pipeline.messages import (  # noqa: E402
+    AUDIO_RESPONSE_DONE,
+    AssistantTextPart,
+    AssistantToolCallPart,
+    AudioOutput,
+)
 
 from .test_openai_client import _ServerEnv  # noqa: E402
 
 PIPELINE_SAMPLE_RATE = 16_000
+IDLE_RECV_OBSERVATION_S = AUDIO_PTIME * 2
+RECV_TIMEOUT_S = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +108,13 @@ class _FakeTransport(SessionTransport):
     async def send_events(self, events):
         self.sent.extend(e.model_dump() for e in events)
 
-    async def send_audio_chunk(self, service, session_id, pcm):
+    async def send_audio_chunk(
+        self,
+        service,
+        session_id,
+        pcm,
+        response_key=None,
+    ):
         raise AssertionError("dispatch tests never send audio")
 
     def discard_pending_audio(self):
@@ -118,10 +147,43 @@ class TestAppendPcm:
         unit = _make_unit()
         conn_id = unit.service.register()
 
-        assert unit.service.handle_audio_commit(conn_id) is not None  # empty buffer errors
+        assert unit.service.handle_audio_commit(conn_id)[1] is not None  # empty buffer errors
 
         unit.service.append_pcm(conn_id, b"\x01\x00" * 512, PIPELINE_SAMPLE_RATE)
-        assert unit.service.handle_audio_commit(conn_id) is None
+        assert unit.service.handle_audio_commit(conn_id) == ([], None)
+
+    def test_24khz_resampling_is_continuous_across_calls(self):
+        unit = _make_unit()
+        samples = np.round(np.sin(np.arange(4800) * 2 * np.pi * 997 / 24000) * 12000).astype("<i2")
+
+        chunked_id = unit.service.register()
+        chunked = b"".join(
+            b"".join(unit.service.append_pcm(chunked_id, chunk.tobytes(), 24000))
+            for chunk in np.array_split(samples, 10)
+        )
+        chunked += unit.service._state(chunked_id).audio_remainder
+
+        single_id = unit.service.register()
+        single = b"".join(unit.service.append_pcm(single_id, samples.tobytes(), 24000))
+        single += unit.service._state(single_id).audio_remainder
+
+        assert chunked == single
+
+    def test_failed_short_commit_preserves_filter_state_for_more_audio(self):
+        unit = _make_unit()
+        conn_id = unit.service.register()
+        first_half = b"\x01\x00" * 384
+
+        assert unit.service.append_pcm(conn_id, first_half, 24000) == []
+        assert unit.service.handle_audio_commit(conn_id)[1] is not None
+        assert unit.service._state(conn_id).input_audio_resampler is not None
+
+        assert unit.service.append_pcm(conn_id, first_half, 24000) == []
+        chunks, error = unit.service.handle_audio_commit(conn_id)
+        assert error is None
+        assert [len(chunk) for chunk in chunks] == [CHUNK_SIZE_BYTES]
+        assert unit.service._state(conn_id).audio_remainder == b""
+        assert unit.service._state(conn_id).input_audio_resampler is None
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +234,87 @@ class TestPcmResampler:
 
 
 class TestPipelineAudioTrack:
-    async def test_recv_returns_written_audio_then_silence(self):
+    async def test_recv_waits_for_audio_when_idle(self):
+        track = PipelineAudioTrack()
+        recv_task = asyncio.create_task(track.recv())
+
+        try:
+            track.write(b"")
+            await asyncio.sleep(IDLE_RECV_OBSERVATION_S)
+            assert not recv_task.done()
+
+            payload = (np.ones(WEBRTC_FRAME_SAMPLES, dtype=np.int16) * 5).tobytes()
+            track.write(payload)
+            frame = await asyncio.wait_for(recv_task, timeout=RECV_TIMEOUT_S)
+            assert np.all(frame.to_ndarray() == 5)
+        finally:
+            recv_task.cancel()
+            await asyncio.gather(recv_task, return_exceptions=True)
+            track.stop()
+
+    async def test_recv_handles_audio_arriving_during_wait_setup(self, monkeypatch):
+        track = PipelineAudioTrack()
+        payload = (np.ones(WEBRTC_FRAME_SAMPLES, dtype=np.int16) * 5).tobytes()
+        original_clear = track._data_available.clear
+
+        def clear_with_concurrent_write():
+            original_clear()
+            track.write(payload)
+
+        monkeypatch.setattr(track._data_available, "clear", clear_with_concurrent_write)
+        frame = await asyncio.wait_for(track.recv(), timeout=RECV_TIMEOUT_S)
+
+        assert np.all(frame.to_ndarray() == 5)
+        track.stop()
+
+    async def test_short_buffer_gaps_do_not_bypass_pacing(self):
+        track = PipelineAudioTrack()
+        payload = (np.ones(WEBRTC_FRAME_SAMPLES, dtype=np.int16) * 5).tobytes()
+
+        async def produce():
+            for _ in range(10):
+                track.write(payload)
+                await asyncio.sleep(AUDIO_PTIME / 4)
+
+        producer = asyncio.create_task(produce())
+        try:
+            first = await track.recv()
+            start = time.monotonic()
+            for _ in range(9):
+                frame = await track.recv()
+                assert np.all(frame.to_ndarray() == 5)
+            # 200 ms of audio has a nominal first-to-last span of 180 ms.
+            assert time.monotonic() - start >= 0.16
+            assert np.all(first.to_ndarray() == 5)
+        finally:
+            await producer
+            track.stop()
+
+    async def test_idle_resume_skips_whole_frames(self, monkeypatch):
+        now = 10.0
+        monkeypatch.setattr(
+            "speech_to_speech.api.openai_realtime.webrtc_session.time",
+            Mock(monotonic=lambda: now),
+        )
+        track = PipelineAudioTrack()
+        track.write(bytes(WEBRTC_FRAME_SAMPLES * 2))
+        first = await track.recv()
+        track.clear()
+        pending = asyncio.create_task(track.recv())
+        try:
+            await asyncio.sleep(0)  # enter the empty-buffer wait
+            now += 0.153  # deliberately outside the 20 ms frame grid
+            track.write(bytes(WEBRTC_FRAME_SAMPLES * 2))
+            resumed = await asyncio.wait_for(pending, timeout=RECV_TIMEOUT_S)
+            assert track._timestamp % WEBRTC_FRAME_SAMPLES == 0
+            assert 0.153 <= track._timestamp / WEBRTC_SAMPLE_RATE < 0.153 + AUDIO_PTIME
+            assert resumed.pts - first.pts == WEBRTC_FRAME_SAMPLES
+        finally:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+            track.stop()
+
+    async def test_recv_returns_written_audio(self):
         track = PipelineAudioTrack()
         payload = (np.ones(WEBRTC_FRAME_SAMPLES, dtype=np.int16) * 5).tobytes()
         track.write(payload)
@@ -180,9 +322,6 @@ class TestPipelineAudioTrack:
         frame = await track.recv()
         assert frame.sample_rate == WEBRTC_SAMPLE_RATE
         assert np.all(frame.to_ndarray() == 5)
-
-        frame = await track.recv()  # buffer now empty → silence
-        assert np.all(frame.to_ndarray() == 0)
         track.stop()
 
     async def test_recv_paces_to_wall_clock(self):
@@ -205,15 +344,205 @@ class TestPipelineAudioTrack:
 
         track.clear()
         assert track.buffered_bytes == 0
-        frame = await track.recv()
-        assert np.all(frame.to_ndarray() == 0)
         track.stop()
 
-    async def test_recv_after_stop_raises(self):
+    async def test_stop_wakes_pending_recv_and_raises(self):
         track = PipelineAudioTrack()
+        recv_task = asyncio.create_task(track.recv())
+        await asyncio.sleep(IDLE_RECV_OBSERVATION_S)
         track.stop()
+
         with pytest.raises(MediaStreamError):
-            await track.recv()
+            await asyncio.wait_for(recv_task, timeout=RECV_TIMEOUT_S)
+
+    async def test_clear_while_pacing_returns_only_new_audio(self):
+        track = PipelineAudioTrack()
+        payload = (np.ones(WEBRTC_FRAME_SAMPLES, dtype=np.int16) * 7).tobytes()
+        track.write(payload * 2)
+        await track.recv()
+        pending = asyncio.create_task(track.recv())
+        try:
+            await asyncio.sleep(0)
+            track.clear()
+            await asyncio.sleep(AUDIO_PTIME * 2)
+            assert not pending.done()
+            track.write((np.ones(WEBRTC_FRAME_SAMPLES, dtype=np.int16) * 3).tobytes())
+            frame = await asyncio.wait_for(pending, timeout=RECV_TIMEOUT_S)
+            assert np.all(frame.to_ndarray() == 3)
+        finally:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+            track.stop()
+
+
+class _PacketCapture:
+    """Capture actual sender serialization without network or encryption."""
+
+    def __init__(self):
+        self.rtp = []
+        self.rtcp = []
+
+    async def send(self, data):
+        now = time.monotonic()
+        if is_rtcp(data):
+            self.rtcp.extend((now, packet) for packet in RtcpPacket.parse(data))
+        else:
+            self.rtp.append((now, RtpPacket.parse(data)))
+
+
+@pytest.fixture
+async def captured_audio_sender(monkeypatch):
+    pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+    session = WebRTCSession(
+        pc,
+        on_client_event=AsyncMock(),
+        on_audio=Mock(),
+        on_open=AsyncMock(),
+        on_closed=Mock(),
+    )
+    session.setup()
+    sender = pc.getSenders()[0]
+    capture = _PacketCapture()
+    monkeypatch.setattr(sender.transport, "_send_rtp", capture.send)
+    await sender.send(
+        RTCRtpSendParameters(
+            codecs=[
+                RTCRtpCodecParameters(mimeType="audio/opus", clockRate=WEBRTC_SAMPLE_RATE, channels=2, payloadType=111)
+            ],
+            rtcp=RTCRtcpParameters(cname="audio-clock-test"),
+        )
+    )
+    try:
+        yield session, sender, capture
+    finally:
+        await session.close()
+
+
+async def _wait_until(predicate, timeout=4.0):
+    async def poll():
+        while not predicate():
+            await asyncio.sleep(0.005)
+
+    await asyncio.wait_for(poll(), timeout=timeout)
+
+
+class TestOutboundAudioPackets:
+    async def test_final_audio_is_encoded_before_idle(self, captured_audio_sender):
+        session, _, capture = captured_audio_sender
+        pcm = np.zeros(WEBRTC_FRAME_SAMPLES * 4, dtype=np.int16)
+        # Speech only in the final 5 ms is otherwise retained in Opus lookahead.
+        pcm[-240:] = (12000 * np.sin(2 * np.pi * 1000 * np.arange(240) / WEBRTC_SAMPLE_RATE)).astype(np.int16)
+        session._track.write(pcm.tobytes())
+        await _wait_until(lambda: len(capture.rtp) >= 9)
+
+        decoder = OpusDecoder()
+        frames = [
+            frame.to_ndarray().astype(np.int32)
+            for _, packet in capture.rtp
+            for frame in decoder.decode(JitterFrame(data=packet.payload, timestamp=packet.timestamp))
+        ]
+        assert max(np.max(np.abs(frame)) for frame in frames) > 1000
+        assert len(capture.rtp) == 9  # four PCM frames plus five bounded drain frames
+        await asyncio.sleep(IDLE_RECV_OBSERVATION_S)
+        assert len(capture.rtp) == 9
+
+    async def test_rtp_clock_advances_across_idle(self, captured_audio_sender):
+        session, _, capture = captured_audio_sender
+        session._track.write(bytes(WEBRTC_FRAME_SAMPLES * 2 * 2))
+        await _wait_until(lambda: len(capture.rtp) >= 7)
+        await asyncio.sleep(AUDIO_PTIME * 2)
+        count = len(capture.rtp)
+        await asyncio.sleep(0.153)
+        assert len(capture.rtp) == count
+        session._track.write(bytes(WEBRTC_FRAME_SAMPLES * 2 * 2))
+        await _wait_until(lambda: len(capture.rtp) >= count + 7)
+        await asyncio.sleep(AUDIO_PTIME * 2)
+
+        previous_time, previous = capture.rtp[count - 1]
+        resumed_time, resumed = capture.rtp[count]
+        timestamp_delta = (resumed.timestamp - previous.timestamp) & 0xFFFFFFFF
+        assert timestamp_delta % WEBRTC_FRAME_SAMPLES == 0
+        rtp_elapsed = timestamp_delta / WEBRTC_SAMPLE_RATE
+        assert abs(rtp_elapsed - (resumed_time - previous_time)) < 0.03
+        assert resumed.ssrc == previous.ssrc
+        assert (resumed.sequence_number - previous.sequence_number) & 0xFFFF == 1
+        for (_, a), (_, b) in zip(capture.rtp[count:], capture.rtp[count + 1 :]):
+            assert (b.timestamp - a.timestamp) & 0xFFFFFFFF == WEBRTC_FRAME_SAMPLES
+
+    async def test_initial_idle_sends_rr_without_audio(self, captured_audio_sender):
+        _, _, capture = captured_audio_sender
+        await _wait_until(lambda: any(isinstance(p, RtcpRrPacket) for _, p in capture.rtcp))
+        assert not capture.rtp
+        assert not any(isinstance(p, RtcpSrPacket) for _, p in capture.rtcp)
+
+    async def test_rtcp_reports_current_clock_and_switches_to_rr_when_idle(self, captured_audio_sender):
+        session, sender, capture = captured_audio_sender
+        session._track.write(bytes(WEBRTC_FRAME_SAMPLES * 2 * 4))
+        await _wait_until(lambda: len(capture.rtp) >= 9)
+        await asyncio.sleep(AUDIO_PTIME * 2)
+        count = len(capture.rtp)
+        await _wait_until(lambda: sum(isinstance(p, RtcpSrPacket) for _, p in capture.rtcp) >= 2)
+        reports = [(at, p) for at, p in capture.rtcp if isinstance(p, RtcpSrPacket)]
+        first_time, first = reports[-2]
+        second_time, second = reports[-1]
+        ntp_elapsed = (second.sender_info.ntp_timestamp - first.sender_info.ntp_timestamp) / 2**32
+        rtp_elapsed = (
+            (second.sender_info.rtp_timestamp - first.sender_info.rtp_timestamp) & 0xFFFFFFFF
+        ) / WEBRTC_SAMPLE_RATE
+        assert abs(ntp_elapsed - (second_time - first_time)) < 0.01
+        assert abs(rtp_elapsed - ntp_elapsed) < 0.001
+        assert (clock.current_ntp_time() - second.sender_info.ntp_timestamp) / 2**32 < 0.05
+        assert first.sender_info.packet_count == second.sender_info.packet_count == count
+
+        await _wait_until(lambda: any(at > second_time and isinstance(p, RtcpRrPacket) for at, p in capture.rtcp))
+        assert len(capture.rtp) == count
+        assert getattr(sender, "_RTCRtpSender__lsr") == (second.sender_info.ntp_timestamp >> 16) & 0xFFFFFFFF
+
+    async def test_interruption_discards_encoder_lookahead(self, captured_audio_sender):
+        session, _, capture = captured_audio_sender
+        session._track.write((np.ones(WEBRTC_FRAME_SAMPLES, dtype=np.int16) * 12000).tobytes())
+        await _wait_until(lambda: len(capture.rtp) >= 1)
+        session.discard_pending_audio()
+        count = len(capture.rtp)
+        await asyncio.sleep(AUDIO_PTIME * 2)
+        assert len(capture.rtp) == count
+        session._track.write(bytes(WEBRTC_FRAME_SAMPLES * 2 * 2))
+        await _wait_until(lambda: len(capture.rtp) >= count + 2)
+        await asyncio.sleep(AUDIO_PTIME * 2)
+
+        decoder = OpusDecoder()
+        frames = [
+            frame.to_ndarray().astype(np.int32)
+            for _, packet in capture.rtp[count:]
+            for frame in decoder.decode(JitterFrame(data=packet.payload, timestamp=packet.timestamp))
+        ]
+        assert max(np.max(np.abs(frame)) for frame in frames) < 100
+
+    async def test_interruption_during_encoding_drops_in_flight_packet(self, captured_audio_sender, monkeypatch):
+        session, sender, capture = captured_audio_sender
+        encoding = ThreadingEvent()
+        release = ThreadingEvent()
+        encoder = OpusEncoder()
+        encode = encoder.encode
+
+        def blocked_encode(*args):
+            encoding.set()
+            assert release.wait(timeout=RECV_TIMEOUT_S)
+            return encode(*args)
+
+        monkeypatch.setattr(encoder, "encode", blocked_encode)
+        setattr(sender, "_RTCRtpSender__encoder", encoder)
+        session._track.write((np.ones(WEBRTC_FRAME_SAMPLES, dtype=np.int16) * 12000).tobytes())
+        try:
+            await _wait_until(encoding.is_set)
+            session.discard_pending_audio()
+            release.set()
+            await asyncio.sleep(AUDIO_PTIME * 2)
+            assert not capture.rtp
+            session._track.write(bytes(WEBRTC_FRAME_SAMPLES * 2))
+            await _wait_until(lambda: len(capture.rtp) >= 2)
+        finally:
+            release.set()
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +551,50 @@ class TestPipelineAudioTrack:
 
 
 class TestWebRTCDispatch:
+    @pytest.mark.parametrize("sample_count", [768, 7680])
+    async def test_websocket_commit_forwards_resampler_tail(self, sample_count):
+        unit = _make_unit()
+        conn_id = unit.service.register()
+        transport = _FakeTransport()
+        samples = np.round(np.sin(np.arange(sample_count) * 2 * np.pi * 997 / 24000) * 12000).astype("<i2")
+        await router_module._dispatch_client_event(
+            unit,
+            conn_id,
+            {
+                "type": "session.update",
+                "session": {"type": "realtime", "audio": {"input": {"format": {"type": "audio/pcm", "rate": 24000}}}},
+            },
+            transport,
+            transport_kind="websocket",
+        )
+
+        await router_module._dispatch_client_event(
+            unit,
+            conn_id,
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(samples.tobytes()).decode("ascii"),
+            },
+            transport,
+            transport_kind="websocket",
+        )
+        assert unit.input_queue.qsize() == sample_count * 2 // 3 // 512 - 1
+
+        await router_module._dispatch_client_event(
+            unit,
+            conn_id,
+            {"type": "input_audio_buffer.commit"},
+            transport,
+            transport_kind="websocket",
+        )
+        assert unit.input_queue.qsize() == sample_count * 2 // 3 // 512
+        assert all(event["type"] != "error" for event in transport.sent)
+        assert unit.service._state(conn_id).audio_remainder == b""
+        assert unit.service._state(conn_id).input_audio_resampler is None
+        received = b"".join(unit.input_queue.get_nowait()[0] for _ in range(sample_count * 2 // 3 // 512))
+        reference = np.clip(np.round(resample_poly(samples.astype(np.float64), 2, 3)), -32768, 32767).astype("<i2")
+        assert received == reference.tobytes()
+
     async def test_append_rejected_over_webrtc(self):
         unit = _make_unit()
         conn_id = unit.service.register()
@@ -238,6 +611,7 @@ class TestWebRTCDispatch:
         assert len(transport.sent) == 1
         assert transport.sent[0]["type"] == "error"
         assert transport.sent[0]["error"]["type"] == "invalid_event_for_transport"
+        assert transport.sent[0]["error"]["type"] == "invalid_event_for_transport"
         assert unit.input_queue.qsize() == 0
 
     async def test_output_audio_buffer_clear_flushes_audio(self):
@@ -245,7 +619,20 @@ class TestWebRTCDispatch:
         conn_id = unit.service.register()
         transport = _FakeTransport()
 
+        text_event = AssistantOutputEvent(text="before audio", response_key="response_1")
+        tool_event = AssistantOutputEvent(
+            tools=[{"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"}],
+            response_key="response_1",
+        )
+        failed_event = ResponseFailedEvent(message="provider failed", response_key="response_1")
+        usage_event = TokenUsageEvent(input_tokens=3, output_tokens=2, response_key="response_1")
+        done_event = AssistantResponseDoneEvent(response_key="response_1")
+        unit.output_queue.put(text_event)
         unit.output_queue.put(b"\x01\x00" * 512)
+        unit.output_queue.put(tool_event)
+        unit.output_queue.put(failed_event)
+        unit.output_queue.put(usage_event)
+        unit.output_queue.put(done_event)
         unit.output_queue.put(AUDIO_RESPONSE_DONE)
 
         await router_module._dispatch_client_event(
@@ -258,8 +645,15 @@ class TestWebRTCDispatch:
 
         assert transport.sent == []  # no error
         assert transport.discards == 1
-        # Pending audio flushed, done-sentinel preserved so the response still closes.
-        assert unit.output_queue.get_nowait() == AUDIO_RESPONSE_DONE
+        # Only audio is flushed; ordered response state and the terminal survive.
+        assert [unit.output_queue.get_nowait() for _ in range(6)] == [
+            text_event,
+            tool_event,
+            failed_event,
+            usage_event,
+            done_event,
+            AUDIO_RESPONSE_DONE,
+        ]
         with pytest.raises(Empty):
             unit.output_queue.get_nowait()
 
@@ -279,7 +673,34 @@ class TestWebRTCDispatch:
 
         assert len(transport.sent) == 1
         assert transport.sent[0]["type"] == "error"
-        assert transport.sent[0]["error"]["type"] == "invalid_event_for_transport"
+
+    async def test_response_cancel_closes_message_lifecycle(self):
+        unit = _make_unit()
+        conn_id = unit.service.register()
+        transport = _FakeTransport()
+        await transport.send_events(unit.service.dispatch_pipeline_event(conn_id, AssistantOutputEvent(text="partial")))
+
+        await router_module._dispatch_client_event(
+            unit,
+            conn_id,
+            {"type": "response.cancel"},
+            transport,
+            transport_kind="webrtc",
+        )
+
+        assert [event["type"] for event in transport.sent] == [
+            "response.created",
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.output_audio_transcript.delta",
+            "response.output_audio_transcript.done",
+            "response.content_part.done",
+            "response.output_item.done",
+            "response.done",
+        ]
+        assert transport.sent[-2]["item"]["status"] == "incomplete"
+        assert transport.sent[-1]["response"]["status"] == "cancelled"
+        assert transport.sent[-2]["item"] == transport.sent[-1]["response"]["output"][0]
 
     async def test_response_cancel_discards_transport_audio(self):
         unit = _make_unit()
@@ -378,7 +799,216 @@ class _DataChannelInbox:
 
 
 class TestWebRTCLoopback:
-    async def test_handshake_events_and_audio_roundtrip(self, server_env):
+    async def test_cancelled_close_keeps_teardown_running(self, monkeypatch):
+        server_pc = RTCPeerConnection()
+        teardown_started = asyncio.Event()
+        release_teardown = asyncio.Event()
+        closed_calls = []
+
+        async def _on_client_event(_raw):
+            pass
+
+        async def _on_open():
+            pass
+
+        session = WebRTCSession(
+            server_pc,
+            on_client_event=_on_client_event,
+            on_audio=lambda _pcm: None,
+            on_open=_on_open,
+            on_closed=lambda: closed_calls.append(None),
+        )
+        session.setup()
+        close_peer_connection = session._close_peer_connection
+
+        async def _pause_peer_close():
+            teardown_started.set()
+            await release_teardown.wait()
+            await close_peer_connection()
+
+        monkeypatch.setattr(session, "_close_peer_connection", _pause_peer_close)
+        first_close = asyncio.create_task(session.close())
+        second_close = None
+        try:
+            await asyncio.wait_for(teardown_started.wait(), timeout=1.0)
+            first_close.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first_close
+
+            second_close = asyncio.create_task(session.close())
+            await asyncio.sleep(0)
+            assert not second_close.done()
+
+            release_teardown.set()
+            await second_close
+            assert server_pc.connectionState == "closed"
+            assert len(closed_calls) == 1
+        finally:
+            release_teardown.set()
+            close_tasks = [task for task in (first_close, second_close) if task is not None]
+            await asyncio.gather(*close_tasks, return_exceptions=True)
+            await session.close()
+            await server_pc.close()
+
+    async def test_close_awaits_pending_ice_checks(self, monkeypatch):
+        client_pc = RTCPeerConnection()
+        server_pc = RTCPeerConnection()
+        first_close = None
+        second_close = None
+        release_sweep = asyncio.Event()
+        closed_calls = []
+        close_server_pc = server_pc.close
+
+        def _pending_ice_checks():
+            return {
+                task
+                for task in asyncio.all_tasks()
+                if getattr(task.get_coro(), "cr_code", None) is Connection.check_start.__code__
+            }
+
+        connect_code = getattr(RTCPeerConnection, "_RTCPeerConnection__connect").__code__
+
+        def _pending_server_connects():
+            tasks = set()
+            for task in asyncio.all_tasks():
+                coro = task.get_coro()
+                frame = getattr(coro, "cr_frame", None)
+                if (
+                    getattr(coro, "cr_code", None) is connect_code
+                    and frame is not None
+                    and frame.f_locals.get("self") is server_pc
+                ):
+                    tasks.add(task)
+            return tasks
+
+        async def _on_client_event(_raw):
+            pass
+
+        async def _on_open():
+            pass
+
+        session = WebRTCSession(
+            server_pc,
+            on_client_event=_on_client_event,
+            on_audio=lambda _pcm: None,
+            on_open=_on_open,
+            on_closed=lambda: closed_calls.append(None),
+        )
+        session.setup()
+        try:
+            client_pc.createDataChannel("oai-events")
+            client_pc.addTrack(AudioStreamTrack())
+            offer = await client_pc.createOffer()
+            await client_pc.setLocalDescription(offer)
+            offer_sdp = client_pc.localDescription.sdp
+            partial_offer_sdp = offer_sdp.replace("a=end-of-candidates\r\n", "")
+            assert partial_offer_sdp != offer_sdp
+            await session.negotiate(partial_offer_sdp)
+
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                if _pending_ice_checks():
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("aioice did not start a connectivity check")
+            assert _pending_server_connects()
+
+            sweep_started = asyncio.Event()
+            cancel_ice_checks = session._cancel_ice_checks
+            sweep_count = 0
+
+            async def _pause_first_sweep():
+                nonlocal sweep_count
+                sweep_count += 1
+                if sweep_count == 1:
+                    sweep_started.set()
+                    await release_sweep.wait()
+                await cancel_ice_checks()
+
+            async def _fail_peer_close():
+                raise RuntimeError("peer close failed")
+
+            monkeypatch.setattr(session, "_cancel_ice_checks", _pause_first_sweep)
+            monkeypatch.setattr(server_pc, "close", _fail_peer_close)
+            first_close = asyncio.create_task(session.close())
+            await asyncio.wait_for(sweep_started.wait(), timeout=1.0)
+            second_close = asyncio.create_task(session.close())
+            await asyncio.sleep(0)
+            assert not second_close.done()
+
+            release_sweep.set()
+            await asyncio.gather(first_close, second_close)
+            assert not _pending_ice_checks()
+            assert not _pending_server_connects()
+            assert len(closed_calls) == 1
+        finally:
+            release_sweep.set()
+            close_tasks = [task for task in (first_close, second_close) if task is not None]
+            if close_tasks:
+                await asyncio.gather(*close_tasks, return_exceptions=True)
+            monkeypatch.setattr(server_pc, "close", close_server_pc)
+            await session.close()
+            await server_pc.close()
+            await client_pc.close()
+
+    @pytest.mark.parametrize("pcm_frames", [1, 4])
+    async def test_speech_tail_reaches_receiver_before_idle(self, pcm_frames):
+        client_pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+        server_pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+        session = WebRTCSession(
+            server_pc,
+            on_client_event=AsyncMock(),
+            on_audio=Mock(),
+            on_open=AsyncMock(),
+            on_closed=Mock(),
+        )
+        session.setup()
+        decoded = []
+        consumers = []
+
+        @client_pc.on("track")
+        def on_track(track):
+            async def consume():
+                while True:
+                    try:
+                        frame = await track.recv()
+                    except MediaStreamError:
+                        return
+                    decoded.append(frame.to_ndarray().astype(np.int32))
+
+            consumers.append(asyncio.create_task(consume()))
+
+        try:
+            client_pc.createDataChannel("oai-events")
+            client_pc.addTransceiver("audio", direction="recvonly")
+            await client_pc.setLocalDescription(await client_pc.createOffer())
+            answer = await session.negotiate(client_pc.localDescription.sdp)
+            await client_pc.setRemoteDescription(RTCSessionDescription(sdp=answer, type="answer"))
+            await _wait_until(lambda: client_pc.connectionState == server_pc.connectionState == "connected")
+
+            pcm = np.zeros(WEBRTC_FRAME_SAMPLES * pcm_frames, dtype=np.int16)
+            # The final 5 ms must leave both Opus lookahead and the receiver's
+            # jitter buffer without another utterance supplying more packets.
+            pcm[-240:] = (12000 * np.sin(2 * np.pi * 1000 * np.arange(240) / WEBRTC_SAMPLE_RATE)).astype(np.int16)
+            session._track.write(pcm.tobytes())
+            await _wait_until(lambda: any(np.max(np.abs(frame)) > 1000 for frame in decoded), timeout=1.0)
+
+            sender = server_pc.getSenders()[0]
+            await asyncio.sleep(AUDIO_PTIME * 2)
+            stats = await sender.getStats()
+            count = next(report.packetsSent for report in stats.values() if report.type == "outbound-rtp")
+            await asyncio.sleep(IDLE_RECV_OBSERVATION_S)
+            stats = await sender.getStats()
+            assert next(report.packetsSent for report in stats.values() if report.type == "outbound-rtp") == count
+        finally:
+            await session.close()
+            await client_pc.close()
+            for consumer in consumers:
+                consumer.cancel()
+            await asyncio.gather(*consumers, return_exceptions=True)
+
+    async def test_handshake_events_and_multi_output_audio_roundtrip(self, server_env):
         pc = RTCPeerConnection()
         try:
             dc = pc.createDataChannel("oai-events")
@@ -434,15 +1064,89 @@ class TestWebRTCLoopback:
             chunk, _cfg = await asyncio.get_running_loop().run_in_executor(None, _wait_for_input_chunk)
             assert len(chunk) == CHUNK_SIZE_BYTES
 
-            # Outbound pipeline audio: PCM through output_queue reaches the
-            # client as RTP frames, and the done-sentinel closes the response
-            # over the data channel (response.created was sent implicitly).
-            server_env.output_queue.put(np.ones(4096, dtype=np.int16).tobytes())
-            server_env.output_queue.put(AUDIO_RESPONSE_DONE)
+            # Two assistant messages separated by a tool call keep distinct
+            # output identities over a real WebRTC media/data-channel pair.
+            response_key = "webrtc_response_1"
+            server_env.output_queue.put(
+                AssistantOutputEvent(
+                    response_key=response_key,
+                    parts=[AssistantTextPart(text="before")],
+                )
+            )
+            server_env.output_queue.put(
+                AudioOutput(
+                    audio=np.ones(2048, dtype=np.int16).tobytes(),
+                    response_key=response_key,
+                )
+            )
+            server_env.output_queue.put(
+                AssistantOutputEvent(
+                    response_key=response_key,
+                    parts=[
+                        AssistantToolCallPart(
+                            tool={
+                                "type": "function_call",
+                                "call_id": "call_1",
+                                "name": "tool",
+                                "arguments": "{}",
+                            }
+                        )
+                    ],
+                )
+            )
+            server_env.output_queue.put(
+                AssistantOutputEvent(
+                    response_key=response_key,
+                    parts=[AssistantTextPart(text="after")],
+                )
+            )
+            server_env.output_queue.put(
+                AudioOutput(
+                    audio=np.ones(2048, dtype=np.int16).tobytes(),
+                    response_key=response_key,
+                )
+            )
+            server_env.output_queue.put(AssistantResponseDoneEvent(response_key=response_key))
+            server_env.output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=response_key))
 
             await inbox.wait_for("response.created", timeout=10.0)
             done = await inbox.wait_for("response.done", timeout=10.0)
             assert done["response"]["status"] == "completed"
+            transcript_deltas = [
+                event for event in inbox.events if event["type"] == "response.output_audio_transcript.delta"
+            ]
+            audio_done = [event for event in inbox.events if event["type"] == "response.output_audio.done"]
+            response_events = [event for event in inbox.events if event["type"].startswith("response.")]
+            assert [event["type"] for event in response_events] == [
+                "response.created",
+                "response.output_item.added",
+                "response.content_part.added",
+                "response.output_audio_transcript.delta",
+                "response.output_audio.done",
+                "response.output_audio_transcript.done",
+                "response.content_part.done",
+                "response.output_item.done",
+                "response.output_item.added",
+                "response.function_call_arguments.done",
+                "response.output_item.done",
+                "response.output_item.added",
+                "response.content_part.added",
+                "response.output_audio_transcript.delta",
+                "response.output_audio.done",
+                "response.output_audio_transcript.done",
+                "response.content_part.done",
+                "response.output_item.done",
+                "response.done",
+            ]
+            assert [event["output_index"] for event in transcript_deltas] == [0, 2]
+            assert [event["output_index"] for event in audio_done] == [0, 2]
+            assert [item["type"] for item in done["response"]["output"]] == [
+                "message",
+                "function_call",
+                "message",
+            ]
+            for event in audio_done:
+                assert done["response"]["output"][event["output_index"]]["id"] == event["item_id"]
 
             await asyncio.wait_for(track_ready.wait(), timeout=10.0)
             assert received_frames[0].sample_rate == WEBRTC_SAMPLE_RATE
@@ -584,3 +1288,126 @@ async def _wait_for_release(server_env, timeout: float = 5.0) -> None:
             return
         await asyncio.sleep(0.05)
     raise AssertionError("failed WebRTC call left the pipeline unit claimed")
+
+
+@pytest.mark.asyncio
+async def test_visemes_use_current_webrtc_data_channel_before_media_audio():
+    from types import SimpleNamespace
+
+    from speech_to_speech.api.openai_realtime.pipeline_unit import SessionState
+    from speech_to_speech.pipeline.visemes import Viseme
+
+    unit = _make_unit()
+    session_id = unit.service.register()
+    delivered = []
+    rtc = object.__new__(WebRTCSession)
+    rtc._dc = SimpleNamespace(readyState="open", send=lambda value: delivered.append(json.loads(value)))
+    rtc._track = SimpleNamespace(write=lambda pcm: delivered.append({"type": "rtp-audio", "pcm": pcm}))
+    rtc._out_resampler = PcmResampler(WEBRTC_SAMPLE_RATE)
+
+    async def close():
+        pass
+
+    rtc.close = close
+    unit.session = SessionState(session_id=session_id, transport=rtc)
+    stop_event = ThreadingEvent()
+    app = router_module.create_app(pool=[unit], stop_event=stop_event)
+    unit.output_queue.put(
+        AudioOutput(
+            audio=b"\x01\x00" * 512,
+            visemes=[Viseme(viseme=21, start_s=0, end_s=0.032)],
+        )
+    )
+    unit.output_queue.put(AUDIO_RESPONSE_DONE)
+    async with app.router.lifespan_context(app):
+
+        async def wait_for_done():
+            while not any(event["type"] == "response.done" for event in delivered):
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(wait_for_done(), timeout=2)
+    kinds = [event["type"] for event in delivered]
+    assert kinds[:5] == [
+        "response.created",
+        "response.output_item.added",
+        "response.content_part.added",
+        "speech_to_speech.output_audio.visemes",
+        "rtp-audio",
+    ]
+    assert delivered[3]["response_id"] == delivered[0]["response"]["id"]
+    assert delivered[3]["item_id"] == delivered[1]["item"]["id"]
+    assert delivered[4]["pcm"]
+    assert not any(event["type"] == "response.output_audio.delta" for event in delivered)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["session-release", "transport-switch", "response-close"])
+async def test_viseme_send_rechecks_response_and_session_before_audio(change):
+    from speech_to_speech.api.openai_realtime.pipeline_unit import SessionState
+    from speech_to_speech.pipeline.visemes import Viseme
+
+    unit = _make_unit()
+    session_id = unit.service.register()
+    metadata_sent = asyncio.Event()
+    audio_sends = []
+
+    class ChangingTransport(_FakeTransport):
+        async def send_events(self, events):
+            await super().send_events(events)
+            if any(event.type == "speech_to_speech.output_audio.visemes" for event in events):
+                if change == "session-release":
+                    unit.session.released_at = time.time()
+                elif change == "transport-switch":
+                    unit.session.transport = _FakeTransport()
+                else:
+                    unit.service.finish_response(session_id, status="cancelled")
+                metadata_sent.set()
+
+        async def send_audio_chunk(self, *args, **kwargs):
+            audio_sends.append(args)
+
+    transport = ChangingTransport()
+    unit.session = SessionState(session_id=session_id, transport=transport)
+    app = router_module.create_app(pool=[unit], stop_event=ThreadingEvent())
+    unit.output_queue.put(
+        AudioOutput(
+            audio=b"\x01\x00" * 512,
+            visemes=[Viseme(viseme=21, start_s=0, end_s=0.032)],
+        )
+    )
+    async with app.router.lifespan_context(app):
+        await asyncio.wait_for(metadata_sent.wait(), timeout=1)
+        await asyncio.sleep(0.05)
+    assert audio_sends == []
+
+
+@pytest.mark.asyncio
+async def test_conversation_delete_uses_shared_data_channel_dispatch():
+    unit = _make_unit()
+    conn_id = unit.service.register()
+    transport = _FakeTransport()
+    try:
+        for payload in [
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "id": "chat_context_1",
+                    "type": "message",
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": "context"}],
+                },
+            },
+            {"type": "conversation.item.delete", "item_id": "chat_context_1"},
+            {"type": "conversation.item.delete", "item_id": "chat_context_1", "event_id": "repeat_delete"},
+        ]:
+            await router_module._dispatch_client_event(unit, conn_id, payload, transport, transport_kind="webrtc")
+        assert [event["type"] for event in transport.sent] == [
+            "conversation.item.created",
+            "conversation.item.deleted",
+            "error",
+        ]
+        assert transport.sent[1]["item_id"] == "chat_context_1"
+        assert transport.sent[2]["error"]["event_id"] == "repeat_delete"
+        assert unit.service._state(conn_id).runtime_config.chat.init_chat_message is None
+    finally:
+        unit.service.unregister(conn_id)

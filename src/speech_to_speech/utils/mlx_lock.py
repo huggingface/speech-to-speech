@@ -1,9 +1,24 @@
 """
 Global MLX lock to prevent concurrent Metal/MLX model access.
 
-MLX models (STT, LLM, TTS) cannot be used concurrently from multiple threads
-on Apple Silicon due to Metal command buffer limitations. This module provides
-a global lock that all MLX handlers should acquire before using their models.
+The pipeline's MLX models (STT, LLM, TTS) share Apple Silicon Metal resources.
+This module provides a global lock that all MLX handlers acquire before using
+their models.
+
+MLX 0.32.0 documents support for independent computations from multiple threads,
+but that does not make the full speech pipeline safe without serialization. We
+tested the pinned stack (mlx/metal 0.32.0, mlx-lm 0.31.3, mlx-audio 0.4.7) from
+GitHub issue #386: two concurrent handlers were stable, while unrestricted
+three-way STT/LLM/TTS load intermittently caused a Metal MMU GPU restart with
+Lightning Whisper and a Parakeet decoder IndexError. Keep this lock until the
+complete three-way pipeline is proven stable, not merely the MLX core runtime.
+
+Issue #646 validation upgraded mlx/metal to 0.32.3 to fix frozen worker-thread
+Qwen3-TTS sampling, retaining mlx-lm 0.31.3 and mlx-audio 0.4.7. On an M3 Pro,
+all four unlocked three-way stress processes still failed: Parakeet raised a
+decoder IndexError followed by GPU recovery errors, and Lightning Whisper Small
+workloads triggered Metal GPU hangs. All four locked controls passed. The sampling
+fix does not remove the need for this lock.
 """
 
 import logging
@@ -11,6 +26,8 @@ import types
 from threading import Lock, RLock, current_thread, get_ident
 from time import perf_counter
 from typing import Literal
+
+from speech_to_speech.pipeline.turn_latency import active_turn_latency_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +110,9 @@ def acquire_mlx_lock(timeout: float | None = None, handler_name: str = "Unknown"
     start = perf_counter()
     acquired = _mlx_lock.acquire(timeout=timeout) if timeout else _mlx_lock.acquire(blocking=True)
     wait_s = perf_counter() - start
+    tracker = active_turn_latency_tracker()
+    if tracker is not None:
+        tracker.record_mlx_lock_wait(wait_s, handler_name)
 
     if acquired:
         depth = _record_lock_acquired(handler_name)
@@ -136,6 +156,10 @@ def release_mlx_lock(handler_name: str = "Unknown") -> None:
     try:
         depth, hold_s = _record_lock_released(handler_name)
         _mlx_lock.release()
+        if hold_s is not None and depth == 0:
+            tracker = active_turn_latency_tracker()
+            if tracker is not None:
+                tracker.record_mlx_lock_hold(hold_s, handler_name)
         if hold_s is not None and depth == 0 and hold_s >= 0.25:
             logger.info("%s: MLX lock released after holding %.2fs", handler_name, hold_s)
         else:

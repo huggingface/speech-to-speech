@@ -42,6 +42,7 @@ class RuntimeConfig(BaseModel):
         default_factory=lambda: RealtimeSessionCreateRequest(type="realtime"),
         validate_default=True,
     )
+    last_assistant_language: str | None = Field(default=None, exclude=True)
 
     @field_validator("session", mode="after")
     @classmethod
@@ -54,6 +55,17 @@ class RuntimeConfig(BaseModel):
         if v.audio.output is None:
             v.audio.output = RealtimeAudioConfigOutput()
         return v
+
+    @property
+    def create_response_enabled(self) -> bool:
+        """Whether finalized speech should automatically schedule generation.
+
+        Preserve the existing automatic default when the flag is omitted.
+        """
+        assert self.session.audio is not None and self.session.audio.input is not None
+        td = self.session.audio.input.turn_detection
+        value = td.get("create_response") if isinstance(td, dict) else getattr(td, "create_response", None)
+        return value if value is not None else True
 
     @property
     def interrupt_response_enabled(self) -> bool:
@@ -75,7 +87,29 @@ class RuntimeConfig(BaseModel):
             return True
         return val if val is not None else True
 
+    @property
+    def input_audio_transcription_snapshots_enabled(self) -> bool:
+        """Whether the client has opted in to replaceable speculative transcript snapshots.
+
+        Reads 'extensions' from the session config. Defaults to 'False'.
+        """
+        extensions = getattr(self.session, "extensions", None)
+        return (
+            isinstance(extensions, (list, tuple, set))
+            and "speech_to_speech.input_audio_transcription.snapshot" in extensions
+        )
+
     def apply_session_update(self, update: RealtimeSessionCreateRequest) -> None:
         """Merge non-None, explicitly-set fields from 'update' into the
         current 'session', preserving any fields not present in the update."""
         _apply_update(self.session, update)
+
+    @property
+    def selected_language(self) -> str | None:
+        audio = self.session.audio
+        input_audio = audio.input if audio is not None else None
+        transcription = input_audio.transcription if input_audio is not None else None
+        language = transcription.language if transcription is not None else None
+        if isinstance(language, str) and language.strip().lower() == "auto":
+            return "auto"
+        return language

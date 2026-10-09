@@ -1,5 +1,7 @@
 """Text-channel system prompt: lead + session prompt + tail (strongest constraints last)."""
 
+from speech_to_speech.LLM.utils import format_language_instruction
+
 TEXT_SYSTEM_PROMPT_LEAD = """\
 You are a helpful assistant in a text conversation.
 """
@@ -19,20 +21,29 @@ _TEXT_SYSTEM_PROMPT_FULL = """\
 {lead}
 
 Session Prompt:
-{session_prompt}{optional_tools}
+{session_prompt}{optional_tools}{optional_language}
 
 {tail}
 """
 
 
-def build_text_system_prompt(session_prompt: str, *, tool_section: str = "") -> str:
-    """Context → session prompt → optional tool block → strongest text rules last."""
+def build_text_system_prompt(
+    session_prompt: str,
+    *,
+    tool_section: str = "",
+    language_name: str | None = None,
+) -> str:
+    """Context → session prompt → optional tool block → optional language hint → text rules."""
     tools = tool_section.strip()
     optional_tools = f"\n\n{tools}" if tools else ""
+    optional_language = ""
+    if language_name:
+        optional_language = f"\n\n{format_language_instruction(language_name)}"
     return _TEXT_SYSTEM_PROMPT_FULL.format(
         lead=TEXT_SYSTEM_PROMPT_LEAD.rstrip(),
         session_prompt=session_prompt.strip(),
         optional_tools=optional_tools,
+        optional_language=optional_language,
         tail=TEXT_SYSTEM_PROMPT_TAIL.rstrip(),
     )
 

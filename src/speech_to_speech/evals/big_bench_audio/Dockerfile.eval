@@ -1,0 +1,33 @@
+# Build locally or with a Docker Space; run on an NVIDIA host or HF Jobs.
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
+ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 \
+    PATH="/usr/src/app/.venv/bin:${PATH}" \
+    HF_HOME=/opt/hf-cache TORCH_HOME=/opt/torch-cache NLTK_DATA=/opt/nltk_data HOME=/home/user
+WORKDIR /usr/src/app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates git libportaudio2 libsndfile1 ffmpeg python3 python3-pip python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+RUN python3 -m pip install --no-cache-dir --break-system-packages uv
+ARG EXTRAS=""
+COPY pyproject.toml README.md LICENSE MANIFEST.in ./
+RUN set -eu; flags=""; for extra in $EXTRAS; do flags="$flags --extra $extra"; done; \
+    uv sync --python /usr/bin/python3 --no-install-project --no-dev $flags
+COPY src ./src
+# Contains the committed Git SHA; prepare_eval_space.py writes it for Space builds.
+COPY source-revision.txt /opt/source-revision.txt
+RUN set -eu; flags=""; for extra in $EXTRAS; do flags="$flags --extra $extra"; done; \
+    uv sync --python /usr/bin/python3 --no-dev $flags
+# Evaluation-only decoding and modern async WebSocket client requirements.
+RUN uv pip install "soundfile>=0.13.0" "websockets>=14.0"
+RUN python -c "import nltk; [nltk.download(p, download_dir='/opt/nltk_data', raise_on_error=True) for p in ('punkt_tab', 'averaged_perceptron_tagger_eng')]"
+RUN install -m 0755 src/speech_to_speech/evals/big_bench_audio/big-bench-audio-entrypoint.sh /usr/local/bin/vibe-check \
+    && mkdir -p /home/user /output /opt/hf-cache /opt/torch-cache /usr/src/app/src/speech_to_speech/tmp \
+    && chown -R 1000:0 /home/user /output /opt/hf-cache /opt/torch-cache /opt/nltk_data /usr/src/app/src/speech_to_speech/tmp
+# Ubuntu 24.04 already supplies UID 1000. Use the numeric ID for Space compatibility.
+USER 1000
+# The engine sets TORCHINDUCTOR_CACHE_DIR inside its package; exercise that
+# import as the runtime user so cache permission errors fail the image build.
+RUN python -c "from speech_to_speech import s2s_pipeline; import torch._dynamo"
+# Only the built image is needed; the Space has no long-running application.
+# Jobs override this with `vibe-check`.
+CMD ["python", "-c", "print('Run vibe-check in a Hugging Face Job.')"]

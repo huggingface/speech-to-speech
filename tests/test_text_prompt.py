@@ -11,6 +11,12 @@ def test_text_prompt_keeps_persona_in_session_prompt():
     assert "You are a helpful assistant in a text conversation." in TEXT_SYSTEM_PROMPT
 
 
+def test_text_prompt_can_include_language_hint():
+    prompt = build_text_system_prompt("Be helpful.", language_name="swedish")
+
+    assert "Please reply to my message in swedish." in prompt
+
+
 def test_text_prompt_allows_markdown_and_drops_voice_rules():
     prompt = build_text_system_prompt("Be helpful.")
 
@@ -36,7 +42,9 @@ def test_text_tool_prompt_drops_speak_first_but_keeps_structural_rules():
     prompt = build_tool_system_prompt([_dance_tool()], text_only=True)
 
     assert "no preamble sentence is required" in prompt
-    assert "Only one tool call may appear in a response." in prompt
+    assert "each named-argument function call inside its own" in prompt
+    assert "preserve the intended text/tool order" in prompt
+    assert "Only one tool call may appear in a response." not in prompt
     assert "Omit optional args instead of placeholder values" in prompt
     assert "do not claim tool results before a tool result is available" in prompt
     # Voice choreography must not appear in the text variant.
@@ -45,7 +53,8 @@ def test_text_tool_prompt_drops_speak_first_but_keeps_structural_rules():
     assert "fitting empathetic sentence" not in prompt
 
 
-def test_voice_tool_prompt_is_default():
+def test_voice_tool_prompt_does_not_include_text_only_guidance():
     prompt = build_tool_system_prompt([_dance_tool()])
 
-    assert "always speak first" in prompt
+    assert "no preamble sentence is required" not in prompt
+    assert "each named-argument function call inside its own" in prompt

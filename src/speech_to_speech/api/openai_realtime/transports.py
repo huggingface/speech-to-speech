@@ -12,6 +12,7 @@ and hands client-visible traffic to the transport attached to the current
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
@@ -34,7 +35,13 @@ class SessionTransport(ABC):
     async def send_events(self, events: list[ServerEvent]) -> None: ...
 
     @abstractmethod
-    async def send_audio_chunk(self, service: RealtimeService, session_id: str, pcm: bytes) -> None:
+    async def send_audio_chunk(
+        self,
+        service: RealtimeService,
+        session_id: str,
+        pcm: bytes,
+        response_key: str | None = None,
+    ) -> None:
         """Deliver a pipeline-rate PCM16 chunk to the client."""
 
     @abstractmethod
@@ -80,13 +87,21 @@ class WebSocketTransport(SessionTransport):
 
     def __init__(self, websocket: WebSocket) -> None:
         self.websocket = websocket
+        self._send_lock = asyncio.Lock()
 
     async def send_events(self, events: list[ServerEvent]) -> None:
-        for event in events:
-            await send_ws_event(self.websocket, event)
+        async with self._send_lock:
+            for event in events:
+                await send_ws_event(self.websocket, event)
 
-    async def send_audio_chunk(self, service: RealtimeService, session_id: str, pcm: bytes) -> None:
-        await self.send_events(service.encode_audio_chunk(session_id, pcm))
+    async def send_audio_chunk(
+        self,
+        service: RealtimeService,
+        session_id: str,
+        pcm: bytes,
+        response_key: str | None = None,
+    ) -> None:
+        await self.send_events(service.encode_audio_chunk(session_id, pcm, response_key))
 
     def discard_pending_audio(self) -> None:
         # Unplayed audio lives client-side over WebSocket; truncation is the

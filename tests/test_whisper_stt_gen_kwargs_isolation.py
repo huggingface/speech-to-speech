@@ -57,10 +57,11 @@ def test_setup_does_not_mutate_the_shared_default(stub_transformers: None) -> No
     assert default_gen_kwargs == {}
 
 
-def test_language_does_not_leak_into_a_later_handler(stub_transformers: None) -> None:
+@pytest.mark.parametrize("language", [None, "auto", "AUTO", " Auto "])
+def test_language_does_not_leak_into_a_later_handler(stub_transformers: None, language: str | None) -> None:
     _make_handler(language="fr")
 
-    without_language = _make_handler()
+    without_language = _make_handler(language=language)
 
     assert "language" not in without_language.gen_kwargs
     assert without_language.last_language is None
@@ -90,8 +91,9 @@ def test_explicit_gen_kwargs_still_carries_the_language(stub_transformers: None)
     assert handler.gen_kwargs == {"num_beams": 1, "language": "es"}
 
 
-def test_auto_language_is_not_written_into_gen_kwargs(stub_transformers: None) -> None:
-    handler = _make_handler(language="auto")
+@pytest.mark.parametrize("language", ["auto", "AUTO", " Auto "])
+def test_auto_language_is_not_written_into_gen_kwargs(stub_transformers: None, language: str) -> None:
+    handler = _make_handler(language=language)
 
     assert handler.gen_kwargs == {}
     assert handler.start_language == "auto"
