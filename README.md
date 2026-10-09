@@ -166,8 +166,6 @@ The default install covers the standard realtime path:
 
 macOS and non-macOS dependencies are resolved automatically via platform markers in `pyproject.toml`.
 
-The default installation includes YAML configuration support for Python callers.
-
 See the [configuration API guide](./docs/configuration.md) for reusable blocks,
 named pipelines, and environment references. This API resolves settings without
 starting a pipeline. Existing Python interfaces, CLI commands, and flat JSON
