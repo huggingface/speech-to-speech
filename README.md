@@ -269,6 +269,7 @@ This installs the package in editable mode. With the environment activated, use 
 | TTS | [OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) | CUDA / Intel XPU / Apple Silicon | `omnivoice` |
 | TTS | [MMS TTS](https://huggingface.co/docs/transformers/model_doc/mms) | CUDA / CPU | built-in |
 | TTS | OpenAI-compatible `/v1/audio/speech` endpoint | local or remote HTTP server | built-in |
+| TTS | [MiniMax](https://platform.minimax.io/docs/api-reference/speech-t2a-http) | hosted HTTP streaming | built-in |
 
 Optional [streaming speaker diarization](./examples/streaming-diarization/README.md)
 adds speaker labels to transcribed turns. Enable it with `--diarization` after

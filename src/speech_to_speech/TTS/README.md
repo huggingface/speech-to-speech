@@ -12,6 +12,7 @@ Runtime-supported values in `s2s_pipeline.py`:
 - `qwen3` → `qwen3_tts_handler.py`
 - `openai` → `openai_compatible_handler.py`
 - `supertonic` → `supertonic_tts_handler.py`
+- `minimax` → `minimax_tts_handler.py`
 
 Deprecated TTS implementations, including MeloTTS, live in [`../../../archive/TTS`](../../../archive/TTS) and are no longer wired into `s2s_pipeline.py`.
 
@@ -299,3 +300,21 @@ speech-to-speech local \
 ```
 
 `--tts pocket`, `--tts kokoro`, and `--tts omnivoice` are also valid options on macOS.
+
+## MiniMax
+
+Set `MINIMAX_API_KEY` and select the hosted MiniMax TTS provider:
+
+```bash
+speech-to-speech serve --tts minimax \
+  --minimax_tts_model speech-2.8-hd \
+  --minimax_tts_voice English_Graceful_Lady
+```
+
+`speech-2.8-turbo` is also supported. Voice IDs may be system or custom voices.
+The adapter requests streamed mono PCM at 16 kHz and uses the existing pipeline
+transport for cancellation, response identity, and shutdown. It makes no paid
+warmup request. `--minimax_tts_timeout` bounds each synthesis request (30 seconds
+by default); `--minimax_tts_base_url` selects a regional endpoint.
+
+See the [MiniMax API reference](https://platform.minimax.io/docs/api-reference/speech-t2a-http).
