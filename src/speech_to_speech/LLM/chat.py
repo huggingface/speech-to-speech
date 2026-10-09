@@ -1328,7 +1328,13 @@ def _append_user_message(messages: list[TransformersChatMessage], content: str |
     elif isinstance(previous.content, str) and isinstance(content, str):
         previous.content = "\n".join(text for text in (previous.content, content) if text)
     else:
-        previous.content = _user_content_parts(previous.content) + _user_content_parts(content)
+        merged = list(_user_content_parts(previous.content))
+        parts = _user_content_parts(content)
+        last, first = (merged[-1] if merged else None), (parts[0] if parts else None)
+        if last is not None and first is not None and last["type"] == "input_text" and first["type"] == "input_text":
+            merged[-1] = {**last, "text": f"{last['text']}\n{first['text']}"}
+            parts = parts[1:]
+        previous.content = merged + parts
 
 
 def _user_content_parts(content: str | list[dict[str, Any]]) -> list[dict[str, Any]]:
