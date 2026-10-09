@@ -58,7 +58,7 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         speculative_turns = getattr(self, "speculative_turns", None)
         if isinstance(tts_input, EndOfResponse):
-            if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
+            if speculative_turns and not speculative_turns.wait_for_gate(
                 tts_input.turn_id,
                 tts_input.turn_revision,
             ):
@@ -68,14 +68,13 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
             yield AUDIO_RESPONSE_DONE
             return
 
-        if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
+        if speculative_turns and not speculative_turns.wait_for_gate(
             tts_input.turn_id,
             tts_input.turn_revision,
+            commit=True,
         ):
             logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
             return
-        if speculative_turns:
-            speculative_turns.commit(tts_input.turn_id, tts_input.turn_revision)
 
         text = tts_input.text
 
@@ -101,10 +100,19 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 ):
                     logger.info("TTS generation cancelled (interruption)")
                     return
-                if gen[0] is None or len(gen[0]) == 0:
+                if gen[0] is None:
                     return
-                audio_chunk = librosa.resample(gen[0], orig_sr=24000, target_sr=16000)
-                audio_chunk = (audio_chunk * 32768).astype(np.int16)[0]
+                # ChatTTS streams a chunk either as (samples,) or as (1, samples)
+                # depending on version. Indexing the converted array with [0] assumed
+                # the second shape and reduced the first to a single sample, so the
+                # following len() raised "object of type 'numpy.int16' has no len()".
+                chunk = np.asarray(gen[0], dtype=np.float32)
+                if chunk.ndim > 1:
+                    chunk = chunk[0]
+                if chunk.size == 0:
+                    return
+                audio_chunk = librosa.resample(chunk, orig_sr=24000, target_sr=16000)
+                audio_chunk = (audio_chunk * 32768).astype(np.int16)
                 while len(audio_chunk) > self.chunk_size:
                     yield audio_chunk[: self.chunk_size]  # Return the first chunk_size samples of the audio data
                     audio_chunk = audio_chunk[self.chunk_size :]  # Remove the samples that have already been returned

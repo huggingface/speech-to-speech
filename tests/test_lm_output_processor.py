@@ -36,6 +36,7 @@ from speech_to_speech.pipeline.messages import (
     TTSInput,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from tests.turns import reopen
 
 
 def _processor(tracker: SpeculativeTurnTracker) -> LMOutputProcessor:
@@ -46,7 +47,9 @@ def _processor(tracker: SpeculativeTurnTracker) -> LMOutputProcessor:
 
 def _tracked_processor(revision: int = 0) -> tuple[SpeculativeTurnTracker, LMOutputProcessor]:
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", revision)
+    tracker.start_turn()
+    for base_revision in range(revision):
+        reopen(tracker, revision=base_revision)
     return tracker, _processor(tracker)
 
 
@@ -327,7 +330,7 @@ def test_latest_end_of_response_follows_ordered_done_event():
 
 def test_generation_done_side_channel_does_not_wait_for_tts_delivery():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     side_events = Queue()
     processor = LMOutputProcessor.__new__(LMOutputProcessor)
     processor.setup(speculative_turns=tracker, text_output_queue=side_events)
@@ -342,7 +345,11 @@ def test_generation_done_side_channel_does_not_wait_for_tts_delivery():
                 turn_revision=0,
             )
         ),
-        *processor.process(EndOfResponse(response_key="response_1", turn_id="turn_1", turn_revision=0)),
+        *processor.process(
+            EndOfResponse(
+                response_key="response_1", turn_id="turn_1", turn_revision=0, input_tool_call_ids=["call_previous"]
+            )
+        ),
     ]
 
     tool_ready = side_events.get_nowait()
@@ -363,6 +370,9 @@ def test_generation_done_side_channel_does_not_wait_for_tts_delivery():
         EndOfResponse,
     ]
     assert [item.output_sequence for item in ordered if isinstance(item, AssistantOutputEvent)] == [0, 1]
+    ordered_done = next(item for item in ordered if isinstance(item, AssistantResponseDoneEvent))
+    assert ordered_done.response_key == "response_1"
+    assert ordered_done.input_tool_call_ids == ["call_previous"]
 
 
 def test_unclaimed_prefetch_emits_tool_ready_side_channel_before_tts_delivery():
@@ -412,7 +422,7 @@ def test_failed_response_event_precedes_terminal_and_keeps_identity():
 
 def test_token_usage_stays_on_ordered_response_path():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     processor = _processor(tracker)
 
     outputs = [

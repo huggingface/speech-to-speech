@@ -1,5 +1,5 @@
+import json
 import sys
-from dataclasses import fields
 from types import SimpleNamespace
 
 import pytest
@@ -16,9 +16,8 @@ from speech_to_speech.arguments_classes.responses_api_language_model_arguments i
     ResponsesApiLanguageModelHandlerArguments,
 )
 from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
-from speech_to_speech.backend_registry import BackendSelection
 from speech_to_speech.cli import main, parse_command, parse_talk_arguments
-from speech_to_speech.pipeline.transcript_logging import log_transcripts_enabled, set_log_transcripts
+from speech_to_speech.pipeline.transcript_logging import set_log_transcripts, transcript_for_log
 from speech_to_speech.s2s_pipeline import ParsedArguments, parse_arguments, prepare_all_args, prepare_module_args
 
 
@@ -153,29 +152,49 @@ def test_noncanonical_mac_optimal_settings_flags_are_rejected(flag):
         parse_arguments([flag])
 
 
-# -- ParsedArguments dataclass tests ------------------------------------------
+def test_mac_diarization_shortcut():
+    args = parse_arguments(["--mac-optimal-settings", "--diarization"], command="local")
 
-EXPECTED_FIELD_TYPES = {
-    "module_kwargs": ModuleArguments,
-    "realtime_server_kwargs": RealtimeServerArguments,
-    "local_audio_kwargs": LocalAudioArguments,
-    "vad_handler_kwargs": VADHandlerArguments,
-    "stt_backend": BackendSelection,
-    "llm_backend": BackendSelection,
-    "tts_backend": BackendSelection,
-}
-
-
-def test_parsed_arguments_has_all_expected_fields():
-    actual_fields = {f.name: f.type for f in fields(ParsedArguments)}
-    assert set(actual_fields) == set(EXPECTED_FIELD_TYPES)
+    assert args.module_kwargs.mac_optimal_settings is True
+    assert args.module_kwargs.diarization_model_name == "nvidia/Nemotron-3-Diarization"
+    assert args.module_kwargs.diarization_revision is None
+    assert args.module_kwargs.diarization_streaming_mode == "low_latency"
+    assert args.module_kwargs.diarization_device == "mps"
+    assert args.module_kwargs.stt == "parakeet-tdt"
+    assert args.module_kwargs.llm_backend == "mlx-lm"
 
 
-def test_parsed_arguments_field_types_match():
-    for f in fields(ParsedArguments):
-        assert f.type is EXPECTED_FIELD_TYPES[f.name], (
-            f"Field {f.name!r}: expected {EXPECTED_FIELD_TYPES[f.name].__name__}, got {f.type}"
-        )
+def test_diarization_shortcut_preserves_custom_model():
+    args = parse_arguments(["--diarization", "--diarization_model_name", "custom/model"])
+
+    assert args.module_kwargs.diarization_model_name == "custom/model"
+    assert args.module_kwargs.diarization_revision is None
+
+
+def test_diarization_defaults_to_automatic_device_selection():
+    args = parse_arguments(["--diarization"])
+
+    assert args.module_kwargs.diarization_device == "auto"
+
+
+def test_diarization_shortcut_preserves_explicit_settings():
+    args = parse_arguments(
+        [
+            "--mac-optimal-settings",
+            "--diarization",
+            "--diarization_revision",
+            "custom-ref",
+            "--diarization_device",
+            "cpu",
+        ]
+    )
+
+    assert args.module_kwargs.diarization_revision == "custom-ref"
+    assert args.module_kwargs.diarization_device == "cpu"
+
+
+def test_diarization_is_opt_in():
+    assert parse_arguments([]).module_kwargs.diarization_model_name is None
 
 
 def test_parse_arguments_default_backend_returns_openai_api():
@@ -188,6 +207,10 @@ def test_parse_arguments_default_backend_returns_openai_api():
 
     assert isinstance(args, ParsedArguments)
     assert isinstance(args.module_kwargs, ModuleArguments)
+    assert args.realtime_server_kwargs.host == "127.0.0.1"
+    assert args.local_audio_kwargs.local_audio_playback_buffer_ms is None
+    assert args.stt_backend.name == "parakeet-tdt"
+    assert args.tts_backend.name == "qwen3"
     assert args.llm_backend.name == "responses-api"
     assert args.llm_backend.spec.config_type is ResponsesApiLanguageModelHandlerArguments
     assert args.llm_backend.config["model_name"] == "gpt-5.6-terra"
@@ -425,11 +448,11 @@ def test_main_wires_talk_transcript_logging_before_client_start(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["speech-to-speech", "talk", "--log-transcripts"])
 
     def warning():
-        assert log_transcripts_enabled() is True
+        assert transcript_for_log("probe") == "probe"
         events.append("warning")
 
     def run_client(config):
-        assert log_transcripts_enabled() is True
+        assert transcript_for_log("probe") == "probe"
         events.append(("client", config.log_transcripts))
 
     monkeypatch.setattr("speech_to_speech.cli.warn_if_log_transcripts_enabled", warning)
@@ -571,17 +594,210 @@ def test_parse_arguments_stt_none_supports_chat_completions_audio_path():
     assert args.llm_backend.config["audio_history_turns"] == 2
 
 
-def test_parse_arguments_all_fields_populated():
-    original_argv = sys.argv[:]
-    try:
-        sys.argv = ["speech-to-speech"]
-        args = parse_arguments()
-    finally:
-        sys.argv = original_argv
+def test_additive_config_api_preserves_flat_json_contract(tmp_path):
+    from speech_to_speech.config import load_config
 
-    for f in fields(ParsedArguments):
-        value = getattr(args, f.name)
-        assert value is not None, f"Field {f.name!r} is None"
-        assert isinstance(value, EXPECTED_FIELD_TYPES[f.name]), (
-            f"Field {f.name!r}: expected {EXPECTED_FIELD_TYPES[f.name].__name__}, got {type(value).__name__}"
+    path = tmp_path / "legacy.json"
+    path.write_text(
+        json.dumps(
+            {
+                "stt": "openai",
+                "llm_backend": "chat-completions",
+                "tts": "openai",
+                "num_pipelines": 2,
+                "openai_stt_api_key": "",
+                "responses_api_stream": False,
+                "inactive_extra_key": "unchanged",
+                "qwen3_tts_speaker": "unused",
+            }
         )
+    )
+    args = parse_arguments([str(path)])
+    assert isinstance(args, ParsedArguments)
+    assert args.module_kwargs.num_pipelines == 2
+    assert args.stt_backend.config["api_key"] == ""
+    assert args.llm_backend.config["stream"] is False
+    with pytest.raises(ValueError, match="existing flat JSON interface"):
+        load_config(path)
+
+
+@pytest.fixture
+def configured_cli(tmp_path, monkeypatch):
+    path = tmp_path / "config.yaml"
+    path.write_text("""schema_version: 1
+blocks:
+  vad: {kind: vad, backend: silero}
+  stt: {kind: stt, backend: openai}
+  llm: {kind: llm, backend: chat-completions}
+  tts: {kind: tts, backend: openai}
+pipelines:
+  primary:
+    stages: {vad: vad, stt: stt, llm: llm, tts: tts}
+  secondary:
+    stages: {vad: vad, stt: stt, llm: llm, tts: tts}
+""")
+    calls = []
+    monkeypatch.setitem(
+        sys.modules,
+        "speech_to_speech.configured_runtime",
+        SimpleNamespace(run_configured_command=lambda command, config: calls.append((command, config))),
+    )
+    return path, calls
+
+
+@pytest.mark.parametrize("flag", ["-f", "--file"])
+def test_file_cli_dispatches_selected_pipeline(flag, configured_cli, monkeypatch):
+    path, calls = configured_cli
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", "serve", flag, str(path), "--name", "secondary"])
+    main()
+    assert calls[0][0] == "serve"
+    assert list(calls[0][1].pipelines) == ["secondary"]
+
+
+def test_file_talk_resolves_only_client(configured_cli, monkeypatch):
+    path, calls = configured_cli
+    path.write_text(
+        path.read_text().replace(
+            "schema_version: 1",
+            "schema_version: 1\nruntime: {server: {port: {env: MISSING_PORT}}, client: {model: client-model}}",
+        )
+    )
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", "talk", "--file", str(path)])
+    main()
+    assert calls[0][0] == "talk"
+    assert calls[0][1].pipelines == {}
+    assert calls[0][1].client["model"] == "client-model"
+
+
+@pytest.mark.parametrize("command", ["serve", "local"])
+def test_file_cli_rejects_multiple_definitions_before_runtime(command, configured_cli, monkeypatch):
+    path, calls = configured_cli
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", command, "-f", str(path)])
+    with pytest.raises(SystemExit, match="2"):
+        main()
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--name", "primary", "--name", "primary"],
+        ["--name", ""],
+        ["--name", "unknown"],
+        ["--name", "primary,secondary"],
+        ["--port", "9876"],
+        ["--api-key", "SECRET_MARKER"],
+        ["--file", "SECRET_MARKER.yaml"],
+    ],
+)
+def test_file_cli_rejects_invalid_and_mixed_flags(extra, configured_cli, monkeypatch, capsys):
+    path, calls = configured_cli
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", "serve", "-f", str(path), *extra])
+    with pytest.raises(SystemExit, match="2"):
+        main()
+    assert calls == []
+    assert "SECRET_MARKER" not in capsys.readouterr().err
+
+
+def test_file_talk_rejects_name(configured_cli, monkeypatch):
+    path, calls = configured_cli
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", "talk", "-f", str(path), "--name", "primary"])
+    with pytest.raises(SystemExit, match="2"):
+        main()
+    assert calls == []
+
+
+@pytest.mark.parametrize("command", ["serve", "talk", "local"])
+def test_cli_help_does_not_read_file_or_run_runtime(command, configured_cli, monkeypatch):
+    _, calls = configured_cli
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", command, "--file", "missing.yaml", "--help"])
+    with pytest.raises(SystemExit, match="0"):
+        main()
+    assert calls == []
+
+
+def test_name_requires_file(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", "serve", "--name", "primary"])
+    with pytest.raises(SystemExit, match="2"):
+        main()
+
+
+def test_file_cli_hides_runtime_error(configured_cli, monkeypatch, capsys):
+    path, _ = configured_cli
+
+    def fail(*_args):
+        raise RuntimeError("provider SECRET_MARKER https://user:password@host")
+
+    monkeypatch.setitem(
+        sys.modules, "speech_to_speech.configured_runtime", SimpleNamespace(run_configured_command=fail)
+    )
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", "serve", "-f", str(path), "--name", "primary"])
+    with pytest.raises(SystemExit, match="1"):
+        main()
+    error = capsys.readouterr().err
+    assert "SECRET_MARKER" not in error
+    assert "password" not in error
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["serve", "-f", "missing.yaml", "--help"],
+        ["local", "-f", "missing.yaml", "--help"],
+        ["talk", "-f", "missing.yaml", "--help"],
+        ["serve", "--name", "primary"],
+    ],
+)
+def test_configured_cli_rejects_or_helps_before_heavy_imports(arguments):
+    import subprocess
+
+    script = """
+import importlib.abc, sys
+class Block(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, *args):
+        if fullname.endswith("s2s_pipeline") or fullname.endswith("configured_runtime"):
+            raise AssertionError(fullname)
+sys.meta_path.insert(0, Block())
+from speech_to_speech.cli import main
+sys.argv = ["speech-to-speech", *sys.argv[1:]]
+try:
+    main()
+except SystemExit as exc:
+    assert exc.code == (0 if "--help" in sys.argv else 2)
+else:
+    raise AssertionError("expected help or rejection")
+"""
+    result = subprocess.run([sys.executable, "-c", script, *arguments], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_file_cli_accepts_attached_short_file_flag(configured_cli, monkeypatch):
+    path, calls = configured_cli
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", "local", f"-f{path}", "--name=primary"])
+    main()
+    assert calls[0][0] == "local"
+
+
+def test_file_cli_malformed_flags_hide_input_values(configured_cli, monkeypatch, capsys):
+    path, _ = configured_cli
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", "serve", "-f", str(path), "--name", "--SECRET_MARKER"])
+    with pytest.raises(SystemExit, match="2"):
+        main()
+    assert "SECRET_MARKER" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "arguments, flags",
+    [
+        (["serve", "--help"], ["--host", "--port", "--stt"]),
+        (["local", "--help"], ["--port", "--local_audio_input_device"]),
+        (["--mode", "local", "--help"], ["--local_audio_input_device"]),
+    ],
+)
+def test_legacy_help_keeps_command_settings(arguments, flags, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", *arguments])
+    with pytest.raises(SystemExit, match="0"):
+        main()
+    output = capsys.readouterr().out
+    for flag in flags:
+        assert flag in output

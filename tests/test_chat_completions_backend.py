@@ -31,7 +31,7 @@ from openai.types.responses import ResponseFunctionToolCall
 import speech_to_speech.LLM.base_openai_compatible_language_model as base_mod
 import speech_to_speech.LLM.chat_completions_language_model as ccm
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
-from speech_to_speech.LLM.chat import Chat, make_user_audio_message, make_user_message
+from speech_to_speech.LLM.chat import Chat, make_system_message, make_user_audio_message, make_user_message
 from speech_to_speech.LLM.chat_completions_language_model import (
     ChatCompletionsApiModelHandler,
     _to_chat_tool_choice,
@@ -49,6 +49,7 @@ from speech_to_speech.pipeline.messages import (
     TTSInput,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from tests.turns import reopen
 
 # ── Fakes ────────────────────────────────────────────────────────────────────
 
@@ -161,7 +162,7 @@ def _drive(
         session.tool_choice = tool_choice
     rc = RuntimeConfig(chat=chat, session=session)
     req = GenerateResponseRequest(
-        runtime_config=rc, response=response, language_code="de", turn_id="t", turn_revision=0
+        runtime_config=rc, response=response, language_code="de", turn_id="turn_1", turn_revision=0
     )
     text, tools_out, usage, end = "", [], None, None
     for out in handler.process(req):
@@ -951,12 +952,12 @@ def test_cancelled_provider_failure_does_not_emit_fallback():
 
 def test_stale_provider_failure_does_not_emit_fallback():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("t", 0)
+    tracker.start_turn()
     h = _make_handler(stream=True)
     h.speculative_turns = tracker
 
     def fail(**kwargs):
-        tracker.observe("t", 1)
+        reopen(tracker)
         raise RuntimeError("stale request failed")
 
     h.client.chat.completions.create = fail
@@ -986,6 +987,22 @@ def test_out_of_band_does_not_commit_to_default_conversation():
 
 
 # ── Standalone runner (no pytest required) ────────────────────────────────────
+
+
+def test_chat_backend_keeps_injected_context_with_session_instructions():
+    handler = _make_handler(stream=False)
+    chat = Chat(10)
+    snapshot = make_system_message("CURRENT CHAT SNAPSHOT")
+    chat.add_item(snapshot)
+
+    for _ in range(2):
+        _drive(handler, chat=chat, instructions="SESSION INSTRUCTIONS")
+        prompt = handler.client.chat.completions.last_kwargs["messages"][0]["content"]
+        assert "SESSION INSTRUCTIONS" in prompt
+        assert prompt.count("CURRENT CHAT SNAPSHOT") == 1
+        assert chat.init_chat_message is snapshot
+        assert snapshot.content[0].text == "CURRENT CHAT SNAPSHOT"
+
 
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

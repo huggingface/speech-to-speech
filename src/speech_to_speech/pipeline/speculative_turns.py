@@ -4,9 +4,39 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from threading import Condition
 
 logger = logging.getLogger(__name__)
+
+
+class TurnPhase(str, Enum):
+    LISTENING = "listening"
+    SOFT_ENDED = "soft_ended"
+    ANSWERING = "answering"
+    CLOSED = "closed"
+
+
+class TurnGateAction(str, Enum):
+    ACCEPT = "accept"
+    DROP = "drop"
+    HOLD = "hold"
+
+
+@dataclass(frozen=True)
+class TurnGate:
+    """Decision for turn-tagged work; a HOLD carries its monotonic deadline."""
+
+    action: TurnGateAction
+    deadline: float | None = None
+
+
+class TurnOutputHeld(Exception):
+    """Output reached its commit while its turn was held; keep it queued."""
+
+
+_ACCEPT = TurnGate(TurnGateAction.ACCEPT)
+_DROP = TurnGate(TurnGateAction.DROP)
 
 
 @dataclass(frozen=True)
@@ -21,6 +51,8 @@ class _PendingReopen:
     turn_id: str
     base_revision: int
     candidate_revision: int
+    # Output stops waiting at this deadline; the candidate stays until VAD resolves it.
+    deadline: float
 
 
 @dataclass(frozen=True)
@@ -33,7 +65,7 @@ class _ReopenGrace:
 class SpeculativeTurnTracker:
     """Thread-safe conversation cursor for raw-audio speculative turns."""
 
-    _PENDING_REOPEN_WAIT_TIMEOUT_S = 2.0
+    _PENDING_REOPEN_HOLD_S = 2.0
 
     def __init__(self) -> None:
         self._condition = Condition()
@@ -43,7 +75,103 @@ class SpeculativeTurnTracker:
         self._closed_current: _TurnReference | None = None
         self._pending_reopen: _PendingReopen | None = None
         self._reopen_grace: _ReopenGrace | None = None
+        self._phase: TurnPhase | None = None
+        self._last_final_audio_ms: int | None = None
+        self._processing_deadline: float | None = None
+        self._unanswered_reopen_ms = 7000
         self.wait_observer: Callable[[str, int, float, float], None] | None = None
+
+    @property
+    def phase(self) -> TurnPhase | None:
+        with self._condition:
+            return self._phase
+
+    def current_turn(self) -> tuple[str | None, int | None]:
+        with self._condition:
+            if self._current is None:
+                return None, None
+            return self._current.turn_id, self._current.revision
+
+    def configure_reopen(self, unanswered_reopen_ms: int) -> None:
+        with self._condition:
+            self._unanswered_reopen_ms = max(0, unanswered_reopen_ms)
+
+    def can_reopen(self, audio_ms: int) -> bool:
+        """Use streamed-audio time, not wall time, for the unanswered-turn cap."""
+        with self._condition:
+            return self._can_reopen_locked(audio_ms)
+
+    def _can_reopen_locked(self, audio_ms: int) -> bool:
+        return (
+            self._current is not None
+            and self._phase == TurnPhase.SOFT_ENDED
+            and self._last_final_audio_ms is not None
+            and not self._blocks_reopen_locked(self._current.turn_id, self._current.revision)
+            and max(0, audio_ms - self._last_final_audio_ms) <= self._unanswered_reopen_ms
+        )
+
+    def speech_candidate_started(self, audio_ms: int) -> bool:
+        """Hold output while VAD checks whether a resumed fragment is speech."""
+        with self._condition:
+            if self._pending_reopen is not None:
+                return True
+            if not self._can_reopen_locked(audio_ms):
+                return False
+            assert self._current is not None
+            return self.begin_reopen_candidate(self._current.turn_id, self._current.revision) is not None
+
+    def speech_candidate_cancelled(self) -> None:
+        with self._condition:
+            if self._pending_reopen is not None:
+                self.cancel_reopen_candidate(self._pending_reopen.turn_id)
+
+    def has_speech_candidate(self) -> bool:
+        with self._condition:
+            return self._pending_reopen is not None
+
+    def speech_started(self, audio_ms: int) -> tuple[str, int, bool]:
+        """Choose a new turn or reopen the unanswered current turn atomically."""
+        with self._condition:
+            if self._current is not None and self._phase == TurnPhase.LISTENING:
+                return self._current.turn_id, self._current.revision, False
+            pending = self._pending_reopen
+            if pending is None and self._can_reopen_locked(audio_ms):
+                assert self._current is not None
+                self.begin_reopen_candidate(self._current.turn_id, self._current.revision)
+                pending = self._pending_reopen
+            if pending is not None and self.confirm_reopen_candidate(
+                pending.turn_id, pending.base_revision, pending.candidate_revision
+            ):
+                return pending.turn_id, pending.candidate_revision, True
+            turn_id, revision = self.start_turn()
+            return turn_id, revision, False
+
+    def segment_finalized(self, audio_ms: int, output_hold_ms: int = 0, processing_delay_ms: int = 0) -> None:
+        """Record audio timing and both Smart Turn deadlines for this revision."""
+        with self._condition:
+            if self._current is None or self._blocks_reopen_locked(self._current.turn_id, self._current.revision):
+                return
+            self._phase = TurnPhase.SOFT_ENDED
+            self._last_final_audio_ms = audio_ms
+            now = time.monotonic()
+            self._processing_deadline = now + max(0, processing_delay_ms) / 1000.0
+            self.start_reopen_grace(self._current.turn_id, self._current.revision, max(0, output_hold_ms) / 1000.0)
+            self._condition.notify_all()
+
+    def segment_discarded(self) -> None:
+        """End detected speech that VAD cannot release as a valid segment."""
+        with self._condition:
+            self.speech_candidate_cancelled()
+            if self._phase == TurnPhase.LISTENING:
+                self._phase = TurnPhase.SOFT_ENDED
+                self._condition.notify_all()
+
+    def processing_deadline(self, turn_id: str | None, revision: int | None) -> float | None:
+        """Return the monotonic deadline, or None for legacy unfinalized input."""
+        with self._condition:
+            if turn_id is None or revision is None or not self._is_current_locked(turn_id, revision):
+                return None
+            return self._processing_deadline
 
     def start_turn(self) -> tuple[str, int]:
         """Advance the conversation cursor and return the new turn metadata."""
@@ -55,31 +183,14 @@ class SpeculativeTurnTracker:
                 revision=0,
             )
             self._closed_current = None
+            self._phase = TurnPhase.LISTENING
+            self._last_final_audio_ms = None
+            self._processing_deadline = None
             self._pending_reopen = None
             self._reopen_grace = None
             logger.debug("Started speculative turn %s", self._current.turn_id)
             self._condition.notify_all()
             return self._current.turn_id, self._current.revision
-
-    def observe(self, turn_id: str | None, revision: int | None) -> None:
-        """Compatibility adapter for revisions created outside the tracker.
-
-        New conversation turns must use :meth:`start_turn`. Existing call sites
-        may still report a newer revision for the current turn.
-        """
-        if turn_id is None or revision is None:
-            return
-        with self._condition:
-            if self._current is None:
-                self._sequence += 1
-                self._current = _TurnReference(self._sequence, turn_id, revision)
-            elif self._current.turn_id == turn_id and revision > self._current.revision:
-                self._current = _TurnReference(self._current.sequence, turn_id, revision)
-                self._closed_current = None
-            else:
-                return
-            logger.debug("Observed speculative turn %s revision %d", turn_id, revision)
-            self._condition.notify_all()
 
     def is_latest(self, turn_id: str | None, revision: int | None) -> bool:
         if turn_id is None or revision is None:
@@ -87,100 +198,53 @@ class SpeculativeTurnTracker:
         with self._condition:
             return self._is_relevant_locked(turn_id, revision)
 
-    def is_latest_after_pending_reopen(self, turn_id: str | None, revision: int | None) -> bool:
+    def gate(
+        self,
+        turn_id: str | None,
+        revision: int | None,
+        *,
+        hold_for_grace: bool = True,
+        hold_until: float | None = None,
+        commit: bool = False,
+    ) -> TurnGate:
+        """Decide without waiting whether turn-tagged work may proceed.
+
+        HOLD lasts while VAD checks resumed speech, during the reopen grace
+        when *hold_for_grace* is set, and until *hold_until*. Committed work
+        is never held. With *commit*, ACCEPT commits the turn.
+        """
+        if turn_id is None or revision is None:
+            return _ACCEPT
+        with self._condition:
+            return self._gate_locked(turn_id, revision, hold_for_grace, hold_until, commit)
+
+    def wait_for_gate(
+        self,
+        turn_id: str | None,
+        revision: int | None,
+        *,
+        hold_for_grace: bool = True,
+        hold_until: float | None = None,
+        commit: bool = False,
+    ) -> bool:
+        """Block a worker thread until :meth:`gate` accepts or drops the work.
+
+        Never call this from the event loop; it waits on tracker state changes
+        and falls back to the hold deadline.
+        """
         if turn_id is None or revision is None:
             return True
         with self._condition:
-            self._wait_for_pending_reopen_locked(turn_id, revision, self._PENDING_REOPEN_WAIT_TIMEOUT_S)
-            return self._is_relevant_locked(turn_id, revision)
-
-    def try_is_latest_after_pending_reopen(self, turn_id: str | None, revision: int | None) -> bool | None:
-        """Return ``None`` when a matching reopen candidate is unresolved."""
-        if turn_id is None or revision is None:
-            return True
-        with self._condition:
-            if self._has_pending_reopen_locked(turn_id, revision):
-                return None
-            return self._is_relevant_locked(turn_id, revision)
-
-    def is_latest_after_reopen_grace(self, turn_id: str | None, revision: int | None) -> bool:
-        if turn_id is None or revision is None:
-            return True
-        with self._condition:
-            self._wait_for_reopen_gate_locked(turn_id, revision)
-            return self._is_relevant_locked(turn_id, revision)
-
-    def try_is_latest_after_reopen_grace(self, turn_id: str | None, revision: int | None) -> bool | None:
-        if turn_id is None or revision is None:
-            return True
-        with self._condition:
-            if (
-                self._has_pending_reopen_locked(turn_id, revision)
-                or self._reopen_grace_remaining_locked(
-                    turn_id,
-                    revision,
-                )
-                > 0
-            ):
-                return None
-            return self._is_relevant_locked(turn_id, revision)
-
-    def commit_if_latest_after_pending_reopen(self, turn_id: str | None, revision: int | None) -> bool:
-        if turn_id is None or revision is None:
-            return True
-        with self._condition:
-            self._wait_for_pending_reopen_locked(turn_id, revision, self._PENDING_REOPEN_WAIT_TIMEOUT_S)
-            return self._commit_locked(turn_id, revision)
-
-    def commit_if_latest_after_reopen_grace(self, turn_id: str | None, revision: int | None) -> bool:
-        if turn_id is None or revision is None:
-            return True
-        with self._condition:
-            self._wait_for_reopen_gate_locked(turn_id, revision)
-            return self._commit_locked(turn_id, revision)
-
-    def try_commit_if_latest_after_pending_reopen(self, turn_id: str | None, revision: int | None) -> bool | None:
-        """Return ``None`` when a matching reopen candidate is unresolved."""
-        if turn_id is None or revision is None:
-            return True
-        with self._condition:
-            if self._has_pending_reopen_locked(turn_id, revision):
-                return None
-            return self._commit_locked(turn_id, revision)
-
-    def try_commit_if_latest_after_reopen_grace(self, turn_id: str | None, revision: int | None) -> bool | None:
-        if turn_id is None or revision is None:
-            return True
-        with self._condition:
-            if (
-                self._has_pending_reopen_locked(turn_id, revision)
-                or self._reopen_grace_remaining_locked(
-                    turn_id,
-                    revision,
-                )
-                > 0
-            ):
-                return None
-            return self._commit_locked(turn_id, revision)
-
-    def has_pending_reopen(self, turn_id: str | None, revision: int | None) -> bool:
-        if turn_id is None or revision is None:
-            return False
-        with self._condition:
-            return self._has_pending_reopen_locked(turn_id, revision)
-
-    def has_pending_reopen_or_grace(self, turn_id: str | None, revision: int | None) -> bool:
-        if turn_id is None or revision is None:
-            return False
-        with self._condition:
-            return (
-                self._has_pending_reopen_locked(turn_id, revision)
-                or self._reopen_grace_remaining_locked(
-                    turn_id,
-                    revision,
-                )
-                > 0
-            )
+            while True:
+                decision = self._gate_locked(turn_id, revision, hold_for_grace, hold_until, commit)
+                if decision.action is not TurnGateAction.HOLD:
+                    return decision.action is TurnGateAction.ACCEPT
+                assert decision.deadline is not None
+                waiting_for_grace = hold_until is None and not self._pending_holds_locked(turn_id, revision)
+                wait_started_at_s = time.perf_counter()
+                self._condition.wait(max(0.0, decision.deadline - time.monotonic()))
+                if waiting_for_grace and self.wait_observer is not None:
+                    self.wait_observer(turn_id, revision, wait_started_at_s, time.perf_counter())
 
     def start_reopen_grace(self, turn_id: str | None, revision: int | None, grace_s: float) -> None:
         if turn_id is None or revision is None or grace_s <= 0:
@@ -205,45 +269,6 @@ class SpeculativeTurnTracker:
                 )
                 self._condition.notify_all()
 
-    def is_latest_after_stability_window(
-        self,
-        turn_id: str | None,
-        revision: int | None,
-        settle_s: float,
-    ) -> bool:
-        if turn_id is None or revision is None:
-            return True
-        if settle_s <= 0:
-            return self.is_latest_after_pending_reopen(turn_id, revision)
-        with self._condition:
-            deadline = time.monotonic() + settle_s
-            while self._is_relevant_locked(turn_id, revision):
-                if self._has_pending_reopen_locked(turn_id, revision):
-                    self._wait_for_pending_reopen_locked(
-                        turn_id,
-                        revision,
-                        self._PENDING_REOPEN_WAIT_TIMEOUT_S,
-                    )
-                    continue
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                self._condition.wait(remaining)
-            return self._is_relevant_locked(turn_id, revision)
-
-    def commit(self, turn_id: str | None, revision: int | None) -> None:
-        if turn_id is None or revision is None:
-            return
-        with self._condition:
-            if self._has_pending_reopen_locked(turn_id, revision):
-                logger.debug(
-                    "Deferring speculative turn %s revision %d commit while reopen is pending",
-                    turn_id,
-                    revision,
-                )
-                return
-            self._commit_locked(turn_id, revision)
-
     def close(self, turn_id: str | None, revision: int | None) -> None:
         """Release committed state after a response reaches its terminal event.
 
@@ -260,6 +285,8 @@ class SpeculativeTurnTracker:
             self._committed.remove(committed)
             if self._current == committed:
                 self._closed_current = committed
+                self._phase = TurnPhase.CLOSED
+                self._processing_deadline = None
             self._condition.notify_all()
 
     def is_current_turn(self, turn_id: str | None) -> bool:
@@ -289,7 +316,12 @@ class SpeculativeTurnTracker:
                     return pending.candidate_revision
                 return None
             candidate_revision = revision + 1
-            self._pending_reopen = _PendingReopen(turn_id, revision, candidate_revision)
+            self._pending_reopen = _PendingReopen(
+                turn_id,
+                revision,
+                candidate_revision,
+                deadline=time.monotonic() + self._PENDING_REOPEN_HOLD_S,
+            )
             logger.debug(
                 "Started speculative reopen candidate for turn %s revision %d -> %d",
                 turn_id,
@@ -309,7 +341,11 @@ class SpeculativeTurnTracker:
             return False
         with self._condition:
             pending = self._pending_reopen
-            if pending != _PendingReopen(turn_id, base_revision, candidate_revision):
+            if pending is None or (pending.turn_id, pending.base_revision, pending.candidate_revision) != (
+                turn_id,
+                base_revision,
+                candidate_revision,
+            ):
                 return False
             if not self._is_current_locked(turn_id, base_revision) or self._blocks_reopen_locked(
                 turn_id,
@@ -320,6 +356,8 @@ class SpeculativeTurnTracker:
                 return False
             assert self._current is not None
             self._current = _TurnReference(self._current.sequence, turn_id, candidate_revision)
+            self._phase = TurnPhase.LISTENING
+            self._processing_deadline = None
             self._pending_reopen = None
             self._reopen_grace = None
             logger.debug(
@@ -343,26 +381,17 @@ class SpeculativeTurnTracker:
             logger.debug("Cancelled speculative reopen candidate for turn %s", turn_id)
             self._condition.notify_all()
 
-    def wait_for_pending_reopen(
-        self,
-        turn_id: str | None,
-        revision: int | None,
-        timeout_s: float = _PENDING_REOPEN_WAIT_TIMEOUT_S,
-    ) -> None:
-        if turn_id is None or revision is None:
-            return
-        with self._condition:
-            self._wait_for_pending_reopen_locked(turn_id, revision, timeout_s)
-
     def _commit_locked(self, turn_id: str, revision: int) -> bool:
         committed = self._committed_reference_locked(turn_id, revision)
         if committed is not None:
             return True
         if self._current is None:
-            return True
+            return False
         if not self._is_current_locked(turn_id, revision):
             return False
         self._committed.add(self._current)
+        self._phase = TurnPhase.ANSWERING
+        self._processing_deadline = None
         if self._grace_matches_locked(turn_id, revision):
             self._reopen_grace = None
         logger.debug("Committed speculative turn %s revision %d", turn_id, revision)
@@ -374,7 +403,7 @@ class SpeculativeTurnTracker:
 
     def _is_relevant_locked(self, turn_id: str, revision: int) -> bool:
         if self._current is None:
-            return True
+            return False
         return (
             self._is_current_locked(turn_id, revision)
             or self._committed_reference_locked(turn_id, revision) is not None
@@ -401,61 +430,57 @@ class SpeculativeTurnTracker:
             None,
         )
 
-    def _has_pending_reopen_locked(self, turn_id: str, revision: int) -> bool:
+    def _gate_locked(
+        self,
+        turn_id: str,
+        revision: int,
+        hold_for_grace: bool,
+        hold_until: float | None,
+        commit: bool,
+    ) -> TurnGate:
+        if not self._is_relevant_locked(turn_id, revision):
+            return _DROP
+        if self._committed_reference_locked(turn_id, revision) is None:
+            now = time.monotonic()
+            deadlines = [deadline for deadline in (hold_until,) if deadline is not None and deadline > now]
+            if self._pending_holds_locked(turn_id, revision):
+                assert self._pending_reopen is not None
+                deadlines.append(self._pending_reopen.deadline)
+            grace = self._reopen_grace
+            if (
+                hold_for_grace
+                and grace is not None
+                and self._grace_matches_locked(turn_id, revision)
+                and self._is_current_locked(turn_id, revision)
+                and grace.deadline > now
+            ):
+                deadlines.append(grace.deadline)
+            if deadlines:
+                return TurnGate(TurnGateAction.HOLD, min(deadlines))
+        if commit:
+            self._commit_locked(turn_id, revision)
+        return _ACCEPT
+
+    def _pending_holds_locked(self, turn_id: str, revision: int) -> bool:
         pending = self._pending_reopen
-        return pending is not None and pending.turn_id == turn_id and pending.base_revision == revision
+        return (
+            pending is not None
+            and pending.turn_id == turn_id
+            and pending.base_revision == revision
+            and pending.deadline > time.monotonic()
+        )
 
     def _grace_matches_locked(self, turn_id: str, revision: int) -> bool:
         grace = self._reopen_grace
         return grace is not None and grace.turn_id == turn_id and grace.revision == revision
 
-    def _reopen_grace_remaining_locked(self, turn_id: str, revision: int) -> float:
-        if not self._grace_matches_locked(turn_id, revision):
-            return 0.0
-        if not self._is_current_locked(turn_id, revision):
-            self._reopen_grace = None
-            return 0.0
-        assert self._reopen_grace is not None
-        remaining = self._reopen_grace.deadline - time.monotonic()
-        if remaining <= 0:
-            self._reopen_grace = None
-            return 0.0
-        return remaining
-
-    def _wait_for_reopen_gate_locked(self, turn_id: str, revision: int) -> None:
-        while self._is_relevant_locked(turn_id, revision):
-            self._wait_for_pending_reopen_locked(turn_id, revision, self._PENDING_REOPEN_WAIT_TIMEOUT_S)
-            if not self._is_relevant_locked(turn_id, revision):
-                return
-            remaining = self._reopen_grace_remaining_locked(turn_id, revision)
-            if remaining <= 0:
-                return
-            logger.debug("Waiting for speculative reopen grace turn=%s rev=%s", turn_id, revision)
-            wait_started_at_s = time.perf_counter()
-            self._condition.wait(remaining)
-            if self.wait_observer is not None:
-                self.wait_observer(turn_id, revision, wait_started_at_s, time.perf_counter())
-
-    def _wait_for_pending_reopen_locked(self, turn_id: str, revision: int, timeout_s: float) -> None:
-        deadline = time.monotonic() + timeout_s
-        pending = self._pending_reopen
-        if not self._has_pending_reopen_locked(turn_id, revision):
-            return
-        logger.debug("Waiting for pending speculative reopen turn=%s rev=%s", turn_id, revision)
-        while self._pending_reopen == pending:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                logger.warning("Timed out waiting for pending speculative reopen turn=%s rev=%s", turn_id, revision)
-                if self._pending_reopen == pending:
-                    self._pending_reopen = None
-                    self._condition.notify_all()
-                return
-            self._condition.wait(remaining)
-
     def reset(self) -> None:
         with self._condition:
             self._sequence = 0
             self._current = None
+            self._phase = None
+            self._last_final_audio_ms = None
+            self._processing_deadline = None
             self._committed.clear()
             self._closed_current = None
             self._pending_reopen = None

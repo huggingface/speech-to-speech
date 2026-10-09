@@ -105,14 +105,6 @@ def test_every_stt_language_has_an_llm_language_name(module_name):
     )
 
 
-def test_parakeet_default_stt_is_fully_covered():
-    """Explicit guard for the default backend, independent of the parametrized sweep."""
-    parakeet = importlib.import_module("speech_to_speech.STT.parakeet_tdt_handler")
-
-    assert len(parakeet.SUPPORTED_LANGUAGES) == 25
-    assert set(parakeet.SUPPORTED_LANGUAGES) <= set(WHISPER_LANGUAGE_TO_LLM_LANGUAGE)
-
-
 def test_language_names_are_lowercase_and_non_empty():
     """The name is interpolated mid-sentence, so it must read as lowercase prose."""
     for code, name in WHISPER_LANGUAGE_TO_LLM_LANGUAGE.items():

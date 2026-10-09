@@ -18,9 +18,11 @@ from openai.types.realtime.conversation_item import (
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.responses import (
     Response,
+    ResponseCompletedEvent,
     ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
+    ResponseReasoningItem,
     ResponseTextDeltaEvent,
 )
 from openai.types.responses.response_output_text import ResponseOutputText
@@ -31,6 +33,7 @@ from speech_to_speech.LLM.base_openai_compatible_language_model import WARMUP_MA
 from speech_to_speech.LLM.chat import (
     AUDIO_INPUT_HISTORY_PLACEHOLDER,
     Chat,
+    make_system_message,
     make_user_message,
 )
 from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
@@ -94,6 +97,63 @@ def _make_response(output, usage=None):
     resp.usage = usage
     resp.output = output
     return resp
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_reasoning_tool_continuation_replays_original_provider_items(stream):
+    reasoning = ResponseReasoningItem(
+        id="rs_original",
+        type="reasoning",
+        summary=[{"type": "summary_text", "text": "Check the weather."}],
+        encrypted_content="opaque-provider-content",
+        status="completed",
+    )
+    call = ResponseFunctionToolCall(
+        id="fc_original",
+        call_id="call_original",
+        type="function_call",
+        name="weather",
+        arguments='{"city":"Paris"}',
+        status="completed",
+    )
+    originals = [item.model_dump(exclude_unset=True) for item in [reasoning, call]]
+    handler = _make_handler(stream=stream)
+    request = _make_request("Weather?", chat_size=5)
+    requests = []
+
+    def create(**kwargs):
+        requests.append(kwargs)
+        if len(requests) == 1:
+            if stream:
+                return _make_stream(
+                    [
+                        ResponseOutputItemDoneEvent(
+                            type="response.output_item.done", output_index=i, sequence_number=i, item=item
+                        )
+                        for i, item in enumerate([reasoning, call])
+                    ]
+                )
+            return _make_response([reasoning, call])
+        assert kwargs["input"][2:4] == originals
+        assert kwargs["input"][4]["type"] == "function_call_output"
+        assert kwargs["input"][4]["call_id"] == "call_original"
+        return _make_stream([]) if stream else _make_response([])
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    outputs = list(handler.process(request))
+    tool = next(output.tools[0] for output in outputs if isinstance(output, LLMResponseChunk) and output.tools)
+    assert tool.id.startswith("fc_") and tool.id != "fc_original"
+    assert tool.call_id.startswith("call_") and tool.call_id != "call_original"
+    request.runtime_config.chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id=tool.call_id,
+            output="Sunny.",
+        )
+    )
+    continuation = list(handler.process(request))
+    assert next(output for output in continuation if isinstance(output, EndOfResponse)).error is None
+    assert [item.model_dump(exclude_unset=True) for item in [reasoning, call]] == originals
 
 
 def _make_runtime_config(chat_size=2, instructions="You are a helpful AI assistant."):
@@ -940,6 +1000,7 @@ def test_generation_is_rejected_until_ordered_tool_output_arrives():
         RealtimeConversationItemFunctionCall(
             type="function_call",
             call_id="call_pending",
+            id="fc_pending",
             name="pending",
             arguments="{}",
         )
@@ -954,6 +1015,53 @@ def test_generation_is_rejected_until_ordered_tool_output_arrives():
     assert isinstance(outputs[0], EndOfResponse)
     assert outputs[0].error is not None and "function call outputs are pending" in outputs[0].error
     assert [item.type for item in chat.buffer] == ["message", "function_call", "message"]
+
+    chat.append_tool_output(
+        "call_pending",
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id="call_pending",
+            output="first result",
+            id="fco_pending",
+        ),
+    )
+
+    def completed_create(**kwargs):
+        # This second result arrives after the model input snapshot. It must not
+        # be reported as consumed by this answer.
+        chat.add_ordered_function_call(
+            RealtimeConversationItemFunctionCall(
+                type="function_call",
+                call_id="call_later",
+                id="fc_later",
+                name="pending",
+                arguments="{}",
+            )
+        )
+        chat.append_tool_output(
+            "call_later",
+            RealtimeConversationItemFunctionCallOutput(
+                type="function_call_output",
+                call_id="call_later",
+                output="late result",
+                id="fco_later",
+            ),
+        )
+        return _make_stream(
+            [
+                _make_text_delta_event("First result."),
+                _make_output_item_done_event(content="First result."),
+                ResponseCompletedEvent.model_construct(
+                    type="response.completed", response=SimpleNamespace(status="completed", usage=None)
+                ),
+            ]
+        )
+
+    handler.client.responses.create = completed_create
+    request.runtime_config.session = _make_runtime_config().session
+    completed = list(handler.process(request))
+    terminal = next(item for item in completed if isinstance(item, EndOfResponse))
+    assert terminal.input_tool_call_ids == ["call_pending"]
 
 
 def test_responses_api_timing_logs_only_text_chunks():
@@ -1748,3 +1856,26 @@ def test_response_history_precedes_speech_that_arrived_during_generation():
     list(handler.process(request))
 
     assert [part.text for item in chat.buffer for part in item.content if part.text] == ["A", "answer A", "B"]
+
+
+def test_responses_backend_keeps_injected_context_with_session_instructions():
+    handler = _make_handler(stream=False)
+    captured = []
+
+    def create(**kwargs):
+        captured.append(kwargs)
+        return _make_response([])
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    request = _make_request(chat_size=10)
+    request.runtime_config.session.instructions = "SESSION INSTRUCTIONS"
+    snapshot = make_system_message("CURRENT CHAT SNAPSHOT")
+    request.runtime_config.chat.add_item(snapshot)
+
+    for _ in range(2):
+        list(handler.process(request))
+        prompt = captured[-1]["input"][0]["content"][0]["text"]
+        assert "SESSION INSTRUCTIONS" in prompt
+        assert prompt.count("CURRENT CHAT SNAPSHOT") == 1
+        assert request.runtime_config.chat.init_chat_message is snapshot
+        assert snapshot.content[0].text == "CURRENT CHAT SNAPSHOT"

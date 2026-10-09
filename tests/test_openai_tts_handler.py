@@ -37,6 +37,7 @@ from speech_to_speech.TTS.openai_compatible_handler import (
     OpenAICompatibleTTSHandler,
     SpeechRequestCancelled,
 )
+from tests.turns import reopen
 
 
 class _FakeSpeechOperation:
@@ -79,9 +80,9 @@ class _CountingSpeculativeTurnTracker(SpeculativeTurnTracker):
         super().__init__()
         self.commit_calls = 0
 
-    def commit_if_latest_after_reopen_grace(self, turn_id: str | None, revision: int | None) -> bool:
-        self.commit_calls += 1
-        return super().commit_if_latest_after_reopen_grace(turn_id, revision)
+    def wait_for_gate(self, turn_id: str | None, revision: int | None, **kwargs) -> bool:
+        self.commit_calls += kwargs.get("commit", False)
+        return super().wait_for_gate(turn_id, revision, **kwargs)
 
 
 def _reset_fake_speech_operation() -> None:
@@ -210,6 +211,9 @@ def test_openai_tts_auto_setup_stays_auto_without_assistant_detection(monkeypatc
     [
         (None, "Auto", "en", "English"),
         ("auto", "Auto", "en", "English"),
+        ("auto", "Auto", "es", "Spanish"),
+        ("auto", "Auto", "hi", "Auto"),  # Unsupported by Qwen3-TTS; keep explicit auto.
+        ("auto", "Auto", "ca", "Auto"),
         ("es", "Auto", "en", "English"),
         ("en", "Auto", "es", "Spanish"),
         ("en", "Auto", "nl", "English"),  # Qwen3-TTS cannot speak Dutch; keep the session language.
@@ -304,6 +308,36 @@ def test_omitted_language_keeps_qwen_auto_for_unsupported_detected_language(monk
     list(handler.process(next(item for item in outputs if isinstance(item, TTSInput))))
 
     assert _FakeSpeechOperation.instances[0].payload["language"] == "Auto"
+
+
+def test_explicit_auto_keeps_qwen_auto_for_unsupported_prior_assistant_language(monkeypatch):
+    monkeypatch.setattr(language_detection, "warm_language_detector", lambda: object())
+    monkeypatch.setattr(
+        language_detection,
+        "detect_language_from_text",
+        lambda text, *args, **kwargs: "hi" if "railway station" in text else None,
+    )
+    handler = _openai_tts_handler(monkeypatch)
+    handler.language = "Auto"
+    handler.detect_llm_output_language = True
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup(detect_llm_output_language=True)
+    config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(type="realtime", audio={"input": {"transcription": {"language": "auto"}}})
+    )
+
+    def speak(text):
+        outputs = list(processor.process(LLMResponseChunk(text=text, runtime_config=config)))
+        tts_input = next(item for item in outputs if isinstance(item, TTSInput))
+        list(handler.process(tts_input))
+        return tts_input
+
+    speak("Main aapko nearest railway station dhoondhne mein madad kar sakta hoon.")
+    list(processor.process(EndOfResponse()))
+    fallback = speak("Sure.")
+
+    assert fallback.tts_language_code == "hi"  # Inconclusive first batch reuses the prior assistant language.
+    assert [operation.payload["language"] for operation in _FakeSpeechOperation.instances] == ["Auto", "Auto"]
 
 
 def test_first_response_uses_session_selected_language(monkeypatch):
@@ -613,7 +647,7 @@ def test_openai_tts_standard_request_yields_audio_before_response_eof(monkeypatc
 
 def test_openai_tts_http_failure_before_audio_does_not_commit(monkeypatch):
     tracker = _CountingSpeculativeTurnTracker()
-    tracker.observe("turn-1", 0)
+    tracker.start_turn()
     handler = _openai_tts_handler(monkeypatch, speculative_turns=tracker)
     _FakeSpeechOperation.startup_error = tts_module.SpeechRequestError("speech server returned HTTP 500")
 
@@ -621,7 +655,7 @@ def test_openai_tts_http_failure_before_audio_does_not_commit(monkeypatch):
         handler.process(
             TTSInput(
                 text="Hello",
-                turn_id="turn-1",
+                turn_id="turn_1",
                 turn_revision=0,
                 response_key="response-1",
             )
@@ -630,26 +664,26 @@ def test_openai_tts_http_failure_before_audio_does_not_commit(monkeypatch):
 
     assert chunks == []
     assert tracker.commit_calls == 0
-    assert not tracker.is_committed("turn-1", 0)
+    assert not tracker.is_committed("turn_1", 0)
     failure = handler.queue_out.get_nowait()
     assert isinstance(failure, ResponseFailedEvent)
     assert failure.message == "speech server returned HTTP 500"
-    assert failure.turn_id == "turn-1"
+    assert failure.turn_id == "turn_1"
     assert failure.turn_revision == 0
     assert failure.response_key == "response-1"
 
 
 def test_openai_tts_stale_keyed_terminal_becomes_cleanup(monkeypatch):
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn-1", 0)
+    tracker.start_turn()
     handler = _openai_tts_handler(monkeypatch, speculative_turns=tracker)
     terminal = EndOfResponse(
         response_key="response-1",
-        turn_id="turn-1",
+        turn_id="turn_1",
         turn_revision=0,
         cancel_generation=7,
     )
-    tracker.observe("turn-1", 1)
+    reopen(tracker)
 
     outputs = list(handler.process(terminal))
     queued = handler.output_for_queue(outputs[0], terminal)
@@ -922,7 +956,7 @@ def test_openai_tts_decodes_streaming_wav_with_unknown_data_length(monkeypatch):
 
 def test_openai_tts_cancellation_before_audio_does_not_commit(monkeypatch):
     tracker = _CountingSpeculativeTurnTracker()
-    tracker.observe("turn-1", 0)
+    tracker.start_turn()
     cancel_scope = CancelScope()
     handler = _openai_tts_handler(
         monkeypatch,
@@ -935,7 +969,7 @@ def test_openai_tts_cancellation_before_audio_does_not_commit(monkeypatch):
         handler.process(
             TTSInput(
                 text="Hello",
-                turn_id="turn-1",
+                turn_id="turn_1",
                 turn_revision=0,
                 cancel_generation=cancel_scope.generation,
             )
@@ -944,20 +978,20 @@ def test_openai_tts_cancellation_before_audio_does_not_commit(monkeypatch):
 
     assert chunks == []
     assert tracker.commit_calls == 0
-    assert not tracker.is_committed("turn-1", 0)
+    assert not tracker.is_committed("turn_1", 0)
     assert _FakeSpeechOperation.instances[0].cancelled is True
 
 
 def test_openai_tts_first_emitted_audio_commits_exactly_once(monkeypatch):
     tracker = _CountingSpeculativeTurnTracker()
-    tracker.observe("turn-1", 0)
+    tracker.start_turn()
     handler = _openai_tts_handler(monkeypatch, speculative_turns=tracker)
 
     chunks = list(
         handler.process(
             TTSInput(
                 text="Hello",
-                turn_id="turn-1",
+                turn_id="turn_1",
                 turn_revision=0,
             )
         )
@@ -965,20 +999,21 @@ def test_openai_tts_first_emitted_audio_commits_exactly_once(monkeypatch):
 
     assert chunks
     assert tracker.commit_calls == 1
-    assert tracker.is_committed("turn-1", 0)
+    assert tracker.is_committed("turn_1", 0)
 
 
 def test_openai_tts_reopened_during_startup_suppresses_old_revision(monkeypatch):
     tracker = _CountingSpeculativeTurnTracker()
-    tracker.observe("turn-1", 0)
+    tracker.start_turn()
     handler = _openai_tts_handler(monkeypatch, speculative_turns=tracker)
-    _FakeSpeechOperation.startup_action = lambda: tracker.observe("turn-1", 1)
+
+    _FakeSpeechOperation.startup_action = lambda: reopen(tracker)
 
     chunks = list(
         handler.process(
             TTSInput(
                 text="Hello",
-                turn_id="turn-1",
+                turn_id="turn_1",
                 turn_revision=0,
             )
         )
@@ -986,7 +1021,7 @@ def test_openai_tts_reopened_during_startup_suppresses_old_revision(monkeypatch)
 
     assert chunks == []
     assert tracker.commit_calls == 0
-    assert not tracker.is_committed("turn-1", 0)
+    assert not tracker.is_committed("turn_1", 0)
     assert _FakeSpeechOperation.instances[0].cancelled is True
 
 

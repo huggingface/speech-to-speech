@@ -144,16 +144,16 @@ def test_configured_grace_is_not_reported_as_wait_without_a_gate(monkeypatch) ->
     turns = SpeculativeTurnTracker()
     turns._condition = ControlledCondition()
     turns.wait_observer = store.record_smart_wait
-    turns.observe("turn_1", 0)
+    turns.start_turn()
     turns.start_reopen_grace("turn_1", 0, 2.0)
 
     clock[0] = 3.0
-    assert turns.is_latest_after_reopen_grace("turn_1", 0)
+    assert turns.wait_for_gate("turn_1", 0)
     assert pending.smart_turn_wait_s == 0.0
 
     clock[0] = 4.0
     turns.start_reopen_grace("turn_1", 0, 2.0)
-    assert turns.is_latest_after_reopen_grace("turn_1", 0)
+    assert turns.wait_for_gate("turn_1", 0)
     assert pending.smart_turn_wait_s == 2.0
 
 
@@ -171,7 +171,7 @@ def test_turn_latency_store_pop_and_clear_session() -> None:
     store.clear_session("sess_1")
     assert store.pop("resp_b", session_id="sess_1") is None
     assert store.get_or_create_for_turn("turn_9", 0).stt_s is None
-    assert store.active_session_count == 0
+    assert len(store._session_keys) == 0
 
 
 def test_response_lookup_does_not_create_or_revive_trackers() -> None:
@@ -184,7 +184,7 @@ def test_response_lookup_does_not_create_or_revive_trackers() -> None:
     store.discard_response("resp_a", session_id="sess_1")
     assert store.get_response("resp_a") is None
     assert store._trackers == {}
-    assert store.active_session_count == 0
+    assert len(store._session_keys) == 0
 
 
 def test_clear_session_keeps_pending_while_other_sessions_active() -> None:
@@ -198,10 +198,10 @@ def test_clear_session_keeps_pending_while_other_sessions_active() -> None:
 
     assert store.pop("resp_a", session_id="sess_1") is None
     assert store.get_or_create_for_turn("turn_9", 0).stt_s == 0.1
-    assert store.active_session_count == 1
+    assert len(store._session_keys) == 1
 
     assert store.pop("resp_b", session_id="sess_2") is not None
-    assert store.active_session_count == 0
+    assert len(store._session_keys) == 0
 
     store.clear_session("sess_2")
     assert store.get_or_create_for_turn("turn_9", 0).stt_s is None

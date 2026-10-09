@@ -40,7 +40,6 @@ from speech_to_speech.LLM.chat import (
     ChatItemError,
     build_active_chat,
     make_assistant_message,
-    make_system_message,
 )
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
 from speech_to_speech.LLM.text_prompt import build_text_system_prompt
@@ -216,7 +215,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
     def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
         if self.speculative_turns is None:
             return True
-        return self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)
+        return self.speculative_turns.wait_for_gate(turn_id, turn_revision)
 
     @abstractmethod
     def _load_model(
@@ -308,7 +307,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             enter_code = None
             end_code = None
 
-        chat.add_item(make_system_message(full_instructions))
+        chat.prepend_instructions(full_instructions)
 
         if ctx is not None:
             ctx.function_tools = function_tools
@@ -806,6 +805,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             turn_revision=ctx.turn_revision,
             cancel_generation=ctx.cancel_generation,
             response_key=request.response_key,
+            input_tool_call_ids=active_chat.tool_output_call_ids() if history_committed else [],
         )
 
     def on_session_end(self) -> None:

@@ -120,12 +120,10 @@ def test_unanswered_reopen_cap_covers_smart_turn_wait(monkeypatch) -> None:
     )
 
     assert handler.unanswered_reopen_ms == 2000
-    tracker.observe("turn_1", 0)
-    handler._current_turn_id = "turn_1"
-    handler._current_turn_revision = 0
-    handler._last_final_audio_ms = 0
-    assert handler._should_reopen_current_turn(1500)
-    assert not handler._should_reopen_current_turn(2001)
+    tracker.start_turn()
+    tracker.segment_finalized(0)
+    assert tracker.can_reopen(1500)
+    assert not tracker.can_reopen(2001)
 
 
 def test_prepare_audio_keeps_latest_eight_seconds_and_left_pads() -> None:

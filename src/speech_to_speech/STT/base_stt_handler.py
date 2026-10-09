@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter, OrderedDict
-from time import perf_counter
+from time import monotonic, perf_counter
 from typing import Any
 
 from speech_to_speech.baseHandler import BaseHandler
@@ -28,6 +28,17 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
     # detection state. Declared here so the session reset covers every backend.
     start_language: Any = None
     last_language: Any = None
+
+    def output_for_queue(self, output: STTOut, source_input: STTIn) -> STTOut:
+        # The background worker overlaps inference with STT. Resolve only now,
+        # without waiting: a late result is explicitly incomplete, not a reason
+        # to stall the response or attach metadata from a different revision.
+        if isinstance(output, Transcription):
+            attribution = source_input.speaker_attribution
+            if source_input.speaker_pending is not None:
+                attribution = source_input.speaker_pending.resolve()
+            return output.model_copy(update={"speaker_attribution": attribution})
+        return output
 
     def should_process_input(self, item: STTIn) -> bool:
         mode = getattr(item, "mode", None)
@@ -133,11 +144,15 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
 
         if wait_for_stability:
             item_delay_s = max(0.0, getattr(item, "processing_delay_s", 0.0) - self._item_age_s(item))
+            processing_deadline = self.speculative_turns.processing_deadline(turn_id, turn_revision)
+            if processing_deadline is not None:
+                item_delay_s = max(0.0, processing_deadline - monotonic())
             wait_started_at_s = perf_counter()
-            is_latest = self.speculative_turns.is_latest_after_stability_window(
+            is_latest = self.speculative_turns.wait_for_gate(
                 turn_id,
                 turn_revision,
-                max(self.final_revision_settle_s, item_delay_s),
+                hold_for_grace=False,
+                hold_until=monotonic() + max(self.final_revision_settle_s, item_delay_s),
             )
             store = getattr(self, "turn_latency_store", None)
             if store is not None and item_delay_s > 0:
@@ -145,7 +160,7 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
                     turn_id, turn_revision, wait_started_at_s, min(perf_counter(), wait_started_at_s + item_delay_s)
                 )
         elif wait_for_pending_reopen:
-            is_latest = self.speculative_turns.is_latest_after_pending_reopen(turn_id, turn_revision)
+            is_latest = self.speculative_turns.wait_for_gate(turn_id, turn_revision, hold_for_grace=False)
         else:
             is_latest = self.speculative_turns.is_latest(turn_id, turn_revision)
         return is_latest

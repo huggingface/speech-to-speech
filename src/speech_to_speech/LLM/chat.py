@@ -5,7 +5,7 @@ import logging
 import threading
 from collections.abc import Callable, Sequence
 from copy import deepcopy
-from typing import Any, Literal, Union
+from typing import Any, Literal, Union, cast
 
 from openai.types.realtime import ConversationItem
 from openai.types.realtime.conversation_item import (
@@ -21,6 +21,13 @@ from openai.types.realtime.realtime_conversation_item_assistant_message import (
 from openai.types.realtime.realtime_conversation_item_system_message import Content as SystemContent
 from openai.types.realtime.realtime_conversation_item_user_message import Content as UserContent
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputMessage,
+    ResponseOutputRefusal,
+    ResponseOutputText,
+    ResponseReasoningItem,
+)
 from openai.types.responses.response_input_image_param import ResponseInputImageParam
 from openai.types.responses.response_input_message_content_list_param import (
     ResponseInputMessageContentListParam,
@@ -48,7 +55,8 @@ AUDIO_INPUT_HISTORY_PLACEHOLDER = "[User audio input]"
 # Anchor returned by :meth:`Chat.history_anchor_id` for an empty conversation,
 # so a generation that starts from empty history is still written before user
 # messages that arrive while it runs.
-HISTORY_START_ANCHOR = "__history_start__"
+# Client item IDs are nonempty, so this internal marker cannot collide with one.
+HISTORY_START_ANCHOR = ""
 
 
 class ChatItemError(Exception):
@@ -65,9 +73,28 @@ class CompactionResult(BaseModel):
 def _ensure_id(value: str | None, prefix: str) -> str:
     if value is None:
         return _generate_id(prefix)
-    if not value.startswith(f"{prefix}_"):
-        raise ChatItemError(f"ID must start with '{prefix}_', got {value!r}")
+    if not value:
+        raise ChatItemError("ID must not be empty")
     return value
+
+
+class ResponsesFunctionCall(RealtimeConversationItemFunctionCall):
+    """Realtime-facing call with its untouched Responses item for manual replay."""
+
+    response_item: ResponseFunctionToolCall
+
+
+# SDK parsing defers these serializers. Build them during module initialization,
+# before concurrent sessions replay messages with omitted optional content fields.
+ResponseOutputText.model_rebuild()
+ResponseOutputRefusal.model_rebuild()
+ResponseOutputMessage.model_rebuild()
+
+
+class ResponsesAssistantMessage(RealtimeConversationItemAssistantMessage):
+    """Local assistant text with its untouched Responses message for replay."""
+
+    response_item: ResponseOutputMessage
 
 
 SupportedItem = Union[
@@ -76,6 +103,9 @@ SupportedItem = Union[
     RealtimeConversationItemAssistantMessage,
     RealtimeConversationItemFunctionCall,
     RealtimeConversationItemFunctionCallOutput,
+    ResponsesFunctionCall,
+    ResponsesAssistantMessage,
+    ResponseReasoningItem,
 ]
 
 
@@ -84,7 +114,7 @@ HistoryCleanupSnapshot = tuple[
     RealtimeConversationItemSystemMessage | None,
     list[SupportedItem],
     dict[str, RealtimeConversationItemFunctionCall],
-    set[str],
+    dict[str, set[str]],
     int,
     CompactFn | None,
 ]
@@ -93,15 +123,17 @@ HistoryCleanupSnapshot = tuple[
 class Chat:
     """Manages conversation history with bounded size to avoid OOM issues.
 
-    The buffer stores ``ConversationItem`` objects (user messages, assistant
-    messages, function calls, function call outputs).  System messages are
+    The buffer stores conversation messages, function calls/outputs, and opaque
+    Responses reasoning items. System messages are
     stored separately in ``init_chat_message`` and never placed in the buffer.
 
     History bounding is decided per ``add_item`` call via the ``compactor``
     argument:
 
     - ``compactor=None``: when the user-turn count exceeds ``size`` the oldest
-      complete turn is evicted in place. Synchronous, lossy, no LLM involvement.
+      complete turn is evicted in place. Pending Responses tool chains are kept
+      until resolved and their active response commits, in addition to the
+      bounded complete turns.
     - ``compactor=<fn>``: when ``size`` is exceeded, ``fn`` is invoked in a
       background thread to summarize older turns into a single user/assistant
       pair (with pending function calls preserved). Single-flight: while a
@@ -118,13 +150,18 @@ class Chat:
         self._pending_tool_calls: dict[str, RealtimeConversationItemFunctionCall] = {}
         # Local models can emit text after a tool call in the same response.
         # Those calls stay in their emitted buffer position, but serializers
-        # omit them until a function_call_output pairs the call.
-        self._ordered_pending_call_ids: set[str] = set()
+        # omit them until a function_call_output pairs the call. Retain each
+        # response's tracked item IDs with its pending calls so prefix gating
+        # cannot cross into an earlier completed response after finalization.
+        self._ordered_pending_calls: dict[str, set[str]] = {}
         # Assistant output is written eagerly when a tool call is exposed to a
         # realtime client. Keep the exact provisional IDs keyed by response so
         # cancellation can roll them back before accepting deferred client items.
         self._provisional_generations: dict[str, tuple[set[str], set[str]]] = {}
         self._cancelled_provisional_generations: dict[str, None] = {}
+        self._provisional_output_items: dict[str, list[tuple[str, str, str | None]]] = {}
+        self._assistant_item_aliases: dict[str, set[str]] = {}
+        self._deleted_tool_output_ids: set[str] = set()
         self._user_turn_count: int = 0
 
         # All state mutations and serializations go through _lock. Public methods
@@ -139,22 +176,69 @@ class Chat:
 
     # ── Internal mutators (caller holds _lock) ─────────────────
 
-    def _evict_oldest_turn(self) -> None:
-        """Remove items from the front until the next user message boundary."""
+    def _responses_tool_context_ids(self, call_ids: set[str]) -> set[str]:
+        """Items since the user message that opened each retained Responses call.
+
+        A tool continuation needs its complete reasoning/call chain, even when
+        its result arrives after a newer user message or during compaction.
+        Caller holds _lock.
+        """
+        protected: set[str] = set()
+        turn: list[SupportedItem] = []
+        keep = False
+        for item in self.buffer:
+            if isinstance(item, RealtimeConversationItemUserMessage):
+                if keep:
+                    protected.update(entry.id for entry in turn if entry.id is not None)
+                turn = []
+                keep = False
+            turn.append(item)
+            if isinstance(item, ResponsesFunctionCall) and item.call_id in call_ids:
+                keep = True
+        if keep:
+            protected.update(entry.id for entry in turn if entry.id is not None)
+        return protected
+
+    def _protected_responses_context(self, include_provisional: bool) -> set[str]:
+        call_ids = set(self._pending_tool_calls)
+        if include_provisional:
+            for _, provisional_call_ids in self._provisional_generations.values():
+                call_ids.update(provisional_call_ids)
+        return self._responses_tool_context_ids(call_ids)
+
+    def _evictable_user_turn_count(self, include_provisional: bool = True) -> int:
+        protected = self._protected_responses_context(include_provisional)
+        return sum(
+            isinstance(item, RealtimeConversationItemUserMessage) and item.id not in protected for item in self.buffer
+        )
+
+    def _evict_oldest_turn(self, include_provisional: bool = True) -> bool:
+        """Evict the oldest turn not needed by retained Responses context."""
         if not self.buffer:
-            return
+            return False
+        protected = self._protected_responses_context(include_provisional)
+        start = 0
+        while start < len(self.buffer):
+            end = start + 1
+            while end < len(self.buffer) and not isinstance(self.buffer[end], RealtimeConversationItemUserMessage):
+                end += 1
+            if not any(item.id in protected for item in self.buffer[start:end]):
+                break
+            start = end
+        if start == len(self.buffer):
+            return False
+        removed = self.buffer[start:end]
+        del self.buffer[start:end]
         removed_call_ids: set[str] = set()
 
         def record_call(item: SupportedItem) -> None:
             if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None:
                 removed_call_ids.add(item.call_id)
 
-        first = self.buffer.pop(0)
-        record_call(first)
-        if isinstance(first, RealtimeConversationItemUserMessage):
-            self._user_turn_count -= 1
-        while self.buffer and not isinstance(self.buffer[0], RealtimeConversationItemUserMessage):
-            record_call(self.buffer.pop(0))
+        for item in removed:
+            record_call(item)
+            if isinstance(item, RealtimeConversationItemUserMessage):
+                self._user_turn_count -= 1
 
         # A provider result can arrive after later user turns. If its call was
         # evicted above, remove the completed result as well so history never
@@ -167,6 +251,7 @@ class Chat:
                     isinstance(item, RealtimeConversationItemFunctionCallOutput) and item.call_id in removed_call_ids
                 )
             ]
+        return True
 
     def _has_call_id_in_buffer(self, call_id: str) -> bool:
         for entry in self.buffer:
@@ -199,24 +284,20 @@ class Chat:
         if self._has_call_id_in_buffer(call_id):
             self._pending_tool_calls.pop(call_id, None)
             self._mark_call_completed(call_id, output_item.status)
-            self._ordered_pending_call_ids.discard(call_id)
+            self._ordered_pending_calls.pop(call_id, None)
             self.buffer.append(output_item)
             return
 
         if call_id in self._pending_tool_calls:
             logger.info("Re-injecting evicted function_call for call_id=%s", call_id)
             fc = self._pending_tool_calls.pop(call_id)
-            self._ordered_pending_call_ids.discard(call_id)
+            self._ordered_pending_calls.pop(call_id, None)
             fc.status = "completed" if output_item.status is None else output_item.status
             self.buffer.append(fc)
             self.buffer.append(output_item)
             return
 
         raise ChatItemError(f"No function_call with call_id '{call_id}' found in conversation history.")
-
-    def init_chat(self, message: RealtimeConversationItemSystemMessage) -> None:
-        with self._lock:
-            self.init_chat_message = message
 
     def history_anchor_id(self) -> str | None:
         """Anchor identifying the current end of the conversation.
@@ -297,17 +378,20 @@ class Chat:
         elif isinstance(item, RealtimeConversationItemAssistantMessage):
             item.id = _ensure_id(item.id, "msg")
             item.content = [part for part in item.content if part.type == "output_text" and part.text]
-            if not item.content:
+            if not item.content and not isinstance(item, ResponsesAssistantMessage):
                 return item
             self._place_locked(item, insert_at)
             logger.debug("Added assistant message to chat (%d parts)", len(item.content))
 
         elif isinstance(item, RealtimeConversationItemFunctionCall):
             item.id = _ensure_id(item.id, "fc")
+            if item.call_id is not None and not item.call_id.startswith("call_"):
+                raise ChatItemError(f"ID must start with 'call_', got {item.call_id!r}")
             item.call_id = _ensure_id(item.call_id, "call")
+            assert item.call_id is not None
             if ordered_function_call:
                 self._place_locked(item, insert_at)
-                self._ordered_pending_call_ids.add(item.call_id)
+                self._ordered_pending_calls.setdefault(item.call_id, set())
             self._pending_tool_calls[item.call_id] = item
             logger.debug("Added function_call to chat (call_id=%s)", item.call_id)
 
@@ -316,17 +400,25 @@ class Chat:
             self._append_tool_output_locked(item.call_id, item)
             logger.debug("Added function_call_output to chat (call_id=%s)", item.call_id)
 
+        elif isinstance(item, ResponseReasoningItem):
+            self._place_locked(item, insert_at)
+
         else:
             raise ChatItemError(f"Unsupported item type: {getattr(item, 'type', None)}")
 
-        if self.size > 0 and self._user_turn_count > 2 * self.size:
+        if (
+            self.size > 0
+            and self._user_turn_count > 2 * self.size
+            and self._evictable_user_turn_count() > 2 * self.size
+        ):
             logger.warning(
                 "Chat buffer exceeded hard cap (%d > 2 * size=%d); evicting oldest turn",
                 self._user_turn_count,
                 self.size,
             )
-            while self._user_turn_count > 2 * self.size:
-                self._evict_oldest_turn()
+            while self._evictable_user_turn_count() > 2 * self.size:
+                if not self._evict_oldest_turn():
+                    break
 
         return item
 
@@ -341,12 +433,24 @@ class Chat:
         explicitly after each successful generation to evict or compact old
         turns. A hard upper bound at ``2 * size`` is enforced inline as a
         runaway-client safety net: if the user-turn count exceeds it, the
-        oldest complete turn is evicted (lossy, no compaction).
+        oldest complete turn is evicted (lossy, no compaction). Pending Responses
+        tool chains are retained in addition until their outputs arrive and
+        their active response commits.
 
         Raises :class:`ChatItemError` if the item fails validation.
         """
         with self._lock:
             return self._add_item_locked(item, insert_at=self._turn_insertion_index_locked(after_item_id))
+
+    def prepend_instructions(self, instructions: str) -> None:
+        """Combine request instructions with the injected system context on a chat copy."""
+        with self._lock:
+            context = (
+                "\n".join(part.text for part in self.init_chat_message.content if part.text)
+                if self.init_chat_message
+                else ""
+            )
+            self.init_chat_message = make_system_message("\n\n".join(text for text in (instructions, context) if text))
 
     def add_ordered_function_call(
         self, item: RealtimeConversationItemFunctionCall, *, after_item_id: str | None = None
@@ -360,6 +464,11 @@ class Chat:
             )
             assert isinstance(recorded, RealtimeConversationItemFunctionCall)
             return recorded
+
+    def tool_output_call_ids(self) -> list[str]:
+        """Return the tool-result IDs present in this chat snapshot."""
+        with self._lock:
+            return sorted({item.call_id for item in self.buffer if item.type == "function_call_output"})
 
     def has_pending_tool_calls(self) -> bool:
         """Whether the conversation is waiting for any function-call output."""
@@ -384,8 +493,12 @@ class Chat:
                     return
                 self._maybe_trigger_compaction(compactor)
             else:
-                while self._user_turn_count > self.size:
-                    self._evict_oldest_turn()
+                # Trailing provider items and their order are committed before
+                # this completion-time trim. Hard admission limits also protect
+                # active generations whose fast tool output arrived earlier.
+                while self._evictable_user_turn_count(include_provisional=False) > self.size:
+                    if not self._evict_oldest_turn(include_provisional=False):
+                        break
 
     def replace_user_message_text(self, item_id: str, text: str) -> bool:
         """Replace the text content of an existing user message.
@@ -403,6 +516,144 @@ class Chat:
                 logger.debug("Replaced speculative user message %s", item_id)
                 return True
         return False
+
+    def item_ids(self) -> set[str]:
+        """IDs of retained items, including staged function calls."""
+        with self._lock:
+            items: list[SupportedItem] = [*self.buffer, *self._pending_tool_calls.values()]
+            if self.init_chat_message is not None:
+                items.append(self.init_chat_message)
+            ids = {item.id for item in items if item.id is not None}
+            return ids | {wire_id for wire_id, message_ids in self._assistant_item_aliases.items() if message_ids & ids}
+
+    def delete_item(self, item_id: str) -> SupportedItem | None:
+        """Delete exactly one retained item and repair its history bookkeeping."""
+        with self._lock:
+            removed: SupportedItem | None = None
+            target_ids = self._assistant_item_aliases.pop(item_id, {item_id})
+            # Native reasoning requires its following provider message/call.
+            # Find that companion before deleting it, allowing interleaved user
+            # inputs and tool results without consuming another response's pair.
+            reasoning_prefix: set[str] = set()
+            orphaned_reasoning_ids: set[str] = set()
+            for item in self.buffer:
+                if isinstance(item, ResponseReasoningItem):
+                    reasoning_prefix.add(item.id)
+                elif isinstance(item, (RealtimeConversationItemAssistantMessage, RealtimeConversationItemFunctionCall)):
+                    if isinstance(item, (ResponsesAssistantMessage, ResponsesFunctionCall)) and item.id in target_ids:
+                        orphaned_reasoning_ids.update(reasoning_prefix)
+                    reasoning_prefix.clear()
+            if self.init_chat_message is not None and self.init_chat_message.id == item_id:
+                removed = self.init_chat_message
+                self.init_chat_message = None
+            else:
+                for index, item in enumerate(self.buffer):
+                    if item.id in target_ids:
+                        removed = self.buffer.pop(index)
+                        break
+                if removed is not None and len(target_ids) > 1:
+                    self.buffer = [item for item in self.buffer if item.id not in target_ids]
+                if removed is None:
+                    removed = next((call for call in self._pending_tool_calls.values() if call.id == item_id), None)
+            if removed is None:
+                return None
+            if orphaned_reasoning_ids:
+                self.buffer = [item for item in self.buffer if item.id not in orphaned_reasoning_ids]
+                target_ids = target_ids | orphaned_reasoning_ids
+            if isinstance(removed, RealtimeConversationItemUserMessage):
+                self._user_turn_count -= 1
+            elif isinstance(removed, RealtimeConversationItemFunctionCall):
+                if removed.call_id is not None:
+                    self._deleted_tool_output_ids.update(
+                        item.id
+                        for item in self.buffer
+                        if item.type == "function_call_output"
+                        and item.call_id == removed.call_id
+                        and item.id is not None
+                    )
+                    self._pending_tool_calls.pop(removed.call_id, None)
+                    self._ordered_pending_calls.pop(removed.call_id, None)
+            elif isinstance(removed, RealtimeConversationItemFunctionCallOutput):
+                if not any(
+                    item.type == "function_call_output" and item.call_id == removed.call_id for item in self.buffer
+                ):
+                    call = next(
+                        (
+                            item
+                            for item in self.buffer
+                            if item.type == "function_call" and item.call_id == removed.call_id
+                        ),
+                        None,
+                    )
+                    if call is not None:
+                        self._pending_tool_calls[removed.call_id] = call
+            self._deleted_tool_output_ids.intersection_update(item.id for item in self.buffer if item.id is not None)
+            for tracked_ids, tracked_call_ids in self._provisional_generations.values():
+                tracked_ids.difference_update(target_ids)
+                if isinstance(removed, RealtimeConversationItemFunctionCall) and removed.call_id is not None:
+                    tracked_call_ids.discard(removed.call_id)
+            for context in self._ordered_pending_calls.values():
+                context.difference_update(target_ids)
+            # A summary calculated before deletion must not restore deleted text.
+            self._gen_counter += 1
+            self._compact_in_flight = False
+            return removed
+
+    def bind_assistant_item_ids(self, response_key: str | None, output_items: Sequence[ConversationItem]) -> None:
+        """Give delivered assistant history the IDs exposed by Realtime."""
+        with self._lock:
+            tracked = self._provisional_generations.get(response_key or "")
+            if tracked is None:
+                return
+            tracked_ids, _ = tracked
+            retained_ids = {item.id for item in self.buffer}
+            self._assistant_item_aliases = {
+                wire_id: ids for wire_id, ids in self._assistant_item_aliases.items() if ids & retained_ids
+            }
+            # The wire merges adjacent text chunks until a function call. A
+            # Responses provider may retain several opaque messages in that
+            # same wire item; preserve their provider data and delete them together.
+            messages_by_id = {
+                item.id: item for item in self.buffer if isinstance(item, RealtimeConversationItemAssistantMessage)
+            }
+            groups: dict[str | None, list[str]] = {}
+            preceding_call_id: str | None = None
+            # Tool boundaries survive text filtering and history eviction, so a
+            # hidden or evicted interval cannot take a later wire message's ID.
+            for native_id, kind, call_id in self._provisional_output_items.get(response_key or "", []):
+                if kind == "message":
+                    groups.setdefault(preceding_call_id, []).append(native_id)
+                else:
+                    preceding_call_id = call_id
+            preceding_call_id = None
+            for output_item in output_items:
+                if isinstance(output_item, RealtimeConversationItemFunctionCall):
+                    preceding_call_id = output_item.call_id
+                    continue
+                if not isinstance(output_item, RealtimeConversationItemAssistantMessage) or output_item.id is None:
+                    continue
+                item_id = output_item.id
+                messages = [
+                    messages_by_id[native_id]
+                    for native_id in groups.get(preceding_call_id, [])
+                    if native_id in messages_by_id
+                ]
+                if not messages:
+                    continue
+                if len(messages) > 1:
+                    self._assistant_item_aliases[item_id] = {
+                        message.id for message in messages if message.id is not None
+                    }
+                    continue
+                message = messages[0]
+                old_id = message.id
+                message.id = item_id
+                tracked_ids.discard(old_id)
+                tracked_ids.add(item_id)
+                for context in self._ordered_pending_calls.values():
+                    if old_id in context:
+                        context.remove(old_id)
+                        context.add(item_id)
 
     def remove_user_message(self, item_id: str) -> bool:
         """Remove an existing user message from the bounded chat buffer."""
@@ -461,7 +712,7 @@ class Chat:
                 return None
             buffer_before = list(self.buffer)
             pending_calls_before = dict(self._pending_tool_calls)
-            ordered_calls_before = set(self._ordered_pending_call_ids)
+            ordered_calls_before = deepcopy(self._ordered_pending_calls)
             user_turn_count_before = self._user_turn_count
             recorded_items: list[SupportedItem] = []
             item_ids: set[str] = set()
@@ -475,6 +726,7 @@ class Chat:
                             RealtimeConversationItemUserMessage,
                             RealtimeConversationItemAssistantMessage,
                             RealtimeConversationItemFunctionCall,
+                            ResponseReasoningItem,
                         ),
                     ):
                         raise ChatItemError(f"Unsupported provisional item type: {getattr(item, 'type', None)}")
@@ -489,7 +741,11 @@ class Chat:
                     # by this write cannot leave a stale index behind.
                     if len(self.buffer) > buffered_before and recorded.id is not None:
                         anchor_id = recorded.id
-                    if isinstance(recorded, RealtimeConversationItemAssistantMessage) and not recorded.content:
+                    if (
+                        isinstance(recorded, RealtimeConversationItemAssistantMessage)
+                        and not recorded.content
+                        and not isinstance(recorded, ResponsesAssistantMessage)
+                    ):
                         continue
                     recorded_items.append(recorded)
                     if recorded.id is not None:
@@ -499,7 +755,7 @@ class Chat:
             except Exception:
                 self.buffer = buffer_before
                 self._pending_tool_calls = pending_calls_before
-                self._ordered_pending_call_ids = ordered_calls_before
+                self._ordered_pending_calls = ordered_calls_before
                 self._user_turn_count = user_turn_count_before
                 raise
             tracked_item_ids, tracked_call_ids = self._provisional_generations.setdefault(
@@ -508,6 +764,17 @@ class Chat:
             )
             tracked_item_ids.update(item_ids)
             tracked_call_ids.update(call_ids)
+            output_items = self._provisional_output_items.setdefault(response_key, [])
+            output_items.extend(
+                (item.id, item.type, item.call_id if isinstance(item, RealtimeConversationItemFunctionCall) else None)
+                for item in recorded_items
+                if item.id is not None
+                and isinstance(item, (RealtimeConversationItemAssistantMessage, RealtimeConversationItemFunctionCall))
+            )
+            for call_id in tracked_call_ids:
+                context = self._ordered_pending_calls.get(call_id)
+                if context is not None:
+                    context.update(tracked_item_ids)
             if committed_item_ids:
                 tracked_item_ids.difference_update(committed_item_ids)
             return recorded_items
@@ -519,6 +786,7 @@ class Chat:
             return
         with self._lock:
             self._provisional_generations.pop(response_key, None)
+            self._provisional_output_items.pop(response_key, None)
             self._cancelled_provisional_generations.pop(response_key, None)
             self._run_deferred_compaction_if_ready()
 
@@ -532,6 +800,7 @@ class Chat:
             while len(self._cancelled_provisional_generations) > 128:
                 self._cancelled_provisional_generations.pop(next(iter(self._cancelled_provisional_generations)))
             tracked = self._provisional_generations.pop(response_key, None)
+            self._provisional_output_items.pop(response_key, None)
             if tracked is not None:
                 item_ids, call_ids = tracked
                 self._rollback_generation_locked(None, item_ids=item_ids, call_ids=call_ids)
@@ -556,23 +825,31 @@ class Chat:
         self.buffer = kept
         for call_id in call_ids:
             self._pending_tool_calls.pop(call_id, None)
-            self._ordered_pending_call_ids.discard(call_id)
+            self._ordered_pending_calls.pop(call_id, None)
         self._user_turn_count = sum(isinstance(item, RealtimeConversationItemUserMessage) for item in self.buffer)
         logger.debug("Rolled back failed generation output for user message %s", user_message_id)
 
-    def compact_audio_history(self, max_audio_turns: int) -> None:
+    def compact_audio_history(
+        self, max_audio_turns: int, *, consumed_items: Sequence[RealtimeConversationItemUserMessage] | None = None
+    ) -> None:
         """Retain only the newest bounded set of audio turns.
 
         Older audio parts are replaced with a textual placeholder so the user
         role and its paired assistant response remain valid in serialized
         history. The newest turns keep their audio semantics for subsequent
         Chat Completions requests.
+
+        When consumed_items is supplied, only clean up unchanged input from
+        that snapshot. New audio and later revisions remain available.
         """
 
         with self._lock:
+            consumed = {item.id: item.content for item in consumed_items} if consumed_items is not None else None
             remaining = max(0, max_audio_turns)
             for item in reversed(self.buffer):
                 if not isinstance(item, RealtimeConversationItemUserMessage):
+                    continue
+                if consumed is not None and item.content != consumed.get(item.id):
                     continue
                 if not any(part.type == "input_audio" for part in item.content):
                     continue
@@ -608,16 +885,48 @@ class Chat:
             if isinstance(item, RealtimeConversationItemUserMessage):
                 skipping = False
             elif isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id in (
-                self._ordered_pending_call_ids
+                self._ordered_pending_calls
             ):
+                # Reasoning can require its following message/call context.
+                # Gate that prefix with the call, without touching live history
+                # or any earlier completed response, even without a tool.
+                response_item_ids = self._ordered_pending_calls[item.call_id]
+                prefix_start = len(kept)
+                reasoning_start = None
+                while (
+                    prefix_start
+                    and kept[prefix_start - 1].id in response_item_ids
+                    and isinstance(kept[prefix_start - 1], (ResponseReasoningItem, ResponsesAssistantMessage))
+                ):
+                    prefix_start -= 1
+                    if isinstance(kept[prefix_start], ResponseReasoningItem):
+                        reasoning_start = prefix_start
+                if reasoning_start is not None:
+                    del kept[reasoning_start:]
                 skipping = True
             if not skipping:
                 kept.append(item)
         return kept
 
-    @staticmethod
-    def _with_adjacent_tool_outputs(items: Sequence[SupportedItem]) -> list[SupportedItem]:
+    def order_response_items(self, item_ids: Sequence[str]) -> None:
+        """Apply Responses output-index order to this generation's history items.
+
+        Streaming dispatch stays immediate. Only provider-item positions change;
+        concurrent user inputs and client tool results keep their positions.
+        Serializers already place tool results adjacent to their matching calls.
+        """
+        with self._lock:
+            order = {item_id: index for index, item_id in enumerate(item_ids)}
+            positions = [index for index, item in enumerate(self.buffer) if item.id in order]
+            ordered = sorted((self.buffer[index] for index in positions), key=lambda item: order[item.id or ""])
+            for index, item in zip(positions, ordered):
+                self.buffer[index] = item
+
+    def _with_adjacent_tool_outputs(self, items: Sequence[SupportedItem]) -> list[SupportedItem]:
         """Return a backend-safe snapshot without rewriting canonical chronology."""
+        # Deleting a call does not delete its output from wire history, but the
+        # remaining result cannot be submitted to a model without that call.
+        items = [item for item in items if item.id not in self._deleted_tool_output_ids]
         call_ids = {
             item.call_id
             for item in items
@@ -649,6 +958,9 @@ class Chat:
     def _to_responses_api_chat_locked(self, items: list[SupportedItem]) -> ResponseInputParam:
         """Body of :meth:`to_responses_api_chat`. Caller must hold ``_lock``."""
         buffer_items = self._drop_unpaired_ordered_turns_locked(self._with_adjacent_tool_outputs(items))
+        provider_call_ids = {
+            item.call_id: item.response_item.call_id for item in buffer_items if isinstance(item, ResponsesFunctionCall)
+        }
         result: list[ResponseInputItemParam] = []
         if self.init_chat_message:
             result.append(
@@ -678,7 +990,9 @@ class Chat:
                         content.append(ResponseInputTextParam(text=AUDIO_INPUT_HISTORY_PLACEHOLDER, type="input_text"))
                         audio_placeholder_added = True
                 if content:
-                    result.append(ResponseMessage(content=content, role="user", type="message"))
+                    _append_user_input(result, content)
+            elif isinstance(item, ResponsesAssistantMessage):
+                result.append(cast(ResponseInputItemParam, item.response_item.model_dump(exclude_unset=True)))
             elif isinstance(item, RealtimeConversationItemAssistantMessage):
                 assistant_content: list[ResponseOutputTextParam] = []
                 for assistant_part in item.content:
@@ -696,6 +1010,11 @@ class Chat:
                             type="message",
                         )
                     )
+            elif isinstance(item, ResponseReasoningItem):
+                result.append(cast(ResponseInputItemParam, item.model_dump(exclude_unset=True)))
+            elif isinstance(item, ResponsesFunctionCall):
+                if item.call_id not in self._pending_tool_calls:
+                    result.append(cast(ResponseInputItemParam, item.response_item.model_dump(exclude_unset=True)))
             elif isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None:
                 if item.call_id in self._pending_tool_calls:
                     continue
@@ -714,7 +1033,7 @@ class Chat:
                 result.append(function_call)
             elif isinstance(item, RealtimeConversationItemFunctionCallOutput):
                 function_call_output = FunctionCallOutput(
-                    call_id=item.call_id,
+                    call_id=provider_call_ids.get(item.call_id, item.call_id),
                     output=item.output,
                     type="function_call_output",
                 )
@@ -740,13 +1059,12 @@ class Chat:
             for item in self._drop_unpaired_ordered_turns_locked(self._with_adjacent_tool_outputs(self.buffer)):
                 if isinstance(item, RealtimeConversationItemUserMessage):
                     has_media = any(p.type in {"input_image", "input_audio"} for p in item.content)
+                    content: str | list[dict[str, Any]]
                     if has_media:
-                        messages.append(
-                            TransformersUserMessage(content=[p.model_dump(exclude_none=True) for p in item.content])
-                        )
+                        content = [p.model_dump(exclude_none=True) for p in item.content]
                     else:
-                        text = " ".join(p.text for p in item.content if p.type == "input_text" and p.text)
-                        messages.append(TransformersUserMessage(content=text))
+                        content = " ".join(p.text for p in item.content if p.type == "input_text" and p.text)
+                    _append_user_message(messages, content)
                 elif isinstance(item, RealtimeConversationItemAssistantMessage):
                     text = " ".join(p.text for p in item.content if p.text)
                     messages.append(TransformersAssistantMessage(content=text))
@@ -796,16 +1114,18 @@ class Chat:
                 self.init_chat_message,
                 list(self.buffer),
                 dict(self._pending_tool_calls),
-                set(self._ordered_pending_call_ids),
+                {call_id: set(item_ids) for call_id, item_ids in self._ordered_pending_calls.items()},
                 self._user_turn_count,
             )
+            clone._deleted_tool_output_ids = set(self._deleted_tool_output_ids)
+            clone._assistant_item_aliases = {wire_id: set(ids) for wire_id, ids in self._assistant_item_aliases.items()}
             if deep:
                 state = deepcopy(state)
             (
                 clone.init_chat_message,
                 clone.buffer,
                 clone._pending_tool_calls,
-                clone._ordered_pending_call_ids,
+                clone._ordered_pending_calls,
                 clone._user_turn_count,
             ) = state
             return clone
@@ -818,7 +1138,7 @@ class Chat:
                     self.init_chat_message,
                     self.buffer,
                     self._pending_tool_calls,
-                    self._ordered_pending_call_ids,
+                    self._ordered_pending_calls,
                     self._user_turn_count,
                 )
             )
@@ -838,7 +1158,7 @@ class Chat:
                 self.init_chat_message,
                 self.buffer,
                 self._pending_tool_calls,
-                self._ordered_pending_call_ids,
+                self._ordered_pending_calls,
                 self._user_turn_count,
                 self._deferred_compactor,
             ) = snapshot
@@ -851,17 +1171,19 @@ class Chat:
                 clone.init_chat_message,
                 clone.buffer,
                 clone._pending_tool_calls,
-                clone._ordered_pending_call_ids,
+                clone._ordered_pending_calls,
                 clone._user_turn_count,
             ) = deepcopy(
                 (
                     self.init_chat_message,
                     self.buffer,
                     self._pending_tool_calls,
-                    self._ordered_pending_call_ids,
+                    self._ordered_pending_calls,
                     self._user_turn_count,
                 )
             )
+            clone._deleted_tool_output_ids = set(self._deleted_tool_output_ids)
+            clone._assistant_item_aliases = {wire_id: set(ids) for wire_id, ids in self._assistant_item_aliases.items()}
             tracked = deepcopy(self._provisional_generations.get(response_key))
         if tracked is not None:
             item_ids, call_ids = tracked
@@ -876,11 +1198,14 @@ class Chat:
             self.buffer = []
             self.init_chat_message = None
             self._pending_tool_calls = {}
-            self._ordered_pending_call_ids = set()
+            self._ordered_pending_calls = {}
             self._provisional_generations = {}
+            self._provisional_output_items = {}
             self._cancelled_provisional_generations = {}
             self._deferred_compactor = None
             self._user_turn_count = 0
+            self._deleted_tool_output_ids.clear()
+            self._assistant_item_aliases.clear()
 
     def close(self) -> None:
         """Permanently shut down the chat. In-flight compaction splice is suppressed.
@@ -962,6 +1287,12 @@ class Chat:
             for entry in self.buffer[end_idx:]
             if isinstance(entry, RealtimeConversationItemFunctionCallOutput)
         }
+        protected_ids = self._responses_tool_context_ids(set(self._pending_tool_calls) | output_call_ids_after_snapshot)
+        items_to_compact = [entry for entry in items_to_compact if entry.id not in protected_ids]
+        marker_ids.difference_update(protected_ids)
+        n_turns = sum(isinstance(entry, RealtimeConversationItemUserMessage) for entry in items_to_compact)
+        if n_turns < 2:
+            return [], set(), n_turns
         serializable_items = [
             entry
             for entry in items_to_compact
@@ -1088,7 +1419,15 @@ class Chat:
                 and isinstance(x, RealtimeConversationItemFunctionCall)
                 and x.call_id not in fco_call_ids_in_range
             }
-            drop_ids = marker_ids - fc_ids_to_keep
+            retained_call_ids = {
+                x.call_id
+                for x in self.buffer
+                if isinstance(x, ResponsesFunctionCall)
+                and x.call_id is not None
+                and x.call_id not in fco_call_ids_in_range
+            }
+            protected_ids = self._responses_tool_context_ids(retained_call_ids)
+            drop_ids = marker_ids - fc_ids_to_keep - protected_ids
             remaining = [x for x in self.buffer if x.id not in drop_ids]
 
             user_msg = make_user_message(result.user_summary)
@@ -1158,6 +1497,51 @@ TransformersChatMessage = Union[
     TransformersFunctionCallMessage,
     TransformersToolMessage,
 ]
+
+
+def _append_user_message(messages: list[TransformersChatMessage], content: str | list[dict[str, Any]]) -> None:
+    """Append a user message, merging it into a directly preceding one.
+
+    History keeps unanswered user turns (an interrupted or failed reply, or a
+    turn past its reopen cap), but strict chat templates such as Gemma's and
+    Mistral's reject two user messages in a row. Merge them only when
+    rendering, so stored history is unchanged.
+    """
+    previous = messages[-1] if messages else None
+    if not isinstance(previous, TransformersUserMessage):
+        messages.append(TransformersUserMessage(content=content))
+    elif isinstance(previous.content, str) and isinstance(content, str):
+        previous.content = "\n".join(text for text in (previous.content, content) if text)
+    else:
+        merged = list(_user_content_parts(previous.content))
+        parts = _user_content_parts(content)
+        last, first = (merged[-1] if merged else None), (parts[0] if parts else None)
+        if last is not None and first is not None and last["type"] == "input_text" and first["type"] == "input_text":
+            merged[-1] = {**last, "text": f"{last['text']}\n{first['text']}"}
+            parts = parts[1:]
+        previous.content = merged + parts
+
+
+def _user_content_parts(content: str | list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if isinstance(content, list):
+        return content
+    return [{"type": "input_text", "text": content}] if content else []
+
+
+def _append_user_input(result: list[ResponseInputItemParam], content: ResponseInputMessageContentListParam) -> None:
+    """Responses API counterpart of :func:`_append_user_message`."""
+    previous = result[-1] if result else None
+    if previous is None or previous.get("type") != "message" or previous.get("role") != "user":
+        result.append(ResponseMessage(content=content, role="user", type="message"))
+        return
+    message = cast(ResponseMessage, previous)
+    merged = list(message["content"])
+    parts = list(content)
+    last, first = (merged[-1] if merged else None), (parts[0] if parts else None)
+    if last is not None and first is not None and last["type"] == "input_text" and first["type"] == "input_text":
+        merged[-1] = ResponseInputTextParam(text=f"{last['text']}\n{first['text']}", type="input_text")
+        parts = parts[1:]
+    message["content"] = merged + parts
 
 
 # ---------------------------------------------------------------------------

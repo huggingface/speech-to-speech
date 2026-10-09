@@ -29,6 +29,7 @@ from speech_to_speech.arguments_classes.omnivoice_tts_arguments import OmniVoice
 from speech_to_speech.arguments_classes.openai_realtime_stt_arguments import OpenAIRealtimeSTTHandlerArguments
 from speech_to_speech.arguments_classes.openai_stt_arguments import OpenAICompatibleSTTHandlerArguments
 from speech_to_speech.arguments_classes.openai_tts_arguments import OpenAICompatibleTTSHandlerArguments
+from speech_to_speech.arguments_classes.orukeet_stt_arguments import OrukeetSTTHandlerArguments
 from speech_to_speech.arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
 from speech_to_speech.arguments_classes.parakeet_tdt_arguments import (
     ParakeetTDTSTTHandlerArguments,
@@ -175,15 +176,6 @@ def build_backend_registry(kind: BackendKind, specs: Iterable[BackendSpec]) -> d
     return registry
 
 
-def select_backend(registry: Mapping[str, BackendSpec], name: str, config: Any) -> BackendSelection:
-    try:
-        spec = registry[name]
-    except KeyError as exc:
-        choices = ", ".join(registry)
-        raise ValueError(f"Unsupported backend {name!r}; choose one of: {choices}.") from exc
-    return BackendSelection(spec, spec.normalize(config))
-
-
 def _optional_dependency_error(selection: BackendSelection, exc: BaseException) -> ImportError | None:
     extra = selection.spec.required_extra
     if extra is None:
@@ -279,6 +271,14 @@ def _create_parakeet(context: HandlerContext, config: Mapping[str, Any]) -> Any:
     )
     handler.speculative_turns = context.speculative_turns
     return handler
+
+
+def _create_orukeet(context: HandlerContext, config: Mapping[str, Any]) -> Any:
+    return _simple_handler_factory(
+        "speech_to_speech.STT.nemo_asr_handler",
+        "NemoASRSTTHandler",
+        attach_speculative_turns=True,
+    )(context, {**config, "detect_language_from_text": True})
 
 
 def _create_openai_tts(context: HandlerContext, config: Mapping[str, Any]) -> Any:
@@ -426,6 +426,14 @@ STT_BACKENDS = build_backend_registry(
                 attach_speculative_turns=True,
             ),
             config_prefix="nemotron_streaming",
+            required_extra="nemo",
+        ),
+        BackendSpec(
+            "orukeet",
+            "stt",
+            OrukeetSTTHandlerArguments,
+            _create_orukeet,
+            config_prefix="orukeet",
             required_extra="nemo",
         ),
         BackendSpec(

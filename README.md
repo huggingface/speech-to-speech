@@ -120,6 +120,7 @@ Clients using the implemented core Realtime event set can connect. The official 
 * [How it works](#how-it-works)
 * [Starting configurations](#quickstart)
 * [Installation](#installation)
+* [YAML configuration API](./docs/configuration.md)
 * [Offline operation](#offline-operation)
 * [Supported components](#supported-components)
 * [Commands](#commands)
@@ -144,6 +145,10 @@ The pipeline is a cascade of four components, each running in its own thread and
 
 Every stage has multiple interchangeable backends, selected via CLI flags. The code is designed for easy modification, with a focus on models available through Transformers and the Hugging Face Hub.
 
+Optional speech-to-viseme extraction adds timed mouth shapes for avatar and robot
+clients after TTS. Enable it with `--enable_visemes`; see the
+[viseme guide](src/speech_to_speech/STV/README.md) for client events and timing.
+
 ## Installation
 
 Requires Python 3.10+. Install from PyPI in an activated virtual environment (see the [quickstart setup](#install-for-these-examples)):
@@ -160,6 +165,23 @@ The default install covers the standard realtime path:
 - local audio and realtime server modes
 
 macOS and non-macOS dependencies are resolved automatically via platform markers in `pyproject.toml`.
+
+See the [configuration guide](./docs/configuration.md) for reusable blocks,
+named pipelines, environment references, and explicit Python startup.
+The [Mac example](./example_configs/mac.yaml) runs fully locally on Apple Silicon.
+From a repository checkout, run its audio client and server together, or start
+only the server:
+
+```bash
+speech-to-speech local -f example_configs/mac.yaml
+speech-to-speech serve -f example_configs/mac.yaml --name mac
+```
+
+`local` runs one selected pipeline with the packaged loopback audio client.
+`talk -f example_configs/mac.yaml` uses only the file's client settings.
+Configured server startup currently supports one named definition per invocation; its
+`num_pipelines` controls the number of isolated instances.
+Existing Python interfaces, CLI commands, and flat JSON configuration remain available.
 
 ### CUDA Note for Qwen3-TTS
 
@@ -196,7 +218,7 @@ pip install "speech-to-speech[faster-whisper]"  # Faster Whisper STT
 pip install "speech-to-speech[whisper-mlx]"     # Lightning Whisper MLX STT on macOS
 pip install "speech-to-speech[paraformer]"      # Paraformer STT through FunASR
 pip install "speech-to-speech[fireredvad]"      # FireRed streaming VAD
-pip install "speech-to-speech[nemo]"            # Parakeet Unified and Nemotron STT through NeMo
+pip install "speech-to-speech[nemo]"            # Parakeet Unified, Nemotron, and Orukeet STT through NeMo
 pip install "speech-to-speech[mlx-lm]"          # mlx-vlm support for vision models on macOS
 ```
 
@@ -226,6 +248,8 @@ This installs the package in editable mode. With the environment activated, use 
 | STT | [Parakeet TDT](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (default) | CUDA / CPU through nano-parakeet, Apple Silicon through MLX | built-in |
 | STT | [Parakeet Unified](https://huggingface.co/nvidia/parakeet-unified-en-0.6b) | CUDA / CPU | `nemo` |
 | STT | [Nemotron Speech Streaming](https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b) | CUDA / CPU | `nemo` |
+| STT | [Nemotron Streaming Farsi](https://huggingface.co/mehdi-hf/nemotron-asr-streaming-farsi), selected with `--stt nemotron-streaming --nemotron_streaming_model_name mehdi-hf/nemotron-asr-streaming-farsi` | CUDA / CPU | `nemo`, NeMo >=3.0, Python >=3.11 |
+| STT | [Orukeet](https://huggingface.co/oruk/orukeet) | CUDA / CPU | `nemo` |
 | STT | [Whisper](https://huggingface.co/docs/transformers/en/model_doc/whisper) through Transformers | CUDA / CPU | built-in |
 | STT | [Faster Whisper](https://github.com/SYSTRAN/faster-whisper) | CUDA / CPU | `faster-whisper` |
 | STT | [Lightning Whisper MLX](https://github.com/mustafaaljadery/lightning-whisper-mlx) | Apple Silicon | `whisper-mlx` |
@@ -245,6 +269,12 @@ This installs the package in editable mode. With the environment activated, use 
 | TTS | [OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) | CUDA / Intel XPU / Apple Silicon | `omnivoice` |
 | TTS | [MMS TTS](https://huggingface.co/docs/transformers/model_doc/mms) | CUDA / CPU | built-in |
 | TTS | OpenAI-compatible `/v1/audio/speech` endpoint | local or remote HTTP server | built-in |
+
+Optional [streaming speaker diarization](./examples/streaming-diarization/README.md)
+adds speaker labels to transcribed turns. Enable it with `--diarization` after
+installing the supporting Transformers build; the linked guide has the current
+model revision and setup while the merged [Transformers PR #49056](https://github.com/huggingface/transformers/pull/49056)
+is awaiting a package release.
 
 Select implementations with `--stt`, `--llm_backend`, and `--tts`. The CLI constructs configuration only for the selected backends; known options for inactive backends remain accepted for compatibility but are ignored with a warning. JSON configuration may likewise include extra inactive-backend keys, which are ignored. Run `speech-to-speech serve -h` for the defaults, or pass selectors before `-h` to see another combination's backend-specific flags (for example, `speech-to-speech serve --stt mlx-audio-whisper -h`).
 
@@ -673,6 +703,67 @@ speech-to-speech serve \
 
 Available voice presets: `alba`, `marius`, `javert`, `jean`, `fantine`, `cosette`, `eponine`, `azelma`. Custom voice files and Hugging Face paths also work.
 
+### Pocket TTS Farsi v2
+
+Select [mehdi-hf/pocket-tts-farsi-v2](https://huggingface.co/mehdi-hf/pocket-tts-farsi-v2)
+with `--pocket_tts_model_name`. The handler normalizes Persian spelling, expands
+numbers, and converts assistant text to phonemes with
+`mehdi-hf/Homo-GE2PE-Persian-HF` before synthesis. Both models download on first use.
+
+The released Pocket TTS package does not support this model's phoneme frontend
+flags yet. Install the author's fork after the `pocket` extra. This command pins
+an inspected commit for reproducibility:
+
+```bash
+pip install "speech-to-speech[pocket]"
+pip install "pocket-tts @ git+https://github.com/mallahyari/pocket-tts@3807c204babb5fe54be8fe18a362a58315e870d6"
+speech-to-speech serve \
+    --tts pocket \
+    --pocket_tts_model_name mehdi-hf/pocket-tts-farsi-v2 \
+    --pocket_tts_voice /voices/persian-reference.wav \
+    --pocket_tts_device cpu
+```
+
+Use a Persian reference recording as a local audio file or Hugging Face audio
+URL. Preset voice states such as `jean` are incompatible with these weights.
+The handler uses the first five seconds of the recording. It splits text at
+sentence boundaries before phoneme conversion, adds a 0.25-second pause between
+sentences, and limits synthesis chunks to 18 tokens. It keeps ezafe-linked words
+together and rejects a linked phrase that exceeds the budget. Oversized G2P inputs
+raise an error rather than lose text.
+Configure the LLM to respond in Persian. This model choice stays fixed for the
+session and does not switch languages based on STT detection.
+
+Farsi synthesis bypasses the fork's orthographic sentence splitter so that `?`
+remains a glottal-stop phoneme. It uses an EOS threshold of -2 and zero extra
+frames after EOS. `--pocket_tts_temperature` overrides the model's default of
+0.3; `--pocket_tts_eos_threshold` overrides -2. Each phoneme chunk is buffered
+before playback. Silent, non-finite, or length-capped output is retried once,
+then reported as an error. This adds one chunk's generation time before the
+first audio block, but avoids playing a failed attempt. PCM conversion clips
+peaks instead of wrapping, and downsampling preserves filter history across
+playback blocks.
+
+To check the handler with actual weights from a source checkout, run:
+
+```bash
+python scripts/check_pocket_tts_farsi.py --output-dir /tmp/pocket-tts-farsi-check
+```
+
+The check downloads the TTS and G2P models and the author's Persian reference
+`samples/prompt_short_sentence.wav`. It uses seed 42 and temperature 0.3.
+It synthesizes a greeting, a sentence with a Persian number, and a
+two-sentence reply. It checks PCM block format, non-silent output, and response
+completion, then saves WAVs and timing measurements. Listen to the WAVs to assess
+pronunciation. Use `--voice /voices/reference.wav` to test your own recording.
+The check saves native 24 kHz audio by default. Pass `--sample-rate 16000` to
+compare with the pipeline's current 16 kHz playback output. The server and local
+playback path still assume 16 kHz, so changing only `--pocket_tts_sample_rate`
+to 24000 does not enable native-rate playback.
+
+The model weights use [CC-BY-NC-4.0](https://huggingface.co/mehdi-hf/pocket-tts-farsi-v2)
+and are for non-commercial use.
+
 ## CLI Reference
 
 References for pipeline CLI arguments live in the [arguments classes](./src/speech_to_speech/arguments_classes) and in `speech-to-speech serve -h`. Client arguments are listed by `speech-to-speech talk -h`.
@@ -720,6 +811,22 @@ gated by `--smart_turn_max_wait_ms` (2 seconds by default). If speech resumes du
 reopened as a newer revision, the accumulated audio is re-emitted, and work from the previous revision is
 discarded before it reaches the user.
 
+The turn tracker owns the conversation order and the `LISTENING`, `SOFT_ENDED`,
+`ANSWERING`, and `CLOSED` states. VAD supplies speech boundaries and Smart Turn timing;
+the tracker decides whether resumed speech reopens the current turn. The unanswered
+reopen cap uses streamed-audio time, so a push-to-talk pause with no audio does not
+advance it. Processing and output holds use wall-clock deadlines. Starting a newer
+turn drops older work that has not committed; accepted output can finish.
+
+Each response belongs to the input supplied to generation. The server records that
+ownership on conversation items and accepted tool calls. A tool follow-up keeps its
+originating input's turn. If a user message follows the tool call, the follow-up
+answers that message's turn; if a newer turn closed without one, it moves to that
+turn, so a late tool result is still spoken. Client input without a speech-turn
+association stays untagged. A response cannot borrow the identity of speech still
+being recorded.
+These input records do not control turn state, reopening, or deadlines.
+
 The server holds `input_audio_buffer.speech_stopped` and the final transcription while a turn can still
 reopen. Resumed speech keeps the same open item and live transcription deltas
 continue. Once the turn commits, the client receives one stop, an input-buffer commitment, the created
@@ -765,9 +872,31 @@ Issues and PRs are welcome. Good starting points are the [open issues](https://g
 For local development:
 
 ```bash
-uv sync
-pytest
-ruff check
+uv sync --group dev
+uv run pytest tests -q
+uv run ruff check src tests
+uv run ruff format --check src tests
+uv run mypy src
+```
+
+To check turn ordering, Smart Turn timing, and Realtime routing on CPU:
+
+```bash
+CUDA_VISIBLE_DEVICES='' uv run pytest -q \
+  tests/test_speculative_turns.py \
+  tests/test_smart_turn.py tests/test_stt_stale_filter.py \
+  tests/test_audio_input_notifier.py tests/test_lm_output_processor.py \
+  tests/openai_realtime/test_response_input_identity.py \
+  tests/openai_realtime/test_realtime_service.py \
+  tests/openai_realtime/test_speculative_turn_protocol.py
+```
+
+The response-input tests include a delayed tool completing during synthetic speech,
+using the packaged client coordinator, service, and VAD handler with mocked model
+output and VAD probabilities. Run that reproduction alone with:
+
+```bash
+CUDA_VISIBLE_DEVICES='' uv run pytest tests/openai_realtime/test_response_input_identity.py -q -s
 ```
 
 ## Star History

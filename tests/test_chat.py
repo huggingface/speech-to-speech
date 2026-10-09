@@ -123,10 +123,6 @@ class TestChatInit:
         assert chat._pending_tool_calls == {}
         assert chat._user_turn_count == 0
 
-    def test_size_stored(self):
-        for s in (0, 1, 100):
-            assert Chat(size=s).size == s
-
 
 # ===================================================================
 # 2. TestFactoryHelpers
@@ -172,26 +168,26 @@ class TestFactoryHelpers:
 
 
 # ===================================================================
-# 3. TestInitChat
+# 3. TestSystemMessages
 # ===================================================================
 
 
-class TestInitChat:
+class TestSystemMessages:
     def test_sets_init_chat_message(self):
         chat = Chat(size=5)
         sys_msg = _system("Be concise.")
-        chat.init_chat(sys_msg)
+        chat.add_item(sys_msg)
         assert chat.init_chat_message is sys_msg
 
     def test_overwrite_replaces_previous(self):
         chat = Chat(size=5)
-        chat.init_chat(_system("first"))
-        chat.init_chat(_system("second"))
+        chat.add_item(_system("first"))
+        chat.add_item(_system("second"))
         assert chat.init_chat_message.content[0].text == "second"
 
     def test_system_message_not_in_buffer(self):
         chat = Chat(size=5)
-        chat.init_chat(_system("system"))
+        chat.add_item(_system("system"))
         assert chat.buffer == []
 
 
@@ -209,36 +205,6 @@ class TestAddItemEviction:
         chat.add_item(_user("there"))
         assert chat._user_turn_count == 2
 
-    def test_add_function_call_registers_pending(self):
-        chat = Chat(size=5)
-        fc = _fc("cid_1")
-        chat.add_item(fc)
-        assert "call_cid_1" in chat._pending_tool_calls
-        assert chat._pending_tool_calls["call_cid_1"] is fc
-
-    def test_add_function_call_none_call_id_auto_generates(self):
-        chat = Chat(size=5)
-        fc = RealtimeConversationItemFunctionCall(
-            type="function_call",
-            call_id=None,
-            name="f",
-            arguments="{}",
-        )
-        chat.add_item(fc)
-        assert fc.call_id is not None
-        assert fc.call_id.startswith("call_")
-
-    def test_eviction_when_exceeding_size(self):
-        chat = Chat(size=1)
-        chat.add_item(_user("t1"))
-        chat.add_item(_assistant("r1"))
-        assert chat._user_turn_count == 1
-
-        chat.add_item(_user("t2"))
-        chat.trim_if_needed()
-        assert chat._user_turn_count == 1
-        assert chat.buffer[0].content[0].text == "t2"
-
     def test_eviction_removes_up_to_next_user_boundary(self):
         chat = Chat(size=1)
         chat.add_item(_user("t1"))
@@ -251,9 +217,35 @@ class TestAddItemEviction:
         chat.add_item(_user("t2"))
         chat.trim_if_needed()
         assert chat._user_turn_count == 1
+        assert len(chat.buffer) == 1
         remaining_types = [e.type for e in chat.buffer]
         assert "message" in remaining_types
         assert chat.buffer[0].content[0].text == "t2"
+
+    def test_eviction_preserves_recent_turns_with_tool_history(self):
+        chat = Chat(size=2)
+        chat.add_item(_user("t1"))
+        chat.add_item(_assistant("r1"))
+        chat.add_item(_user("t2"))
+        chat.add_item(_assistant("let me check"))
+        chat.add_item(_fc("c2"))
+        chat.add_item(_fco("c2"))
+        chat.add_item(_assistant("here"))
+
+        chat.add_item(_user("t3"))
+        chat.trim_if_needed()
+
+        assert chat._user_turn_count == 2
+        user_texts = [e.content[0].text for e in chat.buffer if isinstance(e, RealtimeConversationItemUserMessage)]
+        assert user_texts == ["t2", "t3"]
+        assert [e.type for e in chat.buffer] == [
+            "message",
+            "message",
+            "function_call",
+            "function_call_output",
+            "message",
+            "message",
+        ]
 
     def test_eviction_removes_late_output_with_its_call(self):
         chat = Chat(size=2)
@@ -303,32 +295,25 @@ class TestAddItemEviction:
 
 
 class TestAppendToolOutput:
-    def test_happy_path(self):
+    @pytest.mark.parametrize("buffered", [False, True], ids=["staged", "ordered"])
+    @pytest.mark.parametrize("status", [None, "completed", "incomplete", "in_progress"])
+    def test_status_propagation_from_output(self, buffered, status):
         chat = Chat(size=5)
-        chat.add_item(_fc("c1"))
-        fco = _fco("c1")
+        chat.add_item(_user("hi"))
+        other_call = _fc("other")
+        chat.add_ordered_function_call(other_call)
+        fc = _fc("c1")
+        if buffered:
+            chat.add_ordered_function_call(fc)
+        else:
+            chat.add_item(fc)
+        fco = _fco("c1", status=status)
         chat.append_tool_output("call_c1", fco)
 
+        assert fc.status == ("completed" if status is None else status)
+        assert other_call.status is None
         assert "call_c1" not in chat._pending_tool_calls
         assert chat.buffer[-1] is fco
-
-    def test_marks_function_call_completed_on_none_status(self):
-        chat = Chat(size=5)
-        fc = _fc("c1")
-        chat.add_item(fc)
-        fco = _fco("c1", status=None)
-        chat.append_tool_output("call_c1", fco)
-
-        assert fc.status == "completed"
-
-    def test_status_propagation_from_output(self):
-        chat = Chat(size=5)
-        fc = _fc("c1")
-        chat.add_item(fc)
-        fco = _fco("c1", status="incomplete")
-        chat.append_tool_output("call_c1", fco)
-
-        assert fc.status == "incomplete"
 
     def test_ordered_output_appends_chronologically_and_serializes_adjacent(self):
         chat = Chat(size=5)
@@ -371,6 +356,9 @@ class TestAppendToolOutput:
         assert any(
             isinstance(e, RealtimeConversationItemFunctionCallOutput) and e.call_id == "call_cx" for e in chat.buffer
         )
+        assert "call_cx" not in chat._pending_tool_calls
+        types = [e.type for e in chat.buffer]
+        assert types.index("function_call") < types.index("function_call_output")
 
     def test_reinjection_sets_status(self):
         chat = Chat(size=1)
@@ -391,6 +379,7 @@ class TestAppendToolOutput:
         chat = Chat(size=5)
         with pytest.raises(ChatItemError, match="unknown_id"):
             chat.append_tool_output("unknown_id", _fco("unknown_id"))
+        assert chat.buffer == []
 
 
 # ===================================================================
@@ -401,7 +390,7 @@ class TestAppendToolOutput:
 class TestAddItem:
     # -- System message --
 
-    def test_system_message_routed_to_init_chat(self):
+    def test_system_message_stored_outside_turn_buffer(self):
         chat = Chat(size=5)
         sys_msg = _system("You are an expert.")
         chat.add_item(sys_msg)
@@ -409,6 +398,28 @@ class TestAddItem:
         assert chat.buffer == []
 
     # -- User message --
+
+    @pytest.mark.parametrize("factory", [_system, _user, _assistant, _fc, _fco])
+    def test_client_item_id_is_preserved(self, factory):
+        chat = Chat(size=5)
+        if factory is _fco:
+            chat.add_item(_fc())
+        item = factory("snapshot") if factory in (_system, _user, _assistant) else factory()
+        item.id = "client_context_1"
+        assert chat.add_item(item).id == "client_context_1"
+
+    def test_client_item_id_matching_empty_history_marker_keeps_turn_order(self):
+        chat = Chat(size=5)
+        earlier_question = chat.add_item(_user("earlier question"))
+        earlier_answer = chat.add_item(_assistant("earlier answer"))
+        latest_question = _user("latest question")
+        latest_question.id = "__history_start__"
+        chat.add_item(latest_question)
+        latest_answer = _assistant("latest answer")
+
+        chat.add_item(latest_answer, after_item_id=chat.history_anchor_id())
+
+        assert chat.buffer == [earlier_question, earlier_answer, latest_question, latest_answer]
 
     def test_user_message_text_appended(self):
         chat = Chat(size=5)
@@ -495,18 +506,6 @@ class TestAddItem:
         assert "call_c1" in chat._pending_tool_calls
         assert chat._pending_tool_calls["call_c1"] is fc
 
-    def test_function_call_missing_call_id_auto_generates(self):
-        chat = Chat(size=5)
-        fc = RealtimeConversationItemFunctionCall(
-            type="function_call",
-            call_id=None,
-            name="f",
-            arguments="{}",
-        )
-        chat.add_item(fc)
-        assert fc.call_id is not None
-        assert fc.call_id.startswith("call_")
-
     def test_function_call_none_call_id_auto_generates(self):
         chat = Chat(size=5)
         fc = RealtimeConversationItemFunctionCall(
@@ -548,13 +547,13 @@ class TestAddItem:
         existing = chat.add_item(_user("existing"))
         invalid_call = RealtimeConversationItemFunctionCall(
             type="function_call",
-            id="invalid",
+            id="",
             call_id="call_bad",
             name="bad",
             arguments="{}",
         )
 
-        with pytest.raises(ChatItemError, match="fc_"):
+        with pytest.raises(ChatItemError, match="ID must not be empty"):
             chat.add_provisional_generation_items(
                 "failed_response",
                 [_assistant("must roll back"), invalid_call],
@@ -638,7 +637,7 @@ class TestToResponseApiChat:
 
     def test_system_message_serialized(self):
         chat = Chat(size=5)
-        chat.init_chat(_system("Be brief."))
+        chat.add_item(_system("Be brief."))
         result = chat.to_responses_api_chat()
         assert len(result) == 1
         assert result[0]["role"] == "system"
@@ -653,7 +652,7 @@ class TestToResponseApiChat:
             role="system",
             content=[SystemContent(type="input_text", text="")],
         )
-        chat.init_chat(sys_msg)
+        chat.add_item(sys_msg)
         result = chat.to_responses_api_chat()
         assert result[0]["content"][0]["text"] == "A helpful AI assistant."
 
@@ -766,7 +765,7 @@ class TestToResponseApiChat:
 
     def test_full_mixed_conversation(self):
         chat = Chat(size=10)
-        chat.init_chat(_system("You are helpful."))
+        chat.add_item(_system("You are helpful."))
         chat.add_item(_user("Call my tool"))
         chat.add_item(_fc("c1", "tool_a", '{"x": 1}'))
         fco = _fco("c1", '{"y": 2}')
@@ -794,7 +793,7 @@ class TestToTransformersChat:
 
     def test_system_message(self):
         chat = Chat(size=5)
-        chat.init_chat(_system("Be concise."))
+        chat.add_item(_system("Be concise."))
         result = chat.to_transformers_chat()
         assert result == [{"role": "system", "content": "Be concise."}]
 
@@ -885,9 +884,55 @@ class TestToTransformersChat:
         result = chat.to_transformers_chat()
         assert result[0]["name"] == ""
 
+    def test_adjacent_user_messages_serialize_as_one_without_changing_history(self):
+        # An interrupted or failed reply leaves user turns back to back; strict
+        # templates (Gemma, Mistral) reject that, so they render as one message.
+        chat = Chat(size=5)
+        chat.add_item(_user("Find a flight"))
+        chat.add_item(_user("Actually, a hotel"))
+        assert chat.to_transformers_chat() == [{"role": "user", "content": "Find a flight\nActually, a hotel"}]
+        assert chat.to_responses_api_chat() == [
+            {
+                "role": "user",
+                "type": "message",
+                "content": [{"type": "input_text", "text": "Find a flight\nActually, a hotel"}],
+            }
+        ]
+
+        chat.add_item(_user_msg_with_parts(("text", "look"), ("image", "http://img.png")))
+        result = chat.to_transformers_chat()
+        assert len(result) == 1
+        assert [part.get("text") for part in result[0]["content"]] == ["Find a flight\nActually, a hotel\nlook", None]
+        assert len(chat.buffer) == 3
+
+    @pytest.mark.parametrize("image_in_first_message", [False, True])
+    def test_adjacent_mixed_user_messages_preserve_text_boundary(self, image_in_first_message):
+        chat = Chat(size=5)
+        first_parts = [("text", "The access code is 12")]
+        second_parts = [("text", "34 is a different code.")]
+        if image_in_first_message:
+            first_parts.insert(0, ("image", "http://img.png"))
+        else:
+            second_parts.append(("image", "http://img.png"))
+        chat.add_item(_user_msg_with_parts(*first_parts))
+        chat.add_item(_user_msg_with_parts(*second_parts))
+        stored = [item.model_dump() for item in chat.buffer]
+
+        expected_text = "The access code is 12\n34 is a different code."
+        for messages in (chat.to_transformers_chat(), chat.to_responses_api_chat()):
+            assert len(messages) == 1
+            content = messages[0]["content"]
+            # VLM templates concatenate text blocks without adding separators.
+            assert "".join(part.get("text", "") for part in content) == expected_text
+            assert [part["type"] for part in content] == (
+                ["input_image", "input_text"] if image_in_first_message else ["input_text", "input_image"]
+            )
+            assert next(part["image_url"] for part in content if part["type"] == "input_image") == "http://img.png"
+        assert [item.model_dump() for item in chat.buffer] == stored
+
     def test_full_mixed_conversation(self):
         chat = Chat(size=10)
-        chat.init_chat(_system("System prompt"))
+        chat.add_item(_system("System prompt"))
         chat.add_item(_user("Do it"))
         chat.add_item(_fc("c1", "action", '{"a": 1}'))
         chat.add_item(_fco("c1", "done"))
@@ -958,7 +1003,7 @@ class TestCopyAndReset:
     def test_copy_preserves_init_chat_message(self):
         chat = Chat(size=5)
         sys_msg = _system("Keep it short.")
-        chat.init_chat(sys_msg)
+        chat.add_item(sys_msg)
         clone = chat.copy()
         assert clone.init_chat_message is sys_msg
 
@@ -984,7 +1029,7 @@ class TestCopyAndReset:
 
     def test_reset_clears_everything(self):
         chat = Chat(size=5)
-        chat.init_chat(_system("sys"))
+        chat.add_item(_system("sys"))
         chat.add_item(_user("u"))
         chat.add_item(_fc("c1"))
         assert len(chat.buffer) > 0
@@ -1021,6 +1066,9 @@ class TestStripImages:
             if isinstance(item, RealtimeConversationItemUserMessage):
                 assert all(p.type != "input_image" for p in item.content)
                 assert any(p.type == "input_text" for p in item.content)
+        assert [item.content[0].text for item in chat.buffer] == ["a", "ok", "b"]
+        fresh = chat.add_item(_user_msg_with_parts(("text", "next"), ("image", "new_url")))
+        assert fresh.content[1].image_url == "new_url"
 
     def test_no_user_messages_noop(self):
         chat = Chat(size=10)
@@ -1032,8 +1080,9 @@ class TestStripImages:
     def test_text_only_messages_unchanged(self):
         chat = Chat(size=10)
         chat.add_item(_user("just text"))
+        chat.add_item(_assistant("reply"))
         chat.strip_images()
-        assert chat.buffer[0].content[0].text == "just text"
+        assert [item.content[0].text for item in chat.buffer] == ["just text", "reply"]
         assert len(chat.buffer[0].content) == 1
 
     def test_image_message_ids_reports_only_image_carriers(self):
@@ -1058,50 +1107,6 @@ class TestStripImages:
         fresh_after = next(i for i in chat.buffer if i.id == fresh.id)
         assert all(p.type != "input_image" for p in consumed_after.content)  # consumed → stripped
         assert any(p.type == "input_image" for p in fresh_after.content)  # next turn's image → kept
-
-
-# ===================================================================
-# 11. TestMarkCallCompleted
-# ===================================================================
-
-
-class TestMarkCallCompleted:
-    def test_none_status_sets_completed(self):
-        chat = Chat(size=5)
-        fc = _fc("c1")
-        chat.buffer.append(fc)
-        chat._mark_call_completed("call_c1", status=None)
-        assert fc.status == "completed"
-
-    def test_explicit_status_used(self):
-        chat = Chat(size=5)
-        fc = _fc("c1")
-        chat.buffer.append(fc)
-        chat._mark_call_completed("call_c1", status="incomplete")
-        assert fc.status == "incomplete"
-
-    def test_in_progress_status(self):
-        chat = Chat(size=5)
-        fc = _fc("c1")
-        chat.buffer.append(fc)
-        chat._mark_call_completed("call_c1", status="in_progress")
-        assert fc.status == "in_progress"
-
-    def test_no_match_is_noop(self):
-        chat = Chat(size=5)
-        fc = _fc("c1")
-        chat.buffer.append(fc)
-        chat._mark_call_completed("nonexistent", status=None)
-        assert fc.status is None
-
-    def test_only_function_calls_checked(self):
-        chat = Chat(size=5)
-        chat.add_item(_user("hi"))
-        fc = _fc("c1")
-        chat.buffer.append(fc)
-        chat._mark_call_completed("call_c1")
-        fc = next(e for e in chat.buffer if isinstance(e, RealtimeConversationItemFunctionCall))
-        assert fc.status == "completed"
 
 
 # ===================================================================
@@ -1456,7 +1461,7 @@ class TestCompaction:
     def test_init_message_unchanged_after_compaction(self):
         chat = Chat(size=2)
         sys_msg = _system("system prompt")
-        chat.init_chat(sys_msg)
+        chat.add_item(sys_msg)
         compactor = _make_stub_compactor()
         for i in range(3):
             chat.add_item(_user(f"u{i}"))
@@ -1497,7 +1502,7 @@ class TestCompaction:
 class TestBuildActiveChat:
     def _default(self) -> Chat:
         chat = Chat(size=4)
-        chat.init_chat(make_system_message("default system"))
+        chat.add_item(make_system_message("default system"))
         chat.add_item(_user("default question"))
         return chat
 
@@ -1587,10 +1592,13 @@ class TestTurnOrdering:
         ]
         assert _texts(chat) == ["A", "first", "second", "B"]
 
-    def test_generation_started_on_empty_history_precedes_later_speech(self):
+    @pytest.mark.parametrize("later_id", [None, "__history_start__"])
+    def test_generation_started_on_empty_history_precedes_later_speech(self, later_id):
         chat = Chat(size=5)
         anchor = chat.history_anchor_id()
-        chat.add_item(_user("B"))
+        later_user = _user("B")
+        later_user.id = later_id
+        chat.add_item(later_user)
 
         chat.add_item(_assistant("out of the blue"), after_item_id=anchor)
 

@@ -541,6 +541,10 @@ export class S2sRealtimeClient extends EventTarget {
     if (typeof type !== "string") return;
     if (this._debug) console.debug(`[${this.options.transport}]`, event);
     switch (type) {
+      case "speech_to_speech.output_audio.visemes": {
+        this.dispatchEvent(new CustomEvent("visemes", { detail: event }));
+        break;
+      }
       case "response.output_audio.delta": {
         if (this.options.transport !== "websocket" || event.response_id !== this._playbackResponseId) break;
         const key = JSON.stringify([event.item_id, event.content_index]);
@@ -761,11 +765,6 @@ export class S2sRealtimeClient extends EventTarget {
     if (options.image) this._session?.addImage(options.image, { triggerResponse: false });
     this._responseRequested = true;
     this._transport?.requestResponse();
-  }
-
-  /** @param {string} dataUrl */
-  sendUserImage(dataUrl) {
-    this._session?.addImage(dataUrl, { triggerResponse: false });
   }
 
   /** @param {boolean} muted */

@@ -9,6 +9,7 @@ from speech_to_speech.pipeline.events import AudioInputCompletedEvent
 from speech_to_speech.pipeline.messages import VADAudio
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
+from tests.turns import reopen
 
 
 def _notifier(
@@ -26,7 +27,7 @@ def _notifier(
 
 def test_audio_input_notifier_uses_per_endpoint_processing_delay():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     notifier = _notifier(speculative_turns=tracker)
     item = VADAudio(
         audio=np.zeros(1600, dtype=np.float32),
@@ -57,7 +58,8 @@ def test_audio_input_notifier_ignores_progressive_audio():
 
 def test_audio_input_notifier_discards_stale_pending_vad_measurement():
     revisions = SpeculativeTurnTracker()
-    revisions.observe("turn_1", 1)
+    revisions.start_turn()
+    reopen(revisions)
     notifier = _notifier(speculative_turns=revisions)
     store = TurnLatencyStore()
     notifier.turn_latency_store = store
@@ -93,3 +95,33 @@ def test_audio_input_notifier_routes_final_audio_through_realtime_service_queue(
     assert event.audio_duration_s == 2.5
     assert event.turn_id == "turn_1"
     assert event.turn_revision == 2
+
+
+def test_notifier_does_not_restart_expired_tracker_processing_delay(monkeypatch):
+    clock = [10.0]
+    monkeypatch.setattr("speech_to_speech.pipeline.speculative_turns.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.LLM.audio_input_notifier.monotonic", lambda: clock[0])
+    tracker = SpeculativeTurnTracker()
+    tracker.start_turn()
+    tracker.segment_finalized(1000, output_hold_ms=2000, processing_delay_ms=600)
+    clock[0] = 10.7
+    # Audio processing can finish after the original debounce deadline. Its
+    # later message creation must not start a second wait from that point.
+    item = VADAudio(
+        audio=np.zeros(1600, dtype=np.float32),
+        mode="final",
+        turn_id="turn_1",
+        turn_revision=0,
+        processing_delay_s=0.6,
+    )
+    notifier = _notifier(speculative_turns=tracker)
+    result = []
+    thread = Thread(target=lambda: result.append(notifier.should_process_input(item)))
+    thread.start()
+    thread.join(timeout=0.2)
+    completed_without_new_wait = not thread.is_alive()
+    # Always release a failed baseline waiter before asserting.
+    tracker.start_turn()
+    thread.join(timeout=1.0)
+    assert completed_without_new_wait
+    assert result == [True]

@@ -449,7 +449,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         if isinstance(tts_input, EndOfResponse):
-            if self.speculative_turns and not self.speculative_turns.is_latest_after_reopen_grace(
+            if self.speculative_turns and not self.speculative_turns.wait_for_gate(
                 tts_input.turn_id,
                 tts_input.turn_revision,
             ):
@@ -461,7 +461,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
             yield AUDIO_RESPONSE_DONE
             return
 
-        if self.speculative_turns and not self.speculative_turns.is_latest_after_reopen_grace(
+        if self.speculative_turns and not self.speculative_turns.wait_for_gate(
             tts_input.turn_id,
             tts_input.turn_revision,
         ):
@@ -528,7 +528,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     tts_input.response_assistant_language_code if use_detected_language else tts_input.tts_language_code
                 )
                 if (
-                    use_detected_language
+                    (use_detected_language or selected == "auto")
                     and "qwen3-tts" in self.model.lower()
                     and language not in QWEN3_TTS_LANGUAGE_CODES
                 ):
@@ -603,10 +603,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         tracker = self.speculative_turns
         if tracker is None or tts_input.turn_id is None or tts_input.turn_revision is None:
             return True
-        return tracker.commit_if_latest_after_reopen_grace(
-            tts_input.turn_id,
-            tts_input.turn_revision,
-        )
+        return tracker.wait_for_gate(tts_input.turn_id, tts_input.turn_revision, commit=True)
 
     @staticmethod
     def _response_identity(

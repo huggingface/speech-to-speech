@@ -57,6 +57,11 @@ speech-to-speech serve \
 Available preset voices include:
 `alba`, `marius`, `javert`, `jean`, `fantine`, `cosette`, `eponine`, `azelma`.
 
+For Persian speech, see the [Pocket TTS Farsi v2 setup](../../../README.md#pocket-tts-farsi-v2).
+Select `--pocket_tts_model_name mehdi-hf/pocket-tts-farsi-v2` and provide reference
+audio with `--pocket_tts_voice`. This requires the author's Pocket TTS fork and
+uses a separate G2P model to convert Persian text to phonemes.
+
 ### 4) Kokoro (`--tts kokoro`)
 
 Primary args prefix: `--kokoro_*`
@@ -223,6 +228,14 @@ The reference is encoded once during handler setup and the resulting voice-clone
 ```bash
 --omnivoice_voice_clone_prompt /voices/saved-prompt.pt
 ```
+
+OmniVoice reproduces the reference speaker's accent, so one reference makes every language sound like the reference language. To give each language its own reference, add a directory of `<language>.wav` files with matching `<language>.txt` transcripts:
+
+```bash
+--omnivoice_ref_voices_dir /voices/langs   # fr.wav + fr.txt, es.wav + es.txt, ...
+```
+
+Every reference is encoded once during setup. Each utterance uses the reference for its language code (exact code such as `es-419`, then the base language `es`), and falls back to the default voice above when none matches. Each reference adds a prepared prompt in memory and to startup time.
 
 Voice design omits the cloning flags and supplies an instruction:
 

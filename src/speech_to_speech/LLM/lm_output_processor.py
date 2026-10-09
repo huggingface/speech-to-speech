@@ -128,7 +128,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
     def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
         if self.speculative_turns is None:
             return True
-        return self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)
+        return self.speculative_turns.wait_for_gate(turn_id, turn_revision)
 
     def process(self, lm_output: LLMOut) -> Iterator[TTSIn | PipelineEvent]:
         """
@@ -173,8 +173,9 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                         cleanup_only=True,
                     )
                 return
-            self._notify_generation_done(lm_output, response_key, succeeded=lm_output.error is None)
-            if lm_output.error is None and self._detected_assistant_language and self._tts_runtime_config is not None:
+            succeeded = lm_output.error is None and lm_output.status == "completed"
+            self._notify_generation_done(lm_output, response_key, succeeded=succeeded)
+            if succeeded and self._detected_assistant_language and self._tts_runtime_config is not None:
                 self._tts_runtime_config.last_assistant_language = self._detected_assistant_language
             if lm_output.error:
                 yield ResponseFailedEvent(
@@ -186,7 +187,10 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 )
             else:
                 yield AssistantResponseDoneEvent(
+                    status=lm_output.status,
+                    reason=lm_output.reason,
                     response_key=response_key,
+                    input_tool_call_ids=lm_output.input_tool_call_ids if succeeded else [],
                     turn_id=lm_output.turn_id,
                     turn_revision=lm_output.turn_revision,
                     cancel_generation=lm_output.cancel_generation,

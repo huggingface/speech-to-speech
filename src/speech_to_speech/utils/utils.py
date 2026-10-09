@@ -1,14 +1,35 @@
 from __future__ import annotations
 
+import base64
+import io
 import uuid
+import wave
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import numpy as np
-import torch
 
 if TYPE_CHECKING:
     from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+
+def audio_to_wav_base64(audio: np.ndarray, sample_rate: int) -> str:
+    """Encode a mono 16-bit WAV payload without touching the filesystem."""
+    audio_array = np.asarray(audio)
+    if audio_array.ndim > 1:
+        audio_array = np.mean(audio_array, axis=1)
+    if np.issubdtype(audio_array.dtype, np.floating):
+        pcm = (np.clip(audio_array, -1.0, 1.0) * 32767.0).astype("<i2")
+    else:
+        pcm = np.clip(audio_array, -32768, 32767).astype("<i2")
+
+    with io.BytesIO() as wav_io:
+        with wave.open(wav_io, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(pcm.tobytes())
+        return base64.b64encode(wav_io.getvalue()).decode("ascii")
 
 
 def response_wants_audio(response: RealtimeResponseCreateParams | None) -> bool:
@@ -47,6 +68,8 @@ def is_npu_available() -> bool:
     ``torch.npu`` only exists once ``torch_npu`` has been imported, so the import
     is attempted lazily here and stays invisible to CUDA/MPS/CPU-only installs.
     """
+    import torch
+
     if not hasattr(torch, "npu"):
         try:
             import torch_npu  # noqa: F401
@@ -61,6 +84,11 @@ TORCH_DEVICES = ("cuda", "npu", "xpu", "mps", "cpu")
 
 
 def _is_device_available(device_type: str) -> bool:
+    # torch is imported here rather than at module level: this module is also
+    # used by lightweight paths (CLI, Realtime API, LLM helpers) that never
+    # touch a device, and importing torch costs seconds.
+    import torch
+
     if device_type == "cuda":
         return torch.cuda.is_available()
     if device_type == "npu":

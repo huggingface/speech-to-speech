@@ -1,3 +1,4 @@
+import subprocess
 import sys
 from copy import deepcopy
 from dataclasses import dataclass, fields, replace
@@ -21,7 +22,6 @@ from speech_to_speech.backend_registry import (
     HandlerContext,
     build_backend_registry,
     create_backend_handler,
-    select_backend,
 )
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -297,6 +297,7 @@ def test_omnivoice_cli_config_is_normalized_for_the_handler():
         "ref_audio": "voice.wav",
         "ref_text": "Reference transcript.",
         "voice_clone_prompt": None,
+        "ref_voices_dir": None,
         "instruct": None,
         "language": None,
         "num_steps": 16,
@@ -393,7 +394,8 @@ def test_test_backend_only_needs_config_factory_and_registry_entry():
         [BackendSpec("fake", "stt", FakeArguments, factory, config_prefix="fake")],
     )
     parsed_config = FakeArguments(fake_option="selected")
-    selection = select_backend(registry, "fake", parsed_config)
+    spec = registry["fake"]
+    selection = BackendSelection(spec, spec.normalize(parsed_config))
 
     assert create_backend_handler(selection, _context()) == "handler"
     assert selection.config == {"option": "selected", "gen_kwargs": {}}
@@ -811,20 +813,31 @@ def test_global_device_does_not_reach_mlx_audio_whisper_setup(monkeypatch):
     }
 
 
-def test_factories_keep_backend_modules_lazy():
-    module_names = [
-        "speech_to_speech.STT.whisper_stt_handler",
-        "speech_to_speech.LLM.language_model",
-        "speech_to_speech.TTS.chatTTS_handler",
-        "speech_to_speech.TTS.omnivoice_handler",
-    ]
-    for module_name in module_names:
-        sys.modules.pop(module_name, None)
+def test_registry_import_keeps_backend_modules_lazy():
+    # A fresh process observes the initial import without clearing its evidence
+    # or disturbing the backend modules used by other tests.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import sys
+import speech_to_speech.backend_registry
 
-    assert STT_BACKENDS["whisper"].create_handler is not None
-    assert LLM_BACKENDS["transformers"].create_handler is not None
-    assert TTS_BACKENDS["chatTTS"].create_handler is not None
-    assert all(module_name not in sys.modules for module_name in module_names)
+eager_backends = [
+    name for name in sys.modules
+    if name.startswith(("speech_to_speech.STT.", "speech_to_speech.TTS."))
+    or (name.startswith("speech_to_speech.LLM.") and name.endswith("language_model"))
+]
+assert not eager_backends, f"Registry imported backend modules: {eager_backends}"
+""",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_dependency_error_names_backend_and_required_extra():
@@ -842,3 +855,96 @@ def test_dependency_error_names_backend_and_required_extra():
 
     with pytest.raises(ImportError, match=r"optional.*tts.*speech-to-speech\[optional-extra\]"):
         create_backend_handler(selection, _context())
+
+
+@pytest.mark.parametrize("option", ["--live_transcription_min_silence_ms", "--parakeet_tdt_compute_type"])
+def test_removed_ineffective_options_are_rejected(option):
+    with pytest.raises(ValueError, match=option):
+        parse_arguments([option, "500" if "silence" in option else "float32"])
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_viseme_stage_is_optional_and_connected_after_tts(monkeypatch, enabled):
+    contexts = {}
+
+    class DummyHandler:
+        def __init__(self, *_args, **kwargs):
+            self.queue_in = kwargs["queue_in"]
+            self.queue_out = kwargs["queue_out"]
+            self.setup_kwargs = kwargs.get("setup_kwargs", {})
+
+    def factory(name):
+        def build(context, _config):
+            contexts[name] = context
+            return object()
+
+        return build
+
+    monkeypatch.setattr(s2s_pipeline, "VADHandler", DummyHandler)
+    monkeypatch.setattr(s2s_pipeline, "TranscriptionNotifier", DummyHandler)
+    monkeypatch.setattr("speech_to_speech.LLM.lm_output_processor.LMOutputProcessor", DummyHandler)
+    monkeypatch.setattr("speech_to_speech.STV.w2v_stv_handler.Wav2Vec2STVHandler", DummyHandler)
+    specs = [BackendSpec(name, name, FakeArguments, factory(name)) for name in ("stt", "llm", "tts")]
+    output_queue = Queue()
+    cancel_scope = CancelScope()
+    handlers = s2s_pipeline._build_handlers(
+        stop_event=Event(),
+        should_listen=Event(),
+        recv_audio_chunks_queue=Queue(),
+        spoken_prompt_queue=Queue(),
+        stt_output_queue=Queue(),
+        text_prompt_queue=Queue(),
+        lm_response_queue=Queue(),
+        lm_processed_queue=Queue(),
+        send_audio_chunks_queue=output_queue,
+        text_output_queue=Queue(),
+        module_kwargs=ModuleArguments(enable_visemes=enabled, stv_device="cpu"),
+        vad_handler_kwargs=VADHandlerArguments(),
+        stt_backend=BackendSelection(specs[0], specs[0].normalize(FakeArguments())),
+        llm_backend=BackendSelection(specs[1], specs[1].normalize(FakeArguments())),
+        tts_backend=BackendSelection(specs[2], specs[2].normalize(FakeArguments())),
+        speculative_turns=SpeculativeTurnTracker(),
+        cancel_scope=cancel_scope,
+        pipeline_index=0,
+    )
+    if enabled:
+        assert handlers[-1].queue_in is contexts["tts"].queue_out
+        assert handlers[-1].queue_out is output_queue
+        assert handlers[-1].setup_kwargs["cancel_scope"] is cancel_scope
+    else:
+        assert contexts["tts"].queue_out is output_queue
+
+
+def test_viseme_cli_and_json_configuration(tmp_path):
+    import json
+
+    argv = ["--enable_visemes", "--stv_device", "cpu", "--stv_model_name", "custom/phonemes"]
+    config = tmp_path / "visemes.json"
+    config.write_text(json.dumps({"enable_visemes": True, "stv_device": "cpu", "stv_model_name": "custom/phonemes"}))
+    for args in (parse_arguments(argv), parse_arguments([str(config)])):
+        assert args.module_kwargs.enable_visemes
+        assert args.module_kwargs.stv_device == "cpu"
+        assert args.module_kwargs.stv_model_name == "custom/phonemes"
+    assert not parse_arguments([]).module_kwargs.enable_visemes
+
+
+def test_pocket_farsi_model_cli_routes_to_setup():
+    args = parse_arguments(
+        [
+            "--tts",
+            "pocket",
+            "--pocket_tts_model_name",
+            "mehdi-hf/pocket-tts-farsi-v2",
+            "--pocket_tts_voice",
+            "/voices/farsi.wav",
+            "--pocket_tts_temperature",
+            "0.3",
+            "--pocket_tts_eos_threshold",
+            "-2",
+        ]
+    )
+    assert args.tts_backend.name == "pocket"
+    assert args.tts_backend.config["model_name"] == "mehdi-hf/pocket-tts-farsi-v2"
+    assert args.tts_backend.config["voice"] == "/voices/farsi.wav"
+    assert args.tts_backend.config["temperature"] == 0.3
+    assert args.tts_backend.config["eos_threshold"] == -2.0

@@ -12,6 +12,13 @@ GitHub issue #386: two concurrent handlers were stable, while unrestricted
 three-way STT/LLM/TTS load intermittently caused a Metal MMU GPU restart with
 Lightning Whisper and a Parakeet decoder IndexError. Keep this lock until the
 complete three-way pipeline is proven stable, not merely the MLX core runtime.
+
+Issue #646 validation upgraded mlx/metal to 0.32.3 to fix frozen worker-thread
+Qwen3-TTS sampling, retaining mlx-lm 0.31.3 and mlx-audio 0.4.7. On an M3 Pro,
+all four unlocked three-way stress processes still failed: Parakeet raised a
+decoder IndexError followed by GPU recovery errors, and Lightning Whisper Small
+workloads triggered Metal GPU hangs. All four locked controls passed. The sampling
+fix does not remove the need for this lock.
 """
 
 import logging

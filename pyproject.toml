@@ -37,6 +37,7 @@ dependencies = [
     "onnxruntime>=1.17.0",
     "pillow>=10.0.0",
     "pydantic>=2.0",
+    "PyYAML>=6,<7",
     "rich>=13.0",
     "scipy>=1.10.0",
     "sounddevice==0.5.3; platform_system == 'Darwin'",
@@ -47,20 +48,20 @@ dependencies = [
     "torch>=2.4.0; platform_system != 'Darwin'",
     "torchaudio==2.11.0; platform_system == 'Darwin'",
     "torchaudio>=2.4.0; platform_system != 'Darwin'",
-    "transformers==5.14.1; platform_system == 'Darwin'",
-    "transformers>=5.15.1,<6; platform_system != 'Darwin'",
+    "transformers==5.18.0; platform_system == 'Darwin'",
+    "transformers>=5.18.0,<6; platform_system != 'Darwin'",
     "uvicorn>=0.30.0",
     "websockets>=12.0",
     "nano-parakeet>=0.2.0; platform_system != 'Darwin'",
-    "faster-qwen3-tts[ggml]>=0.4.0; platform_system != 'Darwin' and platform_system != 'Windows'",
-    "faster-qwen3-tts>=0.4.0; platform_system == 'Windows'",
+    "faster-qwen3-tts[ggml]>=0.5.4; platform_system != 'Darwin' and platform_system != 'Windows'",
+    "faster-qwen3-tts>=0.5.4; platform_system == 'Windows'",
     "librosa==0.11.0",
     "lingua-language-detector>=2.0.2",
     "miniaudio==1.61; platform_system == 'Darwin'",
-    "mlx==0.32.0; platform_system == 'Darwin'",
+    "mlx==0.32.3; platform_system == 'Darwin'",
     "mlx-audio==0.4.7; platform_system == 'Darwin'",
     "mlx-lm==0.31.3; platform_system == 'Darwin'",
-    "mlx-metal==0.32.0; platform_system == 'Darwin'",
+    "mlx-metal==0.32.3; platform_system == 'Darwin'",
     "misaki>=0.9.4; platform_system == 'Darwin'",
     "espeakng-loader>=0.2.4; platform_system == 'Darwin'",
     "spacy>=3.8.4; platform_system == 'Darwin'",
@@ -105,7 +106,7 @@ supertonic = [
     "supertonic>=1.3.1",
 ]
 webrtc = [
-    "aiortc>=1.9.0",
+    "aiortc>=1.9.0,<1.16",
 ]
 whisper-mlx = [
     "lightning-whisper-mlx>=0.0.10; platform_system == 'Darwin'",
@@ -123,9 +124,10 @@ speech-to-speech = "speech_to_speech.cli:main"
 dev = [
     "ruff",
     "mypy",
+    "types-PyYAML",
     "pytest",
     "pytest-asyncio",
-    "aiortc>=1.9.0",
+    "aiortc>=1.9.0,<1.16",
 ]
 
 [tool.pytest.ini_options]
@@ -141,7 +143,7 @@ include = ["speech_to_speech*"]
 exclude = ["tests*"]
 
 [tool.setuptools.package-data]
-speech_to_speech = ["TTS/*.wav"]
+speech_to_speech = ["TTS/*.wav", "STV/*.json"]
 
 [tool.ruff]
 src = ["src"]
