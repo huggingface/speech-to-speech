@@ -2,6 +2,7 @@ import json
 import logging
 from queue import Queue
 from threading import BoundedSemaphore, Event, Lock, Thread
+from time import sleep
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -44,6 +45,7 @@ from speech_to_speech.pipeline.messages import (
     ResponsePrefetchTransaction,
     TokenUsage,
 )
+from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 
 
 def _make_text_delta_event(text):
@@ -592,6 +594,35 @@ def test_process_streams_text_from_response_events():
     assert isinstance(outputs[1], LLMResponseChunk) and outputs[1].text == "How are you?"
     assert all(output.selected_language == "es" for output in outputs[:2])
     assert isinstance(outputs[2], EndOfResponse)
+
+
+def test_process_records_hosted_llm_latency():
+    """`llm_ttft` must come from the first provider delta, not the first yielded
+    chunk: sentence batching holds the first chunk back until a sentence ends."""
+    handler = _make_handler()
+    tail_delay_s = 0.2
+
+    def _events():
+        # "Hello" alone does not close a sentence, so the first forwarded chunk
+        # only appears after this delay. A correct TTFT is measured before it.
+        yield _make_text_delta_event("Hello")
+        sleep(tail_delay_s)
+        yield _make_text_delta_event(". How are you?")
+        yield _make_output_item_done_event(content="Hello. How are you?")
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: _make_stream(_events())))
+    request = _make_request("Hi")
+    store = TurnLatencyStore()
+    store.get_or_create_response(request.response_key, turn_id="turn-1", turn_revision=0)
+    handler.turn_latency_store = store
+
+    list(handler.process(request))
+
+    tracker = store.get_response(request.response_key)
+    assert tracker is not None
+    assert tracker.llm_s is not None and tracker.llm_s >= tail_delay_s
+    assert tracker.llm_ttft_s is not None
+    assert tracker.llm_ttft_s < tail_delay_s
 
 
 def test_text_only_streams_raw_deltas_without_sentence_trimming():

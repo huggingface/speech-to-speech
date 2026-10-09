@@ -69,7 +69,7 @@ from speech_to_speech.pipeline.messages import (
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
-from speech_to_speech.pipeline.turn_latency import bind_active_turn_latency_tracker
+from speech_to_speech.pipeline.turn_latency import active_turn_latency_tracker, bind_active_turn_latency_tracker
 from speech_to_speech.utils.utils import is_out_of_band, response_wants_audio
 
 try:
@@ -137,6 +137,7 @@ class StreamContext(BaseModel):
     cancelled: bool = False
     stopped: bool = False
     raw_generated_text: str = ""
+    llm_start_s: float | None = None
     generated_text: str = ""
     printable_text: str = ""
     tools: list[ResponseFunctionToolCall] = Field(default_factory=list)
@@ -530,6 +531,10 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 break
 
             raw_text: str = token.text if hasattr(token, "text") else token
+            if raw_text.strip() and ctx.llm_start_s is not None:
+                tracker = active_turn_latency_tracker()
+                if tracker is not None and tracker.llm_ttft_s is None:
+                    tracker.record_llm_ttft(perf_counter() - ctx.llm_start_s)
             ctx.raw_generated_text += raw_text
             clean = raw_text if not wants_audio else remove_unspeechable(raw_text)
             ctx.generated_text += clean
@@ -672,6 +677,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             store = getattr(self, "turn_latency_store", None)
             tracker = store.get_response(request.response_key) if store else None
             llm_start_s = perf_counter()
+            ctx.llm_start_s = llm_start_s
             try:
                 with bind_active_turn_latency_tracker(tracker):
                     for chunk in self._generate(active_chat, language_code, gen, ctx, runtime_config, response):
