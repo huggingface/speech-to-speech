@@ -168,16 +168,18 @@ macOS and non-macOS dependencies are resolved automatically via platform markers
 
 See the [configuration guide](./docs/configuration.md) for reusable blocks,
 named pipelines, environment references, and explicit Python startup.
-With a configured `primary` pipeline, start its server or run locally:
+The [Mac example](./example_configs/mac.yaml) runs fully locally on Apple Silicon.
+From a repository checkout, run its audio client and server together, or start
+only the server:
 
 ```bash
-speech-to-speech serve -f voice.yaml --name primary
-speech-to-speech local -f voice.yaml --name primary
+speech-to-speech local -f example_configs/mac.yaml
+speech-to-speech serve -f example_configs/mac.yaml --name mac
 ```
 
 `local` runs one selected pipeline with the packaged loopback audio client.
-`talk -f voice.yaml` uses only the file's client settings. Configured server
-startup currently supports one named definition per invocation; its
+`talk -f example_configs/mac.yaml` uses only the file's client settings.
+Configured server startup currently supports one named definition per invocation; its
 `num_pipelines` controls the number of isolated instances.
 Existing Python interfaces, CLI commands, and flat JSON configuration remain available.
 

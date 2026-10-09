@@ -3,49 +3,34 @@
 Use a YAML file to define reusable VAD, STT, LLM, and TTS blocks, connect them
 into named pipelines, and start a selected pipeline from the CLI or Python.
 
-## Write a configuration file
+## Start with a Mac configuration
 
-Save this as `voice.yaml`. Replace the URLs and model name with those of your
-OpenAI-compatible servers. Set `STT_API_KEY`, or replace its reference with `""`
-if your STT server does not require authentication.
+The [Mac example](../example_configs/mac.yaml) runs speech recognition, the LLM,
+and speech synthesis locally on Apple Silicon, with no API key. Use the file
+from a repository checkout, or save the following as `example_configs/mac.yaml`:
 
 ```yaml
 schema_version: 1
-runtime:
-  server:
-    host: 127.0.0.1
-    port: 8765
+
 blocks:
-  vad_main:
-    kind: vad
-    backend: silero
-  stt_main:
-    kind: stt
-    backend: openai
-    settings:
-      openai_stt_base_url: http://localhost:8000/v1
-      openai_stt_api_key: {env: STT_API_KEY}
-  llm_main:
+  vad: {kind: vad, backend: silero}
+  stt: {kind: stt, backend: parakeet-tdt}
+  llm:
     kind: llm
-    backend: chat-completions
+    backend: mlx-lm
     settings:
-      model_name: served-chat-model
-      responses_api_base_url: http://localhost:8080/v1
-      responses_api_api_key: ""
-  tts_main:
-    kind: tts
-    backend: openai
-    settings:
-      openai_tts_base_url: http://localhost:8091/v1
+      model_name: mlx-community/Qwen3-4B-Instruct-2507-4bit
+  tts: {kind: tts, backend: qwen3}
+
 pipelines:
-  primary:
-    num_pipelines: 1
-    stages:
-      vad: vad_main
-      stt: stt_main
-      llm: llm_main
-      tts: tts_main
+  mac:
+    options:
+      mac_optimal_settings: true
+    stages: {vad: vad, stt: stt, llm: llm, tts: tts}
 ```
+
+YAML selects each backend explicitly. `mac_optimal_settings` supplies preset
+defaults for those backends; explicit settings override them.
 
 ## Build your configuration
 
@@ -85,9 +70,9 @@ The existing LLM proxy capability checks also apply.
 ## Run a pipeline
 
 ```bash
-speech-to-speech serve -f voice.yaml --name primary
-speech-to-speech local -f voice.yaml --name primary
-speech-to-speech talk -f voice.yaml
+speech-to-speech local -f example_configs/mac.yaml
+speech-to-speech serve -f example_configs/mac.yaml --name mac
+speech-to-speech talk -f example_configs/mac.yaml
 ```
 
 `-f` and `--file` are equivalent. `serve` and `local` require exactly one
@@ -101,7 +86,8 @@ client URL fails.
 
 `talk` reads `runtime.client` and process logging settings. It does not start
 pipeline handlers or require server/block environment values, and rejects
-`--name`. File mode accepts file selection, pipeline names, and help; put other
+`--name`. With this example, it connects to an already running local server.
+File mode accepts file selection, pipeline names, and help; put other
 settings in YAML rather than mixing in legacy flags. Duplicate file options or
 names and unknown names fail. Existing CLI flags and flat JSON input still work
 outside file mode.
@@ -151,9 +137,9 @@ from threading import Event
 from speech_to_speech.config import load_config, validate_config, resolve_config
 from speech_to_speech.configured_runtime import build_configured_server
 
-document = load_config("voice.yaml")
+document = load_config("example_configs/mac.yaml")
 validate_config(document)
-resolved = resolve_config(document, names=["primary"])
+resolved = resolve_config(document, names=["mac"])
 runtime = build_configured_server(resolved, Event())
 try:
     runtime.start()
