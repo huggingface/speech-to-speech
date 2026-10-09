@@ -62,7 +62,7 @@ from speech_to_speech.api.openai_realtime.input_state import (
 )
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.api.openai_realtime.visemes import SpeechToSpeechVisemesEvent
-from speech_to_speech.LLM.chat import Chat, make_user_message
+from speech_to_speech.LLM.chat import Chat, make_user_audio_message, make_user_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
@@ -83,7 +83,7 @@ from speech_to_speech.pipeline.queue_types import TextPromptItem
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnGateAction, TurnPhase
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
 from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
-from speech_to_speech.utils.utils import _generate_id
+from speech_to_speech.utils.utils import _generate_id, audio_to_wav_base64
 
 logger = logging.getLogger(__name__)
 
@@ -746,7 +746,7 @@ class RealtimeService:
             accounting.user_item_id = None
 
         queue = self.text_prompt_queue
-        if queue and transcript:
+        if queue and transcript and cfg.create_response_enabled:
             request = GenerateResponseRequest(
                 runtime_config=cfg,
                 language_code=event.language_code,
@@ -819,6 +819,23 @@ class RealtimeService:
 
         st.input_audio_duration_s = event.audio_duration_s
         st.response_usage.audio_duration_s += event.audio_duration_s
+
+        if not st.runtime_config.create_response_enabled:
+            # Retain speech independently of generation so response.create can
+            # answer it later, including multiple turns before a request.
+            item = make_user_audio_message(audio_to_wav_base64(event.audio, event.audio_sample_rate))
+            if accounting is not None and accounting.user_item_id is not None:
+                st.runtime_config.chat.remove_user_message(accounting.user_item_id)
+                item.id = accounting.user_item_id
+            retained_item = st.runtime_config.chat.add_item(item)
+            if accounting is not None:
+                accounting.user_item_id = retained_item.id
+            if retained_item.id is not None:
+                self.record_input_turn(
+                    conn_id, retained_item.id, event.turn_id, event.turn_revision, event.speech_stopped_at_s
+                )
+            self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
+            return self.audio.resolve_input_terminals(conn_id)
 
         queue = self.text_prompt_queue
         if queue:
