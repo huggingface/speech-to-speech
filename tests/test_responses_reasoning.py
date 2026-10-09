@@ -20,6 +20,7 @@ from speech_to_speech.LLM.chat import Chat, CompactionResult, ResponsesFunctionC
 from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
 from speech_to_speech.pipeline.messages import EndOfResponse, LLMResponseChunk, ResponsePrefetchTransaction
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from tests.llm_history import drive_llm
 from tests.test_responses_api_language_model import _make_handler, _make_request, _make_response, _make_stream
 
 
@@ -105,7 +106,7 @@ def test_assistant_message_payload_survives_complete_reasoning_tool_continuation
         return _stream([]) if stream else _make_response([])
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
-    first = list(handler.process(request))
+    first = list(drive_llm(handler, request))
     tool = next(item.tools[0] for item in first if isinstance(item, LLMResponseChunk) and item.tools)
     local_message = next(
         item for item in request.runtime_config.chat.buffer if getattr(item, "role", None) == "assistant"
@@ -117,7 +118,7 @@ def test_assistant_message_payload_survives_complete_reasoning_tool_continuation
     _finish(request.runtime_config.chat, tool.call_id)
     # A copy uses the same replay path while retaining its own provider payload.
     assert request.runtime_config.chat.copy(deep=True).to_responses_api_chat()[1:4] == originals
-    second = list(handler.process(request))
+    second = list(drive_llm(handler, request))
     assert next(item for item in second if isinstance(item, EndOfResponse)).error is None
     assert len(captured) == 2
     assert [item.model_dump(exclude_unset=True) for item in items] == originals
@@ -168,11 +169,11 @@ def test_consecutive_tools_replay_all_reasoning_since_user(stream):
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
     for expected in ["call_1", "call_2"]:
-        outputs = list(handler.process(request))
+        outputs = list(drive_llm(handler, request))
         tool = next(o.tools[0] for o in outputs if isinstance(o, LLMResponseChunk) and o.tools)
         assert tool.call_id.startswith("call_") and tool.call_id != expected
         _finish(request.runtime_config.chat, expected)
-    list(handler.process(request))
+    list(drive_llm(handler, request))
     replay = captured[2][2:]
     assert [item["type"] for item in replay] == [
         "reasoning",
@@ -202,7 +203,7 @@ def test_reasoning_before_assistant_message_is_retained_without_client_output(st
             create=lambda **kw: _stream([reasoning, message]) if stream else _make_response([reasoning, message]),
         )
     )
-    outputs = list(handler.process(request))
+    outputs = list(drive_llm(handler, request))
     replay = request.runtime_config.chat.to_responses_api_chat()
     assert [item["type"] for item in replay] == ["message", "reasoning", "message"]
     assert replay[1] == reasoning.model_dump(exclude_unset=True)
@@ -221,13 +222,17 @@ def test_reasoning_and_fast_tool_output_are_rolled_back(discard, with_message):
     if with_message:
         items.insert(1, _message(with_message))
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kw: _stream(items)))
-    generation = handler.process(request)
+    generation = drive_llm(handler, request)
     chunk = next(generation)
     assert isinstance(chunk, LLMResponseChunk) and chunk.tools
-    assert request.runtime_config.chat.buffer[1].type == "reasoning"
-    _finish(request.runtime_config.chat)
     if discard == "prefetch":
+        # Hidden proposals do not enter shared history before a public claim.
+        assert len(request.runtime_config.chat.buffer) == 1
+        assert not request.runtime_config.chat.has_pending_tool_calls()
         request.prefetch_transaction.discard()
+    else:
+        assert request.runtime_config.chat.buffer[1].type == "reasoning"
+        _finish(request.runtime_config.chat)
     generation.close()
     assert [item.type for item in request.runtime_config.chat.buffer] == ["message"]
     assert not request.runtime_config.chat.has_pending_tool_calls()
@@ -318,7 +323,7 @@ def test_fast_output_does_not_allow_eviction_before_late_stream_reasoning_commit
         ResponseCompletedEvent.model_construct(type="response.completed", sequence_number=2, response=response),
     ]
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kw: _make_stream(events)))
-    generation = handler.process(request)
+    generation = drive_llm(handler, request)
     chunk = next(generation)
     assert isinstance(chunk, LLMResponseChunk) and chunk.tools
     _finish(request.runtime_config.chat, chunk.tools[0].call_id)
@@ -360,12 +365,12 @@ def test_out_of_band_snapshot_omits_reasoning_for_unresolved_call(stream, comple
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
     if completed_prefix:
-        list(handler.process(request))
+        list(drive_llm(handler, request))
         _finish(request.runtime_config.chat, "call_1")
-    list(handler.process(request))
+    list(drive_llm(handler, request))
     canonical = request.runtime_config.chat.copy(deep=True)
     request.response = RealtimeResponseCreateParams(conversation="none")
-    outputs = list(handler.process(request))
+    outputs = list(drive_llm(handler, request))
     assert next(item for item in outputs if isinstance(item, EndOfResponse)).error is None
     assert not any(item.get("id") in {"rs_2", "fc_2", "msg_provider"} for item in captured[-1])
     if completed_prefix:
@@ -396,7 +401,7 @@ def test_stream_completion_order_does_not_reorder_replay_or_delay_tool_dispatch(
     handler = _make_handler(stream=True)
     request = _make_request(chat_size=5)
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kw: _make_stream(events)))
-    generation = handler.process(request)
+    generation = drive_llm(handler, request)
     # The call remains exposed as soon as its own done event arrives, before
     # the reasoning's later done event or stream exhaustion.
     chunk = next(generation)
@@ -563,7 +568,7 @@ def test_pinned_sdk_pending_snapshot_preserves_previous_completed_response(strea
         handler.client = client
         for key in ["response-A", "response-B"]:
             request.response_key = key
-            outputs = list(handler.process(request))
+            outputs = list(drive_llm(handler, request))
             assert next(item for item in outputs if isinstance(item, EndOfResponse)).error is None
             chat.finalize_provisional_generation(key)
         assert requests[1]["input"][2:] == first
@@ -572,14 +577,14 @@ def test_pinned_sdk_pending_snapshot_preserves_previous_completed_response(strea
         canonical = chat.copy(deep=True)
         request.response_key = "snapshot"
         request.response = RealtimeResponseCreateParams(conversation="none")
-        outputs = list(handler.process(request))
+        outputs = list(drive_llm(handler, request))
         assert next(item for item in outputs if isinstance(item, EndOfResponse)).error is None
         assert requests[2]["input"][2:] == first
         assert chat.buffer == canonical.buffer
         _finish(chat, "call_B")
         request.response_key = "continuation"
         request.response = None
-        outputs = list(handler.process(request))
+        outputs = list(drive_llm(handler, request))
         assert next(item for item in outputs if isinstance(item, EndOfResponse)).error is None
         assert requests[3]["input"][2:-1] == first + pending
         assert requests[3]["input"][-1]["call_id"] == "call_B"
@@ -644,9 +649,9 @@ def test_pinned_sdk_parses_and_serializes_reasoning_tool_continuation(stream, re
     request = _make_request(chat_size=5)
     with OpenAI(api_key="test", http_client=httpx.Client(transport=httpx.MockTransport(respond))) as client:
         handler.client = client
-        first = list(handler.process(request))
+        first = list(drive_llm(handler, request))
         assert any(isinstance(item, LLMResponseChunk) and item.tools for item in first)
         _finish(request.runtime_config.chat)
-        second = list(handler.process(request))
+        second = list(drive_llm(handler, request))
         assert next(item for item in second if isinstance(item, EndOfResponse)).error is None
     assert len(requests) == 2

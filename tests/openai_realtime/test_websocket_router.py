@@ -27,7 +27,7 @@ from speech_to_speech.api.openai_realtime.tool_followup import (
     TOOL_INPUT_METADATA_KEY,
 )
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
-from speech_to_speech.LLM.chat import make_user_message
+from speech_to_speech.LLM.chat import make_assistant_message, make_user_message
 from speech_to_speech.LLM.language_model import LanguageModelHandler
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.cancel_scope import CancelScope
@@ -47,6 +47,7 @@ from speech_to_speech.pipeline.events import (
     TranscriptionCompletedEvent,
     TranscriptionFailedEvent,
 )
+from speech_to_speech.pipeline.history import ResponseHistory
 from speech_to_speech.pipeline.messages import (
     AUDIO_RESPONSE_DONE,
     PIPELINE_END,
@@ -435,14 +436,25 @@ class TestClientEventDispatch:
                 ws.receive_json()
                 conn_id = list(service._conns)[0]
                 st = service._state(conn_id)
-                request = GenerateResponseRequest(runtime_config=st.runtime_config)
+                request = GenerateResponseRequest(
+                    runtime_config=st.runtime_config, prefetch_transaction=ResponsePrefetchTransaction()
+                )
                 st.tool_followup_prefetch_request = request
                 st.tool_followup_prefetch_origin_response_key = "response_origin"
                 st.mark_response_pending(request.response_key)
-                output_queue.put(AssistantOutputEvent(text="prefetched", response_key=request.response_key))
+                proposal = ResponseHistory.capture(
+                    st.runtime_config.chat,
+                    [make_assistant_message("prefetched")],
+                    after_item_id=st.runtime_config.chat.history_anchor_id(),
+                    complete=True,
+                )
+                output_queue.put(
+                    AssistantOutputEvent(text="prefetched", response_key=request.response_key, history=proposal)
+                )
 
                 # Give the send loop time to encounter and hold the output.
                 time.sleep(0.1)
+                assert st.runtime_config.chat.buffer == []
                 ws.send_json(
                     {
                         "type": "response.create",
@@ -470,6 +482,7 @@ class TestClientEventDispatch:
                 assert part_added["type"] == "response.content_part.added"
                 assert delta["type"] == "response.output_audio_transcript.delta"
                 assert delta["delta"] == "prefetched"
+                assert [item.content[0].text for item in st.runtime_config.chat.buffer] == ["prefetched"]
 
     def test_early_tool_call_waits_until_response_created_send_completes(self, setup, monkeypatch):
         app, service, _, _, text_output_queue, *_ = setup

@@ -57,6 +57,7 @@ from speech_to_speech.LLM.utils import (
 from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
+from speech_to_speech.pipeline.history import ResponseHistory
 from speech_to_speech.pipeline.messages import (
     AssistantOutputPart,
     AssistantTextPart,
@@ -152,9 +153,6 @@ class StreamContext(BaseModel):
     speech_stopped_at_s: float | None = None
     cancel_generation: int | None = None
     output_parts: list[AssistantOutputPart] = Field(default_factory=list)
-    history_parts_committed: int = 0
-    recorded_item_ids: set[str] = Field(default_factory=set)
-    recorded_call_ids: set[str] = Field(default_factory=set)
     prefetch_transaction: ResponsePrefetchTransaction | None = None
 
     @property
@@ -421,17 +419,10 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         return chunks, tools, printable_text
 
     @staticmethod
-    def _commit_ordered_output(
-        chat: Chat,
-        parts: list[AssistantOutputPart],
-        *,
-        wants_audio: bool,
-        response_key: str | None = None,
-        recorded_item_ids: set[str] | None = None,
-        recorded_call_ids: set[str] | None = None,
-        after_item_id: str | None = None,
-    ) -> bool:
-        """Persist exactly the ordered text/tool stream emitted to the client."""
+    def _ordered_output_items(
+        parts: list[AssistantOutputPart], *, wants_audio: bool
+    ) -> list[RealtimeConversationItemAssistantMessage | RealtimeConversationItemFunctionCall]:
+        """Build the history proposal in the same order as emitted model parts."""
         text_parts: list[str] = []
         items: list[RealtimeConversationItemAssistantMessage | RealtimeConversationItemFunctionCall] = []
 
@@ -462,27 +453,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             )
         flush_text()
 
-        if response_key is not None:
-            recorded_items = chat.add_provisional_generation_items(response_key, items, after_item_id=after_item_id)
-            if recorded_items is None:
-                return False
-        else:
-            recorded_items = []
-            for item in items:
-                if isinstance(item, RealtimeConversationItemFunctionCall):
-                    recorded_items.append(chat.add_ordered_function_call(item, after_item_id=after_item_id))
-                else:
-                    recorded_items.append(chat.add_item(item, after_item_id=after_item_id))
-        for recorded in recorded_items:
-            if recorded_item_ids is not None and recorded.id is not None:
-                recorded_item_ids.add(recorded.id)
-            if (
-                recorded_call_ids is not None
-                and isinstance(recorded, RealtimeConversationItemFunctionCall)
-                and recorded.call_id is not None
-            ):
-                recorded_call_ids.add(recorded.call_id)
-        return True
+        return items
 
     def _check_stop(self, gen: int | None, ctx: StreamContext) -> bool:
         """Check whether generation should be aborted and mark the reason on *ctx*."""
@@ -607,8 +578,9 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         # Snapshot the end of the conversation before generating so this turn's
         # output is written back at its own position even when non-interrupting
         # speech appends a newer user message while the model is still running.
-        history_anchor_id = original_chat.history_anchor_id()
-        if not out_of_band and original_chat.has_pending_tool_calls():
+        active_chat = original_chat.copy(deep=True)
+        history_anchor_id = active_chat.history_anchor_id()
+        if not out_of_band and active_chat.has_pending_tool_calls():
             yield EndOfResponse(
                 turn_id=ctx.turn_id,
                 turn_revision=ctx.turn_revision,
@@ -619,7 +591,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             return
         if out_of_band:
             try:
-                active_chat = build_active_chat(original_chat, response)
+                active_chat = build_active_chat(active_chat, response)
             except ChatItemError as exc:
                 log_exception(logger, "Out-of-band response rejected", exc, level=logging.INFO)
                 yield EndOfResponse(
@@ -630,8 +602,6 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     error=str(exc),
                 )
                 return
-        else:
-            active_chat = original_chat.copy()
         language_code = request.language_code
         language_code, _ = resolve_auto_language(language_code)
         lang_name = language_name_for_prompt(language_code, enable=self.enable_lang_prompt)
@@ -656,22 +626,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         # so an image a fast client injects mid-generation for the next turn
         # survives (it is not in this serialized snapshot).
         consumed_image_ids = active_chat.image_message_ids()
-        history_committed = False
-        history_rolled_back = False
-
-        def rollback_history() -> None:
-            nonlocal history_rolled_back
-            if out_of_band or history_committed or history_rolled_back:
-                return
-            if not (ctx.recorded_item_ids or ctx.recorded_call_ids):
-                return
-            original_chat.rollback_generation(
-                None,
-                item_ids=ctx.recorded_item_ids,
-                call_ids=ctx.recorded_call_ids,
-                response_key=request.response_key,
-            )
-            history_rolled_back = True
+        generation_completed = False
+        history = None if out_of_band else ResponseHistory.capture(original_chat, [], after_item_id=history_anchor_id)
 
         try:
             store = getattr(self, "turn_latency_store", None)
@@ -687,19 +643,13 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         new_parts = [part.model_copy(deep=True) for part in chunk.parts]
                         ctx.output_parts.extend(new_parts)
                         if not out_of_band and any(isinstance(part, AssistantToolCallPart) for part in new_parts):
-                            recorded = self._commit_ordered_output(
+                            chunk.history = ResponseHistory.capture(
                                 original_chat,
-                                ctx.output_parts[ctx.history_parts_committed :],
-                                wants_audio=response_wants_audio(response),
-                                response_key=request.response_key,
-                                recorded_item_ids=ctx.recorded_item_ids,
-                                recorded_call_ids=ctx.recorded_call_ids,
+                                self._ordered_output_items(
+                                    ctx.output_parts, wants_audio=response_wants_audio(response)
+                                ),
                                 after_item_id=history_anchor_id,
                             )
-                            if not recorded:
-                                ctx.cancelled = True
-                                break
-                            ctx.history_parts_committed = len(ctx.output_parts)
                         yield chunk
             finally:
                 # Publish the elapsed work before the failure handler yields a
@@ -732,34 +682,15 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 )
                 ctx.output_parts.extend(part.model_copy(deep=True) for part in trailing_chunk.parts)
             if commit_allowed:
-                commit_allowed = self._commit_ordered_output(
+                history = ResponseHistory.capture(
                     original_chat,
-                    ctx.output_parts[ctx.history_parts_committed :],
-                    wants_audio=response_wants_audio(response),
-                    response_key=request.response_key,
-                    recorded_item_ids=ctx.recorded_item_ids,
-                    recorded_call_ids=ctx.recorded_call_ids,
+                    self._ordered_output_items(ctx.output_parts, wants_audio=response_wants_audio(response)),
                     after_item_id=history_anchor_id,
+                    complete=True,
+                    consumed_image_ids=consumed_image_ids,
+                    compactor=self.compactor,
                 )
-                if commit_allowed:
-                    ctx.history_parts_committed = len(ctx.output_parts)
-
-                    def cleanup_history() -> None:
-                        snapshot = original_chat.snapshot_history_cleanup()
-                        try:
-                            original_chat.strip_images(consumed_image_ids)
-                            original_chat.trim_if_needed(self.compactor)
-                        except Exception:
-                            original_chat.restore_history_cleanup(snapshot)
-                            raise
-
-                    if request.prefetch_transaction is not None:
-                        request.prefetch_transaction.complete(cleanup_history)
-                    else:
-                        cleanup_history()
-                    history_committed = True
-                else:
-                    trailing_chunk = None
+            generation_completed = turn_output_allowed
             logger.debug("Clean text: %s", transcript_for_log(ctx.generated_text))
             logger.info("Tools: %s", transcript_for_log(ctx.tools))
 
@@ -781,12 +712,12 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             # the exception would escape process() and no EndOfResponse would be
             # emitted, leaving st.in_response stuck and locking every later response.
             log_exception(logger, "LLM generation failed; ending the current response", exc)
-            rollback_history()
             if request.prefetch_transaction is not None:
                 # The terminal is queued before this generator resumes into its
                 # finally block, so publish failure before yielding it.
                 request.prefetch_transaction.discard()
             yield EndOfResponse(
+                history=history,
                 turn_id=ctx.turn_id,
                 turn_revision=ctx.turn_revision,
                 cancel_generation=ctx.cancel_generation,
@@ -795,17 +726,17 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             )
             return
         finally:
-            rollback_history()
-            if request.prefetch_transaction is not None and not history_committed:
+            if request.prefetch_transaction is not None and not generation_completed:
                 # Make failed hidden work unclaimable before its asynchronous
                 # logical-done notification reaches the realtime service.
                 request.prefetch_transaction.discard()
         yield EndOfResponse(
+            history=history,
             turn_id=ctx.turn_id,
             turn_revision=ctx.turn_revision,
             cancel_generation=ctx.cancel_generation,
             response_key=request.response_key,
-            input_tool_call_ids=active_chat.tool_output_call_ids() if history_committed else [],
+            input_tool_call_ids=active_chat.tool_output_call_ids() if commit_allowed else [],
         )
 
     def on_session_end(self) -> None:
