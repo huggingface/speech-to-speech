@@ -44,7 +44,7 @@ are added only to terminal responses.
 | --- | --- | --- |
 | `stt` | `parakeet-tdt`, `openai`, `openai-realtime`, `vllm-realtime`, `whisper`, `whisper-mlx`, `mlx-audio-whisper`, `faster-whisper`, `qwen3-asr` | `parakeet-unified`, `paraformer` |
 | `llm` | `transformers`, `mlx-lm`, `responses-api`, `chat-completions` | None of the built-in LLM backends |
-| `tts_ttfa`, `e2e` | `qwen3`, `openai` | `chatTTS`, `facebookMMS`, `omnivoice`, `pocket`, `kokoro`, `supertonic` |
+| `tts_ttfa`, `e2e` | `qwen3`, `openai`, `pocket` | `chatTTS`, `facebookMMS`, `omnivoice`, `kokoro`, `supertonic` |
 
 `--stt none` deliberately has no STT measurement. Any field is also `n/a`
 when its stage did not run, produced no audio, or its measurement was unavailable.
@@ -64,6 +64,10 @@ the existing MLX lock and can be zero when that lock is not used.
 - `tts_ttfa` starts when synthesis of the first text segment begins and ends
   when the first provider audio samples arrive. For HTTP TTS, WAV headers are
   excluded, and resampling and output block assembly happen afterward.
+  Pocket Farsi captures this timestamp before buffering and validating the
+  phrase, including across retries; it publishes the measurement only if
+  validation produces usable audio. Generated sentence pauses are excluded
+  from provider TTFA.
 - `e2e` runs from estimated speech end to the first audio block yielded by TTS.
   It includes VAD decision time, Smart Turn analysis, audio enhancement, and
   subsequent processing/hold time before that block. The timestamp is propagated
