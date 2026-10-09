@@ -255,6 +255,30 @@ class TestPipelineAudioTrack:
             await producer
             track.stop()
 
+    async def test_idle_resume_skips_whole_frames(self, monkeypatch):
+        now = 10.0
+        monkeypatch.setattr(
+            "speech_to_speech.api.openai_realtime.webrtc_session.time",
+            Mock(monotonic=lambda: now),
+        )
+        track = PipelineAudioTrack()
+        track.write(bytes(WEBRTC_FRAME_SAMPLES * 2))
+        first = await track.recv()
+        track.clear()
+        pending = asyncio.create_task(track.recv())
+        try:
+            await asyncio.sleep(0)  # enter the empty-buffer wait
+            now += 0.153  # deliberately outside the 20 ms frame grid
+            track.write(bytes(WEBRTC_FRAME_SAMPLES * 2))
+            resumed = await asyncio.wait_for(pending, timeout=RECV_TIMEOUT_S)
+            assert track._timestamp % WEBRTC_FRAME_SAMPLES == 0
+            assert 0.153 <= track._timestamp / WEBRTC_SAMPLE_RATE < 0.153 + AUDIO_PTIME
+            assert resumed.pts - first.pts == WEBRTC_FRAME_SAMPLES
+        finally:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+            track.stop()
+
     async def test_recv_returns_written_audio(self):
         track = PipelineAudioTrack()
         payload = (np.ones(WEBRTC_FRAME_SAMPLES, dtype=np.int16) * 5).tobytes()
@@ -374,8 +398,7 @@ class TestOutboundAudioPackets:
         # Speech only in the final 5 ms is otherwise retained in Opus lookahead.
         pcm[-240:] = (12000 * np.sin(2 * np.pi * 1000 * np.arange(240) / WEBRTC_SAMPLE_RATE)).astype(np.int16)
         session._track.write(pcm.tobytes())
-        await _wait_until(lambda: len(capture.rtp) >= 4)
-        await asyncio.sleep(AUDIO_PTIME * 3)
+        await _wait_until(lambda: len(capture.rtp) >= 9)
 
         decoder = OpusDecoder()
         frames = [
@@ -384,25 +407,27 @@ class TestOutboundAudioPackets:
             for frame in decoder.decode(JitterFrame(data=packet.payload, timestamp=packet.timestamp))
         ]
         assert max(np.max(np.abs(frame)) for frame in frames) > 1000
-        assert len(capture.rtp) == 5  # four PCM frames plus one bounded drain
+        assert len(capture.rtp) == 9  # four PCM frames plus five bounded drain frames
         await asyncio.sleep(IDLE_RECV_OBSERVATION_S)
-        assert len(capture.rtp) == 5
+        assert len(capture.rtp) == 9
 
     async def test_rtp_clock_advances_across_idle(self, captured_audio_sender):
         session, _, capture = captured_audio_sender
         session._track.write(bytes(WEBRTC_FRAME_SAMPLES * 2 * 2))
-        await _wait_until(lambda: len(capture.rtp) >= 2)
+        await _wait_until(lambda: len(capture.rtp) >= 7)
         await asyncio.sleep(AUDIO_PTIME * 2)
         count = len(capture.rtp)
-        await asyncio.sleep(0.15)
+        await asyncio.sleep(0.153)
         assert len(capture.rtp) == count
         session._track.write(bytes(WEBRTC_FRAME_SAMPLES * 2 * 2))
-        await _wait_until(lambda: len(capture.rtp) >= count + 2)
+        await _wait_until(lambda: len(capture.rtp) >= count + 7)
         await asyncio.sleep(AUDIO_PTIME * 2)
 
         previous_time, previous = capture.rtp[count - 1]
         resumed_time, resumed = capture.rtp[count]
-        rtp_elapsed = ((resumed.timestamp - previous.timestamp) & 0xFFFFFFFF) / WEBRTC_SAMPLE_RATE
+        timestamp_delta = (resumed.timestamp - previous.timestamp) & 0xFFFFFFFF
+        assert timestamp_delta % WEBRTC_FRAME_SAMPLES == 0
+        rtp_elapsed = timestamp_delta / WEBRTC_SAMPLE_RATE
         assert abs(rtp_elapsed - (resumed_time - previous_time)) < 0.03
         assert resumed.ssrc == previous.ssrc
         assert (resumed.sequence_number - previous.sequence_number) & 0xFFFF == 1
@@ -418,7 +443,7 @@ class TestOutboundAudioPackets:
     async def test_rtcp_reports_current_clock_and_switches_to_rr_when_idle(self, captured_audio_sender):
         session, sender, capture = captured_audio_sender
         session._track.write(bytes(WEBRTC_FRAME_SAMPLES * 2 * 4))
-        await _wait_until(lambda: len(capture.rtp) >= 4)
+        await _wait_until(lambda: len(capture.rtp) >= 9)
         await asyncio.sleep(AUDIO_PTIME * 2)
         count = len(capture.rtp)
         await _wait_until(lambda: sum(isinstance(p, RtcpSrPacket) for _, p in capture.rtcp) >= 2)
@@ -847,6 +872,62 @@ class TestWebRTCLoopback:
             await session.close()
             await server_pc.close()
             await client_pc.close()
+
+    @pytest.mark.parametrize("pcm_frames", [1, 4])
+    async def test_speech_tail_reaches_receiver_before_idle(self, pcm_frames):
+        client_pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+        server_pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+        session = WebRTCSession(
+            server_pc,
+            on_client_event=AsyncMock(),
+            on_audio=Mock(),
+            on_open=AsyncMock(),
+            on_closed=Mock(),
+        )
+        session.setup()
+        decoded = []
+        consumers = []
+
+        @client_pc.on("track")
+        def on_track(track):
+            async def consume():
+                while True:
+                    try:
+                        frame = await track.recv()
+                    except MediaStreamError:
+                        return
+                    decoded.append(frame.to_ndarray().astype(np.int32))
+
+            consumers.append(asyncio.create_task(consume()))
+
+        try:
+            client_pc.createDataChannel("oai-events")
+            client_pc.addTransceiver("audio", direction="recvonly")
+            await client_pc.setLocalDescription(await client_pc.createOffer())
+            answer = await session.negotiate(client_pc.localDescription.sdp)
+            await client_pc.setRemoteDescription(RTCSessionDescription(sdp=answer, type="answer"))
+            await _wait_until(lambda: client_pc.connectionState == server_pc.connectionState == "connected")
+
+            pcm = np.zeros(WEBRTC_FRAME_SAMPLES * pcm_frames, dtype=np.int16)
+            # The final 5 ms must leave both Opus lookahead and the receiver's
+            # jitter buffer without another utterance supplying more packets.
+            pcm[-240:] = (12000 * np.sin(2 * np.pi * 1000 * np.arange(240) / WEBRTC_SAMPLE_RATE)).astype(np.int16)
+            session._track.write(pcm.tobytes())
+            await _wait_until(lambda: any(np.max(np.abs(frame)) > 1000 for frame in decoded), timeout=1.0)
+
+            sender = server_pc.getSenders()[0]
+            await asyncio.sleep(AUDIO_PTIME * 2)
+            stats = await sender.getStats()
+            count = next(report.packetsSent for report in stats.values() if report.type == "outbound-rtp")
+            await asyncio.sleep(IDLE_RECV_OBSERVATION_S)
+            stats = await sender.getStats()
+            assert next(report.packetsSent for report in stats.values() if report.type == "outbound-rtp") == count
+        finally:
+            await session.close()
+            await client_pc.close()
+            for consumer in consumers:
+                consumer.cancel()
+            await asyncio.gather(*consumers, return_exceptions=True)
 
     async def test_handshake_events_and_multi_output_audio_roundtrip(self, server_env):
         pc = RTCPeerConnection()

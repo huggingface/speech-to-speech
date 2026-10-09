@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import time
 from collections.abc import Awaitable
@@ -43,6 +44,9 @@ logger = logging.getLogger(__name__)
 WEBRTC_SAMPLE_RATE = 48_000
 AUDIO_PTIME = 0.02  # 20 ms frames
 WEBRTC_FRAME_SAMPLES = int(WEBRTC_SAMPLE_RATE * AUDIO_PTIME)
+# One frame flushes Opus lookahead; four more release it through aiortc's
+# audio receiver prefetch. Stop sending after this bounded 100 ms tail.
+WEBRTC_DRAIN_FRAMES = 5
 DATA_CHANNEL_LABEL = "oai-events"
 ICE_SERVERS_ENV = "SPEECH_TO_SPEECH_ICE_SERVERS"
 ICE_GATHERING_TIMEOUT_S = 5.0
@@ -121,7 +125,7 @@ class PipelineAudioTrack(MediaStreamTrack):
         self._start: Optional[float] = None
         self._timestamp = 0
         self._samples_sent = 0
-        self._drain_pending = False
+        self._drain_remaining = 0
         self._generation = 0
         self._frame_generation = 0
 
@@ -133,7 +137,7 @@ class PipelineAudioTrack(MediaStreamTrack):
 
     def clear(self) -> None:
         del self._buffer[:]
-        self._drain_pending = False
+        self._drain_remaining = 0
         self._generation += 1
         self._data_available.clear()
 
@@ -151,7 +155,7 @@ class PipelineAudioTrack(MediaStreamTrack):
 
         while True:
             waited_for_audio = False
-            while not self._buffer and not self._drain_pending:
+            while not self._buffer and not self._drain_remaining:
                 self._data_available.clear()
                 waited_for_audio = True
                 await self._data_available.wait()
@@ -165,24 +169,25 @@ class PipelineAudioTrack(MediaStreamTrack):
             else:
                 timestamp = self._timestamp + WEBRTC_FRAME_SAMPLES
                 if waited_for_audio:
-                    # Skip suppressed silence without moving the clock origin.
-                    # A short wait must still respect the next frame's deadline.
-                    timestamp = max(timestamp, int((now - self._start) * WEBRTC_SAMPLE_RATE))
+                    # Suppress whole 20 ms frames (RFC 7587 section 3.1.3),
+                    # keeping the clock origin and the next frame's deadline.
+                    elapsed_frames = math.ceil((now - self._start) / AUDIO_PTIME)
+                    timestamp = max(timestamp, elapsed_frames * WEBRTC_FRAME_SAMPLES)
                 wait = self._start + timestamp / WEBRTC_SAMPLE_RATE - now
                 if wait > 0:
                     await asyncio.sleep(wait)
 
             if self.readyState != "live":
                 raise MediaStreamError
-            if not self._buffer and not self._drain_pending:
+            if not self._buffer and not self._drain_remaining:
                 # clear() can discard audio while the paced read is asleep.
                 continue
 
             needed = WEBRTC_FRAME_SAMPLES * 2  # bytes of s16 mono
             payload = bytes(self._buffer[:needed])
             del self._buffer[: len(payload)]
-            # One paced silent frame flushes Opus's lookahead before sleeping.
-            self._drain_pending = bool(payload)
+            # Drain codec lookahead and receiver prefetch before sleeping.
+            self._drain_remaining = WEBRTC_DRAIN_FRAMES if payload else self._drain_remaining - 1
             payload += b"\x00" * (needed - len(payload))
 
             samples = np.frombuffer(payload, dtype=np.int16)
