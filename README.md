@@ -213,6 +213,7 @@ Optional components are installed with pip extras:
 
 ```bash
 pip install "speech-to-speech[kokoro]"          # Kokoro-82M TTS on non-macOS
+pip install "speech-to-speech[kitten]"          # KittenTTS
 pip install "speech-to-speech[pocket]"          # Pocket TTS
 pip install "speech-to-speech[chattts]"         # ChatTTS
 pip install "speech-to-speech[omnivoice]"       # OmniVoice TTS (CUDA, Intel XPU, or Apple Silicon)
@@ -266,6 +267,7 @@ This installs the package in editable mode. With the environment activated, use 
 | LLM | [mlx-lm](https://github.com/ml-explore/mlx-lm) | Apple Silicon | built-in on macOS |
 | TTS | [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) (default) | GGML / CUDA on Linux, mlx-audio on macOS | built-in |
 | TTS | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | CUDA / CPU, Apple Silicon | `kokoro` on non-macOS; built-in on macOS |
+| TTS | [KittenTTS](https://github.com/KittenML/KittenTTS) | CPU | `kitten` |
 | TTS | [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) | CPU / CUDA | `pocket` |
 | TTS | [ChatTTS](https://github.com/2noise/ChatTTS) | CUDA / CPU | `chattts` |
 | TTS | [OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) | CUDA / Intel XPU / Apple Silicon | `omnivoice` |
@@ -350,7 +352,7 @@ Start with [Apple Silicon, fully local](#apple-silicon-fully-local). Its `--mac-
 
 The preset supplies these as defaults only: explicit `--device`, component-device flags such as `--qwen3_tts_device`, and `--stt`, `--llm_backend`, `--model_name`, and `--tts` all win. Use it with `serve` instead of `local` when you want to expose the server without starting the microphone/speaker client.
 
-`--tts pocket`, `--tts kokoro`, and `--tts omnivoice` are also valid on macOS.
+`--tts pocket`, `--tts kokoro`, `--tts omnivoice`, and `--tts kitten` are also valid on macOS.
 
 To compare the MLX quantization variants locally:
 
@@ -635,6 +637,7 @@ Language coverage depends on the STT and TTS backends you pick, not on the pipel
 | STT | Paraformer | Depends on the selected FunASR checkpoint; the default is Chinese-oriented |
 | TTS | Qwen3-TTS (default) | Multilingual, with `--qwen3_tts_language auto` by default |
 | TTS | Kokoro | Multiple language/voice mappings, depending on backend availability |
+| TTS | KittenTTS | English |
 | TTS | ChatTTS | English and Chinese |
 | TTS | MMS TTS | Broad multilingual coverage through MMS checkpoints |
 | TTS | OmniVoice | 600+ languages; voice cloning, design, and automatic voice selection |
@@ -957,4 +960,4 @@ If you use this pipeline, please also cite the component models you run. The def
 }
 ```
 
-Citations for optional backends such as Kokoro, Pocket TTS, ChatTTS, Whisper variants, Paraformer, and MMS live in the respective [component READMEs](./src/speech_to_speech).
+Citations for optional backends such as Kokoro, KittenTTS, Pocket TTS, ChatTTS, Whisper variants, Paraformer, and MMS live in the respective [component READMEs](./src/speech_to_speech).

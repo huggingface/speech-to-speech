@@ -801,3 +801,18 @@ def test_legacy_help_keeps_command_settings(arguments, flags, monkeypatch, capsy
     output = capsys.readouterr().out
     for flag in flags:
         assert flag in output
+
+
+def test_parse_arguments_preserves_kitten_backend_options():
+    args = parse_arguments(["--tts", "kitten", "--kitten_voice", "Bella", "--kitten_device", "cpu"])
+
+    assert args.tts_backend.name == "kitten"
+    assert args.tts_backend.spec.required_extra == "kitten"
+    assert args.tts_backend.config["model_name"] == "KittenML/kitten-tts-mini-0.8"
+    assert args.tts_backend.config["voice"] == "Bella"
+    assert args.tts_backend.config["device"] == "cpu"
+
+
+def test_parse_arguments_rejects_unsupported_kitten_device():
+    with pytest.raises(SystemExit):
+        parse_arguments(["--tts", "kitten", "--kitten_device", "cuda"])

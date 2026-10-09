@@ -17,6 +17,7 @@ from speech_to_speech.arguments_classes.facebookmms_tts_arguments import Faceboo
 from speech_to_speech.arguments_classes.faster_whisper_stt_arguments import (
     FasterWhisperSTTHandlerArguments,
 )
+from speech_to_speech.arguments_classes.kitten_tts_arguments import KittenTTSHandlerArguments
 from speech_to_speech.arguments_classes.kokoro_tts_arguments import KokoroTTSHandlerArguments
 from speech_to_speech.arguments_classes.language_model_arguments import LanguageModelHandlerArguments
 from speech_to_speech.arguments_classes.minimax_tts_arguments import MiniMaxTTSHandlerArguments
@@ -613,6 +614,19 @@ TTS_BACKENDS = build_backend_registry(
             ),
             config_prefix="kokoro",
             required_extra="kokoro",
+        ),
+        BackendSpec(
+            "kitten",
+            "tts",
+            KittenTTSHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.TTS.kitten_tts_handler",
+                "KittenTTSHandler",
+                setup_should_listen=True,
+                context_kwargs=True,
+            ),
+            config_prefix="kitten",
+            required_extra="kitten",
         ),
         BackendSpec(
             "qwen3",
