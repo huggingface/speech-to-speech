@@ -6,9 +6,6 @@ download models, call providers, access audio devices, or start threads and
 listeners. Existing Python interfaces, CLI commands, and flat JSON input keep
 their existing behavior.
 
-YAML support, including the PyYAML parser, is included in the default installation.
-The parser is imported only when a caller loads YAML.
-
 Set `enable_visemes`, `stv_model_name`, and `stv_device` under each pipeline's `options`.
 These fields use the existing viseme argument defaults.
 
