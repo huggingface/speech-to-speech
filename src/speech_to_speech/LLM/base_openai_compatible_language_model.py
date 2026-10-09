@@ -398,6 +398,15 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 wav_file.writeframes(pcm.tobytes())
             return base64.b64encode(wav_io.getvalue()).decode("ascii")
 
+    def cleanup(self) -> None:
+        # The runtime closes a shared client after all workers and leases finish.
+        if getattr(self, "client_resource", None) is not None:
+            return
+        client = getattr(self, "client", None)
+        if client is not None:
+            del self.client
+            client.close()
+
     # ── speculative-turn / cancellation gating ─────────────────────────────────
 
     def _turn_is_latest(self, turn_id: str | None, turn_revision: int | None) -> bool:
@@ -1006,6 +1015,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 cancel_generation=turn.gen,
                 response_key=turn.response_key,
                 error=error_message,
+                input_tool_call_ids=(
+                    active_chat.tool_output_call_ids()
+                    if history_committed and not is_out_of_band(turn.response)
+                    else []
+                ),
                 status="incomplete" if generation_completed and state.ending.status == "incomplete" else "completed",
                 reason=state.ending.reason if generation_completed and state.ending.status == "incomplete" else None,
             )

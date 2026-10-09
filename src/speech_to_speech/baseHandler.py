@@ -44,7 +44,14 @@ class BaseHandler(Generic[InT, OutT]):
         self.queue_in = queue_in
         self.queue_out = queue_out
         self.pipeline_index: int | None = None
-        self.setup(*setup_args, **setup_kwargs)
+        try:
+            self.setup(*setup_args, **setup_kwargs)
+        except BaseException:
+            try:
+                self.cleanup()
+            except BaseException:
+                logger.warning("Handler cleanup failed after setup failure")
+            raise
         self._times: list[float] = []
 
     def setup(self, *arg: Any, **kwargs: Any) -> None:
@@ -102,7 +109,20 @@ class BaseHandler(Generic[InT, OutT]):
             )
         return output
 
+    def process_pipeline_event(self, event: PipelineEvent) -> Iterator[Any]:
+        """Forward ordered events, allowing downstream stages to flush audio first."""
+        yield event
+
     def run(self) -> None:
+        try:
+            self._run_loop()
+        finally:
+            try:
+                self.cleanup()
+            finally:
+                self.queue_out.put(PIPELINE_END)
+
+    def _run_loop(self) -> None:
         if self.pipeline_index is not None:
             pipeline_log_ctx.set(self.pipeline_index)
         logger.debug(f"{self.__class__.__name__}: Handler thread started")
@@ -138,7 +158,8 @@ class BaseHandler(Generic[InT, OutT]):
             # Response events share the TTS queue with their audio. Forwarding
             # them here preserves the model's exact text/tool/audio order.
             if isinstance(item, PipelineEvent):
-                self.queue_out.put(cast(OutT, item))
+                for output in self.process_pipeline_event(item):
+                    self.queue_out.put(output)
                 continue
 
             start_time = perf_counter()
@@ -159,9 +180,6 @@ class BaseHandler(Generic[InT, OutT]):
                     start_time = perf_counter()
             except Exception as exc:
                 log_exception(logger, f"{self.__class__.__name__}: Error in process()", exc)
-
-        self.cleanup()
-        self.queue_out.put(PIPELINE_END)
 
     @property
     def last_time(self) -> float:

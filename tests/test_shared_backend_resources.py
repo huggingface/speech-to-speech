@@ -133,6 +133,20 @@ def test_selected_backend_shares_client_but_keeps_conversations_separate(monkeyp
     assert http_client.close_count == 1
 
 
+@pytest.mark.parametrize("backend", ["responses-api", "chat-completions"])
+def test_handler_cleanup_does_not_close_another_pipeline_client(monkeypatch, backend):
+    runtime, http_client, _ = _build(monkeypatch, backend)
+    first, second = runtime.handlers
+    try:
+        first.cleanup()
+        assert not http_client.is_closed
+        second.warmup()
+        assert http_client.close_count == 0
+    finally:
+        runtime.stop()
+    assert http_client.close_count == 1
+
+
 @pytest.mark.parametrize("work", ["prefetch", "compaction"])
 def test_shutdown_waits_for_real_background_provider_work(monkeypatch, work):
     entered, release, block = Event(), Event(), Event()

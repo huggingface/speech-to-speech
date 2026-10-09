@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.pipeline.speaker_metadata import PendingSpeakerAttribution, SpeakerAttribution
 from speech_to_speech.pipeline.transcript_logging import log_exception
+from speech_to_speech.pipeline.visemes import Viseme
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +208,7 @@ class EndOfResponse(PipelineMessage):
     status: Literal["completed", "incomplete"] = "completed"
     reason: ResponseIncompleteReason | None = None
     cleanup_only: bool = False
+    input_tool_call_ids: list[str] = Field(default_factory=list)
 
 
 # ── LMOutputProcessor → TTS ──────────────────────────────────────────
@@ -253,6 +255,7 @@ class AudioOutput(PipelineMessage):
 
     tag: Literal["audio_output"] = "audio_output"
     audio: bytes | np.ndarray
+    visemes: list[Viseme] = Field(default_factory=list)
     cancel_generation: int | None = None
     response_key: str | None = Field(default=None, exclude=True, repr=False)
     cleanup_only: bool = False
