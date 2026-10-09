@@ -848,6 +848,8 @@ class RealtimeService:
             if accounting is not None and accounting.user_item_id is not None:
                 st.runtime_config.chat.remove_user_message(accounting.user_item_id)
                 item.id = accounting.user_item_id
+            if protocol_item_id is not None:
+                item.id = protocol_item_id
             retained_item = st.runtime_config.chat.add_item(item)
             if accounting is not None:
                 accounting.user_item_id = retained_item.id

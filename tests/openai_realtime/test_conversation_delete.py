@@ -361,10 +361,23 @@ def test_openwebui_refresh_reaches_model_and_socket_stays_open(setup):
         assert ws.receive_json()["type"] == "session.updated"
 
 
-def test_direct_audio_request_preserves_wire_identity(service, conn_id):
+@pytest.mark.parametrize("automatic_response", [True, False])
+def test_direct_audio_request_preserves_wire_identity(service, conn_id, automatic_response):
     import numpy as np
 
     from speech_to_speech.pipeline.events import AudioInputCompletedEvent
+
+    if not automatic_response:
+        update = service.parse_client_event(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "realtime",
+                    "audio": {"input": {"turn_detection": {"type": "server_vad", "create_response": False}}},
+                },
+            }
+        )
+        assert service.handle_session_update(conn_id, update) is None
 
     started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="audio", turn_revision=0))
     item_id = next(e.item_id for e in started if e.type == "input_audio_buffer.speech_started")
@@ -379,7 +392,18 @@ def test_direct_audio_request_preserves_wire_identity(service, conn_id):
             turn_revision=0,
         ),
     )
-    assert service.text_prompt_queue.get_nowait().input_item_id == item_id
+    if automatic_response:
+        assert service.text_prompt_queue.get_nowait().input_item_id == item_id
+    else:
+        assert service.text_prompt_queue.empty()
+        chat = service._state(conn_id).runtime_config.chat
+        assert chat.buffer[-1].id == item_id
+        deleted = service.handle_conversation_item_delete(
+            conn_id, ConversationItemDeleteEvent(type="conversation.item.delete", item_id=item_id)
+        )
+        assert deleted[0].type == "conversation.item.deleted"
+        assert deleted[0].item_id == item_id
+        assert not chat.buffer
 
 
 def test_delete_discards_hidden_prefetch_and_late_write(service, conn_id):
