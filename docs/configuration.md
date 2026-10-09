@@ -221,7 +221,6 @@ The loader keeps these rules local rather than changing PyYAML globally.
 Invalid configuration raises `ConfigurationError`, a `ValueError` subclass.
 Errors include the file, configuration path, line, column, and correction when
 available. They omit source snippets, input values, and environment contents.
-A missing parser raises actionable `ImportError` instead.
 
 The new loader rejects `.json` with guidance to use the existing flat JSON
 interface. Existing JSON parsing, including its extra-key behavior, is unchanged.
