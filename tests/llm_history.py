@@ -3,7 +3,7 @@
 from speech_to_speech.api.openai_realtime.service import RealtimeService
 
 
-def drive_llm(handler, request):
+def drive_llm(handler, request, *, service=None, conn_id=None):
     """Yield the backend's outputs while the service applies their history.
 
     Output counts as accepted as soon as it is produced. A prefetch instead
@@ -12,8 +12,10 @@ def drive_llm(handler, request):
     history but never completed it is rolled back, as the service does when
     it cancels or fails one.
     """
-    service = RealtimeService()
-    conn_id = service.register()
+    if service is None:
+        service = RealtimeService()
+    if conn_id is None:
+        conn_id = service.register()
     state = service._state(conn_id)
     state.runtime_config = request.runtime_config
     key = request.response_key

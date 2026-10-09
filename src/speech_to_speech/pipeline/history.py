@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from threading import Event
 from typing import Iterable
 
+from openai.types.realtime.conversation_item import RealtimeConversationItemUserMessage
+
 from speech_to_speech.LLM.chat import Chat, CompactFn, SupportedItem
 
 
@@ -26,6 +28,7 @@ class ResponseHistory:
     consumed_image_ids: frozenset[str] = frozenset()
     item_order: tuple[str, ...] | None = None
     audio_history_turns: int | None = None
+    consumed_audio_items: tuple[RealtimeConversationItemUserMessage, ...] | None = None
     compactor: CompactFn | None = None
     _resolved: Event = field(default_factory=Event, repr=False, compare=False)
 
@@ -48,6 +51,7 @@ class ResponseHistory:
         consumed_image_ids: Iterable[str] = (),
         item_order: Iterable[str] | None = None,
         audio_history_turns: int | None = None,
+        consumed_audio_items: Iterable[RealtimeConversationItemUserMessage] | None = None,
         compactor: CompactFn | None = None,
     ) -> ResponseHistory:
         return cls(
@@ -59,6 +63,11 @@ class ResponseHistory:
             consumed_image_ids=frozenset(consumed_image_ids),
             item_order=tuple(item_order) if item_order is not None else None,
             audio_history_turns=audio_history_turns,
+            consumed_audio_items=(
+                tuple(item.model_copy(deep=True) for item in consumed_audio_items)
+                if consumed_audio_items is not None
+                else None
+            ),
             compactor=compactor,
         )
 
@@ -79,7 +88,7 @@ class ResponseHistory:
                 chat.order_response_items(self.item_order)
             chat.strip_images(set(self.consumed_image_ids))
             if self.audio_history_turns is not None:
-                chat.compact_audio_history(self.audio_history_turns)
+                chat.compact_audio_history(self.audio_history_turns, consumed_items=self.consumed_audio_items)
             chat.trim_if_needed(self.compactor)
             if self.input_item_id is not None:
                 chat.add_provisional_generation_items(response_key, [], committed_item_ids={self.input_item_id})

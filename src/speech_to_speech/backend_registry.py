@@ -19,6 +19,7 @@ from speech_to_speech.arguments_classes.faster_whisper_stt_arguments import (
 )
 from speech_to_speech.arguments_classes.kokoro_tts_arguments import KokoroTTSHandlerArguments
 from speech_to_speech.arguments_classes.language_model_arguments import LanguageModelHandlerArguments
+from speech_to_speech.arguments_classes.minimax_tts_arguments import MiniMaxTTSHandlerArguments
 from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import (
     MLXAudioWhisperSTTHandlerArguments,
 )
@@ -632,6 +633,18 @@ TTS_BACKENDS = build_backend_registry(
             OpenAICompatibleTTSHandlerArguments,
             _create_openai_tts,
             config_prefix="openai_tts",
+        ),
+        BackendSpec(
+            "minimax",
+            "tts",
+            MiniMaxTTSHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.TTS.minimax_tts_handler",
+                "MiniMaxTTSHandler",
+                setup_should_listen=True,
+                context_kwargs=True,
+            ),
+            config_prefix="minimax_tts",
         ),
         BackendSpec(
             "supertonic",

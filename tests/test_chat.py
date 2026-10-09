@@ -399,6 +399,28 @@ class TestAddItem:
 
     # -- User message --
 
+    @pytest.mark.parametrize("factory", [_system, _user, _assistant, _fc, _fco])
+    def test_client_item_id_is_preserved(self, factory):
+        chat = Chat(size=5)
+        if factory is _fco:
+            chat.add_item(_fc())
+        item = factory("snapshot") if factory in (_system, _user, _assistant) else factory()
+        item.id = "client_context_1"
+        assert chat.add_item(item).id == "client_context_1"
+
+    def test_client_item_id_matching_empty_history_marker_keeps_turn_order(self):
+        chat = Chat(size=5)
+        earlier_question = chat.add_item(_user("earlier question"))
+        earlier_answer = chat.add_item(_assistant("earlier answer"))
+        latest_question = _user("latest question")
+        latest_question.id = "__history_start__"
+        chat.add_item(latest_question)
+        latest_answer = _assistant("latest answer")
+
+        chat.add_item(latest_answer, after_item_id=chat.history_anchor_id())
+
+        assert chat.buffer == [earlier_question, earlier_answer, latest_question, latest_answer]
+
     def test_user_message_text_appended(self):
         chat = Chat(size=5)
         chat.add_item(_user("hi"))
@@ -512,13 +534,13 @@ class TestAddItem:
         existing = chat.add_item(_user("existing"))
         invalid_call = RealtimeConversationItemFunctionCall(
             type="function_call",
-            id="invalid",
+            id="",
             call_id="call_bad",
             name="bad",
             arguments="{}",
         )
 
-        with pytest.raises(ChatItemError, match="fc_"):
+        with pytest.raises(ChatItemError, match="ID must not be empty"):
             chat.add_provisional_generation_items(
                 "failed_response",
                 [_assistant("must roll back"), invalid_call],
@@ -848,6 +870,52 @@ class TestToTransformersChat:
         chat.buffer.append(fco)
         result = chat.to_transformers_chat()
         assert result[0]["name"] == ""
+
+    def test_adjacent_user_messages_serialize_as_one_without_changing_history(self):
+        # An interrupted or failed reply leaves user turns back to back; strict
+        # templates (Gemma, Mistral) reject that, so they render as one message.
+        chat = Chat(size=5)
+        chat.add_item(_user("Find a flight"))
+        chat.add_item(_user("Actually, a hotel"))
+        assert chat.to_transformers_chat() == [{"role": "user", "content": "Find a flight\nActually, a hotel"}]
+        assert chat.to_responses_api_chat() == [
+            {
+                "role": "user",
+                "type": "message",
+                "content": [{"type": "input_text", "text": "Find a flight\nActually, a hotel"}],
+            }
+        ]
+
+        chat.add_item(_user_msg_with_parts(("text", "look"), ("image", "http://img.png")))
+        result = chat.to_transformers_chat()
+        assert len(result) == 1
+        assert [part.get("text") for part in result[0]["content"]] == ["Find a flight\nActually, a hotel\nlook", None]
+        assert len(chat.buffer) == 3
+
+    @pytest.mark.parametrize("image_in_first_message", [False, True])
+    def test_adjacent_mixed_user_messages_preserve_text_boundary(self, image_in_first_message):
+        chat = Chat(size=5)
+        first_parts = [("text", "The access code is 12")]
+        second_parts = [("text", "34 is a different code.")]
+        if image_in_first_message:
+            first_parts.insert(0, ("image", "http://img.png"))
+        else:
+            second_parts.append(("image", "http://img.png"))
+        chat.add_item(_user_msg_with_parts(*first_parts))
+        chat.add_item(_user_msg_with_parts(*second_parts))
+        stored = [item.model_dump() for item in chat.buffer]
+
+        expected_text = "The access code is 12\n34 is a different code."
+        for messages in (chat.to_transformers_chat(), chat.to_responses_api_chat()):
+            assert len(messages) == 1
+            content = messages[0]["content"]
+            # VLM templates concatenate text blocks without adding separators.
+            assert "".join(part.get("text", "") for part in content) == expected_text
+            assert [part["type"] for part in content] == (
+                ["input_image", "input_text"] if image_in_first_message else ["input_text", "input_image"]
+            )
+            assert next(part["image_url"] for part in content if part["type"] == "input_image") == "http://img.png"
+        assert [item.model_dump() for item in chat.buffer] == stored
 
     def test_full_mixed_conversation(self):
         chat = Chat(size=10)
@@ -1511,10 +1579,13 @@ class TestTurnOrdering:
         ]
         assert _texts(chat) == ["A", "first", "second", "B"]
 
-    def test_generation_started_on_empty_history_precedes_later_speech(self):
+    @pytest.mark.parametrize("later_id", [None, "__history_start__"])
+    def test_generation_started_on_empty_history_precedes_later_speech(self, later_id):
         chat = Chat(size=5)
         anchor = chat.history_anchor_id()
-        chat.add_item(_user("B"))
+        later_user = _user("B")
+        later_user.id = later_id
+        chat.add_item(later_user)
 
         chat.add_item(_assistant("out of the blue"), after_item_id=anchor)
 

@@ -2,6 +2,7 @@ import json
 import logging
 from queue import Queue
 from threading import BoundedSemaphore, Event, Lock, Thread
+from time import sleep
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -32,6 +33,7 @@ from speech_to_speech.LLM.base_openai_compatible_language_model import WARMUP_MA
 from speech_to_speech.LLM.chat import (
     AUDIO_INPUT_HISTORY_PLACEHOLDER,
     Chat,
+    make_system_message,
     make_user_message,
 )
 from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
@@ -43,6 +45,7 @@ from speech_to_speech.pipeline.messages import (
     ResponsePrefetchTransaction,
     TokenUsage,
 )
+from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from tests.llm_history import drive_llm
 
 
@@ -606,6 +609,35 @@ def test_process_streams_text_from_response_events():
     assert isinstance(outputs[1], LLMResponseChunk) and outputs[1].text == "How are you?"
     assert all(output.selected_language == "es" for output in outputs[:2])
     assert isinstance(outputs[2], EndOfResponse)
+
+
+def test_process_records_hosted_llm_latency():
+    """`llm_ttft` must come from the first provider delta, not the first yielded
+    chunk: sentence batching holds the first chunk back until a sentence ends."""
+    handler = _make_handler()
+    tail_delay_s = 0.2
+
+    def _events():
+        # "Hello" alone does not close a sentence, so the first forwarded chunk
+        # only appears after this delay. A correct TTFT is measured before it.
+        yield _make_text_delta_event("Hello")
+        sleep(tail_delay_s)
+        yield _make_text_delta_event(". How are you?")
+        yield _make_output_item_done_event(content="Hello. How are you?")
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: _make_stream(_events())))
+    request = _make_request("Hi")
+    store = TurnLatencyStore()
+    store.get_or_create_response(request.response_key, turn_id="turn-1", turn_revision=0)
+    handler.turn_latency_store = store
+
+    list(drive_llm(handler, request))
+
+    tracker = store.get_response(request.response_key)
+    assert tracker is not None
+    assert tracker.llm_s is not None and tracker.llm_s >= tail_delay_s
+    assert tracker.llm_ttft_s is not None
+    assert tracker.llm_ttft_s < tail_delay_s
 
 
 def test_text_only_streams_raw_deltas_without_sentence_trimming():
@@ -1839,3 +1871,26 @@ def test_response_history_precedes_speech_that_arrived_during_generation():
     list(drive_llm(handler, request))
 
     assert [part.text for item in chat.buffer for part in item.content if part.text] == ["A", "answer A", "B"]
+
+
+def test_responses_backend_keeps_injected_context_with_session_instructions():
+    handler = _make_handler(stream=False)
+    captured = []
+
+    def create(**kwargs):
+        captured.append(kwargs)
+        return _make_response([])
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    request = _make_request(chat_size=10)
+    request.runtime_config.session.instructions = "SESSION INSTRUCTIONS"
+    snapshot = make_system_message("CURRENT CHAT SNAPSHOT")
+    request.runtime_config.chat.add_item(snapshot)
+
+    for _ in range(2):
+        list(drive_llm(handler, request))
+        prompt = captured[-1]["input"][0]["content"][0]["text"]
+        assert "SESSION INSTRUCTIONS" in prompt
+        assert prompt.count("CURRENT CHAT SNAPSHOT") == 1
+        assert request.runtime_config.chat.init_chat_message is snapshot
+        assert snapshot.content[0].text == "CURRENT CHAT SNAPSHOT"

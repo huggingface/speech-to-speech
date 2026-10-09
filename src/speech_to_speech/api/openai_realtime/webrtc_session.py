@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import time
 from collections.abc import Awaitable
@@ -25,8 +26,11 @@ from typing import TYPE_CHECKING, Callable, Optional
 import av
 import numpy as np
 from aioice.ice import ICE_FAILED
-from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
+from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCRtpSender, RTCSessionDescription, clock
 from aiortc.mediastreams import MediaStreamError, MediaStreamTrack
+from aiortc.rtcrtpparameters import RTCRtpCodecParameters
+from aiortc.rtcrtpsender import RTCEncodedFrame
+from aiortc.rtp import AnyRtcpPacket, RtcpRrPacket, RtcpSrPacket
 
 from speech_to_speech.api.openai_realtime.service import PIPELINE_SAMPLE_RATE
 from speech_to_speech.api.openai_realtime.transports import SessionTransport
@@ -40,6 +44,9 @@ logger = logging.getLogger(__name__)
 WEBRTC_SAMPLE_RATE = 48_000
 AUDIO_PTIME = 0.02  # 20 ms frames
 WEBRTC_FRAME_SAMPLES = int(WEBRTC_SAMPLE_RATE * AUDIO_PTIME)
+# One frame flushes Opus lookahead; four more release it through aiortc's
+# audio receiver prefetch. Stop sending after this bounded 100 ms tail.
+WEBRTC_DRAIN_FRAMES = 5
 DATA_CHANNEL_LABEL = "oai-events"
 ICE_SERVERS_ENV = "SPEECH_TO_SPEECH_ICE_SERVERS"
 ICE_GATHERING_TIMEOUT_S = 5.0
@@ -103,10 +110,10 @@ class PipelineAudioTrack(MediaStreamTrack):
 
     The send loop pushes generated audio in via ``write()`` (faster than
     real time); ``recv()`` paces delivery against the wall clock like
-    aiortc's built-in AudioStreamTrack, emitting silence when the buffer is
-    empty so the RTP stream stays continuous. ``clear()`` drops unplayed
-    audio — this is the server-side equivalent of the client's speaker
-    buffer, so barge-in must flush it for interruption to be audible.
+    aiortc's built-in AudioStreamTrack, waiting when the buffer is empty.
+    ``clear()`` drops unplayed audio — this is the server-side equivalent of
+    the client's speaker buffer, so barge-in must flush it for interruption
+    to be audible.
     """
 
     kind = "audio"
@@ -114,14 +121,29 @@ class PipelineAudioTrack(MediaStreamTrack):
     def __init__(self) -> None:
         super().__init__()
         self._buffer = bytearray()
+        self._data_available = asyncio.Event()
         self._start: Optional[float] = None
         self._timestamp = 0
+        self._samples_sent = 0
+        self._drain_remaining = 0
+        self._generation = 0
+        self._frame_generation = 0
 
     def write(self, pcm: bytes) -> None:
+        if not pcm:
+            return
         self._buffer.extend(pcm)
+        self._data_available.set()
 
     def clear(self) -> None:
         del self._buffer[:]
+        self._drain_remaining = 0
+        self._generation += 1
+        self._data_available.clear()
+
+    def stop(self) -> None:
+        super().stop()
+        self._data_available.set()
 
     @property
     def buffered_bytes(self) -> int:
@@ -131,27 +153,113 @@ class PipelineAudioTrack(MediaStreamTrack):
         if self.readyState != "live":
             raise MediaStreamError
 
-        if self._start is None:
-            self._start = time.time()
-            self._timestamp = 0
-        else:
-            self._timestamp += WEBRTC_FRAME_SAMPLES
-            wait = self._start + (self._timestamp / WEBRTC_SAMPLE_RATE) - time.time()
-            if wait > 0:
-                await asyncio.sleep(wait)
+        while True:
+            waited_for_audio = False
+            while not self._buffer and not self._drain_remaining:
+                self._data_available.clear()
+                waited_for_audio = True
+                await self._data_available.wait()
+                if self.readyState != "live":
+                    raise MediaStreamError
 
-        needed = WEBRTC_FRAME_SAMPLES * 2  # bytes of s16 mono
-        payload = bytes(self._buffer[:needed])
-        del self._buffer[: len(payload)]
-        if len(payload) < needed:
+            now = time.monotonic()
+            if self._start is None:
+                self._start = now
+                timestamp = 0
+            else:
+                timestamp = self._timestamp + WEBRTC_FRAME_SAMPLES
+                if waited_for_audio:
+                    # Suppress whole 20 ms frames (RFC 7587 section 3.1.3),
+                    # keeping the clock origin and the next frame's deadline.
+                    elapsed_frames = math.ceil((now - self._start) / AUDIO_PTIME)
+                    timestamp = max(timestamp, elapsed_frames * WEBRTC_FRAME_SAMPLES)
+                wait = self._start + timestamp / WEBRTC_SAMPLE_RATE - now
+                if wait > 0:
+                    await asyncio.sleep(wait)
+
+            if self.readyState != "live":
+                raise MediaStreamError
+            if not self._buffer and not self._drain_remaining:
+                # clear() can discard audio while the paced read is asleep.
+                continue
+
+            needed = WEBRTC_FRAME_SAMPLES * 2  # bytes of s16 mono
+            payload = bytes(self._buffer[:needed])
+            del self._buffer[: len(payload)]
+            # Drain codec lookahead and receiver prefetch before sleeping.
+            self._drain_remaining = WEBRTC_DRAIN_FRAMES if payload else self._drain_remaining - 1
             payload += b"\x00" * (needed - len(payload))
 
-        samples = np.frombuffer(payload, dtype=np.int16)
-        frame = av.AudioFrame.from_ndarray(samples[np.newaxis, :], format="s16", layout="mono")
-        frame.sample_rate = WEBRTC_SAMPLE_RATE
-        frame.pts = self._timestamp
-        frame.time_base = Fraction(1, WEBRTC_SAMPLE_RATE)
-        return frame
+            samples = np.frombuffer(payload, dtype=np.int16)
+            frame = av.AudioFrame.from_ndarray(samples[np.newaxis, :], format="s16", layout="mono")
+            frame.sample_rate = WEBRTC_SAMPLE_RATE
+            # The encoder/resampler needs contiguous input PTS. The sender
+            # applies the separate media clock to the encoded packet below.
+            frame.pts = self._samples_sent
+            frame.time_base = Fraction(1, WEBRTC_SAMPLE_RATE)
+            self._samples_sent += WEBRTC_FRAME_SAMPLES
+            self._timestamp = timestamp
+            self._frame_generation = self._generation
+            return frame
+
+
+def _configure_audio_sender(sender: RTCRtpSender, track: PipelineAudioTrack) -> None:
+    """Adapt aiortc's continuous-stream clock to suppressed audio (RFC 3550).
+
+    aiortc has no public hook for encoded timestamps or sender-report clocks.
+    Keep the adaptation on this sender; retain its codec, RTP history, RTCP
+    scheduling and shutdown. These hooks exist in aiortc 1.9 through 1.15;
+    pyproject caps aiortc below 1.16 until a newer release is checked.
+    """
+    next_encoded_frame = sender._next_encoded_frame
+    send_rtcp = sender._send_rtcp
+    last_timestamp: int | None = None
+    timestamp_origin: int | None = None
+    clock_rate = WEBRTC_SAMPLE_RATE
+    report_counts = (0, 0)
+    last_sr: tuple[int, float] | None = None
+
+    async def next_audio_frame(codec: RTCRtpCodecParameters) -> RTCEncodedFrame | None:
+        nonlocal last_timestamp, timestamp_origin, clock_rate
+        if timestamp_origin is None and last_timestamp is not None:
+            # The previous packet has been sent before this read starts.
+            timestamp_origin = (getattr(sender, "_RTCRtpSender__rtp_timestamp") - last_timestamp) & 0xFFFFFFFF
+        clock_rate = codec.clockRate
+        encoded = await next_encoded_frame(codec)
+        if encoded is not None:
+            if track._frame_generation != track._generation:
+                # An interruption happened while the executor encoded this frame.
+                return None
+            encoded.timestamp = track._timestamp * clock_rate // WEBRTC_SAMPLE_RATE
+            last_timestamp = encoded.timestamp
+        return encoded
+
+    async def send_audio_rtcp(packets: list[AnyRtcpPacket]) -> None:
+        nonlocal report_counts, last_sr
+        for index, packet in enumerate(packets):
+            if not isinstance(packet, RtcpSrPacket):
+                continue
+            count = packet.sender_info.packet_count
+            # RFC 3550 section 6.4: use RR when neither of the last two
+            # reporting intervals contained RTP, including initial silence.
+            if timestamp_origin is None or count == report_counts[0]:
+                packets[index] = RtcpRrPacket(ssrc=packet.ssrc, reports=packet.reports)
+            else:
+                assert track._start is not None
+                packet.sender_info.ntp_timestamp = clock.current_ntp_time()
+                packet.sender_info.rtp_timestamp = (
+                    timestamp_origin + int((time.monotonic() - track._start) * clock_rate)
+                ) & 0xFFFFFFFF
+                last_sr = ((packet.sender_info.ntp_timestamp >> 16) & 0xFFFFFFFF, time.time())
+            report_counts = (report_counts[1], count)
+            # aiortc updates these before calling _send_rtcp. Keep RTT replies
+            # matched to the actual most recent SR, even when sending an RR.
+            setattr(sender, "_RTCRtpSender__lsr", None if last_sr is None else last_sr[0])
+            setattr(sender, "_RTCRtpSender__lsr_time", None if last_sr is None else last_sr[1])
+        await send_rtcp(packets)
+
+    sender._next_encoded_frame = next_audio_frame  # type: ignore[method-assign]
+    sender._send_rtcp = send_audio_rtcp  # type: ignore[method-assign]
 
 
 class WebRTCSession(SessionTransport):
@@ -183,6 +291,7 @@ class WebRTCSession(SessionTransport):
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
         self._track = PipelineAudioTrack()
+        self._sender: RTCRtpSender | None = None
         self._out_resampler = PcmResampler(WEBRTC_SAMPLE_RATE)
         self._in_resampler = PcmResampler(PIPELINE_SAMPLE_RATE)
         # Data-channel messages funnel through one queue + consumer task so
@@ -195,7 +304,8 @@ class WebRTCSession(SessionTransport):
 
     def setup(self) -> None:
         """Wire aiortc event callbacks. Call before negotiate()."""
-        self._pc.addTrack(self._track)
+        self._sender = self._pc.addTrack(self._track)
+        _configure_audio_sender(self._sender, self._track)
 
         @self._pc.on("datachannel")
         def on_datachannel(dc) -> None:
@@ -306,6 +416,10 @@ class WebRTCSession(SessionTransport):
 
     def discard_pending_audio(self) -> None:
         self._track.clear()
+        if self._sender is not None:
+            # Drop codec lookahead too, so interrupted speech cannot reappear
+            # when a later response wakes the track.
+            setattr(self._sender, "_RTCRtpSender__encoder", None)
 
     # ── Internals ─────────────────────────────────
 

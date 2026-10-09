@@ -31,7 +31,7 @@ from openai.types.responses import ResponseFunctionToolCall
 import speech_to_speech.LLM.base_openai_compatible_language_model as base_mod
 import speech_to_speech.LLM.chat_completions_language_model as ccm
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
-from speech_to_speech.LLM.chat import Chat, make_user_audio_message, make_user_message
+from speech_to_speech.LLM.chat import Chat, make_system_message, make_user_audio_message, make_user_message
 from speech_to_speech.LLM.chat_completions_language_model import (
     ChatCompletionsApiModelHandler,
     _to_chat_tool_choice,
@@ -989,6 +989,22 @@ def test_out_of_band_does_not_commit_to_default_conversation():
 
 
 # ── Standalone runner (no pytest required) ────────────────────────────────────
+
+
+def test_chat_backend_keeps_injected_context_with_session_instructions():
+    handler = _make_handler(stream=False)
+    chat = Chat(10)
+    snapshot = make_system_message("CURRENT CHAT SNAPSHOT")
+    chat.add_item(snapshot)
+
+    for _ in range(2):
+        _drive(handler, chat=chat, instructions="SESSION INSTRUCTIONS")
+        prompt = handler.client.chat.completions.last_kwargs["messages"][0]["content"]
+        assert "SESSION INSTRUCTIONS" in prompt
+        assert prompt.count("CURRENT CHAT SNAPSHOT") == 1
+        assert chat.init_chat_message is snapshot
+        assert snapshot.content[0].text == "CURRENT CHAT SNAPSHOT"
+
 
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

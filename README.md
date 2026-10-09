@@ -115,11 +115,14 @@ For a browser interface, start your chosen configuration with `serve`, then foll
 
 Clients using the implemented core Realtime event set can connect. The official OpenAI Agents SDK is tested over both stock transports; see [Realtime API](#realtime-api) for the tested surface and [LLM backends](#llm-backends) for provider and local-server options.
 
+To use the server as the realtime model of a [LiveKit Agents](https://docs.livekit.io/agents/) voice agent, see the optional [LiveKit example](./demo/livekit/README.md).
+
 ## Index
 
 * [How it works](#how-it-works)
 * [Starting configurations](#quickstart)
 * [Installation](#installation)
+* [YAML configuration API](./docs/configuration.md)
 * [Offline operation](#offline-operation)
 * [Supported components](#supported-components)
 * [Commands](#commands)
@@ -164,6 +167,23 @@ The default install covers the standard realtime path:
 - local audio and realtime server modes
 
 macOS and non-macOS dependencies are resolved automatically via platform markers in `pyproject.toml`.
+
+See the [configuration guide](./docs/configuration.md) for reusable blocks,
+named pipelines, environment references, and explicit Python startup.
+The [Mac example](./example_configs/mac.yaml) runs fully locally on Apple Silicon.
+From a repository checkout, run its audio client and server together, or start
+only the server:
+
+```bash
+speech-to-speech local -f example_configs/mac.yaml
+speech-to-speech serve -f example_configs/mac.yaml --name mac
+```
+
+`local` runs one selected pipeline with the packaged loopback audio client.
+`talk -f example_configs/mac.yaml` uses only the file's client settings.
+Configured server startup currently supports one named definition per invocation; its
+`num_pipelines` controls the number of isolated instances.
+Existing Python interfaces, CLI commands, and flat JSON configuration remain available.
 
 ### CUDA Note for Qwen3-TTS
 
@@ -251,6 +271,7 @@ This installs the package in editable mode. With the environment activated, use 
 | TTS | [OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) | CUDA / Intel XPU / Apple Silicon | `omnivoice` |
 | TTS | [MMS TTS](https://huggingface.co/docs/transformers/model_doc/mms) | CUDA / CPU | built-in |
 | TTS | OpenAI-compatible `/v1/audio/speech` endpoint | local or remote HTTP server | built-in |
+| TTS | [MiniMax](https://platform.minimax.io/docs/api-reference/speech-t2a-http) | hosted HTTP streaming | built-in |
 
 Optional [streaming speaker diarization](./examples/streaming-diarization/README.md)
 adds speaker labels to transcribed turns. Enable it with `--diarization` after
@@ -846,6 +867,17 @@ For example:
 ### Generation Parameters
 
 Other generation parameters can be set using the handler prefix plus `_gen_`, for example `--stt_gen_max_new_tokens 128` or `--llm_gen_temperature 0.7`. Parameters not yet exposed can be added to the relevant arguments class.
+
+## Big Bench Audio system tests
+
+Run a pinned 40-question audio sample or all 1,000 Big Bench Audio questions
+through VAD, STT, the LLM, and TTS, with
+per-category answer accuracy, audio latency, and protocol failures in JSON reports.
+`src/speech_to_speech/evals/big_bench_audio/Dockerfile.eval` builds an image for
+local GPU runs or Hugging Face Jobs;
+`scripts/prepare_eval_space.py` optionally builds the image in a private HF Space.
+Start with four questions, then compare reports across revisions. See
+[Big Bench Audio system tests](docs/vibe-checks.md).
 
 ## Contributing
 
