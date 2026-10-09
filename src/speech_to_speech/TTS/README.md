@@ -83,10 +83,16 @@ Behavior:
 
 ### 5) KittenTTS (`--tts kitten`)
 
+Install the optional runtime:
+
+```bash
+pip install "speech-to-speech[kitten]"
+```
+
 Primary args prefix: `--kitten_*`
 
 ```bash
-python s2s_pipeline.py \
+speech-to-speech serve \
   --tts kitten \
   --kitten_device cpu \
   --kitten_voice Bruno \
@@ -94,12 +100,13 @@ python s2s_pipeline.py \
 ```
 
 Behavior:
-- Uses the KittenML backend with stream generation.
-- Defaults to CPU processing, switch to `--kitten_device cuda` if available.
-- **System Requirement**: KittenTTS relies on `phonemizer`. You MUST install `espeak-ng` on your system:
-  - **Windows**: Install the `.msi` from [eSpeak NG Releases](https://github.com/espeak-ng/espeak-ng/releases) and restart your terminal.
-  - **macOS**: `brew install espeak-ng`
-  - **Linux (Ubuntu/Debian)**: `sudo apt-get install espeak-ng`
+- Uses Kitten's English ONNX models on CPU, defaulting to the 80M-parameter mini 0.8 checkpoint.
+- The supported `kittenml` runtime loads the checkpoint's configuration and handles text splitting and voice embeddings. The extra installs the runtime's declared dependencies, including its larger model family's dependencies; this handler uses only the ONNX models.
+- Synthesizes each incoming text segment before delivering audio in fixed-size blocks. Delivery blocks do not imply incremental model generation.
+- Resamples native 24 kHz output to the pipeline's 16 kHz signed PCM audio.
+- Supports Bella, Jasper, Luna, Bruno, Rosie, Hugo, Kiki, and Leo, as well as their checkpoint voice identifiers. Realtime response voice settings override session voice settings; otherwise the configured voice is used. Unsupported overrides fall back to the configured voice.
+- The runtime bundles eSpeak NG through `espeakng-loader`; a separate system installation is not required.
+- CUDA and KittenTTS 2 models are outside this integration's scope.
 
 ### 6) Qwen3-TTS (`--tts qwen3`)
 

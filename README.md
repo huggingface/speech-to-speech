@@ -265,7 +265,7 @@ This installs the package in editable mode. With the environment activated, use 
 | LLM | [mlx-lm](https://github.com/ml-explore/mlx-lm) | Apple Silicon | built-in on macOS |
 | TTS | [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) (default) | GGML / CUDA on Linux, mlx-audio on macOS | built-in |
 | TTS | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | CUDA / CPU, Apple Silicon | `kokoro` on non-macOS; built-in on macOS |
-| TTS | [KittenTTS](https://github.com/KittenML/KittenTTS) | CUDA / CPU | `kitten` (*requires espeak-ng*) |
+| TTS | [KittenTTS](https://github.com/KittenML/KittenTTS) | CPU | `kitten` |
 | TTS | [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) | CPU / CUDA | `pocket` |
 | TTS | [ChatTTS](https://github.com/2noise/ChatTTS) | CUDA / CPU | `chattts` |
 | TTS | [OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) | CUDA / Intel XPU / Apple Silicon | `omnivoice` |
@@ -635,7 +635,7 @@ Language coverage depends on the STT and TTS backends you pick, not on the pipel
 | STT | Paraformer | Depends on the selected FunASR checkpoint; the default is Chinese-oriented |
 | TTS | Qwen3-TTS (default) | Multilingual, with `--qwen3_tts_language auto` by default |
 | TTS | Kokoro | Multiple language/voice mappings, depending on backend availability |
-| TTS | KittenTTS | Default voice (Bruno), CPU/CUDA execution |
+| TTS | KittenTTS | English |
 | TTS | ChatTTS | English and Chinese |
 | TTS | MMS TTS | Broad multilingual coverage through MMS checkpoints |
 | TTS | OmniVoice | 600+ languages; voice cloning, design, and automatic voice selection |

@@ -811,3 +811,8 @@ def test_parse_arguments_preserves_kitten_backend_options():
     assert args.tts_backend.config["model_name"] == "KittenML/kitten-tts-mini-0.8"
     assert args.tts_backend.config["voice"] == "Bella"
     assert args.tts_backend.config["device"] == "cpu"
+
+
+def test_parse_arguments_rejects_unsupported_kitten_device():
+    with pytest.raises(SystemExit):
+        parse_arguments(["--tts", "kitten", "--kitten_device", "cuda"])
