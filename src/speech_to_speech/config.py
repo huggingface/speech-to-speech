@@ -313,6 +313,35 @@ def _settings(
     return result
 
 
+def _client_settings(
+    document: ConfigDocument,
+    supplied: Any,
+    environ: Mapping[str, str] | None,
+    sources: dict[tuple[str | int, ...], str] | None = None,
+) -> dict[str, Any]:
+    path = ("runtime", "client")
+    supplied = _mapping(document, supplied, path)
+    result = _settings(
+        document,
+        {key: value for key, value in supplied.items() if key != "tool_module"},
+        _client_type(),
+        path,
+        environ,
+        sources,
+        exclude={"tool_executor"},
+    )
+    buffer = result["playback_buffer_ms"]
+    if not _is_env(buffer) and buffer < 0:
+        _error(document, (*path, "playback_buffer_ms"), "Use a finite non-negative playback buffer.")
+    tool_module = supplied.get("tool_module")
+    result["tool_module"] = _value(document, tool_module, str | None, (*path, "tool_module"), environ)
+    if sources is not None:
+        sources[(*path, "tool_module")] = (
+            "environment" if _is_env(tool_module) else "file" if "tool_module" in supplied else "default"
+        )
+    return result
+
+
 def _check_composition(
     document: ConfigDocument,
     name: str,
@@ -356,20 +385,7 @@ def validate_config(document: ConfigDocument) -> None:
     )
     _settings(document, runtime.get("server", {}), server, ("runtime", "server"), None)
     if "client" in runtime:
-        client = _mapping(document, runtime["client"], ("runtime", "client"))
-        validated_client = _settings(
-            document,
-            {key: value for key, value in client.items() if key != "tool_module"},
-            _client_type(),
-            ("runtime", "client"),
-            None,
-            exclude={"tool_executor"},
-        )
-        buffer = validated_client["playback_buffer_ms"]
-        if not _is_env(buffer) and buffer < 0:
-            _error(document, ("runtime", "client", "playback_buffer_ms"), "Use a finite non-negative playback buffer.")
-        if "tool_module" in client:
-            _value(document, client["tool_module"], str | None, ("runtime", "client", "tool_module"), None)
+        _client_settings(document, runtime["client"], None)
     blocks = _mapping(document, data.get("blocks"), ("blocks",))
     pipelines = _mapping(document, data.get("pipelines"), ("pipelines",))
     if not blocks or not pipelines:
@@ -466,28 +482,7 @@ def resolve_config(
         )
     client = None
     if include_client or client_only:
-        supplied_client = raw_runtime.get("client", {})
-        client = _settings(
-            document,
-            {key: value for key, value in supplied_client.items() if key != "tool_module"},
-            _client_type(),
-            ("runtime", "client"),
-            environment,
-            sources,
-            exclude={"tool_executor"},
-        )
-        client["tool_module"] = _value(
-            document, supplied_client.get("tool_module"), str | None, ("runtime", "client", "tool_module"), environment
-        )
-        sources[("runtime", "client", "tool_module")] = (
-            "environment"
-            if _is_env(supplied_client.get("tool_module"))
-            else "file"
-            if "tool_module" in supplied_client
-            else "default"
-        )
-        if client["playback_buffer_ms"] < 0:
-            _error(document, ("runtime", "client", "playback_buffer_ms"), "Use a finite non-negative playback buffer.")
+        client = _client_settings(document, raw_runtime.get("client", {}), environment, sources)
     resolved = {}
     from speech_to_speech.backend_registry import BackendSelection
 

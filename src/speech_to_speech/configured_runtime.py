@@ -276,7 +276,10 @@ class ConfiguredRuntime:
 def build_configured_runtime(config: ResolvedConfig, stop_event: Event) -> ConfiguredRuntime:
     """Construct independent named workers. Models can initialize before start()."""
     _validate_counts(config)
-    arguments = _adapt(config)
+    return _build_runtime(_adapt(config), stop_event)
+
+
+def _build_runtime(arguments: dict[str, ParsedArguments], stop_event: Event) -> ConfiguredRuntime:
     from speech_to_speech.s2s_pipeline import _build_pipeline_unit
 
     result = ConfiguredRuntime(stop_event)
@@ -313,13 +316,14 @@ def build_configured_server(config: ResolvedConfig, stop_event: Event, *, local:
     if len(config.pipelines) != 1:
         raise ConfigurationError("Serving requires exactly one selected pipeline definition.")
     client_config = build_configured_client(config, local=True) if local else None
-    result = build_configured_runtime(config, stop_event)
+    arguments = _adapt(config)
+    result = _build_runtime(arguments, stop_event)
     try:
         from speech_to_speech.api.openai_realtime.audio_client import RealtimeAudioClient
         from speech_to_speech.api.openai_realtime.server import RealtimeServer
         from speech_to_speech.s2s_pipeline import build_llm_proxy_config
 
-        args = next(iter(_adapt(config).values()))
+        args = next(iter(arguments.values()))
         event = result._events[0]
         result.server = RealtimeServer(
             stop_event=event,
