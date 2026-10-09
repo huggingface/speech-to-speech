@@ -50,5 +50,14 @@ class FasterWhisperSTTHandlerArguments:
     )
     faster_whisper_stt_gen_language: str = field(
         default="en",
-        metadata={"help": "The language of the speech to transcribe. Default is 'en' for English."},
+        metadata={
+            "help": (
+                "The language of the speech to transcribe. Default is 'en' for English.\n"
+                "            Use 'auto' to detect the language of each turn and forward it to "
+                "the LLM and TTS.\n"
+                "            Auto-detection requires a multilingual checkpoint: an English-only "
+                "model such as the\n"
+                "            default 'tiny.en' always resolves to English, whatever is requested."
+            )
+        },
     )

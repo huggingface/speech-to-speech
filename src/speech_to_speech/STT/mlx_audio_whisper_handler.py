@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import logging
+from time import perf_counter
 from typing import Any, Iterator, Optional
 
 import numpy as np
 from rich.console import Console
 
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
-from speech_to_speech.pipeline.messages import Transcription
+from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
+from speech_to_speech.utils.mlx_lock import MLXLockContext
 
 logger = logging.getLogger(__name__)
 
 console = Console()
+
+DEFAULT_LANGUAGE = "en"
 
 SUPPORTED_LANGUAGES = [
     "en",
@@ -46,8 +50,11 @@ class MLXAudioWhisperSTTHandler(BaseSTTHandler):
         from transformers import WhisperProcessor
 
         self.model_name = model_name
+        language = self.canonical_language(language)
         self.start_language = language
-        self.last_language = language
+        # "auto" is a request to detect, not a language code, so it must never leak into
+        # last_language -- it would fail every SUPPORTED_LANGUAGES check downstream.
+        self.last_language = language if language != "auto" else None
         self.gen_kwargs = gen_kwargs
 
         # Load the model directly
@@ -90,13 +97,42 @@ class MLXAudioWhisperSTTHandler(BaseSTTHandler):
 
         try:
             # Pre-warm the model by running a transcription
-            _ = self.model.generate(dummy_audio, verbose=False)
+            with MLXLockContext(handler_name=self.__class__.__name__):
+                _ = self.model.generate(dummy_audio, verbose=False)
             logger.info("Model warmed up and ready")
         except Exception as e:
             logger.warning(f"Warmup failed: {e}")
 
+    def _forced_language(self) -> Optional[str]:
+        """The language explicitly requested by the user, if any."""
+        if self.start_language and self.start_language != "auto":
+            return self.start_language
+        return None
+
+    def _resolve_language(self, result: Any, forced: str | None, *, update_last: bool, use_last_fallback: bool) -> str:
+        """Pick the language code to report, updating the sticky fallback on success."""
+        if forced is not None:
+            # generate() ran with this language, so it is authoritative.
+            if update_last:
+                self.last_language = forced
+            return forced
+
+        detected = getattr(result, "language", None)
+        if isinstance(detected, str) and detected:
+            if detected in SUPPORTED_LANGUAGES:
+                if update_last:
+                    self.last_language = detected
+                return detected
+            logger.warning("Detected unsupported language: %s", detected)
+
+        last_language = self.last_language if use_last_fallback else None
+        if last_language is not None and last_language in SUPPORTED_LANGUAGES:
+            return last_language
+        return DEFAULT_LANGUAGE
+
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         logger.debug("inferring mlx-audio whisper...")
+        started_at_s = perf_counter()
 
         assert isinstance(vad_audio.audio, np.ndarray), "Audio must be a numpy array"
         audio_input = vad_audio.audio.astype(np.float32)
@@ -105,51 +141,53 @@ class MLXAudioWhisperSTTHandler(BaseSTTHandler):
         gen_kwargs = {}
 
         # Add language if specified
-        if self.start_language and self.start_language != "auto":
-            gen_kwargs["language"] = self.start_language
+        selected = vad_audio.runtime_config.selected_language if vad_audio.runtime_config else None
+        forced_language = self._forced_language() if selected is None else None if selected == "auto" else selected
+        if forced_language is not None:
+            gen_kwargs["language"] = forced_language
 
         try:
-            # Generate transcription directly using model.generate
-            result = self.model.generate(audio_input, verbose=False, **gen_kwargs)
+            # MLX models share a single Metal command queue, so concurrent inference from
+            # the STT/LLM/TTS threads aborts the process with
+            # "Completed handler provided after commit call". Every other MLX path in the
+            # pipeline serializes through this lock; this one must too.
+            with MLXLockContext(handler_name=self.__class__.__name__):
+                result = self.model.generate(audio_input, verbose=False, **gen_kwargs)
 
             # Extract text from result
             pred_text = result.text.strip() if hasattr(result, "text") else str(result).strip()
-
-            # Try to detect language from result if available
-            if hasattr(result, "language"):
-                language_code = result.language
-            elif self.start_language and self.start_language != "auto":
-                language_code = self.start_language
-            else:
-                # Default to last known language or English
-                language_code = self.last_language if self.last_language else "en"
-
-            # Validate language code
-            if language_code not in SUPPORTED_LANGUAGES:
-                logger.warning(f"Detected unsupported language: {language_code}")
-                if self.last_language in SUPPORTED_LANGUAGES:
-                    language_code = self.last_language
-                else:
-                    language_code = "en"
-            else:
-                self.last_language = language_code
+            language_code = self._resolve_language(
+                result,
+                forced_language,
+                update_last=selected is None or selected == "auto",
+                use_last_fallback=selected != "auto",
+            )
 
         except Exception as e:
             logger.error(f"MLX Audio Whisper inference failed: {e}")
             pred_text = ""
-            language_code = self.last_language if self.last_language else "en"
+            language_code = forced_language or (self.last_language if selected != "auto" else None) or DEFAULT_LANGUAGE
 
         logger.debug("finished mlx-audio whisper inference")
         console.print(f"[yellow]USER: {pred_text}")
         logger.debug(f"Language Code: {language_code}")
 
-        if self.start_language == "auto":
+        if selected == "auto" or (selected is None and self.start_language == "auto"):
             language_code += "-auto"
 
+        if vad_audio.mode == "progressive":
+            yield PartialTranscription(
+                text=pred_text,
+                turn_id=vad_audio.turn_id,
+                turn_revision=vad_audio.turn_revision,
+            )
+            return
+
+        self._record_final_stt(vad_audio, perf_counter() - started_at_s)
         yield Transcription(
             text=pred_text,
             language_code=language_code,
             turn_id=vad_audio.turn_id,
             turn_revision=vad_audio.turn_revision,
-            speech_stopped_at_s=vad_audio.created_at_s,
+            speech_stopped_at_s=vad_audio.speech_end_at_s,
         )

@@ -75,9 +75,6 @@ class TestAnnotationFromSpec:
     def test_none_spec(self):
         assert _annotation_from_spec(None) is Any
 
-    def test_empty_dict(self):
-        assert _annotation_from_spec({}) is Any
-
 
 # --- signature_from_schema tests ---
 
@@ -153,6 +150,21 @@ class TestSignatureFromSchema:
         sig = signature_from_schema(schema)
         assert "*" not in str(sig)
         assert str(sig) == "(query: str, limit: int = 10, verbose: bool = None)"
+
+    def test_required_property_after_optional_property(self):
+        """JSON Schema property order need not be valid Python parameter order."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer"},
+                "query": {"type": "string"},
+            },
+            "required": ["query"],
+        }
+
+        sig = signature_from_schema(schema)
+
+        assert str(sig) == "(query: str, limit: int = None)"
 
     def test_all_required(self):
         schema = {

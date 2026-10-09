@@ -10,7 +10,7 @@ import logging
 import os
 import sys
 from threading import Event
-from typing import Iterator, Optional
+from typing import Iterator
 
 import numpy as np
 from rich.console import Console
@@ -34,7 +34,7 @@ class KittenTTSHandler(BaseHandler[TTSIn, TTSOut]):
     def setup(
         self,
         should_listen: Event,
-        model_name: Optional[str] = "KittenML/kitten-tts-mini-0.8",
+        model_name: str = "KittenML/kitten-tts-mini-0.8",
         device: str = "cpu",
         voice: str = "Bruno",
         blocksize: int = 512,
@@ -59,9 +59,7 @@ class KittenTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
             from kittentts import KittenTTS
         except ImportError as e:
-            raise ImportError(
-                "KittenTTS is required. Install with: pip install kittentts"
-            ) from e
+            raise ImportError("KittenTTS is required. Install with: pip install kittentts") from e
 
         logger.info(f"Loading KittenTTS model: {model_name} on {self.device}")
 
@@ -83,9 +81,7 @@ class KittenTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 except Exception:
                     voices_path = None
             except ImportError:
-                logger.warning(
-                    "huggingface_hub not installed; passing model_name directly to KittenTTS"
-                )
+                logger.warning("huggingface_hub not installed; passing model_name directly to KittenTTS")
 
         # Load the model
         try:
@@ -131,8 +127,7 @@ class KittenTTSHandler(BaseHandler[TTSIn, TTSOut]):
         internal_voice = self._voice_map.get(self.voice, self.voice)
         if internal_voice not in self.model.available_voices:
             logger.warning(
-                f"Voice '{self.voice}' not found. Falling back to 'Bruno'. "
-                f"Available: {self.model.available_voices}"
+                f"Voice '{self.voice}' not found. Falling back to 'Bruno'. Available: {self.model.available_voices}"
             )
             internal_voice = "expr-voice-3-m"
         self._internal_voice = internal_voice
@@ -165,7 +160,8 @@ class KittenTTSHandler(BaseHandler[TTSIn, TTSOut]):
         ):
             logger.debug(
                 "Dropping stale TTS input for turn=%s rev=%s",
-                tts_input.turn_id, tts_input.turn_revision,
+                tts_input.turn_id,
+                tts_input.turn_revision,
             )
             return
         if speculative_turns:

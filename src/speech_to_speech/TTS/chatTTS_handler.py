@@ -15,10 +15,7 @@ from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+from speech_to_speech.utils.utils import validate_device
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +26,7 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
     def setup(
         self,
         should_listen: Event,
-        device: str = "cuda",
+        device: str = "auto",
         gen_kwargs: dict[str, Any] = {},  # Unused
         stream: bool = True,
         chunk_size: int = 512,
@@ -39,9 +36,13 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.should_listen = should_listen
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
-        self.device = device
+        validate_device(device, ("cuda", "npu", "mps", "cpu"), "ChatTTS")
         self.model = ChatTTS.Chat()
-        self.model.load(compile=False)  # Doesn't work for me with True
+        # With "auto", ChatTTS picks CUDA/NPU (by free memory) or CPU; it skips MPS as slower than CPU.
+        model_device = None if device == "auto" else torch.device(device)
+        if not self.model.load(compile=False, device=model_device):  # Doesn't work for me with compile=True
+            raise RuntimeError("ChatTTS failed to load its models.")
+        self.device = str(self.model.device)
         self.chunk_size = chunk_size
         self.stream = stream
         rnd_spk_emb = self.model.sample_random_speaker()
@@ -57,22 +58,23 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         speculative_turns = getattr(self, "speculative_turns", None)
         if isinstance(tts_input, EndOfResponse):
-            if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
+            if speculative_turns and not speculative_turns.wait_for_gate(
                 tts_input.turn_id,
                 tts_input.turn_revision,
             ):
-                return
+                if tts_input.response_key is None:
+                    return
+                tts_input.cleanup_only = True
             yield AUDIO_RESPONSE_DONE
             return
 
-        if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
+        if speculative_turns and not speculative_turns.wait_for_gate(
             tts_input.turn_id,
             tts_input.turn_revision,
+            commit=True,
         ):
             logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
             return
-        if speculative_turns:
-            speculative_turns.commit(tts_input.turn_id, tts_input.turn_revision)
 
         text = tts_input.text
 
@@ -98,10 +100,19 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 ):
                     logger.info("TTS generation cancelled (interruption)")
                     return
-                if gen[0] is None or len(gen[0]) == 0:
+                if gen[0] is None:
                     return
-                audio_chunk = librosa.resample(gen[0], orig_sr=24000, target_sr=16000)
-                audio_chunk = (audio_chunk * 32768).astype(np.int16)[0]
+                # ChatTTS streams a chunk either as (samples,) or as (1, samples)
+                # depending on version. Indexing the converted array with [0] assumed
+                # the second shape and reduced the first to a single sample, so the
+                # following len() raised "object of type 'numpy.int16' has no len()".
+                chunk = np.asarray(gen[0], dtype=np.float32)
+                if chunk.ndim > 1:
+                    chunk = chunk[0]
+                if chunk.size == 0:
+                    return
+                audio_chunk = librosa.resample(chunk, orig_sr=24000, target_sr=16000)
+                audio_chunk = (audio_chunk * 32768).astype(np.int16)
                 while len(audio_chunk) > self.chunk_size:
                     yield audio_chunk[: self.chunk_size]  # Return the first chunk_size samples of the audio data
                     audio_chunk = audio_chunk[self.chunk_size :]  # Remove the samples that have already been returned

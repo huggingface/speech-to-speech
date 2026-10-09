@@ -22,17 +22,16 @@ from rich.console import Console
 from rich.text import Text
 
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
+from speech_to_speech.pipeline.language_detection import (
+    detect_language_from_text,
+    warm_language_detector,
+)
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
+from speech_to_speech.pipeline.turn_latency import bind_active_turn_latency_tracker
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 from speech_to_speech.STT.smart_progressive_streaming import PartialTranscription as ProgressiveStreamPartial
 from speech_to_speech.utils.mlx_lock import MLXLockContext
-
-try:
-    from lingua import Language, LanguageDetectorBuilder
-
-    LINGUA_AVAILABLE = True
-except ImportError:
-    LINGUA_AVAILABLE = False
+from speech_to_speech.utils.utils import resolve_device
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -66,27 +65,6 @@ SUPPORTED_LANGUAGES = [
     "lt",
 ]
 
-# Lingua uses "nb" (Bokmål) for Norwegian instead of "no"
-_LINGUA_CODE_MAP = {"no": "nb"}
-
-if LINGUA_AVAILABLE:
-    _lingua_iso_to_code = {
-        lang.iso_code_639_1.name.lower(): lang for lang in Language.all() if lang.iso_code_639_1 is not None
-    }
-    _lingua_languages = [
-        _lingua_iso_to_code[_LINGUA_CODE_MAP.get(code, code)]
-        for code in SUPPORTED_LANGUAGES
-        if _LINGUA_CODE_MAP.get(code, code) in _lingua_iso_to_code
-    ]
-
-    def _build_lingua_detector():
-        # Preloading can take multiple seconds on some hardware, including the
-        # deployed server. Pay that cost at startup instead of on the first user
-        # request, where it would look like slow STT.
-        return LanguageDetectorBuilder.from_languages(*_lingua_languages).with_preloaded_language_models().build()
-
-    _lingua_detector = _build_lingua_detector()
-
 
 class ParakeetTDTSTTHandler(BaseSTTHandler):
     """
@@ -103,7 +81,6 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         self,
         model_name: Optional[str] = None,
         device: str = "auto",
-        compute_type: str = "float16",
         language: Optional[str] = None,
         gen_kwargs: dict[str, Any] = {},
         enable_live_transcription: bool = False,
@@ -116,29 +93,26 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
             model_name: Model identifier. Defaults are:
                 - MPS: "mlx-community/parakeet-tdt-0.6b-v3"
                 - CUDA/CPU: "nvidia/parakeet-tdt-0.6b-v3"
-            device: Device to use ("auto", "cuda", "mps", "cpu")
-            compute_type: Compute precision ("float16", "float32")
-            language: Target language code (optional, model auto-detects)
+            device: Device to use ("auto", "cuda", "npu", "mps", "cpu")
+            language: Legacy language preference (ignored by Parakeet decoders)
             gen_kwargs: Additional generation kwargs
         """
         self.gen_kwargs = gen_kwargs
-        self.start_language = language
-        self.last_language = language if language else "en"
+        self.start_language = self._normalize_language(language)
+        self.last_language = None
+        if self.start_language:
+            logger.warning("Parakeet does not accept a language constraint; ignoring configured language %r", language)
+        self._language_detector = warm_language_detector(tuple(SUPPORTED_LANGUAGES))
         self.enable_live_transcription = enable_live_transcription
         self.live_transcription_update_interval = live_transcription_update_interval
         self.compute_lock = Lock()
         self.sample_rate = 16000
 
         # Determine device
-        if device == "auto":
-            if platform == "darwin":
-                self.device = "mps"
-            else:
-                import torch
-
-                self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        if device == "auto" and platform == "darwin":
+            self.device = "mps"
         else:
-            self.device = device
+            self.device = resolve_device(device, ("cuda", "npu", "mps", "cpu"), "Parakeet TDT")
 
         # Set default model based on device
         if model_name is None:
@@ -148,7 +122,6 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                 model_name = "nvidia/parakeet-tdt-0.6b-v3"
 
         self.model_name = model_name
-        self.compute_type = compute_type
 
         logger.info(f"Loading Parakeet TDT model: {model_name} on {self.device}")
 
@@ -224,10 +197,8 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                 # Convert to mx.array and call decode_chunk directly
                 audio_mx = mx.array(dummy_audio, dtype=mx.float32)
                 _ = self.model.decode_chunk(audio_mx, verbose=False)
-            elif self.backend == "nano_parakeet":
-                _ = self.model.transcribe(dummy_audio)
             else:
-                _ = self.model.transcribe([dummy_audio], batch_size=1, verbose=False)
+                _ = self.model.transcribe(dummy_audio)
 
             logger.info("Model warmed up and ready")
         except Exception as e:
@@ -243,7 +214,6 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         process_start_s = perf_counter()
         is_progressive = vad_audio.mode == "progressive"
         audio_input = vad_audio.audio
-
         # Ensure audio is float32 numpy array
         if not isinstance(audio_input, np.ndarray):
             audio_input = np.array(audio_input, dtype=np.float32)
@@ -261,112 +231,132 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                 logger.debug("Skipping stale progressive update (final audio already received)")
                 return
 
-            # Try to acquire lock with short timeout - skip if busy
+            # Try to acquire lock with short timeout - skip if busy. Bind the
+            # pending turn tracker so a failed acquire is attributed; the final
+            # transcription of the same revision reuses that slot.
+            store = getattr(self, "turn_latency_store", None)
+            tracker = store.get_or_create_for_turn(vad_audio.turn_id, vad_audio.turn_revision) if store else None
             lock_scope_start_s = perf_counter()
-            with self._compute_lock_context(handler_name="ParakeetSTT-Progressive", timeout=0.01) as acquired:
-                if acquired:
-                    try:
-                        inference_start_s = perf_counter()
-                        progressive_text = self._show_progressive_transcription(audio_input)
-                        inference_s = perf_counter() - inference_start_s
-                        if inference_s >= 0.25:
-                            logger.info(
-                                "Parakeet progressive STT timing turn=%s rev=%s audio=%.3fs age=%.3fs "
-                                "lock_scope=%.3fs inference=%.3fs chars=%d",
-                                vad_audio.turn_id,
-                                vad_audio.turn_revision,
-                                audio_duration_s,
-                                item_age_s,
-                                perf_counter() - lock_scope_start_s,
-                                inference_s,
-                                len(progressive_text),
-                            )
-                        if progressive_text:
-                            yield PartialTranscription(
-                                text=progressive_text,
-                                turn_id=vad_audio.turn_id,
-                                turn_revision=vad_audio.turn_revision,
-                            )
-                            return
-                    except Exception as e:
-                        logger.debug(f"Progressive transcription failed: {e}")
-                else:
-                    logger.debug("Skipping progressive update (compute busy)")
+            try:
+                with bind_active_turn_latency_tracker(tracker):
+                    with self._compute_lock_context(handler_name="ParakeetSTT-Progressive", timeout=0.01) as acquired:
+                        if acquired:
+                            try:
+                                inference_start_s = perf_counter()
+                                progressive_text = self._show_progressive_transcription(audio_input)
+                                inference_s = perf_counter() - inference_start_s
+                                if inference_s >= 0.25:
+                                    logger.info(
+                                        "Parakeet progressive STT timing turn=%s rev=%s audio=%.3fs age=%.3fs "
+                                        "lock_scope=%.3fs inference=%.3fs chars=%d",
+                                        vad_audio.turn_id,
+                                        vad_audio.turn_revision,
+                                        audio_duration_s,
+                                        item_age_s,
+                                        perf_counter() - lock_scope_start_s,
+                                        inference_s,
+                                        len(progressive_text),
+                                    )
+                                if progressive_text:
+                                    yield PartialTranscription(
+                                        text=progressive_text,
+                                        turn_id=vad_audio.turn_id,
+                                        turn_revision=vad_audio.turn_revision,
+                                    )
+                                    return
+                            except Exception as e:
+                                logger.debug(f"Progressive transcription failed: {e}")
+                        else:
+                            logger.debug("Skipping progressive update (compute busy)")
+            finally:
+                # Supersession can happen after the input gate, even on timeout
+                # or empty output, when no later event will consume this slot.
+                if not self._is_latest_turn_item(vad_audio, wait_for_pending_reopen=False, wait_for_stability=False):
+                    self._discard_pending_latency(vad_audio)
             return
 
         # Handle final transcription (send to LLM)
-        logger.info(
-            "Parakeet final STT start turn=%s rev=%s audio=%.3fs age=%.3fs",
-            vad_audio.turn_id,
-            vad_audio.turn_revision,
-            audio_duration_s,
-            item_age_s,
-        )
-        inference_s = 0.0
-        lock_scope_s = 0.0
-        try:
-            if self.enable_live_transcription:
-                # Mark that we're processing final audio (ignore stale progressive updates)
-                self.processing_final = True
+        store = getattr(self, "turn_latency_store", None)
+        tracker = store.get_or_create_for_turn(vad_audio.turn_id, vad_audio.turn_revision) if store else None
+        with bind_active_turn_latency_tracker(tracker):
+            logger.info(
+                "Parakeet final STT start turn=%s rev=%s audio=%.3fs age=%.3fs",
+                vad_audio.turn_id,
+                vad_audio.turn_revision,
+                audio_duration_s,
+                item_age_s,
+            )
+            inference_s = 0.0
+            lock_scope_s = 0.0
+            try:
+                if self.enable_live_transcription:
+                    # Mark that we're processing final audio (ignore stale progressive updates)
+                    self.processing_final = True
 
-            # Acquire lock with longer timeout for final transcription
-            lock_scope_start_s = perf_counter()
-            with self._compute_lock_context(handler_name="ParakeetSTT-Final", timeout=5.0) as acquired:
-                lock_scope_s = perf_counter() - lock_scope_start_s
-                if not acquired:
-                    logger.error("Failed to acquire compute lock for final transcription")
-                    pred_text = ""
-                    language_code = self.last_language
-                else:
-                    inference_start_s = perf_counter()
-                    if self.backend == "mlx":
-                        pred_text, language_code = self._process_mlx_final(audio_input)
-                    else:
-                        pred_text, language_code = self._process_nano_parakeet(audio_input)
-                    inference_s = perf_counter() - inference_start_s
+                # Acquire lock with longer timeout for final transcription
+                lock_scope_start_s = perf_counter()
+                with self._compute_lock_context(handler_name="ParakeetSTT-Final", timeout=5.0) as acquired:
                     lock_scope_s = perf_counter() - lock_scope_start_s
+                    if not acquired:
+                        logger.error("Failed to acquire compute lock for final transcription")
+                        pred_text = ""
+                    else:
+                        inference_start_s = perf_counter()
+                        if self.backend == "mlx":
+                            pred_text = self._process_mlx_final(audio_input)
+                        else:
+                            pred_text = self._process_nano_parakeet(audio_input)
+                        inference_s = perf_counter() - inference_start_s
+                        lock_scope_s = perf_counter() - lock_scope_start_s
 
-            # Validate and update language
-            if language_code and language_code in SUPPORTED_LANGUAGES:
-                self.last_language = language_code
-            else:
-                language_code = self.last_language
+                try:
+                    language_code = self._resolve_language(pred_text) if pred_text else None
+                except Exception:
+                    logger.exception("Parakeet language detection failed; leaving language unset")
+                    language_code = None
+                base_code = language_code.removesuffix("-auto") if language_code else None
+                if base_code and base_code in SUPPORTED_LANGUAGES:
+                    self.last_language = base_code
+                else:
+                    language_code = None
 
-        except Exception as e:
-            logger.error(f"Parakeet TDT inference failed: {e}")
-            pred_text = ""
-            language_code = self.last_language
+            except Exception as e:
+                logger.error(f"Parakeet TDT inference failed: {e}")
+                pred_text = ""
+                language_code = None
 
-        total_s = perf_counter() - process_start_s
-        logger.info(
-            "Parakeet final STT done turn=%s rev=%s total=%.3fs lock_scope=%.3fs inference=%.3fs chars=%d",
-            vad_audio.turn_id,
-            vad_audio.turn_revision,
-            total_s,
-            lock_scope_s,
-            inference_s,
-            len(pred_text),
-        )
-        logger.debug("Finished Parakeet TDT inference")
-        self._clear_live_transcription_line()
-        if pred_text.strip():
-            console.print(f"[yellow]USER: {pred_text.strip()}")
-            if language_code:
-                console.print(f"[dim]Language: {language_code}[/dim]")
+            total_s = perf_counter() - process_start_s
+            if tracker is not None:
+                tracker.record_stt(total_s)
+            logger.info(
+                "Parakeet final STT done turn=%s rev=%s total=%.3fs lock_scope=%.3fs inference=%.3fs chars=%d",
+                vad_audio.turn_id,
+                vad_audio.turn_revision,
+                total_s,
+                lock_scope_s,
+                inference_s,
+                len(pred_text),
+            )
+            logger.debug("Finished Parakeet TDT inference")
+            self._clear_live_transcription_line()
+            if pred_text.strip():
+                console.print(f"[yellow]USER: {pred_text.strip()}")
+                if language_code:
+                    console.print(f"[dim]Language: {language_code}[/dim]")
 
-        # Reset per-utterance live transcription state only after final STT
-        # completes. The streaming handler carries fixed sentence timing within
-        # an utterance, and stale timing must not leak into the next turn.
-        if self.enable_live_transcription:
-            self.processing_final = False
-            self._reset_live_transcription_state(clear_turn=True)
+            # Reset per-utterance live transcription state only after final STT
+            # completes. The streaming handler carries fixed sentence timing within
+            # an utterance, and stale timing must not leak into the next turn.
+            if self.enable_live_transcription:
+                self.processing_final = False
+                self._reset_live_transcription_state(clear_turn=True)
 
         yield Transcription(
             text=pred_text,
             language_code=language_code,
             turn_id=vad_audio.turn_id,
             turn_revision=vad_audio.turn_revision,
-            speech_stopped_at_s=vad_audio.created_at_s,
+            speech_stopped_at_s=vad_audio.speech_end_at_s,
         )
 
     @property
@@ -386,21 +376,21 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         Returns:
             Detected language code or None if detection fails
         """
-        if not LINGUA_AVAILABLE:
-            logger.warning("lingua-py not available, cannot detect language from text")
-            return None
+        return detect_language_from_text(text, getattr(self, "_language_detector", None))
 
-        # Skip very short utterances where language ID is still too noisy.
-        if not text or len(text.strip()) < 20:
-            return None
+    def _resolve_language(self, pred_text: str) -> Optional[str]:
+        """Report detected language as automatic; configured preferences cannot force Parakeet."""
+        detected_lang = self._detect_language_from_text(pred_text)
+        logger.debug("Parakeet detected language: %s", detected_lang)
+        return f"{detected_lang}-auto" if detected_lang else None
 
-        detected = _lingua_detector.detect_language_of(text)
-        if detected is None:
+    def _normalize_language(self, language: Optional[str]) -> Optional[str]:
+        if not isinstance(language, str):
             return None
-
-        code = detected.iso_code_639_1.name.lower()
-        # Map back lingua-specific codes to our supported codes
-        return {v: k for k, v in _LINGUA_CODE_MAP.items()}.get(code, code)
+        language = language.strip()
+        if not language or language.lower() in ("auto", "none", "null"):
+            return None
+        return language
 
     @contextmanager
     def _compute_lock_context(self, handler_name: str, timeout: float) -> Iterator[bool]:
@@ -435,6 +425,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
 
     def _show_progressive_transcription(self, audio_input: np.ndarray) -> str:
         """Run progressive transcription, print to console, and return the text."""
+        assert self.streaming_handler is not None, "Live transcription requires a streaming handler"
         result = self.streaming_handler.transcribe_incremental(audio_input)
         rich_text = Text()
         if result.fixed_text:
@@ -521,7 +512,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
             parts.append(result.active_text.strip())
         return " ".join(part for part in parts if part).strip()
 
-    def _process_mlx_final(self, audio_input: np.ndarray) -> tuple[str, str]:
+    def _process_mlx_final(self, audio_input: np.ndarray) -> str:
         """Process final audio using MLX backend with streaming handler."""
         # If we have fixed sentences from progressive updates, only transcribe the new part
         if (
@@ -544,8 +535,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                     fixed_end_sample,
                     len(audio_input),
                 )
-                pred_text, language_code = self._process_mlx(audio_input)
-                return pred_text, language_code
+                return self._process_mlx(audio_input)
 
             # Only transcribe the part after fixed sentences
             if fixed_end_sample < len(audio_input):
@@ -571,22 +561,11 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
             self.streaming_handler.reset()
         else:
             # No progressive updates, transcribe everything
-            pred_text, language_code = self._process_mlx(audio_input)
-            return pred_text, language_code
+            return self._process_mlx(audio_input)
 
-        # Determine language
-        if self.start_language and self.start_language != "auto":
-            language_code = self.start_language
-        else:
-            detected_lang = self._detect_language_from_text(pred_text)
-            if detected_lang:
-                language_code = detected_lang
-            else:
-                language_code = self.last_language
+        return pred_text
 
-        return pred_text, language_code
-
-    def _process_mlx(self, audio_input: np.ndarray) -> tuple[str, str]:
+    def _process_mlx(self, audio_input: np.ndarray) -> str:
         """Process audio using MLX backend."""
         import mlx.core as mx
 
@@ -602,36 +581,13 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         else:
             pred_text = str(result).strip()
 
-        # Determine language:
-        # 1. Use fixed language if specified by user
-        # 2. Try to detect from transcribed text using langdetect
-        # 3. Fall back to last known language
-        if self.start_language and self.start_language != "auto":
-            language_code = self.start_language
-        else:
-            # Detect language from transcribed text
-            detected_lang = self._detect_language_from_text(pred_text)
-            if detected_lang:
-                language_code = detected_lang
-            else:
-                language_code = self.last_language
+        return pred_text
 
-        return pred_text, language_code
-
-    def _process_nano_parakeet(self, audio_input: np.ndarray) -> tuple[str, str]:
+    def _process_nano_parakeet(self, audio_input: np.ndarray) -> str:
         """Process audio using nano-parakeet backend."""
         pred_text = self.model.transcribe(audio_input).strip()
 
-        if self.start_language and self.start_language != "auto":
-            language_code = self.start_language
-        else:
-            detected_lang = self._detect_language_from_text(pred_text)
-            if detected_lang:
-                language_code = detected_lang
-            else:
-                language_code = self.last_language
-
-        return pred_text, language_code
+        return pred_text
 
     def cleanup(self) -> None:
         """Clean up model resources."""
@@ -641,7 +597,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
 
     def on_session_end(self) -> None:
         super().on_session_end()
-        self.last_language = self.start_language if self.start_language else "en"
+        self.last_language = None
         if self.enable_live_transcription:
             self.processing_final = False
             self._reset_live_transcription_state(clear_turn=True)
