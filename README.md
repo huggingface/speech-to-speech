@@ -111,7 +111,7 @@ To connect an app instead of the packaged microphone client, replace `local` wit
 speech-to-speech talk --url ws://127.0.0.1:8765/v1/realtime
 ```
 
-For a browser interface, start your chosen configuration with `serve`, then follow the [browser demo setup](./demo/README.md#quick-start-local) using that running backend.
+For a browser interface, start your chosen configuration with `serve`, then follow the [browser demo setup](./demo/README.md#quick-start-local) using that running backend. For a saved chat with typed context updates during a voice call, try the optional [Open WebUI local example](./demo/openwebui/README.md).
 
 Clients using the implemented core Realtime event set can connect. The official OpenAI Agents SDK is tested over both stock transports; see [Realtime API](#realtime-api) for the tested surface and [LLM backends](#llm-backends) for provider and local-server options.
 
