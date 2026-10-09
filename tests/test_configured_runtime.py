@@ -45,6 +45,27 @@ class Handler:
         self.cleaned += 1
 
 
+def _unit(index, stop_event, handlers):
+    from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
+    from speech_to_speech.api.openai_realtime.service import RealtimeService
+    from speech_to_speech.pipeline.cancel_scope import CancelScope
+
+    prompt_queue = Queue()
+    listen = Event()
+    return PipelineUnit(
+        index=index,
+        service=RealtimeService(text_prompt_queue=prompt_queue, should_listen=listen),
+        cancel_scope=CancelScope(),
+        should_listen=listen,
+        response_playing=Event(),
+        input_queue=Queue(),
+        output_queue=Queue(),
+        text_output_queue=Queue(),
+        text_prompt_queue=prompt_queue,
+        handlers=handlers,
+    )
+
+
 @pytest.fixture
 def builder(monkeypatch):
     calls = []
@@ -53,7 +74,7 @@ def builder(monkeypatch):
         calls.append(kwargs)
         handler = Handler(kwargs["stop_event"])
         kwargs["resource_ledger"].append(handler)
-        return SimpleNamespace(index=kwargs["index"], handlers=[handler], input_queue=Queue(), output_queue=Queue())
+        return _unit(kwargs["index"], kwargs["stop_event"], [handler])
 
     monkeypatch.setattr("speech_to_speech.s2s_pipeline._build_pipeline_unit", build)
     return calls
@@ -66,7 +87,7 @@ def test_named_pools_are_independent_and_explicitly_started(config, builder, mon
     assert result.state == "constructed"
     assert list(result.pools) == ["primary", "secondary"]
     assert [u.index for pool in result.pools.values() for u in pool] == [0, 1, 2]
-    assert builder[0]["stop_event"] is builder[1]["stop_event"]
+    assert builder[0]["stop_event"] is not builder[1]["stop_event"]
     assert builder[0]["stop_event"] is not builder[2]["stop_event"]
     assert builder[0]["llm_backend"].config is not builder[1]["llm_backend"].config
     builder[0]["llm_backend"].config["gen_kwargs"]["changed"] = True
@@ -103,9 +124,9 @@ def test_modified_count_is_checked_before_allocation(config, builder, count):
     assert builder == []
 
 
-def test_server_rejects_several_definitions_before_allocation(config, builder):
+def test_local_rejects_several_definitions_before_allocation(config, builder):
     with pytest.raises(ConfigurationError):
-        runtime.build_configured_server(config, Event())
+        runtime.build_configured_server(config, Event(), local=True)
     assert builder == []
 
 
@@ -121,7 +142,7 @@ def test_construction_failure_cleans_partial_resources_in_reverse(config, monkey
         kwargs["resource_ledger"].append(handler)
         if order == 2:
             raise ValueError("SECRET_PROVIDER_TEXT")
-        return SimpleNamespace(handlers=[handler])
+        return _unit(kwargs["index"], kwargs["stop_event"], [handler])
 
     monkeypatch.setattr("speech_to_speech.s2s_pipeline._build_pipeline_unit", build)
     with pytest.raises(runtime.ConfiguredRuntimeError) as exc:
@@ -169,7 +190,7 @@ def test_bounded_stop_retains_resources_until_worker_finishes(config, monkeypatc
 
     def build(**kwargs):
         kwargs["resource_ledger"].append(handler)
-        return SimpleNamespace(handlers=[handler])
+        return _unit(kwargs["index"], kwargs["stop_event"], [handler])
 
     config.pipelines = {"secondary": config.pipelines["secondary"]}
     monkeypatch.setattr("speech_to_speech.s2s_pipeline._build_pipeline_unit", build)
@@ -346,7 +367,7 @@ def test_never_started_diarizer_worker_resets_owned_model(config, monkeypatch):
 
     def build(**kwargs):
         kwargs["resource_ledger"].append(worker)
-        return SimpleNamespace(handlers=[worker])
+        return _unit(kwargs["index"], kwargs["stop_event"], [worker])
 
     config.pipelines = {"secondary": config.pipelines["secondary"]}
     monkeypatch.setattr("speech_to_speech.s2s_pipeline._build_pipeline_unit", build)
@@ -400,7 +421,7 @@ def test_started_base_handler_cleans_when_input_gate_raises(config, monkeypatch)
         handler = FailingHandler(kwargs["stop_event"], Queue(), Queue())
         handler.queue_in.put(object())
         kwargs["resource_ledger"].append(handler)
-        return SimpleNamespace(handlers=[handler])
+        return _unit(kwargs["index"], kwargs["stop_event"], [handler])
 
     config.pipelines = {"secondary": config.pipelines["secondary"]}
     monkeypatch.setattr("speech_to_speech.s2s_pipeline._build_pipeline_unit", build)
@@ -631,3 +652,259 @@ def test_later_replica_failure_cleans_completed_viseme_handlers(config, viseme_c
     assert len(visemes) == 2
     assert cleaned == list(reversed(visemes))
     assert all(viseme.stop_event.is_set() and viseme._pending == [] for viseme in visemes)
+
+
+@pytest.mark.parametrize("failure_mode", ["exception", "exit", "stop_event"])
+def test_worker_readiness_and_replica_failure_isolation(config, monkeypatch, failure_mode):
+    triggers = [Event() for _ in range(3)]
+
+    class FailingHandler(Handler):
+        def run(self):
+            try:
+                while not self.stop_event.wait(0.01):
+                    if triggers[self.index].is_set():
+                        if failure_mode == "exception":
+                            raise RuntimeError("SECRET_WORKER_FAILURE")
+                        if failure_mode == "stop_event":
+                            self.stop_event.set()
+                        return
+            finally:
+                self.cleanup()
+
+    def build(**kwargs):
+        handler = FailingHandler(kwargs["stop_event"])
+        handler.index = kwargs["index"]
+        kwargs["resource_ledger"].append(handler)
+        return _unit(kwargs["index"], kwargs["stop_event"], [handler])
+
+    monkeypatch.setattr("speech_to_speech.s2s_pipeline._build_pipeline_unit", build)
+    result = runtime.build_configured_runtime(config, Event())
+    units = [u for pool in result.pools.values() for u in pool]
+    assert not result.ready.is_set()
+    assert not result.wait_ready(0)
+    assert [u.pipeline_name for u in units] == ["primary", "primary", "secondary"]
+    assert [u.instance_index for u in units] == [0, 1, 0]
+    assert all(u.lifecycle_state == "constructed" for u in units)
+    result.start()
+    try:
+        assert result.wait_ready(2)
+        assert all(u.healthy for u in units)
+        triggers[0].set()
+        assert units[0].stop_event.wait(2)
+        assert units[0].lifecycle_state == "failed"
+        assert result.ready.is_set()
+        assert units[1].healthy and units[2].healthy
+        triggers[1].set()
+        assert units[1].stop_event.wait(2)
+        for _ in range(100):
+            if not result.ready.is_set():
+                break
+            Event().wait(0.01)
+        assert not result.ready.is_set()
+        assert units[2].healthy
+        assert result.state == "running"
+    finally:
+        result.stop()
+    assert all(u.stop_event.is_set() for u in units)
+
+
+def test_server_readiness_requires_listener_startup(config, builder, monkeypatch):
+    result = runtime.build_configured_server(config, Event())
+    server = result.server
+    release_listener = Event()
+
+    def serve():
+        release_listener.wait()
+        if not server.stop_event.is_set():
+            server.ready.set()
+        server.stop_event.wait()
+
+    monkeypatch.setattr(server, "run", serve)
+    result.start()
+    try:
+        assert not result.wait_ready(0.05)
+        release_listener.set()
+        assert result.wait_ready(2)
+        assert len(server.pipeline_pools["primary"]) == 2
+        assert len(server.pipeline_pools["secondary"]) == 1
+        assert server.pool == [u for pool in result.pools.values() for u in pool]
+    finally:
+        release_listener.set()
+        result.stop()
+    assert not result.ready.is_set()
+
+
+def test_pipeline_unit_health_failure_is_atomic_and_irreversible():
+    unit = _unit(0, Event(), [])
+    unit.stop_event = Event()
+    called = []
+    unit.on_failure = lambda failed: called.append(failed)
+    assert unit.healthy and unit.available
+    unit.mark_failed()
+    unit.mark_failed()
+    assert unit.lifecycle_state == "failed"
+    assert unit.stop_event.is_set()
+    assert not unit.healthy and not unit.available
+    assert called == [unit]
+
+
+@pytest.mark.parametrize(
+    "base,expected",
+    [
+        ("ws://example.test/v1/realtime", "ws://example.test/v1/pipelines/primary/realtime"),
+        ("  ws://example.test/v1/realtime  ", "ws://example.test/v1/pipelines/primary/realtime"),
+        (
+            "wss://example.test/gateway/pipelines/tenant/v1/realtime",
+            "wss://example.test/gateway/pipelines/tenant/v1/pipelines/primary/realtime",
+        ),
+        ("wss://example.test/gateway/v1/realtime", "wss://example.test/gateway/v1/pipelines/primary/realtime"),
+        ("https://example.test/api/realtime", "https://example.test/api/pipelines/primary/realtime"),
+        ("ws://example.test/v1/pipelines/primary/realtime", "ws://example.test/v1/pipelines/primary/realtime"),
+    ],
+)
+def test_configured_client_named_url_preserves_model_and_base(config, base, expected):
+    config.client.update(url=base, model="same-model")
+    client = runtime.build_configured_client(config, pipeline_name="primary")
+    assert client.url == expected
+    assert client.model == "same-model"
+    assert config.client["url"] == base
+
+
+@pytest.mark.parametrize(
+    "name,url",
+    [
+        ("unknown", "ws://example.test/v1/realtime"),
+        ("primary", "ws://example.test/v1/pipelines/secondary/realtime"),
+        ("", "ws://example.test/v1/realtime"),
+    ],
+)
+def test_configured_client_rejects_unknown_or_conflicting_name(config, name, url):
+    config.client["url"] = url
+    with pytest.raises(ConfigurationError):
+        runtime.build_configured_client(config, pipeline_name=name)
+
+
+def test_real_listener_readiness_and_bind_failure(config, builder):
+    import socket
+
+    config.runtime["server"]["port"] = 0
+    result = runtime.build_configured_server(config, Event())
+    result.start()
+    try:
+        assert result.wait_ready(5)
+        assert result.server.ready.is_set()
+    finally:
+        result.stop()
+    assert not result.ready.is_set()
+    with socket.socket() as blocker:
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen()
+        config.runtime["server"]["port"] = blocker.getsockname()[1]
+        failed = runtime.build_configured_server(config, Event())
+        try:
+            failed.start()
+            assert not failed.wait_ready(0.1)
+            with pytest.raises(runtime.ConfiguredRuntimeError):
+                failed.wait()
+        finally:
+            failed.stop()
+        assert failed.state == "failed"
+
+
+@pytest.mark.asyncio
+async def test_named_websocket_transport_reports_unexpected_send_failure():
+    from starlette.websockets import WebSocketState
+
+    from speech_to_speech.api.openai_realtime.transports import WebSocketTransport
+
+    async def send_json(_event):
+        raise OSError("transport failed")
+
+    websocket = SimpleNamespace(application_state=WebSocketState.CONNECTED, send_json=send_json)
+    transport = WebSocketTransport(websocket, raise_errors=True)
+    event = SimpleNamespace(model_dump=lambda: {})
+    with pytest.raises(OSError):
+        await transport.send_events([event])
+
+
+@pytest.mark.parametrize("name", ["", 4, "bad/name", "bad{name}", "a" * 65])
+def test_server_rejects_invalid_pipeline_identifiers(name):
+    from speech_to_speech.api.openai_realtime.server import RealtimeServer
+
+    unit = _unit(0, Event(), [])
+    with pytest.raises(ValueError, match="identifiers"):
+        RealtimeServer(Event(), [unit], pipeline_pools={name: [unit]})
+
+
+def test_worker_initial_failure_stops_complete_activation(config, monkeypatch):
+    class InitialFailure(Handler):
+        def run(self):
+            try:
+                raise RuntimeError("SECRET_INITIAL_FAILURE")
+            finally:
+                self.cleanup()
+
+    owned = []
+
+    def build(**kwargs):
+        handler = InitialFailure(kwargs["stop_event"])
+        owned.append(handler)
+        kwargs["resource_ledger"].append(handler)
+        return _unit(kwargs["index"], kwargs["stop_event"], [handler])
+
+    monkeypatch.setattr("speech_to_speech.s2s_pipeline._build_pipeline_unit", build)
+    result = runtime.build_configured_runtime(config, Event())
+    try:
+        with pytest.raises(runtime.ConfiguredRuntimeError, match="startup"):
+            result.start()
+        assert not result.wait_ready(0)
+    finally:
+        result.stop()
+    assert all(handler.cleaned == 1 for handler in owned)
+    assert result.pools == {}
+
+
+@pytest.mark.parametrize("proxy_mode", ["legacy", "partial", "empty"])
+def test_server_rejects_incompatible_named_proxy_configuration(proxy_mode):
+    from speech_to_speech.api.openai_realtime.server import RealtimeServer
+
+    units = [_unit(index, Event(), []) for index in range(2)]
+    kwargs = {"pipeline_pools": {"primary": [units[0]], "secondary": [units[1]]}}
+    if proxy_mode == "legacy":
+        kwargs["llm_proxy_config"] = SimpleNamespace()
+    else:
+        kwargs["llm_proxy_configs"] = {"primary": None} if proxy_mode == "partial" else {}
+    with pytest.raises(ValueError, match="proxy"):
+        RealtimeServer(Event(), units, **kwargs)
+
+
+def test_stop_cannot_leave_delayed_readiness_published():
+    from threading import Thread
+
+    entered, release = Event(), Event()
+
+    class DelayedReady(Event):
+        def set(self):
+            entered.set()
+            assert release.wait(2)
+            super().set()
+
+    result = runtime.ConfiguredRuntime(Event())
+    result.pools = {"primary": [_unit(0, Event(), [])]}
+    result.state = "running"
+    result.ready = DelayedReady()
+    updater = Thread(target=result._update_ready)
+    stopper = Thread(target=result.stop)
+    updater.start()
+    try:
+        assert entered.wait(2)
+        stopper.start()
+        stopper.join(0.05)
+    finally:
+        release.set()
+        updater.join(2)
+        if stopper.ident is not None:
+            stopper.join(2)
+    assert not updater.is_alive() and not stopper.is_alive()
+    assert result.state == "stopped"
+    assert not result.ready.is_set()

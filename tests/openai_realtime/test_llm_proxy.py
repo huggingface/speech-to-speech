@@ -589,3 +589,94 @@ class TestUpstreamErrorPassthrough:
             r = client.post("/v1/chat/completions", json=CHAT_BODY)
         assert r.status_code == status
         assert r.json() == {"error": {"message": "upstream says no", "type": "boom"}}
+
+
+@pytest.mark.parametrize(
+    "backend, suffix",
+    [
+        ("chat-completions", "/chat/completions"),
+        ("responses-api", "/responses"),
+    ],
+)
+def test_named_proxy_keeps_provider_path_and_shares_alias_usage(upstream, backend, suffix):
+    from fastapi import FastAPI
+
+    from speech_to_speech.api.openai_realtime.llm_proxy import LLMProxyUsage, mount_llm_proxy
+
+    app = FastAPI()
+    usage = LLMProxyUsage()
+    config = LLMProxyConfig(
+        enabled=True,
+        llm_backend=backend,
+        upstream_base_url=upstream.base_url,
+        upstream_api_key="test-key",
+        model_name="provider-model",
+    )
+    upstream.responder = lambda request: (200, {"usage": {"input_tokens": 3, "output_tokens": 5}})
+    assert mount_llm_proxy(app, config, route_prefix="/v1/pipelines/primary", usage=usage) is usage
+    assert mount_llm_proxy(app, config, usage=usage) is usage
+    with TestClient(app) as client:
+        for prefix in ["/v1/pipelines/primary", "/v1"]:
+            assert client.post(prefix + suffix, json={"model": "client-model", "store": True}).status_code == 200
+    assert [request["path"] for request in upstream.requests] == ["/v1" + suffix] * 2
+    assert all(request["body"]["model"] == "provider-model" for request in upstream.requests)
+    if backend == "responses-api":
+        assert all(request["body"]["store"] is False for request in upstream.requests)
+    assert usage.requests == 2
+    assert usage.input_tokens == 6
+    assert usage.output_tokens == 10
+
+
+def test_named_proxy_disabled_and_wrong_operation_remain_unavailable(upstream):
+    from fastapi import FastAPI
+
+    from speech_to_speech.api.openai_realtime.llm_proxy import mount_llm_proxy
+
+    app = FastAPI()
+    mount_llm_proxy(app, None, route_prefix="/v1/pipelines/disabled")
+    mount_llm_proxy(
+        app,
+        LLMProxyConfig(enabled=True, llm_backend="responses-api", upstream_base_url=upstream.base_url),
+        route_prefix="/v1/pipelines/primary",
+    )
+    with TestClient(app) as client:
+        for path in [
+            "/v1/pipelines/disabled/responses",
+            "/v1/pipelines/disabled/chat/completions",
+            "/v1/pipelines/primary/chat/completions",
+        ]:
+            assert client.post(path, json={}).status_code == 501
+    assert upstream.requests == []
+
+
+@pytest.mark.parametrize(
+    "backend, suffix",
+    [
+        ("chat-completions", "/chat/completions"),
+        ("responses-api", "/responses"),
+    ],
+)
+def test_named_proxy_stream_preserves_bytes_provider_prefix_and_usage(upstream, backend, suffix):
+    from fastapi import FastAPI
+
+    from speech_to_speech.api.openai_realtime.llm_proxy import mount_llm_proxy
+
+    frames = [b'data: {"usage":{"input_tokens":7,"output_tokens":2}}\n\n', b"data: [DONE]\n\n"]
+    upstream.responder = lambda request: SSEScript(frames=[(0.0, frame) for frame in frames])
+    app = FastAPI()
+    config = _proxy_config(upstream, llm_backend=backend, upstream_base_url=upstream.base_url + "/provider-prefix")
+    usage = mount_llm_proxy(app, config, route_prefix="/v1/pipelines/primary")
+    with TestClient(app) as client:
+        with client.stream("POST", "/v1/pipelines/primary" + suffix, json={"stream": True, "store": True}) as response:
+            assert response.status_code == 200
+            assert b"".join(response.iter_raw()) == b"".join(frames)
+    (request,) = upstream.requests
+    assert request["path"] == "/v1/provider-prefix" + suffix
+    if backend == "responses-api":
+        assert request["body"]["store"] is False
+        assert "stream_options" not in request["body"]
+    else:
+        assert request["body"]["stream_options"] == {"include_usage": True}
+    assert usage.requests == 1
+    assert usage.input_tokens == 7
+    assert usage.output_tokens == 2
