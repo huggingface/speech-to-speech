@@ -780,7 +780,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         state = _GenState(history_items=[input_history] if input_history is not None else [])
         error_message: str | None = None
         generation_completed = False
-        history: ResponseHistory | None = None
+        history = (
+            None
+            if is_out_of_band(turn.response)
+            else ResponseHistory.capture(original_chat, [], after_item_id=turn.history_anchor_id)
+        )
         provider_request_started = False
         consumed_image_ids: set[str] = set()
         store = getattr(self, "turn_latency_store", None)

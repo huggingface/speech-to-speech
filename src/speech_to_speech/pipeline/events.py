@@ -215,6 +215,9 @@ class ResponseFailedEvent(PipelineEvent):
     ``status="failed"`` instead of the usual ``completed``.
     """
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    history: ResponseHistory | None = Field(default=None, exclude=True, repr=False)
+
     type: Literal["response_failed"] = "response_failed"
     message: str = ""
     turn_id: str | None = None

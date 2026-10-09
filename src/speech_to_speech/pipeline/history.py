@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from threading import Event
 from typing import Iterable
 
 from speech_to_speech.LLM.chat import Chat, CompactFn, SupportedItem
@@ -26,6 +27,14 @@ class ResponseHistory:
     item_order: tuple[str, ...] | None = None
     audio_history_turns: int | None = None
     compactor: CompactFn | None = None
+    _resolved: Event = field(default_factory=Event, repr=False, compare=False)
+
+    def resolve(self) -> None:
+        """Release the model worker after the service writes or rejects history."""
+        self._resolved.set()
+
+    def wait_until_resolved(self, timeout: float) -> bool:
+        return self._resolved.wait(timeout)
 
     @classmethod
     def capture(
@@ -59,11 +68,10 @@ class ResponseHistory:
             response_key,
             [item.model_copy(deep=True) for item in self.items[start:]],
             after_item_id=after_item_id or self.after_item_id,
-            committed_item_ids={self.input_item_id} if self.complete and self.input_item_id else None,
         )
 
-    def clean_up(self) -> None:
-        """Apply the terminal cleanup policy, undoing all of it on failure."""
+    def clean_up(self, response_key: str) -> None:
+        """Apply terminal cleanup, then make the input permanent on success."""
         chat = self.chat
         snapshot = chat.snapshot_history_cleanup()
         try:
@@ -73,6 +81,8 @@ class ResponseHistory:
             if self.audio_history_turns is not None:
                 chat.compact_audio_history(self.audio_history_turns)
             chat.trim_if_needed(self.compactor)
+            if self.input_item_id is not None:
+                chat.add_provisional_generation_items(response_key, [], committed_item_ids={self.input_item_id})
         except Exception:
             chat.restore_history_cleanup(snapshot)
             raise

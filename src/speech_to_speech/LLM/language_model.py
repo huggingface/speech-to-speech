@@ -623,7 +623,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         # survives (it is not in this serialized snapshot).
         consumed_image_ids = active_chat.image_message_ids()
         generation_completed = False
-        history: ResponseHistory | None = None
+        history = None if out_of_band else ResponseHistory.capture(original_chat, [], after_item_id=history_anchor_id)
 
         try:
             store = getattr(self, "turn_latency_store", None)
@@ -712,6 +712,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 # finally block, so publish failure before yielding it.
                 request.prefetch_transaction.discard()
             yield EndOfResponse(
+                history=history,
                 turn_id=ctx.turn_id,
                 turn_revision=ctx.turn_revision,
                 cancel_generation=ctx.cancel_generation,

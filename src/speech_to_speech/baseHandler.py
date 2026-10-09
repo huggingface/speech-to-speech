@@ -13,7 +13,13 @@ import numpy as np
 from speech_to_speech.pipeline.control import PipelineControlMessage, is_control_message, SESSION_END
 from speech_to_speech.pipeline.events import PipelineEvent, TokenUsageEvent
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
-from speech_to_speech.pipeline.messages import PIPELINE_END, AudioOutput, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.messages import (
+    PIPELINE_END,
+    AudioOutput,
+    EndOfResponse,
+    GenerateResponseRequest,
+    TTSInput,
+)
 from speech_to_speech.pipeline.transcript_logging import log_exception
 
 logger = logging.getLogger(__name__)
@@ -106,6 +112,7 @@ class BaseHandler(Generic[InT, OutT]):
         if self.pipeline_index is not None:
             pipeline_log_ctx.set(self.pipeline_index)
         logger.debug(f"{self.__class__.__name__}: Handler thread started")
+        pending_history: EndOfResponse | None = None
         while not self.stop_event.is_set():
             try:
                 # Use timeout to check stop_event periodically
@@ -114,6 +121,7 @@ class BaseHandler(Generic[InT, OutT]):
                 continue
 
             if isinstance(item, PipelineControlMessage) and is_control_message(item, SESSION_END.kind):
+                pending_history = None
                 logger.debug(f"{self.__class__.__name__}: session end received")
                 try:
                     self.on_session_end()
@@ -132,6 +140,30 @@ class BaseHandler(Generic[InT, OutT]):
                 continue
 
             typed_item = cast(InT, item)
+            if isinstance(item, GenerateResponseRequest) and pending_history is not None:
+                history = pending_history.history
+                cancel_scope = getattr(self, "cancel_scope", None)
+                tracker = getattr(self, "speculative_turns", None)
+                # Read the next request only after the service decides the
+                # previous history. Logical completion bypasses slow TTS.
+                while history is not None and history.chat is item.runtime_config.chat:
+                    if self.stop_event.is_set():
+                        break
+                    if (
+                        cancel_scope is not None
+                        and pending_history.cancel_generation is not None
+                        and cancel_scope.is_stale(pending_history.cancel_generation)
+                    ):
+                        break
+                    if tracker is not None and not tracker.is_latest(
+                        pending_history.turn_id, pending_history.turn_revision
+                    ):
+                        break
+                    if history.wait_until_resolved(0.05):
+                        break
+                pending_history = None
+                if self.stop_event.is_set():
+                    break
             if not self.should_process_input(typed_item):
                 continue
 
@@ -156,6 +188,8 @@ class BaseHandler(Generic[InT, OutT]):
                         self.output_for_queue(output, typed_item),
                     )
                     self.queue_out.put(queued_output)
+                    if isinstance(typed_item, GenerateResponseRequest) and isinstance(queued_output, EndOfResponse):
+                        pending_history = queued_output
                     start_time = perf_counter()
             except Exception as exc:
                 log_exception(logger, f"{self.__class__.__name__}: Error in process()", exc)

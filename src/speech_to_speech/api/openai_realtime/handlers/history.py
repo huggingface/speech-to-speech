@@ -5,7 +5,11 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
-from speech_to_speech.pipeline.events import ResponseGenerationDoneEvent
+from speech_to_speech.pipeline.events import (
+    AssistantResponseDoneEvent,
+    ResponseFailedEvent,
+    ResponseGenerationDoneEvent,
+)
 from speech_to_speech.pipeline.speculative_turns import TurnGateAction
 
 if TYPE_CHECKING:
@@ -67,8 +71,11 @@ class HistoryHandler(RealtimeBaseHandler):
             return
         state = self._responses.setdefault((conn_id, key), _ResponseHistoryState())
         state.rejected = True
+        proposal = state.proposal
         state.proposal = None
         st.runtime_config.chat.rollback_provisional_generation(key)
+        if proposal is not None:
+            proposal.resolve()
 
     def finalize(self, conn_id: str, key: str | None) -> None:
         """Make a completed response's history permanent."""
@@ -78,31 +85,51 @@ class HistoryHandler(RealtimeBaseHandler):
         """Forget a closed response and undo any history it did not finalize."""
         if key is None:
             return
-        self._responses.pop((conn_id, key), None)
+        state = self._responses.pop((conn_id, key), None)
         self._state(conn_id).runtime_config.chat.rollback_provisional_generation(key)
+        if state is not None and state.proposal is not None:
+            state.proposal.resolve()
 
     def close_session(self, conn_id: str) -> None:
         for owner, key in tuple(self._responses):
             if owner == conn_id:
+                proposal = self._responses[(owner, key)].proposal
+                if proposal is not None:
+                    proposal.resolve()
                 del self._responses[(owner, key)]
 
     def _keep(self, conn_id: str, event: object) -> tuple[str, _ResponseHistoryState] | None:
         key = getattr(event, "response_key", None)
+        proposal: ResponseHistory | None = getattr(event, "history", None)
         st = self._state(conn_id)
         if key is None or key in st.closed_response_keys:
+            if proposal is not None:
+                proposal.resolve()
             return None
-        if isinstance(event, ResponseGenerationDoneEvent) and not event.succeeded:
+        if (
+            isinstance(event, ResponseGenerationDoneEvent)
+            and not event.succeeded
+            or isinstance(event, AssistantResponseDoneEvent)
+            and event.status == "incomplete"
+            or isinstance(event, ResponseFailedEvent)
+        ):
             self.reject(conn_id, key)
+            if proposal is not None:
+                proposal.resolve()
             return None
-        proposal: ResponseHistory | None = getattr(event, "history", None)
         if proposal is None or proposal.chat is not st.runtime_config.chat:
+            if proposal is not None:
+                proposal.resolve()
             return None  # Late output from a released session must not write a new chat.
         state = self._responses.setdefault((conn_id, key), _ResponseHistoryState())
         if state.rejected:
+            proposal.resolve()
             return None
         held = state.proposal
         if held is None or (len(proposal.items), proposal.complete) > (len(held.items), held.complete):
             state.proposal = proposal
+        elif state.done:
+            proposal.resolve()
         prefetch = st.tool_followup_prefetch_request
         if (
             proposal.complete
@@ -128,16 +155,15 @@ class HistoryHandler(RealtimeBaseHandler):
         if proposal is None or state.rejected or state.done:
             return
         try:
-            # A complete proposal is written even with no new items: it
-            # commits the input item that earlier tool prefixes left reversible.
-            if state.written < len(proposal.items) or proposal.complete:
+            if state.written < len(proposal.items):
                 written = proposal.write(key, state.written, state.last_item_id)
                 state.written = len(proposal.items)
                 if written:
                     state.last_item_id = written[-1].id
             if proposal.complete:
-                proposal.clean_up()
+                proposal.clean_up(key)
                 state.done = True
+                proposal.resolve()
         except Exception as exc:
             self.reject(conn_id, key)
             raise HistoryCommitError(f"Language model history commit failed: {exc}") from exc

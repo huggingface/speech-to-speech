@@ -21,13 +21,13 @@ def drive_llm(handler, request):
         service.history.accept(conn_id, key)
     else:
         state.tool_followup_prefetch_request = request
-    proposals = []
+    proposal = None
     try:
         for output in handler.process(request):
             service.history.stage(conn_id, output)
             if getattr(output, "history", None) is not None:
-                proposals.append(output.history)
+                proposal = output.history
             yield output
     finally:
-        if request.prefetch_transaction is None and proposals and not proposals[-1].complete:
+        if request.prefetch_transaction is None and proposal is not None and not proposal.complete:
             service.history.close(conn_id, key)

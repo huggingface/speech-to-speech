@@ -180,6 +180,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 self._tts_runtime_config.last_assistant_language = self._detected_assistant_language
             if lm_output.error:
                 yield ResponseFailedEvent(
+                    history=lm_output.history,
                     message=lm_output.error,
                     turn_id=lm_output.turn_id,
                     turn_revision=lm_output.turn_revision,

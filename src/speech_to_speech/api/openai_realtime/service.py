@@ -596,6 +596,9 @@ class RealtimeService:
                 return []
 
         if self._is_stale_turn_event(event):
+            history = getattr(event, "history", None)
+            if history is not None:
+                history.resolve()
             if isinstance(event, (TranscriptionCompletedEvent, TranscriptionFailedEvent)):
                 self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
             logger.info(
