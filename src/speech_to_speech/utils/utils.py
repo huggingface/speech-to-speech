@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib.util
+import logging
 import uuid
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
@@ -61,6 +63,41 @@ def is_npu_available() -> bool:
 TORCH_DEVICES = ("cuda", "npu", "xpu", "mps", "cpu")
 
 
+logger = logging.getLogger(__name__)
+
+# ROCm builds of PyTorch expose AMD GPUs through the ``torch.cuda`` namespace, so
+# ``rocm`` and ``hip`` are accepted as spellings of ``cuda`` on the command line.
+_DEVICE_ALIASES = {"rocm": "cuda", "hip": "cuda"}
+
+
+def is_rocm() -> bool:
+    """Whether the installed PyTorch is a ROCm (HIP) build."""
+    import torch
+
+    return bool(getattr(torch.version, "hip", None))
+
+
+def normalize_device(device: str) -> str:
+    """Map ``rocm``/``hip`` (with an optional ``:index``) to the ``cuda`` device PyTorch uses on ROCm."""
+    device_type, sep, index = device.partition(":")
+    alias = _DEVICE_ALIASES.get(device_type.lower())
+    return f"{alias}{sep}{index}" if alias else device
+
+
+def resolve_attn_implementation(requested: str, device: str) -> str:
+    """Fall back from ``flash_attention_2`` to ``sdpa`` when the flash-attn package is not installed.
+
+    flash-attn ships CUDA wheels only; ROCm needs its own build, and CPU never has it.
+    PyTorch SDPA dispatches to its own fused kernels on CUDA and ROCm, so it is the safe default.
+    """
+    if requested != "flash_attention_2":
+        return requested
+    if device.split(":", 1)[0] == "cuda" and importlib.util.find_spec("flash_attn") is not None:
+        return requested
+    logger.warning("flash_attention_2 is unavailable on %s%s; using sdpa.", device, " (ROCm)" if is_rocm() else "")
+    return "sdpa"
+
+
 def _is_device_available(device_type: str) -> bool:
     # torch is imported here rather than at module level: this module is also
     # used by lightweight paths (CLI, Realtime API, LLM helpers) that never
@@ -80,12 +117,14 @@ def _is_device_available(device_type: str) -> bool:
 
 def validate_device(device: str, supported: Sequence[str], component: str) -> None:
     """Raise unless ``device`` is ``auto`` or one of the ``supported`` device types (``cuda:1`` counts as ``cuda``)."""
+    device = normalize_device(device)
     if device != "auto" and device.split(":", 1)[0] not in supported:
         raise ValueError(f"{component} supports device 'auto' or one of: {', '.join(supported)}; got {device!r}.")
 
 
 def resolve_device(device: str, supported: Sequence[str], component: str) -> str:
     """Turn ``auto`` into the first available of ``supported``; keep a supported explicit choice as is."""
+    device = normalize_device(device)
     validate_device(device, supported, component)
     if device != "auto":
         return device
