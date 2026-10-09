@@ -6,6 +6,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from speech_to_speech.config import ConfigDocument, ConfigurationError
 
 _MAX_BYTES = 1024 * 1024
@@ -13,11 +15,6 @@ _MAX_DEPTH = 32
 
 
 def read_document(path: Path) -> ConfigDocument:
-    try:
-        import yaml
-    except ImportError:
-        raise ImportError('YAML configuration requires `pip install "speech-to-speech[config]"`.') from None
-
     def fail(message: str, mark: Any = None) -> None:
         location = f"{path}"
         if mark is not None:

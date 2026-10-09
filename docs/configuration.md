@@ -1,20 +1,11 @@
 # YAML configuration and startup
 
-The optional configuration API loads, validates, and resolves reusable blocks
+The configuration API loads, validates, and resolves reusable blocks
 and named pipelines from a local YAML file. These offline operations do not
 construct handlers, download models, call providers, access audio devices, or
 start workers and listeners. Explicit runtime construction and CLI file mode
 can start the configured pipeline. Existing Python interfaces, CLI commands,
 and flat JSON input keep their existing behavior.
-
-Install the YAML parser:
-
-```bash
-pip install "speech-to-speech[config]"
-```
-
-Importing `speech_to_speech.config` does not require the parser. Loading YAML
-without the optional dependency raises `ImportError` with installation guidance.
 
 Set `enable_visemes`, `stv_model_name`, and `stv_device` under each pipeline's `options`.
 These fields use the existing viseme argument defaults.
@@ -236,7 +227,6 @@ The loader keeps these rules local rather than changing PyYAML globally.
 Invalid configuration raises `ConfigurationError`, a `ValueError` subclass.
 Errors include the file, configuration path, line, column, and correction when
 available. They omit source snippets, input values, and environment contents.
-A missing parser raises actionable `ImportError` instead.
 
 The new loader rejects `.json` with guidance to use the existing flat JSON
 interface. Existing JSON parsing, including its extra-key behavior, is unchanged.

@@ -17,7 +17,7 @@ jobs:
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "latest"
-      - run: uv sync --group dev --extra config
+      - run: uv sync --group dev
       - name: Ruff check
         run: uv run ruff check src/ tests/
       - name: Ruff format
@@ -32,7 +32,7 @@ jobs:
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "latest"
-      - run: uv sync --group dev --extra config
+      - run: uv sync --group dev
       - name: Mypy
         run: uv run mypy src/
 
@@ -45,7 +45,7 @@ jobs:
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "latest"
-      - run: uv sync --group dev --extra config
+      - run: uv sync --group dev
       - name: NLTK data (punkt_tab for sent_tokenize)
         run: uv run python -c "import nltk; nltk.download('punkt_tab')"
       - name: Pytest

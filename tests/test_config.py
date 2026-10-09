@@ -250,26 +250,22 @@ def test_registry_equivalence_and_scope_coverage(document):
             assert result.pipelines["primary"].stages[kind].selection.config == spec.normalize(spec.config_type())
 
 
-def test_import_boundaries_and_missing_parser(tmp_path):
+def test_import_boundaries(tmp_path):
     path = tmp_path / "config.yaml"
     path.write_text(BASE)
     script = """
 import importlib.abc, sys
 class Block(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, *args):
-        if fullname == "yaml" or fullname.startswith("yaml."):
-            raise ImportError("blocked")
         if fullname.endswith("s2s_pipeline") or (fullname.startswith("speech_to_speech.") and "_handler" in fullname):
             raise AssertionError(fullname)
 sys.meta_path.insert(0, Block())
 from speech_to_speech.config import load_config
+assert "yaml" not in sys.modules
 assert "speech_to_speech.backend_registry" not in sys.modules
-try:
-    load_config(sys.argv[1])
-except ImportError as exc:
-    assert "speech-to-speech[config]" in str(exc)
-else:
-    raise AssertionError("missing dependency accepted")
+load_config(sys.argv[1])
+assert "yaml" in sys.modules
+assert "speech_to_speech.backend_registry" not in sys.modules
 """
     result = subprocess.run([sys.executable, "-c", script, str(path)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

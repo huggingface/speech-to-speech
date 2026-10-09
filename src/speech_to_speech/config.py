@@ -1,4 +1,4 @@
-"""Optional, offline configuration APIs. Existing startup interfaces are unchanged."""
+"""Offline configuration APIs. Existing startup interfaces are unchanged."""
 
 from __future__ import annotations
 

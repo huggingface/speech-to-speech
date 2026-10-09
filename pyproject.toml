@@ -37,6 +37,7 @@ dependencies = [
     "onnxruntime>=1.17.0",
     "pillow>=10.0.0",
     "pydantic>=2.0",
+    "PyYAML>=6,<7",
     "rich>=13.0",
     "scipy>=1.10.0",
     "sounddevice==0.5.3; platform_system == 'Darwin'",
@@ -68,9 +69,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-config = [
-    "PyYAML>=6,<7",
-]
 chattts = [
     "ChatTTS>=0.2.1",
 ]
@@ -126,6 +124,7 @@ speech-to-speech = "speech_to_speech.cli:main"
 dev = [
     "ruff",
     "mypy",
+    "types-PyYAML",
     "pytest",
     "pytest-asyncio",
     "aiortc>=1.9.0",
