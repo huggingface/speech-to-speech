@@ -120,6 +120,7 @@ Clients using the implemented core Realtime event set can connect. The official 
 * [How it works](#how-it-works)
 * [Starting configurations](#quickstart)
 * [Installation](#installation)
+* [YAML configuration API](./docs/configuration.md)
 * [Offline operation](#offline-operation)
 * [Supported components](#supported-components)
 * [Commands](#commands)
@@ -164,6 +165,23 @@ The default install covers the standard realtime path:
 - local audio and realtime server modes
 
 macOS and non-macOS dependencies are resolved automatically via platform markers in `pyproject.toml`.
+
+See the [configuration guide](./docs/configuration.md) for reusable blocks,
+named pipelines, environment references, and explicit Python startup.
+The [Mac example](./example_configs/mac.yaml) runs fully locally on Apple Silicon.
+From a repository checkout, run its audio client and server together, or start
+only the server:
+
+```bash
+speech-to-speech local -f example_configs/mac.yaml
+speech-to-speech serve -f example_configs/mac.yaml --name mac
+```
+
+`local` runs one selected pipeline with the packaged loopback audio client.
+`talk -f example_configs/mac.yaml` uses only the file's client settings.
+Configured server startup currently supports one named definition per invocation; its
+`num_pipelines` controls the number of isolated instances.
+Existing Python interfaces, CLI commands, and flat JSON configuration remain available.
 
 ### CUDA Note for Qwen3-TTS
 
