@@ -666,19 +666,27 @@ class Chat:
         self._user_turn_count = sum(isinstance(item, RealtimeConversationItemUserMessage) for item in self.buffer)
         logger.debug("Rolled back failed generation output for user message %s", user_message_id)
 
-    def compact_audio_history(self, max_audio_turns: int) -> None:
+    def compact_audio_history(
+        self, max_audio_turns: int, *, consumed_items: Sequence[RealtimeConversationItemUserMessage] | None = None
+    ) -> None:
         """Retain only the newest bounded set of audio turns.
 
         Older audio parts are replaced with a textual placeholder so the user
         role and its paired assistant response remain valid in serialized
         history. The newest turns keep their audio semantics for subsequent
         Chat Completions requests.
+
+        When consumed_items is supplied, only clean up unchanged input from
+        that snapshot. New audio and later revisions remain available.
         """
 
         with self._lock:
+            consumed = {item.id: item.content for item in consumed_items} if consumed_items is not None else None
             remaining = max(0, max_audio_turns)
             for item in reversed(self.buffer):
                 if not isinstance(item, RealtimeConversationItemUserMessage):
+                    continue
+                if consumed is not None and item.content != consumed.get(item.id):
                     continue
                 if not any(part.type == "input_audio" for part in item.content):
                     continue
