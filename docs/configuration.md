@@ -1,19 +1,13 @@
 # YAML configuration API
 
-The optional configuration API loads, validates, and resolves reusable blocks
+The configuration API loads, validates, and resolves reusable blocks
 and named pipelines from a local YAML file. It does not construct handlers,
 download models, call providers, access audio devices, or start threads and
 listeners. Existing Python interfaces, CLI commands, and flat JSON input keep
 their existing behavior.
 
-Install the YAML parser:
-
-```bash
-pip install "speech-to-speech[config]"
-```
-
-Importing `speech_to_speech.config` does not require the parser. Loading YAML
-without the optional dependency raises `ImportError` with installation guidance.
+YAML support, including the PyYAML parser, is included in the default installation.
+The parser is imported only when a caller loads YAML.
 
 Set `enable_visemes`, `stv_model_name`, and `stv_device` under each pipeline's `options`.
 These fields use the existing viseme argument defaults.

@@ -267,7 +267,8 @@ assert "speech_to_speech.backend_registry" not in sys.modules
 try:
     load_config(sys.argv[1])
 except ImportError as exc:
-    assert "speech-to-speech[config]" in str(exc)
+    assert "PyYAML is a required dependency" in str(exc)
+    assert "pip install speech-to-speech" in str(exc)
 else:
     raise AssertionError("missing dependency accepted")
 """

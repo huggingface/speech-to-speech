@@ -16,7 +16,7 @@ def read_document(path: Path) -> ConfigDocument:
     try:
         import yaml
     except ImportError:
-        raise ImportError('YAML configuration requires `pip install "speech-to-speech[config]"`.') from None
+        raise ImportError("PyYAML is a required dependency; reinstall with `pip install speech-to-speech`.") from None
 
     def fail(message: str, mark: Any = None) -> None:
         location = f"{path}"

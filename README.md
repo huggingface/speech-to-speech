@@ -166,11 +166,7 @@ The default install covers the standard realtime path:
 
 macOS and non-macOS dependencies are resolved automatically via platform markers in `pyproject.toml`.
 
-To load and resolve YAML configuration from Python, install the optional parser:
-
-```bash
-pip install "speech-to-speech[config]"
-```
+The default installation includes YAML configuration support for Python callers.
 
 See the [configuration API guide](./docs/configuration.md) for reusable blocks,
 named pipelines, and environment references. This API resolves settings without
