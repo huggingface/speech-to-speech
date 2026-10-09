@@ -208,7 +208,8 @@ def _configure_audio_sender(sender: RTCRtpSender, track: PipelineAudioTrack) -> 
 
     aiortc has no public hook for encoded timestamps or sender-report clocks.
     Keep the adaptation on this sender; retain its codec, RTP history, RTCP
-    scheduling and shutdown. These hooks exist in aiortc 1.9 through 1.15.
+    scheduling and shutdown. These hooks exist in aiortc 1.9 through 1.15;
+    pyproject caps aiortc below 1.16 until a newer release is checked.
     """
     next_encoded_frame = sender._next_encoded_frame
     send_rtcp = sender._send_rtcp
