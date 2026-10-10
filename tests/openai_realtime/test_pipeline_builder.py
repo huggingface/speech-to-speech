@@ -1,10 +1,19 @@
 import sys
 from threading import Event
 from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
 
 from speech_to_speech.api.openai_realtime.audio_client import RealtimeAudioClient
 from speech_to_speech.api.openai_realtime.server import RealtimeServer
 from speech_to_speech.s2s_pipeline import build_local_pipeline, build_pipeline, parse_arguments
+
+
+@pytest.fixture(autouse=True)
+def mock_shared_client(monkeypatch):
+    # These tests replace every model handler; no provider is contacted.
+    monkeypatch.setattr("openai.OpenAI", MagicMock())
 
 
 def _default_args():

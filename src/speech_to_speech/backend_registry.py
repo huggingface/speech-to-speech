@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, fields
 from importlib import import_module
 from queue import Queue
 from threading import Event
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from speech_to_speech.arguments_classes.chat_completions_language_model_arguments import (
     ChatCompletionsLanguageModelHandlerArguments,
@@ -52,6 +52,9 @@ from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTH
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
+if TYPE_CHECKING:
+    from speech_to_speech.LLM.shared_client import SharedOpenAIClient
+
 BackendKind = Literal["stt", "llm", "tts"]
 BackendConfig = dict[str, Any]
 
@@ -89,6 +92,7 @@ class HandlerContext:
     enable_live_transcription: bool
     live_transcription_update_interval: float
     detect_llm_output_language: bool = False
+    openai_client_resource: SharedOpenAIClient | None = None
 
 
 HandlerFactory = Callable[[HandlerContext, Mapping[str, Any]], Any]
@@ -228,6 +232,8 @@ def _simple_handler_factory(
                 cancel_scope=context.cancel_scope,
                 speculative_turns=context.speculative_turns,
             )
+        if context_kwargs and context.openai_client_resource is not None:
+            setup_kwargs["client_resource"] = context.openai_client_resource
         if pass_assistant_language_flag:
             setup_kwargs["detect_llm_output_language"] = context.detect_llm_output_language
         handler = handler_class(

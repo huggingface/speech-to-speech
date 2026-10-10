@@ -46,14 +46,15 @@ from speech_to_speech.pipeline.queue_types import (
     TTSInItem,
     VADOutItem,
 )
+from speech_to_speech.pipeline.runtime import PipelineRuntime
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import (
+    log_exception,
     set_log_transcripts,
     warn_if_log_transcripts_enabled,
 )
 from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
-from speech_to_speech.utils.thread_manager import ThreadManager
 from speech_to_speech.utils.utils import resolve_device
 from speech_to_speech.VAD.vad_handler import VADHandler
 
@@ -380,6 +381,7 @@ def _build_handlers(
     speculative_turns: SpeculativeTurnTracker,
     cancel_scope: CancelScope,
     pipeline_index: int,
+    openai_client_resource: Any = None,
     resource_ledger: list[Any] | None = None,
 ) -> list[Any]:
     """Build a handler chain: VAD → STT/AudioInput → LM → TTS."""
@@ -495,7 +497,9 @@ def _build_handlers(
             detect_llm_output_language=module_kwargs.detect_llm_output_language,
         )
 
-    lm_context = handler_context(text_prompt_queue, lm_response_queue)
+    lm_context = replace(
+        handler_context(text_prompt_queue, lm_response_queue), openai_client_resource=openai_client_resource
+    )
     lm = create_backend_handler(
         llm_backend,
         lm_context,
@@ -575,6 +579,7 @@ def _build_pipeline_unit(
     stt_backend: BackendSelection,
     llm_backend: BackendSelection,
     tts_backend: BackendSelection,
+    openai_client_resource: Any = None,
     resource_ledger: list[Any] | None = None,
 ) -> "PipelineUnit":
     """Build one isolated pipeline with its own state and queues.
@@ -641,6 +646,7 @@ def _build_pipeline_unit(
         speculative_turns=speculative_turns,
         cancel_scope=cancel_scope,
         pipeline_index=index,
+        openai_client_resource=openai_client_resource,
         **({"resource_ledger": resource_ledger} if resource_ledger is not None else {}),
     )
     for h in handlers:
@@ -687,42 +693,69 @@ def build_pipeline(
     stop_event: Event,
     *,
     host: str | None = None,
-) -> ThreadManager:
-    """Build a pool of pipeline units behind one server."""
+) -> PipelineRuntime:
+    """Build a pool and explicitly own its shared OpenAI-compatible client."""
     from speech_to_speech.api.openai_realtime.server import RealtimeServer
 
-    module_kwargs = args.module_kwargs
-    pool = [
-        _build_pipeline_unit(
-            index=index,
+    resource = None
+    if args.llm_backend.name in {"responses-api", "chat-completions"}:
+        from openai import OpenAI
+
+        from speech_to_speech.LLM.base_openai_compatible_language_model import BaseOpenAICompatibleHandler
+        from speech_to_speech.LLM.shared_client import SharedOpenAIClient
+
+        config = args.llm_backend.config
+        api_key = config.get("api_key")
+        base_url = config.get("base_url")
+        if api_key is None and not os.environ.get("OPENAI_API_KEY") and base_url is not None:
+            if BaseOpenAICompatibleHandler._is_local_base_url(base_url):
+                api_key = "none"
+        try:
+            resource = SharedOpenAIClient(OpenAI(api_key=api_key, base_url=base_url))
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not create shared client for LLM backend {args.llm_backend.name!r}: {exc}"
+            ) from exc
+
+    try:
+        module_kwargs = args.module_kwargs
+        pool = [
+            _build_pipeline_unit(
+                index=index,
+                stop_event=stop_event,
+                module_kwargs=module_kwargs,
+                vad_handler_kwargs=args.vad_handler_kwargs,
+                stt_backend=args.stt_backend,
+                llm_backend=args.llm_backend,
+                tts_backend=args.tts_backend,
+                openai_client_resource=resource,
+            )
+            for index in range(module_kwargs.num_pipelines)
+        ]
+        server = RealtimeServer(
             stop_event=stop_event,
-            module_kwargs=module_kwargs,
-            vad_handler_kwargs=args.vad_handler_kwargs,
-            stt_backend=args.stt_backend,
-            llm_backend=args.llm_backend,
-            tts_backend=args.tts_backend,
+            pool=pool,
+            host=host or args.realtime_server_kwargs.host,
+            port=args.realtime_server_kwargs.port,
+            llm_proxy_config=(
+                build_llm_proxy_config(module_kwargs, args.llm_backend) if module_kwargs.enable_llm_proxy else None
+            ),
         )
-        for index in range(module_kwargs.num_pipelines)
-    ]
-
-    server = RealtimeServer(
-        stop_event=stop_event,
-        pool=pool,
-        host=host or args.realtime_server_kwargs.host,
-        port=args.realtime_server_kwargs.port,
-        llm_proxy_config=(
-            build_llm_proxy_config(module_kwargs, args.llm_backend) if module_kwargs.enable_llm_proxy else None
-        ),
-    )
-
-    handlers: list[Any] = []
-    for unit in pool:
-        handlers.extend(unit.handlers)
-    handlers.append(server)
-    return ThreadManager(handlers)
+        handlers: list[Any] = []
+        for unit in pool:
+            handlers.extend(unit.handlers)
+        handlers.append(server)
+        return PipelineRuntime(handlers, resource)
+    except BaseException:
+        if resource is not None:
+            try:
+                resource.close()
+            except Exception as exc:
+                log_exception(logger, "Shared LLM client cleanup failed during construction", exc)
+        raise
 
 
-def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadManager:
+def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> PipelineRuntime:
     """Compose the canonical server and audio client over a forced loopback URL."""
 
     from speech_to_speech.api.openai_realtime.audio_client import (
@@ -741,23 +774,28 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
     if local_audio.local_audio_tool_module:
         tools, tool_executor, tool_response_create = load_realtime_tool_module(local_audio.local_audio_tool_module)
     server_manager = build_pipeline(args, stop_event, host="127.0.0.1")
-    client = RealtimeAudioClient(
-        stop_event,
-        RealtimeAudioClientConfig(
-            url=f"ws://127.0.0.1:{args.realtime_server_kwargs.port}/v1/realtime",
-            api_key="local",
-            chunk_size=local_audio.local_audio_chunk_size,
-            playback_buffer_ms=playback_buffer_ms,
-            input_device=local_audio.local_audio_input_device,
-            output_device=local_audio.local_audio_output_device,
-            print_json=local_audio.local_audio_print_json,
-            block_mic_during_playback=local_audio.local_audio_block_mic_during_playback,
-            tools=tools,
-            tool_executor=tool_executor,
-            tool_response_create=tool_response_create,
-        ),
-    )
-    return ThreadManager([*server_manager.handlers, client])
+    try:
+        client = RealtimeAudioClient(
+            stop_event,
+            RealtimeAudioClientConfig(
+                url=f"ws://127.0.0.1:{args.realtime_server_kwargs.port}/v1/realtime",
+                api_key="local",
+                chunk_size=local_audio.local_audio_chunk_size,
+                playback_buffer_ms=playback_buffer_ms,
+                input_device=local_audio.local_audio_input_device,
+                output_device=local_audio.local_audio_output_device,
+                print_json=local_audio.local_audio_print_json,
+                block_mic_during_playback=local_audio.local_audio_block_mic_during_playback,
+                tools=tools,
+                tool_executor=tool_executor,
+                tool_response_create=tool_response_create,
+            ),
+        )
+        server_manager.add_handler(client)
+        return server_manager
+    except BaseException:
+        server_manager.stop()
+        raise
 
 
 def run_pipeline_command(command: Literal["serve", "local"], argv: Sequence[str]) -> None:
