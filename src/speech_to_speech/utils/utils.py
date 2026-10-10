@@ -118,7 +118,11 @@ def resolve_device(device: str, supported: Sequence[str], component: str) -> str
 
 
 def _generate_id(prefix: str) -> str:
-    return f"{prefix}_{uuid.uuid4().hex}"
+    suffix = uuid.uuid4().hex
+    if prefix == "call":
+        # LiveKit Realtime clients shorten call IDs longer than 32 characters.
+        suffix = suffix[:27]
+    return f"{prefix}_{suffix}"
 
 
 def int2float(sound: np.ndarray) -> np.ndarray:

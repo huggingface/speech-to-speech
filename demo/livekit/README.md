@@ -81,14 +81,16 @@ and interruption work; tool calls fail as described below.
 
 ## Known limitations
 
-- **Function tools do not complete.** The server generates `call_id`s of 37
-  characters (`call_` plus a UUID). The plugin shortens any `call_id` longer
-  than 32 characters, the OpenAI limit, to a SHA-256 prefix before sending the
+- **Function tools failed at the tested revision (`1e9bd0a`).** That revision
+  generates `call_id`s of 37 characters (`call_` plus a UUID). The plugin
+  shortens any `call_id` longer than 32 characters to a SHA-256 prefix before sending the
   `function_call_output`. The server finds no matching function call, rejects
   the output and then the follow-up `response.create` with
   `function_call_output_pending`, so the agent stays silent after running the
   tool. With the shortening disabled in a local diagnostic run, the same tool
-  call completed. `agent.py` therefore defines no tools. Related:
+  call completed. The server now generates `call_` IDs of at most 32 characters
+  to avoid this mismatch ([#695](https://github.com/huggingface/speech-to-speech/issues/695));
+  the live voice test has not been repeated with this fix. `agent.py` defines no tools. Related:
   [#686](https://github.com/huggingface/speech-to-speech/issues/686). To
   reproduce, add this tool to the `Assistant` class (with
   `from datetime import datetime` and `function_tool` imported from

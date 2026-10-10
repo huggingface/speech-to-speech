@@ -462,6 +462,7 @@ def test_streaming_tool_call_accumulates_arguments():
     tc = tools[0]
     assert isinstance(tc, ResponseFunctionToolCall)
     assert tc.name == "search_docs"
+    assert tc.call_id.startswith("call_") and len(tc.call_id) <= 32
     # Markdown cleanup only applies to spoken text, never structured tool arguments.
     assert json.loads(tc.arguments) == {"query": "**bold** _italic_ x*y"}
     assert usage == (20, 8)

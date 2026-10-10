@@ -145,6 +145,7 @@ def test_reasoning_tool_continuation_replays_original_provider_items(stream):
     tool = next(output.tools[0] for output in outputs if isinstance(output, LLMResponseChunk) and output.tools)
     assert tool.id.startswith("fc_") and tool.id != "fc_original"
     assert tool.call_id.startswith("call_") and tool.call_id != "call_original"
+    assert len(tool.call_id) <= 32
     request.runtime_config.chat.add_item(
         RealtimeConversationItemFunctionCallOutput(
             type="function_call_output",
