@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from time import perf_counter
 from typing import Any, Iterator
 
 import numpy as np
@@ -233,6 +234,7 @@ class NemoASRSTTHandler(BaseSTTHandler):
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         audio = np.asarray(vad_audio.audio, dtype=np.float32)
+        started_at_s = perf_counter()
         text = self._transcribe(audio)
         language_code = self.language
         if self._detects_utterance_language:
@@ -255,6 +257,7 @@ class NemoASRSTTHandler(BaseSTTHandler):
             )
             return
         console.print(f"[yellow]USER: {text}")
+        self._record_final_stt(vad_audio, perf_counter() - started_at_s)
         yield Transcription(
             text=text,
             language_code=language_code,
