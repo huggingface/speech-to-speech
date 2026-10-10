@@ -1040,16 +1040,20 @@ class Chat:
                         args = json.loads(args) if isinstance(args, str) else args
                     except (json.JSONDecodeError, TypeError):
                         args = {}
-                    messages.append(
-                        TransformersFunctionCallMessage(
-                            tool_calls=[
-                                TransformersToolCall(
-                                    id=item.call_id,
-                                    function=TransformersToolCallFunction(name=item.name, arguments=args),
-                                )
-                            ]
-                        )
+                    call = TransformersToolCall(
+                        id=item.call_id,
+                        function=TransformersToolCallFunction(name=item.name, arguments=args),
                     )
+                    # A reply that speaks and then calls is one assistant turn. Serialized as two,
+                    # the text closes the turn, and a model reading that history copies it: it says
+                    # "I'll check" and ends the turn without the call.
+                    previous = messages[-1] if messages else None
+                    if isinstance(previous, TransformersFunctionCallMessage):
+                        previous.tool_calls.append(call)
+                    elif isinstance(previous, TransformersAssistantMessage):
+                        messages[-1] = TransformersFunctionCallMessage(content=previous.content, tool_calls=[call])
+                    else:
+                        messages.append(TransformersFunctionCallMessage(tool_calls=[call]))
                 elif isinstance(item, RealtimeConversationItemFunctionCallOutput):
                     name = ""
                     for prev in reversed(messages):
