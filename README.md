@@ -311,7 +311,7 @@ response, while a smaller value starts sooner but is more sensitive to jitter.
 This setting only controls the packaged Python client's speakers; browser and
 other Realtime clients manage their own playback buffers.
 
-The packaged client can opt in to local Python tools with `talk --tool-module <module>` or `local --tool-module <module>`. The module contract, programmatic API, and a Serper web-search example are documented in [Tool calling design](./src/speech_to_speech/api/openai_realtime/README.md#packaged-python-client-tools).
+The packaged client can opt in to local Python tools with `talk --tool-module <module>` or `local --tool-module <module>`. The module contract, programmatic API, and web-search examples (Serper, or keyless You.com) are documented in [Tool calling design](./src/speech_to_speech/api/openai_realtime/README.md#packaged-python-client-tools).
 
 ### Migrating from `--mode`
 
