@@ -24,6 +24,7 @@ from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.turn_latency import record_response_e2e, record_response_tts_ttfa
 from speech_to_speech.utils.mlx_lock import MLXLockContext
 from speech_to_speech.utils.utils import resolve_device
 
@@ -292,19 +293,20 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
     def _record_tts_ttfa(self, tts_input: TTSInput | None, started_at_s: float, first_audio_at_s: float) -> None:
         if tts_input is None:
             return
-        store = getattr(self, "turn_latency_store", None)
-        tracker = store.get_response(tts_input.response_key) if store else None
-        if tracker is not None:
-            tracker.record_tts_ttfa(first_audio_at_s - started_at_s)
+        record_response_tts_ttfa(
+            getattr(self, "turn_latency_store", None),
+            tts_input.response_key,
+            first_audio_at_s - started_at_s,
+        )
 
     def _record_e2e(self, tts_input: TTSInput | None) -> None:
         if tts_input is None or tts_input.speech_stopped_at_s is None:
             return
-        latency_s = max(0.0, perf_counter() - tts_input.speech_stopped_at_s)
-        store = getattr(self, "turn_latency_store", None)
-        tracker = store.get_response(tts_input.response_key) if store else None
-        if tracker is not None:
-            tracker.record_e2e(latency_s)
+        record_response_e2e(
+            getattr(self, "turn_latency_store", None),
+            tts_input.response_key,
+            max(0.0, perf_counter() - tts_input.speech_stopped_at_s),
+        )
 
     def _lang_and_voice_for(self, language_code: str, pinned_voice: Optional[str] = None) -> tuple[str, str]:
         """Pick the Kokoro language and voice for a reply in ``language_code``.
