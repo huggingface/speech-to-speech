@@ -1,3 +1,31 @@
+# Realtime engine
+
+Serve the default local voice pipeline to a browser, robot, or other Realtime client. The OpenAI-compatible protocol is the client interface; it does not require a hosted OpenAI LLM or provider key.
+
+## Start locally
+
+After [installation](../../../../README.md#installation), start the server:
+
+```bash
+speech-to-speech serve
+```
+
+This runs Parakeet TDT, local Qwen3.5-4B, and Qwen3-TTS. On Apple Silicon, the LLM uses MLX LM with `mlx-community/Qwen3.5-4B-4bit`; on Linux / Windows, it uses Transformers with `Qwen/Qwen3.5-4B` and automatic accelerator / CPU selection. First startup downloads and warms up the models. For a conversation in one terminal, use `speech-to-speech local` instead.
+
+The server listens on loopback at `ws://127.0.0.1:8765/v1/realtime`. Connect the packaged audio client from another terminal:
+
+```bash
+speech-to-speech talk --url ws://127.0.0.1:8765/v1/realtime
+```
+
+For other clients, see the [browser demo](../../../../demo/README.md) and [LiveKit example](../../../../demo/livekit/README.md). `--host` and `--port` change the listener; the server defaults to one pipeline instance.
+
+## Choose another LLM
+
+The Realtime server and clients work with both local and API-backed LLMs. Use `--llm_backend` and `--model_name` to change the server's model; the client does not choose its weights. Keep MLX conversions on the MLX backend and Transformers checkpoints on the Transformers backend.
+
+Selecting `responses-api` or `chat-completions` connects the LLM stage to a separate inference server or hosted provider. That is an explicit alternative to local generation; it does not change the local STT/TTS defaults. See the [LLM guide](../../LLM/README.md) for model overrides, local-server connections, hosted credentials, and generation settings.
+
 ## Realtime Engine -- High-Level Architecture
 
 A FastAPI/uvicorn server exposes WebSocket and WebRTC transports. Each session claims a queue-backed
@@ -407,46 +435,3 @@ them before a delayed logical-completion event arrives on the text side channel.
 To see the failures before the fixes, use commit `d2df091` and add `--runxfail` to
 that command. The local case emits no acknowledgement and requests another reply;
 the trimmed-history case accepts the delayed duplicate. Both fail with exit status 1.
-
-### Local LLM with Transformers
-
-On Linux / Windows, Transformers is the default LLM backend with `Qwen/Qwen3.5-4B`; no API key is required. This example explicitly selects an NVIDIA GPU:
-
-```bash
-uv run speech-to-speech serve \
-  --stt parakeet-tdt \
-  --llm_backend transformers \
-  --tts kokoro \
-  --model_name "Qwen/Qwen3.5-4B" \
-  --llm_device cuda \
-  --llm_torch_dtype float16 \
-  --enable_live_transcription
-```
-
-### Local LLM with MLX-LM
-
-On Apple Silicon macOS, MLX-LM is the default LLM backend with `mlx-community/Qwen3.5-4B-4bit`; no API key is required:
-
-```bash
-uv run speech-to-speech serve \
-  --stt parakeet-tdt \
-  --llm_backend mlx-lm \
-  --tts kokoro \
-  --model_name "mlx-community/Qwen3.5-4B-4bit" \
-  --llm_device mps \
-  --enable_live_transcription
-```
-
-### Remote LLM with OpenAI-compatible API
-
-```bash
-uv run speech-to-speech serve \
-  --stt parakeet-tdt \
-  --llm_backend responses-api \
-  --tts kokoro \
-  --model_name "openai/gpt-oss-20b:groq" \
-  --responses_api_base_url "https://router.huggingface.co/v1" \
-  --responses_api_api_key "$HF_TOKEN" \
-  --responses_api_stream \
-  --enable_live_transcription
-```

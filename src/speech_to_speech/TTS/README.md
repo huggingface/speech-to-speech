@@ -1,5 +1,17 @@
 # TTS Summary
 
+## Start with local speech synthesis
+
+After [installation](../../../README.md#installation), `speech-to-speech local` runs the default local conversation stack without a provider API key. Qwen3-TTS CustomVoice speaks replies with speaker `Aiden`; it uses MLX Audio on Apple Silicon and the GGML backend by default elsewhere. Parakeet TDT and the platform's local Qwen3.5-4B LLM provide recognition and reply generation.
+
+To change the speaker while keeping the local stack:
+
+```bash
+speech-to-speech local --qwen3_tts_speaker Ryan
+```
+
+Change `--tts` to select another synthesizer, installing its extra where needed. Use `serve` instead of `local` for a separate Realtime client. The examples below keep STT and the LLM on their local defaults unless explicitly changed. `--tts openai` connects to a separate speech endpoint; `--tts minimax` selects a hosted provider. Their endpoint and credential requirements are documented below.
+
 ## Available TTS modes (`--tts`)
 
 Runtime-supported values in `s2s_pipeline.py`:
@@ -323,9 +335,10 @@ speech-to-speech serve \
 ### Apple Silicon setup
 
 ```bash
-speech-to-speech local \
-  --mac-optimal-settings
+speech-to-speech local
 ```
+
+Apple Silicon selects MLX speech synthesis and the local MLX LLM automatically. The optional `--mac-optimal-settings` preset also supplies MPS defaults for supported component devices.
 
 `--tts pocket`, `--tts kokoro`, and `--tts omnivoice` are also valid options on macOS.
 

@@ -7,7 +7,7 @@ blocks:
     kind: llm
     backend: mlx-lm
     settings:
-      model_name: mlx-community/Qwen3-4B-Instruct-2507-4bit
+      model_name: mlx-community/Qwen3.5-4B-4bit
   tts: {kind: tts, backend: qwen3}
 
 pipelines:

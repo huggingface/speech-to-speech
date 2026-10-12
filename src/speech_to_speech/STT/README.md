@@ -2,6 +2,18 @@
 
 This document summarizes the Speech-to-Text (STT) implementations in the `STT/` folder, including language support, language abbreviations, and usage in `s2s_pipeline.py`.
 
+## Start with local speech recognition
+
+After [installation](../../../README.md#installation), `speech-to-speech local` runs Parakeet TDT, local Qwen3.5-4B, and Qwen3-TTS without a provider API key. Parakeet uses MLX Audio on Apple Silicon and nano-parakeet on supported non-macOS devices. The LLM independently selects MLX LM on macOS or Transformers elsewhere.
+
+To try another recognizer, change only the STT stage. For example, on Linux / Windows with an NVIDIA GPU:
+
+```bash
+speech-to-speech local --stt whisper --language auto --stt_device cuda
+```
+
+Use `serve` instead of `local` for a separate Realtime client. The examples below keep the other stages on their local defaults unless they explicitly override them. Selecting `--stt openai`, `openai-realtime`, or `vllm-realtime` connects recognition to a separate server or provider; see the [STT endpoint guide](../../../docs/openai-compatible-stt.md) for setup and credentials.
+
 ## Available STT Modes (`--stt`)
 
 - `whisper` → `STT/whisper_stt_handler.py`
