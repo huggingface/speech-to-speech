@@ -56,7 +56,7 @@ and `pipelines` mappings.
 |---|---|
 | Block `settings` | Backend argument fields, including existing prefixes and inherited fields; VAD excludes the `vad` selector |
 | Pipeline `options` | Pipeline-wide options such as `device`, `mac_optimal_settings`, diarization, and `enable_visemes` / `stv_model_name` / `stv_device` |
-| `runtime` | Process logging: `log_level` and `log_transcripts` |
+| `runtime` | Process settings: `log_level`, `log_transcripts`, and `torch_num_threads` |
 | `runtime.server` | Listener `host` and `port` |
 | `runtime.client` | Packaged client settings such as `url`, `voice`, `input_device`, `output_device`, `playback_buffer_ms`, and `tool_module` |
 

@@ -786,6 +786,7 @@ See [ModuleArguments](./src/speech_to_speech/arguments_classes/module_arguments.
 - logging level
 - transcript logging (`--log_transcripts`)
 - realtime pipeline pool size (`--num_pipelines`)
+- PyTorch CPU thread count (`--torch_num_threads`)
 
 Logs are content-free by default: transcript-bearing records report a character count rather
 than the text, because logs are commonly retained by service managers, containers and hosted
@@ -793,6 +794,22 @@ log aggregators. Pass `--log_transcripts` to include full user and assistant tra
 debugging STT, LLM, TTS or Realtime behaviour; it logs a warning at startup because enabling
 it writes conversation content wherever those logs are collected. The `talk` client takes the
 same flag, as `--log-transcripts` or `--log_transcripts`.
+
+`--torch_num_threads N` sets PyTorch's CPU intra-op thread count (`torch.set_num_threads`) for
+the whole process. It is unset by default, which keeps the current behaviour: Silero VAD sets
+PyTorch to a single thread when it loads, and that single thread also applies to every other
+PyTorch model on the CPU. If your STT runs on the CPU, you can trade some Silero speed for
+faster transcription:
+
+```bash
+speech-to-speech serve --stt parakeet-tdt --device cpu --torch_num_threads 8
+```
+
+The setting is shared: Silero and the CPU STT use the same thread count, and more threads can
+slow Silero down, so measure the complete pipeline when choosing a value. It only affects
+PyTorch; ONNX Runtime, MLX and other non-PyTorch backends keep their own thread settings. In a
+YAML configuration, set it under `runtime` as `torch_num_threads`. See the
+[`torch.set_num_threads` documentation](https://docs.pytorch.org/docs/stable/generated/torch.set_num_threads.html).
 
 ### VAD Parameters
 

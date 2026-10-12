@@ -98,31 +98,6 @@ def test_silero_load_pins_cached_master_ref(monkeypatch) -> None:
     ]
 
 
-def test_silero_load_keeps_torch_thread_count(monkeypatch) -> None:
-    class FakeSileroModel:
-        def reset_states(self) -> None:
-            pass
-
-    def fake_load(*_args, **_kwargs):
-        # The real silero_vad module calls torch.set_num_threads(1) on import.
-        torch.set_num_threads(1)
-        return FakeSileroModel(), None
-
-    monkeypatch.setattr(torch.hub, "load", fake_load)
-    original = torch.get_num_threads()
-    torch.set_num_threads(3)
-    try:
-        handler = object.__new__(VADHandler)
-        handler.setup(
-            Event(),
-            speculative_turns=SpeculativeTurnTracker(),
-            smart_turn=False,
-        )
-        assert torch.get_num_threads() == 3
-    finally:
-        torch.set_num_threads(original)
-
-
 def test_unanswered_reopen_cap_covers_smart_turn_wait(monkeypatch) -> None:
     class FakeSileroModel:
         def reset_states(self) -> None:

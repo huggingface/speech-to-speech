@@ -151,18 +151,12 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 speech_pad_ms=speech_pad_ms,
             )
         elif vad == "silero":
-            # Importing silero_vad calls torch.set_num_threads(1), which is process-wide
-            # and would make every other CPU model in the pipeline single-threaded.
-            num_threads = torch.get_num_threads()
-            try:
-                self.model, _ = torch.hub.load(
-                    "snakers4/silero-vad:master",
-                    "silero_vad",
-                    trust_repo=True,
-                    skip_validation=True,
-                )
-            finally:
-                torch.set_num_threads(num_threads)
+            self.model, _ = torch.hub.load(
+                "snakers4/silero-vad:master",
+                "silero_vad",
+                trust_repo=True,
+                skip_validation=True,
+            )
             self.iterator = VADIterator(
                 self.model,
                 threshold=thresh,

@@ -20,7 +20,7 @@ _ENV = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _INTEGER = re.compile(r"[+-]?[0-9]+\Z")
 _FLOAT = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z")
 _STAGES = ("vad", "stt", "llm", "tts")
-_MODULE_PROCESS = {"log_level", "log_transcripts"}
+_MODULE_PROCESS = {"log_level", "log_transcripts", "torch_num_threads"}
 _MODULE_SELECTORS = {"stt", "llm_backend", "tts"}
 _MODULE_PIPELINE = {
     "diarization",
