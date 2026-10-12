@@ -109,6 +109,7 @@ def _validate_package_defaults() -> None:
         ResponsesApiLanguageModelHandlerArguments,
     )
     from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
+    from speech_to_speech.s2s_pipeline import parse_arguments
 
     module_args = ModuleArguments()
     responses_api_args = ResponsesApiLanguageModelHandlerArguments()
@@ -116,7 +117,12 @@ def _validate_package_defaults() -> None:
     vad_args = VADHandlerArguments()
 
     assert module_args.stt == "parakeet-tdt"
-    assert module_args.llm_backend == "responses-api"
+    assert module_args.llm_backend == ("mlx-lm" if sys.platform == "darwin" else "transformers")
+    local_args = parse_arguments([])
+    assert local_args.llm_backend.config["model_name"] == (
+        "mlx-community/Qwen3.5-4B-4bit" if sys.platform == "darwin" else "Qwen/Qwen3.5-4B"
+    )
+    assert "api_key" not in local_args.llm_backend.config
     assert module_args.tts == "qwen3"
     assert module_args.log_level == "info"
     assert module_args.enable_live_transcription is True
@@ -175,7 +181,7 @@ def _validate_realtime_engine_imports() -> None:
 
 def _validate_default_handler_imports() -> None:
     default_handler_modules = [
-        "speech_to_speech.LLM.responses_api_language_model",
+        "speech_to_speech.LLM.language_model",
         "speech_to_speech.STT.parakeet_tdt_handler",
         "speech_to_speech.TTS.qwen3_tts_handler",
         "speech_to_speech.VAD.vad_handler",

@@ -2,6 +2,7 @@ import json
 import logging
 from queue import Queue
 from threading import BoundedSemaphore, Event, Lock, Thread
+from time import sleep
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -32,6 +33,7 @@ from speech_to_speech.LLM.base_openai_compatible_language_model import WARMUP_MA
 from speech_to_speech.LLM.chat import (
     AUDIO_INPUT_HISTORY_PLACEHOLDER,
     Chat,
+    make_system_message,
     make_user_message,
 )
 from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
@@ -43,6 +45,8 @@ from speech_to_speech.pipeline.messages import (
     ResponsePrefetchTransaction,
     TokenUsage,
 )
+from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
+from tests.llm_history import drive_llm
 
 
 def _make_text_delta_event(text):
@@ -137,10 +141,11 @@ def test_reasoning_tool_continuation_replays_original_provider_items(stream):
         return _make_stream([]) if stream else _make_response([])
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
-    outputs = list(handler.process(request))
+    outputs = list(drive_llm(handler, request))
     tool = next(output.tools[0] for output in outputs if isinstance(output, LLMResponseChunk) and output.tools)
     assert tool.id.startswith("fc_") and tool.id != "fc_original"
     assert tool.call_id.startswith("call_") and tool.call_id != "call_original"
+    assert len(tool.call_id) <= 32
     request.runtime_config.chat.add_item(
         RealtimeConversationItemFunctionCallOutput(
             type="function_call_output",
@@ -148,7 +153,7 @@ def test_reasoning_tool_continuation_replays_original_provider_items(stream):
             output="Sunny.",
         )
     )
-    continuation = list(handler.process(request))
+    continuation = list(drive_llm(handler, request))
     assert next(output for output in continuation if isinstance(output, EndOfResponse)).error is None
     assert [item.model_dump(exclude_unset=True) for item in [reasoning, call]] == originals
 
@@ -230,7 +235,8 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None, rea
     return handler
 
 
-def test_discarded_prefetch_aborts_blocked_provider_stream():
+@pytest.mark.parametrize("with_tool_prefix", [False, True])
+def test_discarded_prefetch_aborts_blocked_provider_stream(with_tool_prefix):
     class BlockingStream:
         def __init__(self):
             self.started = Event()
@@ -238,9 +244,10 @@ def test_discarded_prefetch_aborts_blocked_provider_stream():
             self.closed = False
 
         def __iter__(self):
+            if with_tool_prefix:
+                yield _make_function_call_done_event()
             self.started.set()
             self.released.wait(timeout=2.0)
-            return iter(())
 
         def close(self):
             self.closed = True
@@ -254,11 +261,23 @@ def test_discarded_prefetch_aborts_blocked_provider_stream():
     transaction = ResponsePrefetchTransaction()
     request.prefetch_transaction = transaction
     outputs: list[object] = []
-    worker = Thread(target=lambda: outputs.extend(handler.process(request)))
+    staged, resume = Event(), Event()
+
+    def run():
+        for output in drive_llm(handler, request):
+            outputs.append(output)
+            staged.set()
+            resume.wait(timeout=2.0)  # Output can wait behind slow TTS.
+
+    worker = Thread(target=run)
 
     worker.start()
     assert stream.started.wait(timeout=1.0)
+    assert staged.wait(timeout=1.0) or not with_tool_prefix
+    # Holding a tool prefix must leave the hidden stream abortable.
     transaction.discard()
+    assert stream.closed
+    resume.set()
     worker.join(timeout=1.0)
 
     assert not worker.is_alive()
@@ -593,6 +612,35 @@ def test_process_streams_text_from_response_events():
     assert isinstance(outputs[2], EndOfResponse)
 
 
+def test_process_records_hosted_llm_latency():
+    """`llm_ttft` must come from the first provider delta, not the first yielded
+    chunk: sentence batching holds the first chunk back until a sentence ends."""
+    handler = _make_handler()
+    tail_delay_s = 0.2
+
+    def _events():
+        # "Hello" alone does not close a sentence, so the first forwarded chunk
+        # only appears after this delay. A correct TTFT is measured before it.
+        yield _make_text_delta_event("Hello")
+        sleep(tail_delay_s)
+        yield _make_text_delta_event(". How are you?")
+        yield _make_output_item_done_event(content="Hello. How are you?")
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: _make_stream(_events())))
+    request = _make_request("Hi")
+    store = TurnLatencyStore()
+    store.get_or_create_response(request.response_key, turn_id="turn-1", turn_revision=0)
+    handler.turn_latency_store = store
+
+    list(drive_llm(handler, request))
+
+    tracker = store.get_response(request.response_key)
+    assert tracker is not None
+    assert tracker.llm_s is not None and tracker.llm_s >= tail_delay_s
+    assert tracker.llm_ttft_s is not None
+    assert tracker.llm_ttft_s < tail_delay_s
+
+
 def test_text_only_streams_raw_deltas_without_sentence_trimming():
     """Text-only streams (so a new speech turn can interrupt it) and forwards each
     delta verbatim — no sent_tokenize (newlines / markdown survive) and no
@@ -789,7 +837,7 @@ def test_process_preserves_nonstreaming_text_tool_text_order():
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: api_response))
 
     request = _make_request("What do you see?")
-    outputs = list(handler.process(request))
+    outputs = list(drive_llm(handler, request))
 
     assert len(outputs) == 4
     assert isinstance(outputs[0], LLMResponseChunk)
@@ -916,7 +964,7 @@ def test_cancelled_text_tool_turn_rolls_back_ordered_call():
         responses=SimpleNamespace(create=lambda **kwargs: _make_stream([_make_function_call_done_event()]))
     )
     request = _make_request("Use a tool")
-    generation = handler.process(request)
+    generation = drive_llm(handler, request)
 
     tool_chunk = next(generation)
     assert isinstance(tool_chunk, LLMResponseChunk)
@@ -1333,9 +1381,9 @@ def test_second_turn_flattens_assistant_history_for_responses():
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
 
     cfg.chat.add_item(make_user_message("Hi"))
-    list(handler.process(GenerateResponseRequest(runtime_config=cfg)))
+    list(drive_llm(handler, GenerateResponseRequest(runtime_config=cfg)))
     cfg.chat.add_item(make_user_message("Again"))
-    list(handler.process(GenerateResponseRequest(runtime_config=cfg)))
+    list(drive_llm(handler, GenerateResponseRequest(runtime_config=cfg)))
 
     assistant_items = [item for item in captured["input"] if item.get("role") == "assistant"]
     assert len(assistant_items) == 1
@@ -1417,8 +1465,8 @@ def test_audio_second_turn_retains_recent_audio_then_compacts_older_turn():
     handler.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)))
     cfg = _make_runtime_config(chat_size=5)
 
-    list(handler.process(_make_audio_request(cfg)))
-    list(handler.process(_make_audio_request(cfg)))
+    list(drive_llm(handler, _make_audio_request(cfg)))
+    list(drive_llm(handler, _make_audio_request(cfg)))
 
     second_messages = captured_calls[1]["messages"]
     assert [message["role"] for message in second_messages] == ["system", "user", "assistant", "user"]
@@ -1475,7 +1523,7 @@ def test_audio_nonstreaming_tool_call_uses_chat_protocol_and_survives_next_turn(
     ]
     cfg.session.tool_choice = {"type": "function", "name": "lookup"}
 
-    first_outputs = list(handler.process(_make_audio_request(cfg)))
+    first_outputs = list(drive_llm(handler, _make_audio_request(cfg)))
     emitted_tools = [tool for output in first_outputs if isinstance(output, LLMResponseChunk) for tool in output.tools]
     assert len(emitted_tools) == 1
     emitted_tool = emitted_tools[0]
@@ -1503,7 +1551,7 @@ def test_audio_nonstreaming_tool_call_uses_chat_protocol_and_survives_next_turn(
             output='{"temperature": 22}',
         )
     )
-    list(handler.process(_make_audio_request(cfg)))
+    list(drive_llm(handler, _make_audio_request(cfg)))
 
     second_messages = captured_calls[1]["messages"]
     assert [message["role"] for message in second_messages] == [
@@ -1586,7 +1634,7 @@ def test_audio_nonstreaming_refusal_is_emitted_and_stored():
     )
     cfg = _make_runtime_config(chat_size=5)
 
-    outputs = list(handler.process(_make_audio_request(cfg)))
+    outputs = list(drive_llm(handler, _make_audio_request(cfg)))
 
     assert any(isinstance(output, LLMResponseChunk) and output.text == "I cannot help with that." for output in outputs)
     assert any(
@@ -1635,7 +1683,7 @@ def test_interrupted_audio_tool_turn_rolls_back_user_call_and_fast_output():
     cfg = _make_runtime_config(chat_size=5)
     cfg.session.tools = [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}]
 
-    generation = handler.process(_make_audio_request(cfg))
+    generation = drive_llm(handler, _make_audio_request(cfg))
     tool_chunk = next(output for output in generation if isinstance(output, LLMResponseChunk) and output.tools)
     call_id = tool_chunk.tools[0].call_id
     cfg.chat.add_item(
@@ -1821,6 +1869,29 @@ def test_response_history_precedes_speech_that_arrived_during_generation():
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
 
-    list(handler.process(request))
+    list(drive_llm(handler, request))
 
     assert [part.text for item in chat.buffer for part in item.content if part.text] == ["A", "answer A", "B"]
+
+
+def test_responses_backend_keeps_injected_context_with_session_instructions():
+    handler = _make_handler(stream=False)
+    captured = []
+
+    def create(**kwargs):
+        captured.append(kwargs)
+        return _make_response([])
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    request = _make_request(chat_size=10)
+    request.runtime_config.session.instructions = "SESSION INSTRUCTIONS"
+    snapshot = make_system_message("CURRENT CHAT SNAPSHOT")
+    request.runtime_config.chat.add_item(snapshot)
+
+    for _ in range(2):
+        list(drive_llm(handler, request))
+        prompt = captured[-1]["input"][0]["content"][0]["text"]
+        assert "SESSION INSTRUCTIONS" in prompt
+        assert prompt.count("CURRENT CHAT SNAPSHOT") == 1
+        assert request.runtime_config.chat.init_chat_message is snapshot
+        assert snapshot.content[0].text == "CURRENT CHAT SNAPSHOT"

@@ -399,6 +399,28 @@ class TestAddItem:
 
     # -- User message --
 
+    @pytest.mark.parametrize("factory", [_system, _user, _assistant, _fc, _fco])
+    def test_client_item_id_is_preserved(self, factory):
+        chat = Chat(size=5)
+        if factory is _fco:
+            chat.add_item(_fc())
+        item = factory("snapshot") if factory in (_system, _user, _assistant) else factory()
+        item.id = "client_context_1"
+        assert chat.add_item(item).id == "client_context_1"
+
+    def test_client_item_id_matching_empty_history_marker_keeps_turn_order(self):
+        chat = Chat(size=5)
+        earlier_question = chat.add_item(_user("earlier question"))
+        earlier_answer = chat.add_item(_assistant("earlier answer"))
+        latest_question = _user("latest question")
+        latest_question.id = "__history_start__"
+        chat.add_item(latest_question)
+        latest_answer = _assistant("latest answer")
+
+        chat.add_item(latest_answer, after_item_id=chat.history_anchor_id())
+
+        assert chat.buffer == [earlier_question, earlier_answer, latest_question, latest_answer]
+
     def test_user_message_text_appended(self):
         chat = Chat(size=5)
         chat.add_item(_user("hi"))
@@ -507,31 +529,18 @@ class TestAddItem:
         with pytest.raises(ChatItemError, match="call_"):
             chat.add_item(fc)
 
-    def test_cancelled_response_rejects_late_provisional_items_atomically(self):
-        chat = Chat(size=5)
-        response_key = "cancelled_response"
-        chat.rollback_provisional_generation(response_key)
-
-        recorded = chat.add_provisional_generation_items(response_key, [_assistant("late"), _fc("late")])
-
-        assert recorded is None
-        assert chat.buffer == []
-        assert not chat.has_pending_tool_calls()
-        chat.rollback_generation(None, item_ids=set(), call_ids=set(), response_key=response_key)
-        assert chat._cancelled_provisional_generations == {}
-
     def test_invalid_provisional_batch_rolls_back_earlier_items(self):
         chat = Chat(size=5)
         existing = chat.add_item(_user("existing"))
         invalid_call = RealtimeConversationItemFunctionCall(
             type="function_call",
-            id="invalid",
+            id="",
             call_id="call_bad",
             name="bad",
             arguments="{}",
         )
 
-        with pytest.raises(ChatItemError, match="fc_"):
+        with pytest.raises(ChatItemError, match="ID must not be empty"):
             chat.add_provisional_generation_items(
                 "failed_response",
                 [_assistant("must roll back"), invalid_call],
@@ -1570,10 +1579,13 @@ class TestTurnOrdering:
         ]
         assert _texts(chat) == ["A", "first", "second", "B"]
 
-    def test_generation_started_on_empty_history_precedes_later_speech(self):
+    @pytest.mark.parametrize("later_id", [None, "__history_start__"])
+    def test_generation_started_on_empty_history_precedes_later_speech(self, later_id):
         chat = Chat(size=5)
         anchor = chat.history_anchor_id()
-        chat.add_item(_user("B"))
+        later_user = _user("B")
+        later_user.id = later_id
+        chat.add_item(later_user)
 
         chat.add_item(_assistant("out of the blue"), after_item_id=anchor)
 

@@ -22,6 +22,7 @@ from speech_to_speech.pipeline.messages import (
     GenerateResponseRequest,
     LLMResponseChunk,
 )
+from tests.llm_history import drive_llm
 
 
 def _tool(name="dance"):
@@ -399,7 +400,7 @@ def test_local_history_commits_text_and_tools_in_emitted_order():
     chat = Chat(5)
     chat.add_item(make_user_message("go"))
 
-    list(handler.process(GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat))))
+    list(drive_llm(handler, GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat))))
 
     output = chat.buffer[1:]
     assert [item.type for item in output] == ["message", "function_call", "message", "function_call", "message"]
@@ -489,7 +490,7 @@ def test_local_tool_call_is_recorded_before_chunk_is_emitted():
     chat = Chat(5)
     chat.add_item(make_user_message("go"))
     request = GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat))
-    generation = handler.process(request)
+    generation = drive_llm(handler, request)
 
     first = next(generation)
 
@@ -524,7 +525,7 @@ def test_cancelled_local_tool_turn_rolls_back_fast_output():
     )
     chat = Chat(5)
     user = chat.add_item(make_user_message("go"))
-    generation = handler.process(GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat)))
+    generation = drive_llm(handler, GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat)))
 
     next(generation)
     assert chat._provisional_generations

@@ -1,3 +1,4 @@
+import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -68,10 +69,11 @@ class ModuleArguments(Wav2Vec2STVHandlerArguments):
         },
     )
     llm_backend: Optional[str] = field(
-        default="responses-api",
+        default_factory=lambda: "mlx-lm" if sys.platform == "darwin" else "transformers",
         metadata={
             "choices": tuple(LLM_BACKENDS),
-            "help": "The LLM backend to use. Default is 'responses-api'.",
+            "help": "The LLM backend to use. Defaults to local inference: 'mlx-lm' on macOS, "
+            "'transformers' elsewhere. API backends must be selected explicitly.",
         },
     )
     tts: Optional[str] = field(
@@ -94,6 +96,17 @@ class ModuleArguments(Wav2Vec2STVHandlerArguments):
                 "retained by service managers, containers and hosted log aggregators, so "
                 "conversation content would outlive the conversation there. Default is False."
             )
+        },
+    )
+    torch_num_threads: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Set PyTorch's CPU intra-op thread count (torch.set_num_threads) for the whole process. "
+            "Unset by default, which keeps the current behaviour: Silero VAD sets PyTorch to one thread "
+            "when it loads. The value is shared by Silero and every other PyTorch CPU model, such as a "
+            "CPU STT, so more threads can speed up CPU STT while slowing Silero; tune it for the whole "
+            "pipeline. It does not configure ONNX Runtime, MLX or other non-PyTorch backends. Must be a "
+            "positive integer."
         },
     )
     enable_live_transcription: bool = field(

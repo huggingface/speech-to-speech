@@ -19,6 +19,7 @@ from rich.console import Console
 from transformers import HfArgumentParser
 
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
+from speech_to_speech.arguments_classes.language_model_arguments import MLX_DEFAULT_LM_MODEL
 from speech_to_speech.arguments_classes.local_audio_arguments import LocalAudioArguments
 from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
 from speech_to_speech.arguments_classes.realtime_server_arguments import (
@@ -76,7 +77,6 @@ console = Console()
 logger = logging.getLogger(__name__)
 logging.getLogger("numba").setLevel(logging.WARNING)  # quiet down numba logs
 
-MLX_DEFAULT_LM_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
 OPENAI_TTS_PLAYBACK_BUFFER_MS = 196.0
 
 
@@ -326,7 +326,19 @@ def check_mac_settings(module_kwargs: ModuleArguments) -> None:
             )
 
 
+def validate_torch_num_threads(value: Any) -> None:
+    if value is not None and (type(value) is not int or value < 1):
+        raise ValueError(f"--torch_num_threads must be a positive integer; got {value!r}.")
+
+
+def apply_torch_num_threads(module_kwargs: ModuleArguments) -> None:
+    """Apply an explicit --torch_num_threads; with it unset, leave PyTorch's thread count alone."""
+    if module_kwargs.torch_num_threads is not None:
+        torch.set_num_threads(module_kwargs.torch_num_threads)
+
+
 def prepare_module_args(module_kwargs: ModuleArguments, llm_backend: BackendSelection) -> None:
+    validate_torch_num_threads(module_kwargs.torch_num_threads)
     if module_kwargs.diarization_model_name and module_kwargs.stt == "none":
         raise ValueError("Speaker-aware conversation requires an STT backend; --stt none does not produce transcripts.")
     if module_kwargs.diarization_model_name and not 0 < module_kwargs.diarization_threshold < 1:
@@ -402,6 +414,9 @@ def _build_handlers(
 
     if resource_ledger is not None:
         resource_ledger.append(vad)
+    # Loading Silero sets PyTorch to one thread for the whole process. Re-apply an explicit
+    # --torch_num_threads after every VAD build, before the other models load and warm up.
+    apply_torch_num_threads(module_kwargs)
 
     side_handlers: list[Any] = []
     if module_kwargs.diarization_model_name:

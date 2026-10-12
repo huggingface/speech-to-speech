@@ -57,6 +57,17 @@ class RuntimeConfig(BaseModel):
         return v
 
     @property
+    def create_response_enabled(self) -> bool:
+        """Whether finalized speech should automatically schedule generation.
+
+        Preserve the existing automatic default when the flag is omitted.
+        """
+        assert self.session.audio is not None and self.session.audio.input is not None
+        td = self.session.audio.input.turn_detection
+        value = td.get("create_response") if isinstance(td, dict) else getattr(td, "create_response", None)
+        return value if value is not None else True
+
+    @property
     def interrupt_response_enabled(self) -> bool:
         """Whether barge-in should cancel an active response.
 
