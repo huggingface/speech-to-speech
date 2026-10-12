@@ -5,8 +5,9 @@ plugin can use it as the realtime model by pointing ``base_url`` at it.
 """
 
 import os
+from datetime import datetime
 
-from livekit.agents import Agent, AgentServer, AgentSession, JobContext, cli
+from livekit.agents import Agent, AgentServer, AgentSession, JobContext, cli, function_tool
 from livekit.plugins import openai
 from openai.types.realtime import AudioTranscription
 from openai.types.realtime.realtime_audio_input_turn_detection import ServerVad
@@ -18,6 +19,11 @@ S2S_VOICE = os.getenv("S2S_VOICE", "Aiden")
 class Assistant(Agent):
     def __init__(self) -> None:
         super().__init__(instructions="You are a helpful voice assistant. Keep answers short and conversational.")
+
+    @function_tool
+    async def get_current_time(self) -> str:
+        """Return the current local time."""
+        return datetime.now().strftime("%H:%M")
 
 
 server = AgentServer()
