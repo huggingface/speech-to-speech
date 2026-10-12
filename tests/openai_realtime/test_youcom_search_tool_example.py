@@ -96,3 +96,41 @@ async def test_youcom_search_reports_free_limit(monkeypatch):
 
     assert result.output["query"] == "latest news"
     assert "YDC_API_KEY" in result.output["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("longer_description", [True, False])
+async def test_youcom_search_preserves_distinct_text_with_a_shared_prefix(monkeypatch, longer_description):
+    prefix = "Bern weather forecast for today and tonight. "
+    detail = prefix + "Read our detailed outlook for rainfall, wind and sunshine across the entire Bern region."
+    temperature = prefix + "Current temperature: 21°C."
+    description, snippet = (detail, temperature) if longer_description else (temperature, detail)
+    response = FakeResponse(
+        200,
+        {
+            "results": {
+                "web": [
+                    {
+                        "title": "Forecast",
+                        "description": description,
+                        "snippets": [snippet],
+                        "url": "https://example.com/weather",
+                    }
+                ]
+            }
+        },
+    )
+    monkeypatch.setattr(realtime_youcom_search_tool, "YDC_API_KEY", "")
+    _patch_client(monkeypatch, response, {})
+
+    result = await realtime_youcom_search_tool.execute_tool("web_search", {"query": "weather in Bern"})
+
+    text = result.output["results"][0]["snippet"]
+    assert description in text
+    assert snippet in text
+
+
+def test_youcom_search_deduplicates_identical_description_and_snippet():
+    text = "Current temperature: 21°C."
+
+    assert realtime_youcom_search_tool._snippet({"description": text, "snippets": [text]}) == text

@@ -54,8 +54,8 @@ def _snippet(item: dict[str, Any]) -> str:
     snippet = ((item.get("snippets") or [""])[0] or "").strip()
     if not description or not snippet:
         return description or snippet
-    if snippet[:40] == description[:40]:
-        return max(description, snippet, key=len)
+    if snippet == description:
+        return description
     return f"{description} {snippet}"
 
 
