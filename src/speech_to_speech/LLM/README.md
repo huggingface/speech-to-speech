@@ -8,6 +8,8 @@ Runtime-supported values in `s2s_pipeline.py`:
 - `mlx-lm` → `language_model.py` (MLX backend)
 - `responses-api` → `responses_api_language_model.py`
 
+The default is local Qwen3.5-4B without an API key: `mlx-lm` with `mlx-community/Qwen3.5-4B-4bit` on macOS, or `transformers` with `Qwen/Qwen3.5-4B` elsewhere. Explicit backend and model settings override these defaults.
+
 ## Usage
 
 ### 1) Transformers (`--llm_backend transformers`)
@@ -20,7 +22,7 @@ Runtime-supported values in `s2s_pipeline.py`:
 ```bash
 speech-to-speech serve \
   --llm_backend transformers \
-  --model_name Qwen/Qwen3-4B-Instruct-2507 \
+  --model_name Qwen/Qwen3.5-4B \
   --llm_device cuda \
   --llm_torch_dtype float16 \
   --llm_gen_max_new_tokens 128
@@ -100,7 +102,7 @@ speech-to-speech local \
   --model_name mlx-community/Qwen3.5-4B-4bit
 ```
 
-`--mac-optimal-settings` sets `--llm_backend mlx-lm`; the explicit `--model_name` above selects `mlx-community/Qwen3.5-4B-4bit`. The command independently selects whether to run only the server or compose it with the audio client.
+`--mac-optimal-settings` sets `--llm_backend mlx-lm` and defaults the model to `mlx-community/Qwen3.5-4B-4bit` if not overridden. macOS selects this LLM backend and model even without the preset. The command independently selects whether to run only the server or compose it with the audio client.
 
 ### Realtime (OpenAI-compatible) setup
 

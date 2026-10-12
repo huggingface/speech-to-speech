@@ -49,6 +49,21 @@ Validation: `npm run test:agents:adapter` checks parsing and adapter behavior;
    see the [backend README](https://github.com/huggingface/speech-to-speech/blob/main/src/speech_to_speech/api/openai_realtime/README.md)
    for more model combinations):
 
+   **Linux / Windows with an NVIDIA GPU (Transformers):**
+
+   ```bash
+   uv run speech-to-speech serve \
+     --stt parakeet-tdt \
+     --llm_backend transformers \
+     --tts kokoro \
+     --model_name "Qwen/Qwen3.5-4B" \
+     --llm_device cuda \
+     --llm_torch_dtype float16 \
+     --enable_live_transcription
+   ```
+
+   **Apple Silicon macOS (MLX):**
+
    ```bash
    uv run speech-to-speech serve \
      --stt parakeet-tdt \
@@ -58,6 +73,11 @@ Validation: `npm run test:agents:adapter` checks parsing and adapter behavior;
      --llm_device mps \
      --enable_live_transcription
    ```
+
+   The LLM defaults to local Qwen3.5-4B without an API key: MLX on macOS,
+   Transformers elsewhere. You can omit `--llm_backend` and `--model_name`
+   to use those defaults. On systems without a supported GPU, omit
+   `--llm_device cuda` to let Transformers select CPU automatically.
 
    The realtime server listens on `ws://localhost:8765/v1/realtime` by default
    (`--host` / `--port` to change).

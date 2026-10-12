@@ -52,6 +52,8 @@ pip install speech-to-speech
 
 Run the configuration you chose with this environment activated. Activate the same environment in any additional terminal where you run `speech-to-speech`. The first run downloads and warms up the models before connecting the microphone. Allow microphone access if prompted, use headphones to avoid speaker feedback, then speak and pause for a reply. Stop with `Ctrl+C`.
 
+`speech-to-speech local` runs the default local pipeline without an API key. On macOS it selects `mlx-lm` with `mlx-community/Qwen3.5-4B-4bit`; elsewhere it selects `transformers` with `Qwen/Qwen3.5-4B`, using an available GPU or falling back to CPU. CPU inference can be slow. Select `responses-api` or `chat-completions` explicitly to use a hosted LLM.
+
 If speaker feedback interrupts replies, add `--local_audio_block_mic_during_playback` to your `speech-to-speech local` command. This pauses microphone capture during playback, so you cannot interrupt the assistant while it speaks.
 
 ### Apple Silicon, fully local
@@ -77,13 +79,13 @@ speech-to-speech local \
     --device cuda \
     --stt parakeet-tdt \
     --llm_backend transformers \
-    --model_name Qwen/Qwen3-4B-Instruct-2507 \
+    --model_name Qwen/Qwen3.5-4B \
     --llm_torch_dtype float16 \
     --tts qwen3 \
     --qwen3_tts_backend ggml
 ```
 
-The [LLM weights alone are approximately **8 GB**](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507/tree/main); speech models, caches, and dependencies need additional disk space. For a quantized LLM in a separate server, see [Combining with llama.cpp](#combining-with-llamacpp), available on both Apple Silicon and NVIDIA.
+The [unquantized LLM weights](https://huggingface.co/Qwen/Qwen3.5-4B/tree/main), speech models, caches, and dependencies all need disk space. For a quantized LLM in a separate server, see [Combining with llama.cpp](#combining-with-llamacpp), available on both Apple Silicon and NVIDIA.
 
 ### Local speech with a hosted LLM
 
@@ -320,31 +322,17 @@ The packaged client can opt in to local Python tools with `talk --tool-module <m
 ### Realtime Server
 
 ```bash
-export OPENAI_API_KEY=...
 speech-to-speech serve
 ```
 
-This is equivalent to:
+This runs Parakeet TDT for STT, local Qwen3.5-4B for the LLM, and Qwen3-TTS CustomVoice with speaker `Aiden` for TTS. No provider API key is required. The LLM backend and model defaults depend on the platform:
 
-```bash
-speech-to-speech serve \
-    --thresh 0.6 \
-    --stt parakeet-tdt \
-    --llm_backend responses-api \
-    --tts qwen3 \
-    --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
-    --qwen3_tts_speaker Aiden \
-    --qwen3_tts_language auto \
-    --qwen3_tts_backend ggml \
-    --qwen3_tts_non_streaming_mode True \
-    --qwen3_tts_mlx_quantization 6bit \
-    --model_name gpt-5.6-terra \
-    --chat_size 30 \
-    --responses_api_stream \
-    --enable_live_transcription
-```
+| Platform | LLM backend | Default model |
+| --- | --- | --- |
+| Apple Silicon macOS | `mlx-lm` | `mlx-community/Qwen3.5-4B-4bit` |
+| Linux / Windows | `transformers` | `Qwen/Qwen3.5-4B` |
 
-The default model is `gpt-5.6-terra` through the OpenAI Responses API with reasoning effort `none`, preserving the previous default model's latency-oriented reasoning behavior. Override the model with `--model_name`, the effort with `--responses_api_reasoning_effort`, and set `--responses_api_base_url` for another OpenAI-compatible provider or server.
+Override the backend with `--llm_backend` and the model with `--model_name`. To use OpenAI explicitly, set `OPENAI_API_KEY` and pass `--llm_backend responses-api`; that backend defaults to `gpt-5.6-terra` with reasoning effort `none`. Use `--responses_api_base_url` for another OpenAI-compatible provider or server.
 
 ### Local Mac
 
@@ -441,13 +429,13 @@ Requests are stateless (send the full message list each time) and are proxied to
 
 The LLM is the most compute-intensive and highest-latency component in the pipeline. A single forward pass through a large model can dominate end-to-end response time, so choosing the right backend for your hardware and latency budget matters. The pipeline supports:
 
-- **Local inference**: `transformers` on CUDA / CPU and `mlx-lm` on Apple Silicon.
+- **Local inference (default)**: `mlx-lm` with 4-bit Qwen3.5-4B on Apple Silicon, and `transformers` with Qwen3.5-4B elsewhere.
 - **Self-hosted servers**: `responses-api` and `chat-completions` can point at a local [vLLM](https://github.com/vllm-project/vllm) or [llama.cpp](https://github.com/ggerganov/llama.cpp) server.
 - **Provider APIs**: the same backends work with OpenAI, [HF Inference Providers](https://huggingface.co/inference-providers), [OpenRouter](https://openrouter.ai), and other OpenAI-compatible providers.
 
 Two API backends are available, sharing the same `--responses_api_*` connection flags:
 
-- `--llm_backend responses-api` (default) targets `/v1/responses`.
+- `--llm_backend responses-api` targets `/v1/responses`.
 - `--llm_backend chat-completions` targets `/v1/chat/completions`.
 
 ### Direct Audio Input (No STT)
@@ -459,7 +447,7 @@ supported with `--llm_backend responses-api`: a model may accept audio through
 [`gpt-audio-1.5`](https://developers.openai.com/api/docs/models/gpt-audio-1.5).
 
 You must explicitly set `--model_name` to a model that accepts audio: the
-default `gpt-5.6-terra` accepts text and image input, but not audio. Check the
+API backends' default `gpt-5.6-terra` accepts text and image input, but not audio. Check the
 provider's model documentation and endpoint support before enabling this mode.
 For OpenAI, see the
 [GPT-5.6 Terra model card](https://developers.openai.com/api/docs/models/gpt-5.6-terra)
@@ -549,7 +537,7 @@ speech-to-speech serve \
     --stt parakeet-tdt \
     --llm_backend chat-completions \
     --tts qwen3 \
-    --model_name "Qwen/Qwen3-4B-Instruct-2507" \
+    --model_name "Qwen/Qwen3.5-4B" \
     --responses_api_base_url "http://localhost:8000/v1" \
     --responses_api_stream
 ```

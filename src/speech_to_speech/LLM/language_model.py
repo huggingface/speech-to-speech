@@ -71,7 +71,7 @@ from speech_to_speech.pipeline.messages import (
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
 from speech_to_speech.pipeline.turn_latency import active_turn_latency_tracker, bind_active_turn_latency_tracker
-from speech_to_speech.utils.utils import is_out_of_band, response_wants_audio
+from speech_to_speech.utils.utils import TORCH_DEVICES, is_out_of_band, resolve_device, response_wants_audio
 
 try:
     import mlx.core as mx
@@ -175,8 +175,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
     def setup(
         self,
-        model_name: str = "Qwen/Qwen3-4B-Instruct-2507",
-        device: str = "cuda",
+        model_name: str = "Qwen/Qwen3.5-4B",
+        device: str = "auto",
         torch_dtype: str = "float16",
         gen_kwargs: dict[str, Any] = {},
         user_role: str = "user",
@@ -189,6 +189,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         compact_history: bool = False,
         **_kwargs: Any,
     ) -> None:
+        if backend == "transformers":
+            device = resolve_device(device, TORCH_DEVICES, "Transformers LLM")
         self.backend = backend
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns

@@ -410,18 +410,22 @@ the trimmed-history case accepts the delayed duplicate. Both fail with exit stat
 
 ### Local LLM with Transformers
 
+On Linux / Windows, Transformers is the default LLM backend with `Qwen/Qwen3.5-4B`; no API key is required. This example explicitly selects an NVIDIA GPU:
+
 ```bash
 uv run speech-to-speech serve \
   --stt parakeet-tdt \
   --llm_backend transformers \
   --tts kokoro \
-  --model_name "Qwen/Qwen3-4B-Instruct-2507" \
-  --llm_device mps \
+  --model_name "Qwen/Qwen3.5-4B" \
+  --llm_device cuda \
   --llm_torch_dtype float16 \
   --enable_live_transcription
 ```
 
 ### Local LLM with MLX-LM
+
+On Apple Silicon macOS, MLX-LM is the default LLM backend with `mlx-community/Qwen3.5-4B-4bit`; no API key is required:
 
 ```bash
 uv run speech-to-speech serve \
@@ -430,7 +434,6 @@ uv run speech-to-speech serve \
   --tts kokoro \
   --model_name "mlx-community/Qwen3.5-4B-4bit" \
   --llm_device mps \
-  --llm_torch_dtype float16 \
   --enable_live_transcription
 ```
 

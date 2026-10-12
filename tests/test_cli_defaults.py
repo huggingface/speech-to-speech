@@ -7,7 +7,10 @@ import pytest
 from speech_to_speech.arguments_classes.chat_completions_language_model_arguments import (
     ChatCompletionsLanguageModelHandlerArguments,
 )
-from speech_to_speech.arguments_classes.language_model_arguments import LanguageModelHandlerArguments
+from speech_to_speech.arguments_classes.language_model_arguments import (
+    LanguageModelHandlerArguments,
+    MLXLanguageModelHandlerArguments,
+)
 from speech_to_speech.arguments_classes.local_audio_arguments import LocalAudioArguments
 from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
 from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
@@ -21,7 +24,7 @@ from speech_to_speech.pipeline.transcript_logging import set_log_transcripts, tr
 from speech_to_speech.s2s_pipeline import ParsedArguments, parse_arguments, prepare_all_args, prepare_module_args
 
 
-def test_release_defaults_match_responses_api_parakeet_qwen3_profile():
+def test_release_defaults_match_local_qwen35_parakeet_qwen3_profile():
     module_args = ModuleArguments()
     vad_args = VADHandlerArguments()
     responses_api_args = ResponsesApiLanguageModelHandlerArguments()
@@ -29,7 +32,9 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_profile():
 
     assert module_args.stt == "parakeet-tdt"
     assert module_args.mac_optimal_settings is False
-    assert module_args.llm_backend == "responses-api"
+    assert module_args.llm_backend == ("mlx-lm" if sys.platform == "darwin" else "transformers")
+    assert LanguageModelHandlerArguments().model_name == "Qwen/Qwen3.5-4B"
+    assert MLXLanguageModelHandlerArguments().model_name == "mlx-community/Qwen3.5-4B-4bit"
     assert module_args.tts == "qwen3"
     assert module_args.detect_llm_output_language is False
     assert module_args.log_level == "info"
@@ -100,14 +105,14 @@ def test_mac_optimal_settings_flag_does_not_select_a_command():
     assert args.module_kwargs.tts == "qwen3"
     assert args.llm_backend.config["device"] == "mps"
     assert args.tts_backend.config["device"] == "mps"
-    assert args.llm_backend.config["model_name"] == "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+    assert args.llm_backend.config["model_name"] == "mlx-community/Qwen3.5-4B-4bit"
 
 
 def test_mac_optimal_settings_routes_explicit_model_to_mlx_backend():
     args = parse_arguments(["--mac-optimal-settings", "--model_name", "custom/mlx-model"])
 
     assert args.module_kwargs.llm_backend == "mlx-lm"
-    assert args.llm_backend.spec.config_type is LanguageModelHandlerArguments
+    assert args.llm_backend.spec.config_type is MLXLanguageModelHandlerArguments
     assert args.llm_backend.config["model_name"] == "custom/mlx-model"
 
 
@@ -197,11 +202,15 @@ def test_diarization_is_opt_in():
     assert parse_arguments([]).module_kwargs.diarization_model_name is None
 
 
-def test_parse_arguments_default_backend_returns_openai_api():
+@pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
+@pytest.mark.parametrize("command", ["serve", "local"])
+def test_parse_arguments_default_backend_runs_local_qwen35(platform, command, monkeypatch):
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     original_argv = sys.argv[:]
     try:
         sys.argv = ["speech-to-speech"]
-        args = parse_arguments()
+        args = parse_arguments(command=command)
     finally:
         sys.argv = original_argv
 
@@ -211,11 +220,13 @@ def test_parse_arguments_default_backend_returns_openai_api():
     assert args.local_audio_kwargs.local_audio_playback_buffer_ms is None
     assert args.stt_backend.name == "parakeet-tdt"
     assert args.tts_backend.name == "qwen3"
-    assert args.llm_backend.name == "responses-api"
-    assert args.llm_backend.spec.config_type is ResponsesApiLanguageModelHandlerArguments
-    assert args.llm_backend.config["model_name"] == "gpt-5.6-terra"
-    assert args.llm_backend.config["reasoning_effort"] == "none"
-    assert args.module_kwargs.llm_backend == "responses-api"
+    expected_backend = "mlx-lm" if platform == "darwin" else "transformers"
+    expected_model = "mlx-community/Qwen3.5-4B-4bit" if platform == "darwin" else "Qwen/Qwen3.5-4B"
+    assert args.llm_backend.name == expected_backend
+    assert args.llm_backend.config["model_name"] == expected_model
+    assert args.llm_backend.config["device"] == ("mps" if platform == "darwin" else "auto")
+    assert "api_key" not in args.llm_backend.config
+    assert args.module_kwargs.llm_backend == expected_backend
     assert args.vad_handler_kwargs.smart_turn is True
     assert args.vad_handler_kwargs.smart_turn_model_path is None
     assert args.vad_handler_kwargs.smart_turn_threshold == 0.5
@@ -252,6 +263,38 @@ def test_parse_arguments_accepts_smart_turn_options():
     assert vad_args.smart_turn_max_wait_ms == 2500
     assert vad_args.smart_turn_incomplete_delay_ms == 700
     assert vad_args.smart_turn_cpu_count == 2
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+@pytest.mark.parametrize("backend", ["mlx-lm", "transformers", "responses-api", "chat-completions"])
+def test_llm_defaults_follow_explicit_backend_and_keep_model_overrides(platform, backend, monkeypatch):
+    monkeypatch.setattr(sys, "platform", platform)
+    args = parse_arguments(["--llm_backend", backend])
+    expected_model = {
+        "mlx-lm": "mlx-community/Qwen3.5-4B-4bit",
+        "transformers": "Qwen/Qwen3.5-4B",
+        "responses-api": "gpt-5.6-terra",
+        "chat-completions": "gpt-5.6-terra",
+    }[backend]
+    assert args.llm_backend.name == backend
+    assert args.llm_backend.config["model_name"] == expected_model
+    overridden = parse_arguments(["--llm_backend", backend, "--model_name", "custom/model"])
+    assert overridden.llm_backend.config["model_name"] == "custom/model"
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_legacy_json_defaults_to_local_llm_and_preserves_overrides(platform, tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", platform)
+    path = tmp_path / "pipeline.json"
+    path.write_text("{}")
+    args = parse_arguments([str(path)])
+    assert args.llm_backend.name == ("mlx-lm" if platform == "darwin" else "transformers")
+    assert "api_key" not in args.llm_backend.config
+    path.write_text(json.dumps({"llm_backend": "transformers", "model_name": "custom/model", "llm_device": "cpu"}))
+    args = parse_arguments([str(path)])
+    assert args.llm_backend.name == "transformers"
+    assert args.llm_backend.config["model_name"] == "custom/model"
+    assert args.llm_backend.config["device"] == "cpu"
 
 
 def test_parse_arguments_can_disable_smart_turn():
@@ -537,7 +580,7 @@ def test_parse_arguments_transformers_backend():
     assert isinstance(args, ParsedArguments)
     assert args.llm_backend.name == "transformers"
     assert args.llm_backend.spec.config_type is LanguageModelHandlerArguments
-    assert args.llm_backend.config["model_name"] == "Qwen/Qwen3-4B-Instruct-2507"
+    assert args.llm_backend.config["model_name"] == "Qwen/Qwen3.5-4B"
     assert not hasattr(args, "responses_api_language_model_handler_kwargs")
 
 
@@ -548,6 +591,8 @@ def test_prepare_module_args_rejects_responses_api_for_stt_none():
             "speech-to-speech",
             "--stt",
             "none",
+            "--llm_backend",
+            "responses-api",
             "--responses_api_base_url",
             "http://127.0.0.1:8080/v1",
             "--model_name",
