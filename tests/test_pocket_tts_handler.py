@@ -379,6 +379,129 @@ def test_pocket_pcm_conversion_saturates_instead_of_wrapping():
     assert np.array_equal(output[0][:4], np.array([32767, -32767, 32767, -32767], dtype=np.int16))
 
 
+def test_pocket_records_ttfa_at_first_provider_chunk_and_preserves_first_audio(monkeypatch):
+    """TTFA is provider audio; later segments must not overwrite first-audio fields."""
+    import torch
+
+    import speech_to_speech.TTS.pocket_tts_handler as pocket_module
+    from speech_to_speech.pipeline.messages import TTSInput
+    from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
+
+    clock = [100.0]
+    monkeypatch.setattr(pocket_module, "perf_counter", lambda: clock[0])
+
+    handler, _ = _farsi_handler()
+    handler.phonemizer = None
+    handler.sample_rate = handler.model.sample_rate
+    handler.blocksize = 4
+    store = handler.turn_latency_store = TurnLatencyStore()
+    tracker = store.get_or_create_response("resp-1", turn_id="turn_1", turn_revision=0)
+
+    def stream(*args, **kwargs):
+        clock[0] = 100.05
+        yield torch.full((4,), 0.1)
+        clock[0] = 100.50
+        yield torch.full((4,), 0.2)
+
+    handler.model.generate_audio_stream = stream
+    outputs = list(
+        handler.process(
+            TTSInput(
+                text="Hello",
+                response_key="resp-1",
+                turn_id="turn_1",
+                turn_revision=0,
+                speech_stopped_at_s=99.0,
+            )
+        )
+    )
+
+    assert outputs
+    assert tracker.tts_ttfa_s == pytest.approx(0.05)
+    assert tracker.e2e_s == pytest.approx(1.05)
+
+    clock[0] = 200.0
+
+    def later_stream(*args, **kwargs):
+        clock[0] = 200.40
+        yield torch.full((4,), 0.3)
+
+    handler.model.generate_audio_stream = later_stream
+    list(
+        handler.process(
+            TTSInput(
+                text="Again",
+                response_key="resp-1",
+                turn_id="turn_1",
+                turn_revision=0,
+                speech_stopped_at_s=99.0,
+            )
+        )
+    )
+
+    assert tracker.tts_ttfa_s == pytest.approx(0.05)
+    assert tracker.e2e_s == pytest.approx(1.05)
+
+
+@pytest.mark.parametrize("outcome", ["success", "retry", "failed", "cancelled", "sentence_pause"])
+def test_farsi_ttfa_precedes_buffering_and_ignores_generated_pauses(monkeypatch, outcome):
+    from queue import Queue
+
+    import torch
+
+    import speech_to_speech.TTS.pocket_tts_handler as pocket_module
+    from speech_to_speech.pipeline.cancel_scope import CancelScope
+    from speech_to_speech.pipeline.messages import TTSInput
+    from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
+
+    clock = [100.0]
+    monkeypatch.setattr(pocket_module, "perf_counter", lambda: clock[0])
+    handler, _ = _farsi_handler()
+    handler.phonemizer = lambda text: "" if text == "حذف" else "salAm"
+    handler.sample_rate = handler.model.sample_rate
+    handler.queue_out = Queue()
+    handler.cancel_scope = CancelScope()
+    store = handler.turn_latency_store = TurnLatencyStore()
+    tracker = store.get_or_create_response("farsi", turn_id="turn_1")
+    attempts = []
+
+    def stream(**kwargs):
+        attempts.append(kwargs)
+        start = 100.0 + len(attempts) - 1
+        clock[0] = start + 0.01
+        yield torch.empty(0)
+        bad = outcome == "failed" or (outcome == "retry" and len(attempts) == 1)
+        clock[0] = start + 0.05
+        yield torch.full((1200,), 0.0 if bad else 0.1)
+        clock[0] = start + 0.50
+        if outcome == "cancelled":
+            handler.cancel_scope.cancel()
+        yield torch.full((1200,), 0.0 if bad else 0.1)
+        clock[0] = start + 1.0
+
+    handler.model._generate_audio_stream_short_text = stream
+    output = list(
+        handler.process(
+            TTSInput(
+                text="حذف.سلام" if outcome == "sentence_pause" else "سلام",
+                response_key="farsi",
+                speech_stopped_at_s=99.0,
+                cancel_generation=0,
+            )
+        )
+    )
+    assert len(attempts) == (2 if outcome in {"retry", "failed"} else 1)
+    if outcome in {"failed", "cancelled"}:
+        assert output == []
+        assert tracker.tts_ttfa_s is None
+        assert tracker.e2e_s is None
+    else:
+        assert output
+        assert tracker.tts_ttfa_s == pytest.approx(0.05)
+        expected_e2e = {"success": 2.0, "retry": 3.0, "sentence_pause": 1.0}[outcome]
+        assert tracker.e2e_s == pytest.approx(expected_e2e)
+
+
 @pytest.mark.parametrize("output_rate", [16000, 24000])
 def test_pocket_resampling_matches_whole_signal_across_chunk_boundaries(output_rate):
     import numpy as np

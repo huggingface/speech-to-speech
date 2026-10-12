@@ -18,6 +18,7 @@ from speech_to_speech.pipeline.events import (
     TranscriptionCompletedEvent,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from tests.llm_history import drive_llm
 from tests.test_responses_api_language_model import _make_handler
 
 
@@ -172,7 +173,7 @@ def test_disabled_direct_audio_reaches_real_backend_once_and_survives_response_f
     assert created.type == "response.created"
     request = prompts.get_nowait()
     assert request.turn_id == "turn_2"
-    outputs = list(handler.process(request))
+    outputs = list(drive_llm(handler, request, service=service, conn_id=conn_id))
     assert len(calls) == 1
     audio_inputs = [
         part["input_audio"]
@@ -320,7 +321,7 @@ def test_audio_arriving_during_manual_generation_remains_available_for_next_requ
             == "response.created"
         )
         request = prompts.get_nowait()
-        list(handler.process(request))
+        list(drive_llm(handler, request, service=service, conn_id=conn_id))
         service.response.mark_response_created_sent(conn_id, request.response_key)
         service.finish_response(conn_id, response_key=request.response_key)
     assert len(calls) == 2

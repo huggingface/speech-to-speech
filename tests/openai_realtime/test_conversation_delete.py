@@ -35,7 +35,9 @@ from speech_to_speech.pipeline.events import (
     TranscriptionCompletedEvent,
     TranscriptionFailedEvent,
 )
+from speech_to_speech.pipeline.history import ResponseHistory
 from speech_to_speech.pipeline.messages import AssistantTextPart, EndOfResponse, LLMResponseChunk
+from tests.llm_history import drive_llm
 from tests.test_response_overrides import _RecordingLocalHandler
 from tests.test_responses_api_language_model import _make_handler, _make_response, _make_stream
 
@@ -180,7 +182,7 @@ def test_generated_assistant_is_deletable_by_wire_id(service, conn_id):
     handler.enable_lang_prompt = False
     handler.tokenizer = SimpleNamespace(encode=lambda _text: [])
     handler.emit_text = True
-    list(handler.process(request))
+    list(drive_llm(handler, request, service=service, conn_id=conn_id))
     events = service.dispatch_pipeline_event(
         conn_id, AssistantOutputEvent(parts=[AssistantTextPart(text="ok")], response_key=request.response_key)
     )
@@ -349,7 +351,7 @@ def test_openwebui_refresh_reaches_model_and_socket_stays_open(setup):
         handler.enable_lang_prompt = False
         handler.tokenizer = SimpleNamespace(encode=lambda _text: [])
         handler.emit_text = True
-        assert any(isinstance(chunk, EndOfResponse) for chunk in handler.process(request))
+        assert any(isinstance(chunk, EndOfResponse) for chunk in drive_llm(handler, request))
         assert "Snapshot 2" in str(handler.seen_chat.to_transformers_chat())
         assert "Be concise." in str(handler.seen_chat.to_transformers_chat())
         assert "Snapshot 1" not in str(handler.seen_chat.to_transformers_chat())
@@ -426,10 +428,16 @@ def test_delete_discards_hidden_prefetch_and_late_write(service, conn_id):
     assert st.tool_followup_prefetch_request is None
     assert not st.response_pending
     assert service.text_prompt_queue.empty()
-    assert (
-        st.runtime_config.chat.add_provisional_generation_items(request.response_key, [make_assistant_message("stale")])
-        is None
+    proposal = ResponseHistory.capture(
+        st.runtime_config.chat, [make_assistant_message("stale")], after_item_id=None, complete=True
     )
+    service.dispatch_pipeline_event(
+        conn_id,
+        AssistantOutputEvent(
+            parts=[AssistantTextPart(text="stale")], response_key=request.response_key, history=proposal
+        ),
+    )
+    assert proposal.wait_until_resolved(0)
     assert st.runtime_config.chat.to_transformers_chat() == []
 
 
@@ -480,7 +488,14 @@ def test_delete_waits_for_overlapping_queued_response(service, conn_id, cancel_a
     assert any(e.type == "conversation.item.deleted" for e in events)
     assert not st.response_pending
     assert st.runtime_config.chat.init_chat_message is None
-    assert st.runtime_config.chat.add_provisional_generation_items("queued", [make_assistant_message("late")]) is None
+    proposal = ResponseHistory.capture(
+        st.runtime_config.chat, [make_assistant_message("late")], after_item_id=None, complete=True
+    )
+    service.dispatch_pipeline_event(
+        conn_id, AssistantOutputEvent(parts=[AssistantTextPart(text="late")], response_key="queued", history=proposal)
+    )
+    assert proposal.wait_until_resolved(0)
+    assert not st.runtime_config.chat.buffer
 
 
 def test_deleting_provisional_call_does_not_remove_replacement_on_rollback():
@@ -578,7 +593,7 @@ def test_filtered_provider_message_does_not_steal_visible_reply_identity(
     handler = _make_handler(stream=stream)
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **_kwargs: provider_response))
     wire_messages = []
-    chunks = list(handler.process(request))
+    chunks = list(drive_llm(handler, request, service=service, conn_id=conn_id))
     assert any(isinstance(chunk, EndOfResponse) and chunk.error is None for chunk in chunks)
     for chunk in chunks:
         if not isinstance(chunk, LLMResponseChunk):
@@ -688,7 +703,7 @@ def test_delete_provider_companion_keeps_next_responses_request_valid(
     )
     request = service.text_prompt_queue.get_nowait()
     output_items = []
-    chunks = list(handler.process(request))
+    chunks = list(drive_llm(handler, request, service=service, conn_id=conn_id))
     assert any(isinstance(chunk, EndOfResponse) and chunk.error is None for chunk in chunks)
     for chunk in chunks:
         if isinstance(chunk, LLMResponseChunk):
@@ -718,7 +733,7 @@ def test_delete_provider_companion_keeps_next_responses_request_valid(
     service.handle_response_create(
         conn_id, ResponseCreateEvent(type="response.create", response={"output_modalities": ["text"]})
     )
-    chunks = list(handler.process(service.text_prompt_queue.get_nowait()))
+    chunks = list(drive_llm(handler, service.text_prompt_queue.get_nowait(), service=service, conn_id=conn_id))
     assert any(isinstance(chunk, EndOfResponse) and chunk.error is None for chunk in chunks)
     provider_input = requests[-1]["input"]
     deleted_ids = {"msg_deleted", "fc_deleted"} if leading_message else {"rs_deleted", "msg_deleted", "fc_deleted"}
