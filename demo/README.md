@@ -15,7 +15,7 @@ hf_oauth_expiration_minutes: 10080
 
 Browser voice-chat UI for the
 [huggingface/speech-to-speech](https://github.com/huggingface/speech-to-speech)
-backend. The default backend runs STT, Qwen3.5-4B, and TTS locally without a provider API key. The UI speaks the OpenAI Realtime **GA** protocol over **WebSocket**
+backend, which runs locally by default. The UI speaks the OpenAI Realtime **GA** protocol over **WebSocket**
 (default) or **WebRTC** (Settings → Transport, env-pinned deploys only — see
 [WebRTC transport](#webrtc-transport)).
 
@@ -26,27 +26,17 @@ protocol implementation.
 
 ## Quick start (local)
 
-Run the browser UI against the default local pipeline. You need a repository checkout, [uv](https://docs.astral.sh/uv/getting-started/installation/), and Node.js/npm for the browser dependencies. Follow the [main installation guide](../README.md#installation) for platform requirements, including Linux audio libraries and the Qwen3-TTS CUDA wheel.
+You need a repository checkout, [uv](https://docs.astral.sh/uv/getting-started/installation/), and Node.js/npm. See the [main README](../README.md#quickstart) for platform notes.
 
-1. **Start the local speech server** from the repository root:
+1. **Start the speech server** from the repository root:
 
    ```bash
    uv sync --python 3.11
    uv run speech-to-speech serve
    ```
 
-   No provider API key or separate LLM server is needed. The default speech
-   models are Parakeet TDT and Qwen3-TTS; the LLM depends on your platform:
-
-   | Platform | LLM backend | Model |
-   |---|---|---|
-   | Apple Silicon macOS | MLX LM | `mlx-community/Qwen3.5-4B-4bit` |
-   | Linux / Windows | Transformers | `Qwen/Qwen3.5-4B` |
-
-   Transformers selects an available accelerator or CPU. First startup
-   downloads and warms up the models. Wait for the server to listen at
-   `ws://127.0.0.1:8765/v1/realtime` before starting the UI. The same command
-   works on both platforms; model and backend overrides are optional.
+   The first start downloads the models. Wait until the server listens at
+   `ws://127.0.0.1:8765/v1/realtime`.
 
 2. **Install the pinned browser SDK and start this app**, pointing it at the
    backend with `SPEECH_TO_SPEECH_URL`:
@@ -85,11 +75,9 @@ Run the browser UI against the default local pipeline. You need a repository che
 
 3. Open <http://localhost:7860/>, click the orb, allow the mic, talk.
 
-Model changes belong on the speech server. Keep the default local LLM or follow
-the [LLM guide](../src/speech_to_speech/LLM/README.md) to choose another local model,
-a separate inference server, or a hosted provider. The browser connects to the
-same Realtime endpoint in each case. Optional [web search](#tools) and
-[startup greetings](#startup-greeting) can be configured after the local conversation works.
+To change models, configure the speech server (see the
+[LLM guide](../src/speech_to_speech/LLM/README.md)). Optional [web search](#tools) and
+[startup greetings](#startup-greeting) are covered below.
 
 > Browsers require **HTTPS or `localhost`** for `getUserMedia()` (mic + camera).
 > `127.0.0.1` and `localhost` both work; plain `http://192.168.x.y` does NOT.
@@ -230,9 +218,8 @@ button, top-right):
   Tools panel.
 - **Camera** — while enabled, a live self-view shows bottom-left; when the model
   calls the tool, the current frame is sent to the vision-language model so it can
-  see what you're showing it. Configure a vision-capable LLM before using this
-  tool: the default quickstart uses the text-only handler. Local vision inference
-  needs `--llm_is_vlm` and the appropriate vision backend dependencies; see the
+  see what you're showing it. This needs a vision-language model on the server
+  (`--llm_is_vlm`; the default model is text-only); see the
   [LLM guide](../src/speech_to_speech/LLM/README.md#local-generation-options).
 
 ## Usage limits (deployed Space only)

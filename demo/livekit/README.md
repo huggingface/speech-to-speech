@@ -3,7 +3,7 @@
 Run a [LiveKit Agents](https://docs.livekit.io/agents/) voice agent with
 speech-to-speech as its realtime model. LiveKit's OpenAI Realtime plugin accepts
 a custom `base_url`, so the agent talks to the local Realtime server instead of
-OpenAI. The default speech server runs Parakeet TDT, local Qwen3.5-4B, and Qwen3-TTS without a provider API key. LiveKit room credentials below belong to LiveKit, not to an LLM provider.
+OpenAI. The speech server needs no changes or extra flags for this.
 
 ```text
 LiveKit room ──audio──> agent.py (LiveKit Agents) ──Realtime WebSocket──> speech-to-speech
@@ -14,8 +14,8 @@ LiveKit room ──audio──> agent.py (LiveKit Agents) ──Realtime WebSock
 
 Apple Silicon macOS, Python 3.12, [uv](https://docs.astral.sh/uv/getting-started/installation/)
 and, for the `dev` mode below, a local [LiveKit server](https://docs.livekit.io/home/self-hosting/local/)
-(`brew install livekit`). This example's supported setup is Apple Silicon; the speech server uses the local defaults from the
-[main README](../../README.md#apple-silicon-fully-local): Parakeet TDT, Qwen3.5-4B
+(`brew install livekit`). The speech server uses the
+[local defaults](../../README.md#quickstart): Parakeet TDT, Qwen3.5-4B
 through MLX LM and Qwen3-TTS. The agent uses `livekit-agents` 1.8.5, pinned in
 `requirements.txt`. Other versions are not tested by this example.
 
@@ -31,10 +31,6 @@ through MLX LM and Qwen3-TTS. The agent uses `livekit-agents` 1.8.5, pinned in
    Wait for `Uvicorn running on http://127.0.0.1:8765`. First startup downloads
    the model weights. This terminal uses the repository's environment, which
    `uv run` selects automatically.
-
-   The command selects MLX LM with `mlx-community/Qwen3.5-4B-4bit` on macOS.
-   Model flags and the Mac preset are optional; see the [LLM guide](../../src/speech_to_speech/LLM/README.md)
-   to choose another local model or explicitly connect a hosted provider.
 
 2. In a second terminal, start a local LiveKit server:
 

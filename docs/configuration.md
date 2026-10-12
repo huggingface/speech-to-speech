@@ -3,7 +3,7 @@
 Use a YAML file to define reusable VAD, STT, LLM, and TTS blocks, connect them
 into named pipelines, and start a selected pipeline from the CLI or Python.
 
-For the default local conversation, no file is needed: run `speech-to-speech local`. A file is useful when you want to save model choices or reuse pipeline settings. Unlike the CLI's automatic platform selection, YAML names each backend explicitly: use `mlx-lm` on Apple Silicon or `transformers` elsewhere. Their default models are local Qwen3.5-4B, and neither requires a provider API key.
+The default conversation needs no file: `speech-to-speech local` is enough. Unlike the CLI, YAML does not pick backends by platform, so name them explicitly.
 
 ## Start with a Mac configuration
 
@@ -34,7 +34,7 @@ pipelines:
 YAML selects each backend explicitly. `mac_optimal_settings` supplies preset
 defaults for those backends; explicit settings override them.
 
-On Linux / Windows, change the LLM block to `backend: transformers` and `model_name: Qwen/Qwen3.5-4B`, and remove `mac_optimal_settings: true`. Transformers selects an available accelerator or CPU automatically. Rename the pipeline if desired; its name does not affect backend selection.
+On Linux / Windows, change the LLM block to `backend: transformers` and `model_name: Qwen/Qwen3.5-4B`, and remove `mac_optimal_settings: true`.
 
 ## Build your configuration
 

@@ -1,30 +1,13 @@
 # Realtime engine
 
-Serve the default local voice pipeline to a browser, robot, or other Realtime client. The OpenAI-compatible protocol is the client interface; it does not require a hosted OpenAI LLM or provider key.
-
-## Start locally
-
-After [installation](../../../../README.md#installation), start the server:
+Serves the voice pipeline to a browser, robot, or any other Realtime client over the OpenAI Realtime protocol. The models run locally by default; the protocol is only the client interface.
 
 ```bash
-speech-to-speech serve
+speech-to-speech serve                                             # terminal 1
+speech-to-speech talk --url ws://127.0.0.1:8765/v1/realtime        # terminal 2
 ```
 
-This runs Parakeet TDT, local Qwen3.5-4B, and Qwen3-TTS. On Apple Silicon, the LLM uses MLX LM with `mlx-community/Qwen3.5-4B-4bit`; on Linux / Windows, it uses Transformers with `Qwen/Qwen3.5-4B` and automatic accelerator / CPU selection. First startup downloads and warms up the models. For a conversation in one terminal, use `speech-to-speech local` instead.
-
-The server listens on loopback at `ws://127.0.0.1:8765/v1/realtime`. Connect the packaged audio client from another terminal:
-
-```bash
-speech-to-speech talk --url ws://127.0.0.1:8765/v1/realtime
-```
-
-For other clients, see the [browser demo](../../../../demo/README.md) and [LiveKit example](../../../../demo/livekit/README.md). `--host` and `--port` change the listener; the server defaults to one pipeline instance.
-
-## Choose another LLM
-
-The Realtime server and clients work with both local and API-backed LLMs. Use `--llm_backend` and `--model_name` to change the server's model; the client does not choose its weights. Keep MLX conversions on the MLX backend and Transformers checkpoints on the Transformers backend.
-
-Selecting `responses-api` or `chat-completions` connects the LLM stage to a separate inference server or hosted provider. That is an explicit alternative to local generation; it does not change the local STT/TTS defaults. See the [LLM guide](../../LLM/README.md) for model overrides, local-server connections, hosted credentials, and generation settings.
+The server listens on loopback; `--host` and `--port` change that. Other clients include the [browser demo](../../../../demo/README.md) and the [LiveKit example](../../../../demo/livekit/README.md). Models are chosen on the server, not by the client; see the [LLM guide](../../LLM/README.md).
 
 ## Realtime Engine -- High-Level Architecture
 

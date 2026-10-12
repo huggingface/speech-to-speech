@@ -14,9 +14,9 @@
 
 </div>
 
-A low-latency voice-agent pipeline that runs **speech recognition, the language model, and speech synthesis on your own computer by default**. Start a conversation with one command and no provider API key. The default stack is **Silero VAD -> Parakeet TDT -> Qwen3.5-4B -> Qwen3-TTS**, using MLX on Apple Silicon and Transformers for the LLM elsewhere.
+A low-latency voice agent built from open models that **runs entirely on your computer**. One command starts a conversation: no API key, no cloud service.
 
-Every component is swappable. Use the packaged microphone/speaker client, or connect your own app through the **core OpenAI Realtime GA event set over WebSocket and WebRTC**. OpenAI-compatible clients can talk to this local server; using that protocol does not require an OpenAI account. Separate local LLM servers and hosted providers are optional alternatives.
+The default pipeline is **Silero VAD → Parakeet TDT → Qwen3.5-4B → Qwen3-TTS**, and every stage is swappable. The server speaks the **OpenAI Realtime protocol** over WebSocket and WebRTC, so apps built for OpenAI's Realtime API can point at your own machine instead.
 
 This pipeline runs in production as the conversation backend for thousands of [Reachy Mini](https://huggingface.co/blog/reachy-mini) robots.
 
@@ -30,99 +30,48 @@ This pipeline runs in production as the conversation backend for thousands of [R
 
 ## Quickstart
 
-Install the package, then run `speech-to-speech local` to talk through your microphone and speakers. The command selects local models for your platform. You do not need to choose an LLM backend, start a separate model server, or set an API key.
-
-### Install for these examples
-
-Use Python 3.10+ (Python 3.11 recommended) and install the package in a virtual environment.
-
-On Ubuntu, install the local audio libraries first: `sudo apt-get install libportaudio2 libsndfile1`. The default Linux Qwen3-TTS wheel targets CUDA 12.8 and glibc 2.39 (Ubuntu 24.04); check the [CUDA installation note](#cuda-note-for-qwen3-tts) if your system differs.
+Use Python 3.10+ (3.11 recommended):
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate    # Windows PowerShell: .venv\Scripts\Activate.ps1
 pip install speech-to-speech
-```
-
-On Windows, create and activate the environment in PowerShell, then use the same `speech-to-speech local` command:
-
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install speech-to-speech
-```
-
-Multiline shell examples below use Bash/zsh syntax. In PowerShell, enter each command on one line or use PowerShell's backtick continuation character.
-
-### Start a conversation
-
-With the environment activated:
-
-```bash
 speech-to-speech local
 ```
 
-The first run needs internet access to download and warm up the models and supporting assets. Allow microphone access if prompted, use headphones to avoid speaker feedback, then speak and pause for a reply. Stop with `Ctrl+C`. Once the assets are cached, the local pipeline can run [offline](#offline-operation).
+Then talk: speak, pause, and the assistant answers through your speakers. Stop with `Ctrl+C`. The first run downloads the models, so give it a few minutes. Use headphones so the assistant does not hear itself, or add `--local_audio_block_mic_during_playback`.
 
-Speech recognition uses Parakeet TDT; speech synthesis uses Qwen3-TTS CustomVoice with speaker `Aiden`. The LLM defaults are:
+On Ubuntu, first install the audio libraries with `sudo apt-get install libportaudio2 libsndfile1`. The default Linux Qwen3-TTS wheel targets CUDA 12.8 and Ubuntu 24.04; see the [CUDA note](#cuda-note-for-qwen3-tts) for other systems.
 
-| Platform | Local LLM backend | Default model | Hardware to plan for |
-|---|---|---|---|
-| [Apple Silicon macOS](#apple-silicon-fully-local) | `mlx-lm` | `mlx-community/Qwen3.5-4B-4bit` | 16 GB or more of unified memory |
-| [Linux / Windows with NVIDIA](#nvidia-gpu-fully-local) | `transformers` | `Qwen/Qwen3.5-4B` | Budget 24 GB of VRAM for the unquantized LLM, speech models, and caches, plus system RAM |
-| Linux / Windows without a supported GPU | `transformers` | `Qwen/Qwen3.5-4B` | CPU fallback; replies can be slow |
+The command picks local models for your platform:
 
-These are planning estimates for one conversation, not measured minimum requirements. Actual memory use depends on context length, audio length, and backend versions. Model downloads, dependencies, and caches also need disk space. The default pipeline processes conversation audio and text locally. Selecting remote backends or tools changes where their inputs are sent.
+| Platform | LLM | Plan for |
+|---|---|---|
+| Apple Silicon Mac | [Qwen3.5-4B 4-bit](https://huggingface.co/mlx-community/Qwen3.5-4B-4bit) via MLX LM | 16 GB of unified memory |
+| Linux / Windows with NVIDIA | [Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B) via Transformers | 24 GB of VRAM |
+| Other machines | Qwen3.5-4B via Transformers on CPU | Slow replies |
 
-If speaker feedback interrupts replies, add `--local_audio_block_mic_during_playback` to your `speech-to-speech local` command. This pauses microphone capture during playback, so you cannot interrupt the assistant while it speaks.
+Speech recognition and synthesis run locally too. After the first run, everything works [offline](#offline-operation). To use another model, a llama.cpp server, or a hosted provider, see [LLM backends](#llm-backends).
 
-### Apple Silicon, fully local
+### Connect your own app
 
-The command above already selects MLX LM with the 4-bit Qwen3.5-4B model. Parakeet TDT and the 6-bit Qwen3-TTS CustomVoice model run through MLX Audio. Model weights: [STT](https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v3/tree/main), [LLM](https://huggingface.co/mlx-community/Qwen3.5-4B-4bit/tree/main), and [TTS](https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit/tree/main).
-
-`--mac-optimal-settings` is an optional preset that also supplies MPS defaults for supported component devices. It is not required to select the local Mac LLM. Explicit backend, model, and device flags override preset defaults.
-
-For a separate local LLM server, see [Combining with llama.cpp](#combining-with-llamacpp). For a model that accepts audio directly, see the [Gemma 4 12B example](./examples/gemma4-12b-macos/README.md).
-
-### NVIDIA GPU, fully local
-
-On Linux and Windows, Transformers loads Qwen3.5-4B in the speech process and automatically selects an available accelerator or CPU. With an NVIDIA GPU, the simple `local` command uses CUDA for the LLM when available. To require CUDA for all handlers that accept a device override:
-
-```bash
-speech-to-speech local \
-    --device cuda
-```
-
-The [unquantized LLM weights](https://huggingface.co/Qwen/Qwen3.5-4B/tree/main), speech models, caches, and dependencies all need disk space. For a quantized LLM in a separate server, see [Combining with llama.cpp](#combining-with-llamacpp), available on both Apple Silicon and NVIDIA.
-
-### Other clients and offline use
-
-For offline use, first cache the selected models and dependencies as described in [Offline operation](#offline-operation).
-
-To connect an app, start the same local pipeline as a server:
+`local` runs a server and a microphone client in one process. To run only the server:
 
 ```bash
 speech-to-speech serve
 ```
 
-The server listens at `ws://127.0.0.1:8765/v1/realtime`. To use the packaged audio client with this running server, open another terminal with the same environment activated:
+It listens at `ws://127.0.0.1:8765/v1/realtime`. Connect with:
 
-```bash
-speech-to-speech talk --url ws://127.0.0.1:8765/v1/realtime
-```
-
-For a browser interface, start your chosen configuration with `serve`, then follow the [browser demo setup](./demo/README.md#quick-start-local) using that running backend.
-
-To change the model, use a separate local LLM server, or move generation to a hosted provider, see [LLM backends](#llm-backends). These are optional changes to the local defaults.
-
-Clients using the implemented core Realtime event set can connect. The official OpenAI Agents SDK is tested over both stock transports; see [Realtime API](#realtime-api) for the tested surface and [LLM backends](#llm-backends) for provider and local-server options.
-
-To use the server as the realtime model of a [LiveKit Agents](https://docs.livekit.io/agents/) voice agent, see the optional [LiveKit example](./demo/livekit/README.md).
+- the packaged audio client: `speech-to-speech talk --url ws://127.0.0.1:8765/v1/realtime`
+- the [browser demo](./demo/README.md#quick-start-local)
+- any client using the core OpenAI Realtime events; the OpenAI Agents SDK is tested over both transports (see [Realtime API](#realtime-api))
+- [LiveKit Agents](./demo/livekit/README.md), as the agent's realtime model
 
 ## Index
 
 * [How it works](#how-it-works)
-* [Quickstart: talk locally](#quickstart)
+* [Quickstart](#quickstart)
 * [Installation](#installation)
 * [YAML configuration API](./docs/configuration.md)
 * [Offline operation](#offline-operation)
@@ -155,20 +104,14 @@ clients after TTS. Enable it with `--enable_visemes`; see the
 
 ## Installation
 
-Requires Python 3.10+. Install from PyPI in an activated virtual environment (see the [quickstart setup](#install-for-these-examples)):
+`pip install speech-to-speech` (see the [Quickstart](#quickstart)) includes everything the default pipeline needs:
 
-```bash
-pip install speech-to-speech
-```
+- Silero VAD and Parakeet TDT for listening
+- Qwen3.5-4B for replies: MLX LM on macOS, Transformers elsewhere
+- Qwen3-TTS for speech: `mlx-audio` on Apple Silicon, GGML elsewhere
+- the local audio client and the Realtime server
 
-The default install includes the local conversation stack:
-
-- Parakeet TDT for STT
-- Local Qwen3.5-4B for the language model: MLX LM on macOS, Transformers elsewhere
-- Qwen3-TTS for speech output, using the GGML backend by default on non-macOS platforms and `mlx-audio` on Apple Silicon
-- Silero VAD, the local audio client, and the Realtime server
-
-macOS and non-macOS dependencies are resolved automatically via platform markers in `pyproject.toml`.
+Platform-specific dependencies are resolved automatically.
 
 See the [configuration guide](./docs/configuration.md) for reusable blocks,
 named pipelines, environment references, and explicit Python startup.
@@ -304,7 +247,7 @@ For native incremental audio and partial transcripts, see
 
 `serve` binds to `127.0.0.1` by default; pass `--host 0.0.0.0` explicitly for network exposure. `local` always binds to loopback and connects the same packaged client at `ws://127.0.0.1:<port>/v1/realtime`.
 
-The command controls how the server and client run; `--llm_backend` controls where reply generation happens. The default `local` and `serve` commands both use local models. A `local` command with an explicitly selected hosted backend still runs the microphone client and speech stages on your computer.
+The command only decides how the server and client run. Where replies are generated is set by `--llm_backend`, which is local by default for every command.
 
 The packaged `local` client buffers 196 ms of received audio when using the
 OpenAI-compatible TTS backend, which absorbs short delivery gaps from HTTP
@@ -321,19 +264,9 @@ The packaged client can opt in to local Python tools with `talk --tool-module <m
 
 `--mode` is deprecated and will stop working soon. During this migration window, `speech-to-speech --mode realtime` runs `speech-to-speech serve`, and `speech-to-speech --mode local` runs `speech-to-speech local`; both print a warning. All other mode values have been removed and exit with guidance to use the new commands.
 
-### Realtime Server
-
-```bash
-speech-to-speech serve
-```
-
-This starts the [same local models as `local`](#start-a-conversation), with no provider API key. It leaves microphone capture and audio playback to the connecting client. Use this command for the browser demo, LiveKit, or your own Realtime client. The OpenAI-compatible protocol is the client interface; the LLM still runs locally unless you [select another backend](#llm-backends).
-
 ### Local Mac
 
-Both `local` and `serve` select MLX LM on macOS without additional flags. The optional `--mac-optimal-settings` preset also supplies MPS defaults for supported components; see [Apple Silicon, fully local](#apple-silicon-fully-local).
-
-The preset supplies these as defaults only: explicit `--device`, component-device flags such as `--qwen3_tts_device`, and `--stt`, `--llm_backend`, `--model_name`, and `--tts` all win. Use it with `serve` instead of `local` when you want to expose the server without starting the microphone/speaker client.
+On macOS, `local` and `serve` already run all three models through MLX. The optional `--mac-optimal-settings` preset also makes MPS the default device for supported components. It only sets defaults: explicit `--device`, component-device flags such as `--qwen3_tts_device`, and `--stt`, `--llm_backend`, `--model_name`, and `--tts` all win.
 
 `--tts pocket`, `--tts kokoro`, `--tts omnivoice`, and `--tts kitten` are also valid on macOS.
 
@@ -422,38 +355,31 @@ Requests are stateless (send the full message list each time) and are proxied to
 
 ## LLM Backends
 
-Start with the in-process local LLM selected for your platform. Change it when you need a different model, a separate inference server, or a hosted provider:
+By default the LLM runs inside the speech process. You can swap the model, run it in a separate server, or hand it to a hosted provider:
 
-| Where the LLM runs | Backend | Setup |
-|---|---|---|
-| In the speech process on Apple Silicon (default) | `mlx-lm` | MLX model weights; no provider key or separate server |
-| In the speech process elsewhere (default) | `transformers` | Transformers model weights; automatic accelerator / CPU selection |
-| In a separate server on your own hardware | `responses-api` or `chat-completions` | Start a compatible server and supply its URL and model name |
-| At a hosted provider | `responses-api` or `chat-completions` | Supply the provider's model, endpoint, and credentials |
+| Where the LLM runs | Backend |
+|---|---|
+| In process on Apple Silicon (default) | `mlx-lm` |
+| In process elsewhere (default) | `transformers` |
+| A separate server on your hardware (llama.cpp, vLLM, ...) | `responses-api` or `chat-completions` |
+| A hosted provider | `responses-api` or `chat-completions` |
 
 ### Changing the local model
 
-`--model_name` overrides the selected backend's model. Use weights compatible with that backend: an MLX conversion on Mac, or a Transformers checkpoint elsewhere. These examples make the defaults explicit:
+Pass `--model_name`, using an MLX conversion on Mac and a Transformers checkpoint elsewhere:
 
 ```bash
-# Apple Silicon
-speech-to-speech local \
-    --llm_backend mlx-lm \
-    --model_name mlx-community/Qwen3.5-4B-4bit
-
-# Linux / Windows
-speech-to-speech local \
-    --llm_backend transformers \
-    --model_name Qwen/Qwen3.5-4B
+speech-to-speech local --model_name mlx-community/Qwen3.5-9B-4bit   # Apple Silicon
+speech-to-speech local --model_name Qwen/Qwen3.5-9B                 # Linux / Windows
 ```
 
-Local generation runs on an available accelerator by default; Transformers falls back to CPU. Use `--llm_device` to override only the LLM device, or `--device` to override all supported handlers. Local generation options such as `--llm_gen_max_new_tokens` are documented in the [LLM guide](./src/speech_to_speech/LLM/README.md).
+Transformers picks an available accelerator and falls back to CPU. `--llm_device` overrides the LLM's device; `--device` overrides every stage. Generation options such as `--llm_gen_max_new_tokens` are in the [LLM guide](./src/speech_to_speech/LLM/README.md).
 
 ### Combining with llama.cpp
 
-Serve the LLM with llama.cpp and connect speech-to-speech through its local Responses API, keeping your choice of STT/TTS backends. This works on **Apple Silicon or Linux/NVIDIA**. Install llama.cpp with `brew install llama.cpp` on macOS or use a [CUDA build](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md#cuda) on NVIDIA.
+Serve the LLM with llama.cpp and connect speech-to-speech through its local Responses API. This works on **Apple Silicon or Linux/NVIDIA**. Install llama.cpp with `brew install llama.cpp` on macOS or use a [CUDA build](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md#cuda) on NVIDIA.
 
-For this Gemma 4 configuration with the default speech models, budget **24 GB of total unified memory on Mac** or **16 GB of GPU VRAM on NVIDIA**, plus system RAM. These are planning estimates; reserve approximately 8 GB for the speech pipeline alongside the LLM and its runtime cache.
+With the default speech models, budget **24 GB of unified memory on Mac** or **16 GB of VRAM on NVIDIA**; about 8 GB of that goes to the speech pipeline.
 
 Terminal 1 — start the LLM and leave it running:
 
@@ -471,32 +397,26 @@ Terminal 2 — activate your Python environment and connect the speech pipeline 
 
 ```bash
 speech-to-speech local \
-    --stt parakeet-tdt \
     --llm_backend responses-api \
     --model_name local-gemma \
     --responses_api_base_url http://127.0.0.1:8080/v1 \
-    --responses_api_api_key "" \
-    --tts qwen3
+    --responses_api_api_key ""
 ```
 
-The speech backends automatically select MLX on Apple Silicon or CUDA/GGML on NVIDIA. Change `--stt` and `--tts` to use other speech backends, or `-hf` to use another supported GGUF model; keep the server alias and `--model_name` matched.
-
-The [Q4_0 LLM weights are approximately **4.6 GB**](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/gemma-4-E4B-it-Q4_0.gguf). The example uses one 8k context and disables reasoning for faster replies; `--no-mmproj` skips the image/audio projector because STT supplies text. Increase context or concurrency only as needed, leaving memory for speech. Stop both processes with `Ctrl+C` in their respective terminals.
+The [Q4_0 weights](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/gemma-4-E4B-it-Q4_0.gguf) are about 4.6 GB. The example uses one 8k context and disables reasoning for faster replies; `--no-mmproj` skips the image/audio projector because STT supplies text. To try another GGUF model, change `-hf` and keep `--alias` and `--model_name` matched.
 
 ### Local speech with a hosted LLM
 
-Select an API backend explicitly to move only the LLM to a provider. For OpenAI:
+Select an API backend to move only the LLM to a provider. For OpenAI:
 
 ```bash
 export OPENAI_API_KEY=...
 speech-to-speech local --llm_backend responses-api
 ```
 
-The `responses-api` backend defaults to `gpt-5.6-terra` with reasoning effort `none`; that is an API-backend default, not the default local model. This configuration sends transcribed text, instructions, and conversation history to OpenAI, with provider API charges. Parakeet TDT and Qwen3-TTS continue running locally, so microphone audio and speech synthesis stay on your computer.
+This uses `gpt-5.6-terra` with reasoning effort `none`. Speech recognition and synthesis stay local, so your audio never leaves your computer; transcribed text and conversation history go to the provider.
 
-Offloading the LLM reduces local model memory use but still needs memory for speech recognition and synthesis. For another provider or your own inference server, set the endpoint and model explicitly as described below. Hosted providers require connectivity during conversations; a local server can run offline once its assets are cached.
-
-Two API backends are available, sharing the same `--responses_api_*` connection flags:
+Two API backends share the same `--responses_api_*` connection flags:
 
 - `--llm_backend responses-api` targets `/v1/responses`.
 - `--llm_backend chat-completions` targets `/v1/chat/completions`.
@@ -603,21 +523,22 @@ OpenAI-compatible servers represent input audio differently. Use
 WAV base64, or `--responses_api_audio_content_type audio_url` for a base64
 data URL.
 
+For a fully local audio-input model on Apple Silicon, see the
+[Gemma 4 12B example](./examples/gemma4-12b-macos/README.md).
+
 ## Offline Operation
 
 The pipeline can run without internet access after the dependencies and model assets for the selected components
 are installed locally. Before disconnecting, start the exact configuration once while online so it can cache the
 STT, LLM, TTS, Silero VAD, NLTK, and Smart Turn resources it needs.
 
-For the default pipeline, run the same command after caching its assets:
+After that first run, set `HF_HUB_OFFLINE=1` to skip Hugging Face Hub requests:
 
 ```bash
 HF_HUB_OFFLINE=1 speech-to-speech local
 ```
 
-`HF_HUB_OFFLINE=1` prevents Hugging Face Hub requests; every selected model must already be cached or supplied through a local path supported by its backend. Other supporting assets must also be installed before disconnecting. Use `serve` instead of `local` when connecting a separate client.
-
-For the [llama.cpp configuration](#combining-with-llamacpp), also keep the local LLM server running and explicitly select its API backend:
+For the [llama.cpp configuration](#combining-with-llamacpp), keep the LLM server running and pass the same LLM flags:
 
 ```bash
 HF_HUB_OFFLINE=1 speech-to-speech serve \
@@ -627,7 +548,7 @@ HF_HUB_OFFLINE=1 speech-to-speech serve \
     --responses_api_api_key ""
 ```
 
-Selecting `responses-api` without a local base URL targets a hosted service. A hosted LLM cannot run offline; `HF_HUB_OFFLINE=1` does not redirect provider requests to a local model.
+Hosted LLMs still need a connection.
 
 Smart Turn uses a separate ONNX checkpoint. A cached checkpoint works with `HF_HUB_OFFLINE=1`; for an explicit,
 cache-independent setup, pass `--smart_turn_model_path /path/to/smart-turn-v3.2-cpu.onnx`. If the checkpoint is not
@@ -665,9 +586,7 @@ speech-to-speech serve \
     --stt parakeet-tdt \
     --enable_lang_prompt \
     --detect_llm_output_language \
-    --qwen3_tts_language auto \
-    --llm_backend mlx-lm \
-    --model_name "mlx-community/Qwen3.5-4B-4bit"
+    --qwen3_tts_language auto
 ```
 
 A single non-English language, Chinese in this example:
@@ -676,9 +595,7 @@ A single non-English language, Chinese in this example:
 speech-to-speech serve \
     --stt whisper-mlx \
     --stt_model_name large-v3 \
-    --language zh \
-    --llm_backend mlx-lm \
-    --model_name mlx-community/Qwen3.5-4B-4bit
+    --language zh
 ```
 
 Both commands also work with `--mac-optimal-settings`; explicit `--stt` flags override the defaults it sets.
