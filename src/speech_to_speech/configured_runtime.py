@@ -76,6 +76,7 @@ def _adapt(config: ResolvedConfig) -> dict[str, ParsedArguments]:
             num_pipelines=pipeline.num_pipelines,
             log_level=config.runtime.get("log_level", "info"),
             log_transcripts=config.runtime.get("log_transcripts", False),
+            torch_num_threads=config.runtime.get("torch_num_threads"),
         )
         if options.get("diarization") and options.get("diarization_model_name") is None:
             options["diarization_model_name"] = "nvidia/Nemotron-3-Diarization"
