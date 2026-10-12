@@ -34,14 +34,14 @@ Use Python 3.10+ (3.11 recommended):
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate    # Windows PowerShell: .venv\Scripts\Activate.ps1
+source .venv/bin/activate
 pip install speech-to-speech
 speech-to-speech local
 ```
 
 Then talk: speak, pause, and the assistant answers through your speakers. Stop with `Ctrl+C`. The first run downloads the models, so give it a few minutes. Use headphones so the assistant does not hear itself, or add `--local_audio_block_mic_during_playback`.
 
-On Ubuntu, first install the audio libraries with `sudo apt-get install libportaudio2 libsndfile1`. The default Linux Qwen3-TTS wheel targets CUDA 12.8 and Ubuntu 24.04; see the [CUDA note](#cuda-note-for-qwen3-tts) for other systems.
+On Ubuntu, first install the audio libraries with `sudo apt-get install libportaudio2 libsndfile1`. The default Linux Qwen3-TTS wheel targets CUDA 12.8 and Ubuntu 24.04; see the [CUDA note](#cuda-note-for-qwen3-tts) for other systems. On Windows, activate the environment with `.venv\Scripts\Activate.ps1`.
 
 The command picks local models for your platform:
 
