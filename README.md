@@ -61,10 +61,10 @@ Run all three models locally on an Apple Silicon Mac, using a quantized LLM thro
 ```bash
 speech-to-speech local \
     --mac-optimal-settings \
-    --model_name mlx-community/Qwen3-4B-Instruct-2507-4bit
+    --model_name mlx-community/Qwen3.5-4B-4bit
 ```
 
-The Mac preset selects Parakeet TDT through MLX, the 4-bit Qwen3-4B language model through MLX LM, and the 6-bit Qwen3-TTS CustomVoice model through MLX Audio. The core model weights total approximately **7.5 GB**: [STT](https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v3/tree/main), [LLM](https://huggingface.co/mlx-community/Qwen3-4B-Instruct-2507-4bit/tree/main), and [TTS](https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit/tree/main). Allow additional disk space for dependencies and auxiliary model assets.
+This command uses Parakeet TDT through MLX, the 4-bit Qwen3.5-4B language model through MLX LM, and the 6-bit Qwen3-TTS CustomVoice model through MLX Audio. Model weights: [STT](https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v3/tree/main), [LLM](https://huggingface.co/mlx-community/Qwen3.5-4B-4bit/tree/main), and [TTS](https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit/tree/main). Allow additional disk space for dependencies and auxiliary model assets.
 
 For a separate local LLM server, see [Combining with llama.cpp](#combining-with-llamacpp). For a model that accepts audio directly, see the [Gemma 4 12B example](./examples/gemma4-12b-macos/README.md).
 
@@ -660,7 +660,7 @@ speech-to-speech serve \
     --detect_llm_output_language \
     --qwen3_tts_language auto \
     --llm_backend mlx-lm \
-    --model_name "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+    --model_name "mlx-community/Qwen3.5-4B-4bit"
 ```
 
 A single non-English language, Chinese in this example:
@@ -671,7 +671,7 @@ speech-to-speech serve \
     --stt_model_name large-v3 \
     --language zh \
     --llm_backend mlx-lm \
-    --model_name mlx-community/Qwen3-4B-Instruct-2507-4bit
+    --model_name mlx-community/Qwen3.5-4B-4bit
 ```
 
 Both commands also work with `--mac-optimal-settings`; explicit `--stt` flags override the defaults it sets.

@@ -428,7 +428,7 @@ uv run speech-to-speech serve \
   --stt parakeet-tdt \
   --llm_backend mlx-lm \
   --tts kokoro \
-  --model_name "mlx-community/Qwen3-4B-Instruct-2507-bf16" \
+  --model_name "mlx-community/Qwen3.5-4B-4bit" \
   --llm_device mps \
   --llm_torch_dtype float16 \
   --enable_live_transcription
