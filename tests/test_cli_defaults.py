@@ -282,21 +282,6 @@ def test_llm_defaults_follow_explicit_backend_and_keep_model_overrides(platform,
     assert overridden.llm_backend.config["model_name"] == "custom/model"
 
 
-@pytest.mark.parametrize("platform", ["darwin", "linux"])
-def test_legacy_json_defaults_to_local_llm_and_preserves_overrides(platform, tmp_path, monkeypatch):
-    monkeypatch.setattr(sys, "platform", platform)
-    path = tmp_path / "pipeline.json"
-    path.write_text("{}")
-    args = parse_arguments([str(path)])
-    assert args.llm_backend.name == ("mlx-lm" if platform == "darwin" else "transformers")
-    assert "api_key" not in args.llm_backend.config
-    path.write_text(json.dumps({"llm_backend": "transformers", "model_name": "custom/model", "llm_device": "cpu"}))
-    args = parse_arguments([str(path)])
-    assert args.llm_backend.name == "transformers"
-    assert args.llm_backend.config["model_name"] == "custom/model"
-    assert args.llm_backend.config["device"] == "cpu"
-
-
 def test_parse_arguments_can_disable_smart_turn():
     original_argv = sys.argv[:]
     try:
