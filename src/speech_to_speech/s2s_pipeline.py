@@ -19,6 +19,7 @@ from rich.console import Console
 from transformers import HfArgumentParser
 
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
+from speech_to_speech.arguments_classes.language_model_arguments import MLX_DEFAULT_LM_MODEL
 from speech_to_speech.arguments_classes.local_audio_arguments import LocalAudioArguments
 from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
 from speech_to_speech.arguments_classes.realtime_server_arguments import (
@@ -76,7 +77,6 @@ console = Console()
 logger = logging.getLogger(__name__)
 logging.getLogger("numba").setLevel(logging.WARNING)  # quiet down numba logs
 
-MLX_DEFAULT_LM_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
 OPENAI_TTS_PLAYBACK_BUFFER_MS = 196.0
 
 

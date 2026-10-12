@@ -19,7 +19,10 @@ from speech_to_speech.arguments_classes.faster_whisper_stt_arguments import (
 )
 from speech_to_speech.arguments_classes.kitten_tts_arguments import KittenTTSHandlerArguments
 from speech_to_speech.arguments_classes.kokoro_tts_arguments import KokoroTTSHandlerArguments
-from speech_to_speech.arguments_classes.language_model_arguments import LanguageModelHandlerArguments
+from speech_to_speech.arguments_classes.language_model_arguments import (
+    LanguageModelHandlerArguments,
+    MLXLanguageModelHandlerArguments,
+)
 from speech_to_speech.arguments_classes.minimax_tts_arguments import MiniMaxTTSHandlerArguments
 from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import (
     MLXAudioWhisperSTTHandlerArguments,
@@ -516,7 +519,7 @@ LLM_BACKENDS = build_backend_registry(
         BackendSpec(
             "mlx-lm",
             "llm",
-            LanguageModelHandlerArguments,
+            MLXLanguageModelHandlerArguments,
             _create_local_llm("mlx-lm"),
             config_prefix="llm",
             required_extra="mlx-lm",

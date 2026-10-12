@@ -480,7 +480,7 @@ def test_preset_defaults_and_device_override_preserve_settings(tmp_path, builder
     result = runtime.build_configured_runtime(config, Event())
     assert builder[0]["llm_backend"].config["device"] == "cuda"
     assert builder[0]["stt_backend"].config["device"] == "cuda"
-    assert builder[0]["llm_backend"].config["model_name"] == "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+    assert builder[0]["llm_backend"].config["model_name"] == "mlx-community/Qwen3.5-4B-4bit"
     assert config == original
     result.stop()
     builder.clear()

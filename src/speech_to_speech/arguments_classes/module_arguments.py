@@ -1,3 +1,4 @@
+import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -68,10 +69,11 @@ class ModuleArguments(Wav2Vec2STVHandlerArguments):
         },
     )
     llm_backend: Optional[str] = field(
-        default="responses-api",
+        default_factory=lambda: "mlx-lm" if sys.platform == "darwin" else "transformers",
         metadata={
             "choices": tuple(LLM_BACKENDS),
-            "help": "The LLM backend to use. Default is 'responses-api'.",
+            "help": "The LLM backend to use. Defaults to local inference: 'mlx-lm' on macOS, "
+            "'transformers' elsewhere. API backends must be selected explicitly.",
         },
     )
     tts: Optional[str] = field(

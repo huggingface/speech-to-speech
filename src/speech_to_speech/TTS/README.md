@@ -1,5 +1,13 @@
 # TTS Summary
 
+The default voice is Qwen3-TTS CustomVoice with speaker `Aiden`, through MLX Audio on Apple Silicon and GGML elsewhere. To change the speaker:
+
+```bash
+speech-to-speech local --qwen3_tts_speaker Ryan
+```
+
+Change `--tts` to pick another synthesizer, installing its extra where needed; the other stages keep their local defaults. `--tts openai` connects to a separate speech endpoint and `--tts minimax` to a hosted provider, as described below.
+
 ## Available TTS modes (`--tts`)
 
 Runtime-supported values in `s2s_pipeline.py`:
@@ -323,9 +331,10 @@ speech-to-speech serve \
 ### Apple Silicon setup
 
 ```bash
-speech-to-speech local \
-  --mac-optimal-settings
+speech-to-speech local
 ```
+
+Apple Silicon selects MLX automatically. The optional `--mac-optimal-settings` preset also sets MPS device defaults.
 
 `--tts pocket`, `--tts kokoro`, and `--tts omnivoice` are also valid options on macOS.
 

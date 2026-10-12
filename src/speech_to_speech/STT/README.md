@@ -2,6 +2,14 @@
 
 This document summarizes the Speech-to-Text (STT) implementations in the `STT/` folder, including language support, language abbreviations, and usage in `s2s_pipeline.py`.
 
+The default recognizer is Parakeet TDT, through MLX Audio on Apple Silicon and nano-parakeet elsewhere. To try another one, change only `--stt`; the other stages keep their local defaults:
+
+```bash
+speech-to-speech local --stt whisper --language auto --stt_device cuda
+```
+
+`--stt openai`, `openai-realtime`, and `vllm-realtime` send audio to a separate server or provider; see the [STT endpoint guide](../../../docs/openai-compatible-stt.md).
+
 ## Available STT Modes (`--stt`)
 
 - `whisper` → `STT/whisper_stt_handler.py`

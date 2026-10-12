@@ -1,3 +1,14 @@
+# Realtime engine
+
+Serves the voice pipeline to a browser, robot, or any other Realtime client over the OpenAI Realtime protocol. The models run locally by default; the protocol is only the client interface.
+
+```bash
+speech-to-speech serve                                             # terminal 1
+speech-to-speech talk --url ws://127.0.0.1:8765/v1/realtime        # terminal 2
+```
+
+The server listens on loopback; `--host` and `--port` change that. Other clients include the [browser demo](../../../../demo/README.md) and the [LiveKit example](../../../../demo/livekit/README.md). Models are chosen on the server, not by the client; see the [LLM guide](../../LLM/README.md).
+
 ## Realtime Engine -- High-Level Architecture
 
 A FastAPI/uvicorn server exposes WebSocket and WebRTC transports. Each session claims a queue-backed
@@ -407,43 +418,3 @@ them before a delayed logical-completion event arrives on the text side channel.
 To see the failures before the fixes, use commit `d2df091` and add `--runxfail` to
 that command. The local case emits no acknowledgement and requests another reply;
 the trimmed-history case accepts the delayed duplicate. Both fail with exit status 1.
-
-### Local LLM with Transformers
-
-```bash
-uv run speech-to-speech serve \
-  --stt parakeet-tdt \
-  --llm_backend transformers \
-  --tts kokoro \
-  --model_name "Qwen/Qwen3-4B-Instruct-2507" \
-  --llm_device mps \
-  --llm_torch_dtype float16 \
-  --enable_live_transcription
-```
-
-### Local LLM with MLX-LM
-
-```bash
-uv run speech-to-speech serve \
-  --stt parakeet-tdt \
-  --llm_backend mlx-lm \
-  --tts kokoro \
-  --model_name "mlx-community/Qwen3-4B-Instruct-2507-bf16" \
-  --llm_device mps \
-  --llm_torch_dtype float16 \
-  --enable_live_transcription
-```
-
-### Remote LLM with OpenAI-compatible API
-
-```bash
-uv run speech-to-speech serve \
-  --stt parakeet-tdt \
-  --llm_backend responses-api \
-  --tts kokoro \
-  --model_name "openai/gpt-oss-20b:groq" \
-  --responses_api_base_url "https://router.huggingface.co/v1" \
-  --responses_api_api_key "$HF_TOKEN" \
-  --responses_api_stream \
-  --enable_live_transcription
-```

@@ -14,8 +14,8 @@ LiveKit room ──audio──> agent.py (LiveKit Agents) ──Realtime WebSock
 
 Apple Silicon macOS, Python 3.12, [uv](https://docs.astral.sh/uv/getting-started/installation/)
 and, for the `dev` mode below, a local [LiveKit server](https://docs.livekit.io/home/self-hosting/local/)
-(`brew install livekit`). The speech server uses the Apple Silicon preset from the
-[main README](../../README.md#apple-silicon-fully-local): Parakeet TDT, Qwen3-4B
+(`brew install livekit`). The speech server uses the
+[local defaults](../../README.md#quickstart): Parakeet TDT, Qwen3.5-4B
 through MLX LM and Qwen3-TTS. The agent uses `livekit-agents` 1.8.5, pinned in
 `requirements.txt`. Other versions are not tested by this example.
 
@@ -25,9 +25,7 @@ through MLX LM and Qwen3-TTS. The agent uses `livekit-agents` 1.8.5, pinned in
 
    ```bash
    uv sync --python 3.12
-   uv run speech-to-speech serve \
-     --mac-optimal-settings \
-     --model_name mlx-community/Qwen3-4B-Instruct-2507-4bit
+   uv run speech-to-speech serve
    ```
 
    Wait for `Uvicorn running on http://127.0.0.1:8765`. First startup downloads
