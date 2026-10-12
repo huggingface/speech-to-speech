@@ -363,3 +363,25 @@ class TurnLatencyStore:
                         self._turn_responses.pop(key, None)
             if not self._session_keys:
                 self._pending_turn.clear()
+
+
+def record_response_tts_ttfa(
+    store: TurnLatencyStore | None,
+    response_key: str | None,
+    seconds: float,
+) -> None:
+    """Publish first-provider TTS audio on an existing response tracker."""
+    tracker = store.get_response(response_key) if store is not None else None
+    if tracker is not None:
+        tracker.record_tts_ttfa(seconds)
+
+
+def record_response_e2e(
+    store: TurnLatencyStore | None,
+    response_key: str | None,
+    seconds: float,
+) -> None:
+    """Publish speech-end → first yielded TTS audio on an existing response tracker."""
+    tracker = store.get_response(response_key) if store is not None else None
+    if tracker is not None:
+        tracker.record_e2e(seconds)

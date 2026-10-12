@@ -16,6 +16,7 @@ from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import transcript_for_log
+from speech_to_speech.pipeline.turn_latency import record_response_e2e, record_response_tts_ttfa
 from speech_to_speech.TTS.persian_normalization import normalize
 from speech_to_speech.TTS.pocket_tts_farsi import PersianPhonemizer
 from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
@@ -378,10 +379,11 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
             if first_chunk and not cancelled():
                 ttfa_s = first_audio_at_s - pipeline_start
                 logger.debug("Time to first audio: %.3fs", ttfa_s)
-                store = getattr(self, "turn_latency_store", None)
-                tracker = store.get_response(tts_input.response_key) if store else None
-                if tracker is not None:
-                    tracker.record_tts_ttfa(ttfa_s)
+                record_response_tts_ttfa(
+                    getattr(self, "turn_latency_store", None),
+                    tts_input.response_key,
+                    ttfa_s,
+                )
                 first_chunk = False
 
         def emit(block: np.ndarray) -> Iterator[TTSOut]:
@@ -389,10 +391,11 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
             if first_yielded:
                 if tts_input.speech_stopped_at_s is not None:
                     latency_s = max(0.0, perf_counter() - tts_input.speech_stopped_at_s)
-                    store = getattr(self, "turn_latency_store", None)
-                    tracker = store.get_response(tts_input.response_key) if store else None
-                    if tracker is not None:
-                        tracker.record_e2e(latency_s)
+                    record_response_e2e(
+                        getattr(self, "turn_latency_store", None),
+                        tts_input.response_key,
+                        latency_s,
+                    )
                 first_yielded = False
             yield block
 

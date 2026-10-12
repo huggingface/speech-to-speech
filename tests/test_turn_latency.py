@@ -11,6 +11,8 @@ from speech_to_speech.pipeline.turn_latency import (
     TurnLatencyStore,
     TurnLatencyTracker,
     bind_active_turn_latency_tracker,
+    record_response_e2e,
+    record_response_tts_ttfa,
 )
 
 
@@ -84,6 +86,34 @@ def test_turn_latency_tracker_first_write_wins_for_ttfa_and_e2e() -> None:
     tracker.record_e2e(4.0)
     assert tracker.tts_ttfa_s == 0.2
     assert tracker.e2e_s == 1.0
+
+
+def test_record_response_helpers_lookup_existing_tracker_only() -> None:
+    store = TurnLatencyStore()
+    tracker = store.get_or_create_response("resp_1", turn_id="turn_1", turn_revision=0)
+
+    record_response_tts_ttfa(None, "resp_1", 0.5)
+    record_response_e2e(None, "resp_1", 1.5)
+    assert tracker.tts_ttfa_s is None
+    assert tracker.e2e_s is None
+
+    record_response_tts_ttfa(store, None, 0.5)
+    record_response_e2e(store, None, 1.5)
+    assert tracker.tts_ttfa_s is None
+    assert tracker.e2e_s is None
+
+    record_response_tts_ttfa(store, "missing", 0.5)
+    record_response_e2e(store, "missing", 1.5)
+    assert tracker.tts_ttfa_s is None
+    assert tracker.e2e_s is None
+    assert store.get_response("missing") is None
+
+    record_response_tts_ttfa(store, "resp_1", 0.12)
+    record_response_e2e(store, "resp_1", 2.4)
+    record_response_tts_ttfa(store, "resp_1", 9.0)
+    record_response_e2e(store, "resp_1", 9.0)
+    assert tracker.tts_ttfa_s == 0.12
+    assert tracker.e2e_s == 2.4
 
 
 def test_turn_latency_store_pending_turn_merges_into_response() -> None:
