@@ -691,6 +691,17 @@ class RealtimeService:
         self, conn_id: str, *, origin_call_ids: set[str] | None = None
     ) -> tuple[InputTurnReference, Literal["speech", "client", "tool"], SpeechLatencyAnchor | None]:
         reference, continuation = self._response_input(conn_id, origin_call_ids=origin_call_ids)
+        if origin_call_ids is not None:
+            # A rebuilt prefetch still has the original generation ownership,
+            # but a user item supplied after those calls supersedes its timing.
+            for item in reversed(self._state(conn_id).runtime_config.chat.copy().buffer):
+                if isinstance(item, (RealtimeConversationItemFunctionCall, RealtimeConversationItemFunctionCallOutput)):
+                    if item.call_id in origin_call_ids:
+                        break
+                elif isinstance(item, RealtimeConversationItemUserMessage):
+                    if self._state(conn_id).input_turn_by_item_id.get(item.id or "") != reference:
+                        return (reference[0], reference[1], None), "client", None
+                    break
         anchor = (
             self._state(conn_id).speech_latency_anchors.get((reference[0], reference[1]))
             if reference[0] is not None

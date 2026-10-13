@@ -125,7 +125,9 @@ disabled), `client` for an independent create, and `tool` for a continuation
 resolved through function-call identity. This is a server diagnostic extension,
 not an OpenAI-defined metadata field. Independent responses also export LLM/TTS
 stage timings, with `e2e_s: null`; input ownership can still carry a turn ID for
-speculative gating, so turn identity alone does not imply E2E eligibility.
+speculative gating, so turn identity alone does not imply E2E eligibility. New
+supplied user input supersedes an earlier tool timing origin, including when
+private follow-up generation is rebuilt for that input.
 
 Tool follow-ups have separate response keys and do not repeat the originating
 turn's VAD/Smart Turn measurements. Their E2E retains the originating speech-end
@@ -135,8 +137,8 @@ the first-audio measurement too; subsequent tool answers keep stage timings but
 have no second E2E sample. Completed answers and cancelled/failed responses close
 the speech anchor. Idle time before an independent create cannot reuse it.
 These attribution changes retain metadata version 2's timing boundaries; `source`
-is additive. Out-of-band responses retain their existing metadata behavior. Stages overlap; do not
-sum them to reconstruct E2E. Configured grace and delay and Smart Turn analysis
+is additive. Out-of-band responses retain their existing metadata behavior.
+Stages overlap; do not sum them to reconstruct E2E. Configured grace and delay and Smart Turn analysis
 are no longer part of the terminal timing record.
 
 Remote timings are measured by this server. They include network transfer and

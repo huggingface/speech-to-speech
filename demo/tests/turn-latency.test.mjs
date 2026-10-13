@@ -74,3 +74,20 @@ test("independent client timings retain stages without an attributed speech turn
     assert.equal(finished.latency.e2e_s, null);
   }
 });
+
+
+test("tool follow-up timings retain stages without a speech turn", () => {
+  const toolTiming = { ...timing, version: 2, source: "tool", turn_id: null,
+    stt_s: null, e2e_s: null, llm_s: 0.5, tts_ttfa_s: 0.25 };
+  assert.deepEqual(readTurnLatency(response(JSON.stringify(toolTiming))), toolTiming);
+  for (const transport of ["websocket", "webrtc"]) {
+    const client = new S2sRealtimeClient({ transport, directUrl: "ws://unused" });
+    let finished;
+    client.addEventListener("response-finished", (event) => { finished = event.detail; });
+    client._onTransportEvent({ type: "response.done", response: { id: "tool", ...response(JSON.stringify(toolTiming)) } });
+    assert.equal(finished.latency.llm_s, 0.5);
+    assert.equal(finished.latency.tts_ttfa_s, 0.25);
+    assert.equal(finished.latency.e2e_s, null);
+    assert.equal(finished.latency.source, "tool");
+  }
+});
