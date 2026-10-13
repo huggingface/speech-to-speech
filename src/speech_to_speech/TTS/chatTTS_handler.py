@@ -100,11 +100,7 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
         first_yielded = True
 
         def cancelled() -> bool:
-            return (
-                _cancel_gen is not None
-                and self.cancel_scope is not None
-                and self.cancel_scope.is_stale(_cancel_gen)
-            )
+            return _cancel_gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(_cancel_gen)
 
         def record_ttfa() -> None:
             nonlocal first_provider
@@ -115,7 +111,7 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         def emit(block: np.ndarray) -> Iterator[TTSOut]:
             nonlocal first_yielded
-            if first_yielded:
+            if first_yielded and not cancelled():
                 if speech_stopped_at_s is not None:
                     record_response_e2e(
                         store,

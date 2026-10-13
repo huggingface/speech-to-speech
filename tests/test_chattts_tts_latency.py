@@ -94,9 +94,9 @@ def test_stream_preserves_first_audio_across_later_segments(monkeypatch, chattts
         chatTTS_handler,
         "librosa",
         SimpleNamespace(
-            resample=lambda chunk, *, orig_sr, target_sr: chunk[
-                : int(len(chunk) * target_sr / orig_sr)
-            ].astype(np.float32)
+            resample=lambda chunk, *, orig_sr, target_sr: chunk[: int(len(chunk) * target_sr / orig_sr)].astype(
+                np.float32
+            )
         ),
     )
 
