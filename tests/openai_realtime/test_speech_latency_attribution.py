@@ -358,3 +358,52 @@ def test_typed_tool_chain_exports_stage_measurements_without_speech(service, con
     assert record["e2e_s"] is None
     assert record["llm_s"] == 0.5
     assert record["tts_ttfa_s"] == pytest.approx(0.25)
+
+
+def test_new_text_before_tool_result_supersedes_prefetch_speech_timing(service, conn_id, monkeypatch):
+    request = speech(service, conn_id)
+    call = RealtimeConversationItemFunctionCall(
+        type="function_call", id="fc_lookup", call_id="call_lookup", name="lookup", arguments="{}"
+    )
+    request.runtime_config.chat.add_provisional_generation_items(request.response_key, [call])
+    service.dispatch_pipeline_event(
+        conn_id,
+        AssistantOutputEvent(
+            response_key=request.response_key,
+            turn_id=request.turn_id,
+            turn_revision=request.turn_revision,
+            parts=[AssistantToolCallPart(tool=call.model_dump())],
+        ),
+    )
+    service.dispatch_pipeline_event(
+        conn_id, ResponseGenerationDoneEvent(response_key=request.response_key, call_ids=[call.call_id])
+    )
+    finish(service, conn_id, request)
+    service.handle_conversation_item_create(
+        conn_id,
+        ConversationItemCreateEvent(
+            type="conversation.item.create",
+            item={
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Forget weather. Tell a joke."}],
+            },
+        ),
+    )
+    service.handle_conversation_item_create(
+        conn_id,
+        ConversationItemCreateEvent(
+            type="conversation.item.create",
+            item={"type": "function_call_output", "call_id": call.call_id, "output": "result"},
+        ),
+    )
+    rebuilt = service.text_prompt_queue.get_nowait()
+    assert rebuilt.speech_stopped_at_s is None
+    created = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
+    assert created.type == "response.created"
+    service.response.mark_response_created_sent(conn_id, rebuilt.response_key)
+    audio(service, conn_id, rebuilt, monkeypatch, [1011.0])
+    record = finish(service, conn_id, rebuilt)
+    assert record["source"] == "client"
+    assert record["e2e_s"] is None
+    assert record["tts_ttfa_s"] == pytest.approx(0.25)

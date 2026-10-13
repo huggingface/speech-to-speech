@@ -695,7 +695,7 @@ class RealtimeService:
             # A rebuilt prefetch still has the original generation ownership,
             # but a user item supplied after those calls supersedes its timing.
             for item in reversed(self._state(conn_id).runtime_config.chat.copy().buffer):
-                if isinstance(item, (RealtimeConversationItemFunctionCall, RealtimeConversationItemFunctionCallOutput)):
+                if isinstance(item, RealtimeConversationItemFunctionCall):
                     if item.call_id in origin_call_ids:
                         break
                 elif isinstance(item, RealtimeConversationItemUserMessage):
