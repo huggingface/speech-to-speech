@@ -707,7 +707,7 @@ class RealtimeService:
                     break
         anchor = (
             self._state(conn_id).speech_latency_anchors.get((reference[0], reference[1]))
-            if reference[0] is not None
+            if reference[0] is not None and (not continuation or reference[2] is not None)
             else None
         )
         source: Literal["speech", "client", "tool"] = "tool" if continuation else "client"

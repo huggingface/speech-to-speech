@@ -1182,10 +1182,18 @@ class ResponseHandler(RealtimeBaseHandler):
                     events.extend(self._finish_current_message_output(conn_id, event.response_key))
                 tool = part.tool
                 accounting = st.input_turn_accounting.get(event.turn_id) if event.turn_id is not None else None
+                tracker = self._service.turn_latency_store.get_response(st.current_response_key)
+                # New input can supersede speech timing while generation keeps
+                # its original turn. Calls inherit this response's eligibility.
+                speech_stopped_at_s = (
+                    accounting.speech_stopped_at_s
+                    if accounting is not None and tracker is not None and tracker.speech_anchor is not None
+                    else None
+                )
                 st.input_turn_by_call_id[tool.call_id] = (
                     event.turn_id,
                     event.turn_revision,
-                    accounting.speech_stopped_at_s if accounting is not None else None,
+                    speech_stopped_at_s,
                 )
                 while len(st.input_turn_by_call_id) > 128:
                     st.input_turn_by_call_id.pop(next(iter(st.input_turn_by_call_id)))

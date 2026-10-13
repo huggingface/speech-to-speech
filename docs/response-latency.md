@@ -127,7 +127,9 @@ not an OpenAI-defined metadata field. Independent responses also export LLM/TTS
 stage timings, with `e2e_s: null`; input ownership can still carry a turn ID for
 speculative gating, so turn identity alone does not imply E2E eligibility. New
 supplied user input supersedes an earlier tool timing origin, including when
-private follow-up generation is rebuilt for that input.
+private follow-up generation is rebuilt for that input. Subsequent tool calls
+inherit the emitting response's timing eligibility, even when generation
+ownership still names the earlier turn.
 
 Tool follow-ups have separate response keys and do not repeat the originating
 turn's VAD/Smart Turn measurements. Their E2E retains the originating speech-end

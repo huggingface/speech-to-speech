@@ -450,3 +450,106 @@ def test_cancelled_unclaimed_tool_prefetch_cannot_lend_speech_anchor_to_retry(se
     record = finish(service, conn_id, retry)
     assert record["e2e_s"] is None
     assert record["tts_ttfa_s"] == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize("prefetch", [False, True])
+def test_new_text_tool_chain_cannot_restore_superseded_speech_timing(service, conn_id, monkeypatch, prefetch):
+    original = speech(service, conn_id)
+    call = RealtimeConversationItemFunctionCall(
+        type="function_call", id="fc_original", call_id="call_original", name="lookup", arguments="{}"
+    )
+    original.runtime_config.chat.add_provisional_generation_items(original.response_key, [call])
+    service.dispatch_pipeline_event(
+        conn_id,
+        AssistantOutputEvent(
+            response_key=original.response_key,
+            turn_id=original.turn_id,
+            turn_revision=original.turn_revision,
+            parts=[AssistantToolCallPart(tool=call.model_dump())],
+        ),
+    )
+    service.dispatch_pipeline_event(
+        conn_id, ResponseGenerationDoneEvent(response_key=original.response_key, call_ids=[call.call_id])
+    )
+    finish(service, conn_id, original)
+    service.handle_conversation_item_create(
+        conn_id,
+        ConversationItemCreateEvent(
+            type="conversation.item.create",
+            item={"type": "function_call_output", "call_id": call.call_id, "output": "result"},
+        ),
+    )
+    old_prefetch = service.text_prompt_queue.get_nowait()
+    service.handle_conversation_item_create(
+        conn_id,
+        ConversationItemCreateEvent(
+            type="conversation.item.create",
+            item={
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Forget weather. Look up hotels."}],
+            },
+        ),
+    )
+    request = service.text_prompt_queue.get_nowait()
+    assert old_prefetch.prefetch_transaction.discarded
+    assert (request.turn_id, request.turn_revision) == (original.turn_id, original.turn_revision)
+    assert request.speech_stopped_at_s is None
+    assert service.turn_latency_store.get_response(request.response_key).source == "client"
+    assert (
+        service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create")).type == "response.created"
+    )
+    service.response.mark_response_created_sent(conn_id, request.response_key)
+
+    # Further calls retain generation ownership, but cannot regain the old
+    # speech timing. Check another silent hop as well as the final audio.
+    for call_id in ["call_hotels", "call_rooms"]:
+        next_call = RealtimeConversationItemFunctionCall(
+            type="function_call", id=f"fc_{call_id}", call_id=call_id, name="lookup", arguments="{}"
+        )
+        request.runtime_config.chat.add_provisional_generation_items(request.response_key, [next_call])
+        service.dispatch_pipeline_event(
+            conn_id,
+            AssistantOutputEvent(
+                response_key=request.response_key,
+                turn_id=request.turn_id,
+                turn_revision=request.turn_revision,
+                parts=[AssistantToolCallPart(tool=next_call.model_dump())],
+            ),
+        )
+        if prefetch:
+            service.dispatch_pipeline_event(
+                conn_id, ResponseGenerationDoneEvent(response_key=request.response_key, call_ids=[call_id])
+            )
+        service.dispatch_pipeline_event(
+            conn_id,
+            AssistantResponseDoneEvent(
+                response_key=request.response_key,
+                input_tool_call_ids=[call.call_id],
+                turn_id=request.turn_id,
+                turn_revision=request.turn_revision,
+            ),
+        )
+        assert finish(service, conn_id, request)["e2e_s"] is None
+        service.handle_conversation_item_create(
+            conn_id,
+            ConversationItemCreateEvent(
+                type="conversation.item.create",
+                item={"type": "function_call_output", "call_id": call_id, "output": "result"},
+            ),
+        )
+        request = create(service, conn_id)
+        assert (request.turn_id, request.turn_revision) == (original.turn_id, original.turn_revision)
+        assert request.speech_stopped_at_s is None
+        tracker = service.turn_latency_store.get_response(request.response_key)
+        assert tracker.source == "tool"
+        assert tracker.speech_anchor is None
+        call = next_call
+
+    tracker.record_llm(0.5)
+    audio(service, conn_id, request, monkeypatch, [1011.0])
+    record = finish(service, conn_id, request)
+    assert record["source"] == "tool"
+    assert record["e2e_s"] is None
+    assert record["llm_s"] == 0.5
+    assert record["tts_ttfa_s"] == pytest.approx(0.25)
