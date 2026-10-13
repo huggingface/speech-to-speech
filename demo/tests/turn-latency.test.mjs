@@ -55,3 +55,22 @@ test("version 2 exports only the simplified measurements", () => {
   assert.deepEqual(readTurnLatency(response(JSON.stringify(current))), current);
   assert.equal(readTurnLatency(response(JSON.stringify({ ...current, hold_s: -1 }))), null);
 });
+
+
+test("independent client timings retain stages without an attributed speech turn", () => {
+  const independent = { ...timing, version: 2, source: "client", turn_id: null,
+    stt_s: null, e2e_s: null };
+  assert.deepEqual(readTurnLatency(response(JSON.stringify(independent))), independent);
+  for (const patch of [{ version: 1 }, { source: undefined }, { turn_id: "" }]) {
+    assert.equal(readTurnLatency(response(JSON.stringify({ ...independent, ...patch }))), null);
+  }
+  for (const transport of ["websocket", "webrtc"]) {
+    const client = new S2sRealtimeClient({ transport, directUrl: "ws://unused" });
+    let finished;
+    client.addEventListener("response-finished", (event) => { finished = event.detail; });
+    client._onTransportEvent({ type: "response.done", response: { id: "independent", ...response(JSON.stringify(independent)) } });
+    assert.equal(finished.latency.llm_s, timing.llm_s);
+    assert.equal(finished.latency.tts_ttfa_s, timing.tts_ttfa_s);
+    assert.equal(finished.latency.e2e_s, null);
+  }
+});

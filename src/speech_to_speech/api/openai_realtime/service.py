@@ -86,7 +86,7 @@ from speech_to_speech.pipeline.messages import GenerateResponseRequest
 from speech_to_speech.pipeline.queue_types import TextPromptItem
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnGateAction, TurnPhase
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
-from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
+from speech_to_speech.pipeline.turn_latency import SpeechLatencyAnchor, TurnLatencyStore
 from speech_to_speech.utils.utils import _generate_id, audio_to_wav_base64
 
 logger = logging.getLogger(__name__)
@@ -299,6 +299,7 @@ class ConnState(BaseModel):
     # calls establish which turn a later generation can actually answer.
     input_turn_by_item_id: dict[str, InputTurnReference] = Field(default_factory=dict)
     input_turn_by_call_id: dict[str, InputTurnReference] = Field(default_factory=dict)
+    speech_latency_anchors: dict[tuple[str, int | None], SpeechLatencyAnchor] = Field(default_factory=dict)
     response_tool_inputs: dict[str, set[str]] = Field(default_factory=dict)
     # Recent acknowledgements outlive history trimming, with bounded retention.
     answered_tool_call_ids: dict[str, None] = Field(default_factory=dict)
@@ -451,13 +452,21 @@ class RealtimeService:
         *,
         turn_id: str | None = None,
         turn_revision: int | None = None,
+        source: Literal["speech", "client", "tool"] = "speech",
+        speech_anchor: SpeechLatencyAnchor | None = None,
     ) -> None:
-        self.turn_latency_store.get_or_create_response(
+        tracker = self.turn_latency_store.get_or_create_response(
             response_key,
             turn_id=turn_id,
             turn_revision=turn_revision,
             session_id=conn_id,
         )
+        tracker.source = source
+        if source == "speech" and speech_anchor is None and turn_id is not None:
+            speech_anchor = self._state(conn_id).speech_latency_anchors.get((turn_id, turn_revision))
+        tracker.speech_anchor = speech_anchor
+        if speech_anchor is not None:
+            speech_anchor.requested = True
 
     # ── Client event parsing ─────────────────────
 
@@ -555,6 +564,9 @@ class RealtimeService:
         st = self._state(conn_id)
         self.response.discard_tool_followup_prefetch(conn_id)
         for response_key in tuple(st.pending_response_keys):
+            tracker = self.turn_latency_store.get_response(response_key)
+            if tracker is not None and tracker.speech_anchor is not None:
+                tracker.speech_anchor.close()
             self.close_response_key(conn_id, response_key)
         st.generation_done_tool_calls.clear()
         st.completed_tool_response_keys.clear()
@@ -673,6 +685,30 @@ class RealtimeService:
         )
 
     def response_input_turn(self, conn_id: str, *, origin_call_ids: set[str] | None = None) -> InputTurnReference:
+        return self._response_input(conn_id, origin_call_ids=origin_call_ids)[0]
+
+    def response_latency_context(
+        self, conn_id: str, *, origin_call_ids: set[str] | None = None
+    ) -> tuple[InputTurnReference, Literal["speech", "client", "tool"], SpeechLatencyAnchor | None]:
+        reference, continuation = self._response_input(conn_id, origin_call_ids=origin_call_ids)
+        anchor = (
+            self._state(conn_id).speech_latency_anchors.get((reference[0], reference[1]))
+            if reference[0] is not None
+            else None
+        )
+        source: Literal["speech", "client", "tool"] = "tool" if continuation else "client"
+        if anchor is not None and (continuation or not anchor.requested):
+            if not continuation:
+                source = "speech"
+            if anchor.available:
+                return reference, source, anchor
+        # Identity still follows input for speculative gates; only the timing
+        # anchor is ineligible. A previous answer is not fresh speech input.
+        return (reference[0], reference[1], None), source, None
+
+    def _response_input(
+        self, conn_id: str, *, origin_call_ids: set[str] | None = None
+    ) -> tuple[InputTurnReference, bool]:
         """Resolve generation ownership from supplied conversation input.
 
         A listening cursor is not input to generation. Tool continuations keep
@@ -682,14 +718,17 @@ class RealtimeService:
         """
         st = self._state(conn_id)
         reference: InputTurnReference = (None, None, None)
+        continuation = origin_call_ids is not None
         if origin_call_ids is not None:
             references = {st.input_turn_by_call_id.get(call_id, (None, None, None)) for call_id in origin_call_ids}
             if len(references) == 1:
                 reference = references.pop()
         else:
             tool_reference: InputTurnReference | None = None
+            unconsumed_tool_output = False
             for item in reversed(st.runtime_config.chat.copy().buffer):
                 if isinstance(item, RealtimeConversationItemFunctionCallOutput):
+                    unconsumed_tool_output |= item.call_id not in st.answered_tool_call_ids
                     if tool_reference is None:
                         tool_reference = st.input_turn_by_call_id.get(item.call_id, (None, None, None))
                     continue
@@ -700,13 +739,15 @@ class RealtimeService:
                     break
                 if isinstance(item, RealtimeConversationItemFunctionCall) and tool_reference is not None:
                     reference = tool_reference
+                    continuation = unconsumed_tool_output
                     break
             else:
                 if tool_reference is not None:
                     reference = tool_reference
+                    continuation = unconsumed_tool_output
         turns = self.speculative_turns
         if turns is None or reference[0] is None:
-            return reference
+            return reference, continuation
         # Once a newer turn has closed (for example after an empty or failed
         # transcript), no speech is waiting on this response, so it moves to
         # that turn instead of being dropped as stale with its origin. Read
@@ -714,8 +755,8 @@ class RealtimeService:
         # LISTENING.
         current = turns.current_turn()
         if current == reference[:2] or turns.phase != TurnPhase.CLOSED:
-            return reference
-        return current[0], current[1], None
+            return reference, continuation
+        return (current[0], current[1], None), continuation
 
     def record_input_turn(
         self, conn_id: str, item_id: str, turn_id: str | None, revision: int | None, stopped_at_s: float | None
@@ -727,6 +768,10 @@ class RealtimeService:
             key: value for key, value in st.input_turn_by_item_id.items() if key in retained_ids
         }
         st.input_turn_by_item_id[item_id] = (turn_id, revision, stopped_at_s)
+        if turn_id is not None:
+            st.speech_latency_anchors.setdefault((turn_id, revision), SpeechLatencyAnchor())
+            while len(st.speech_latency_anchors) > 128:
+                st.speech_latency_anchors.pop(next(iter(st.speech_latency_anchors)))
 
     def _input_turn_accounting(self, conn_id: str, turn_id: str | None) -> InputTurnAccounting | None:
         if turn_id is None:

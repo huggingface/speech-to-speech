@@ -512,7 +512,7 @@ def test_terminal_response_emits_one_latency_record(service, conn_id, caplog, st
         f"status={status}"
         + (" mlx_lock_wait=0.03s[Qwen3TTS:0.03s]" if sys.platform == "darwin" else "")
         + cut
-        + f" response_key={request.response_key}"
+        + f" source=speech response_key={request.response_key}"
     ]
     done = [event for event in events if event.type == "response.done"]
     assert len(done) == 1

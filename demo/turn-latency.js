@@ -2,7 +2,8 @@
 /**
  * @typedef {Object} TurnLatency
  * @property {number} version
- * @property {string} turn_id
+ * @property {string|null} turn_id
+ * @property {"speech"|"client"|"tool"|null|undefined} [source]
  * @property {number} turn_revision
  * @property {string} response_key
  * @property {string} status
@@ -26,7 +27,8 @@ export function readTurnLatency(response) {
   try {
     const data = JSON.parse(raw);
     if (!data || ![1, 2].includes(data.version) ||
-        typeof data.turn_id !== "string" || !data.turn_id ||
+        !((typeof data.turn_id === "string" && data.turn_id) ||
+          (data.version === 2 && data.source === "client" && data.turn_id === null)) ||
         typeof data.response_key !== "string" || !data.response_key ||
         !Number.isInteger(data.turn_revision) || data.turn_revision < 0 ||
         !["completed", "cancelled", "failed", "incomplete"].includes(data.status) ||
