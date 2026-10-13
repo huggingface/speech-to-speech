@@ -236,6 +236,78 @@ def test_omnivoice_tts_backend_is_registered_as_optional():
     assert spec.required_extra == "omnivoice"
 
 
+def test_phonon_cli_and_registry_construct_native_handler(monkeypatch):
+    from speech_to_speech.TTS.phonon_tts_handler import PhononTTSHandler
+
+    loaded = []
+
+    def load(**kwargs):
+        loaded.append(kwargs)
+        return SimpleNamespace(sample_rate=24000, voices=["voice-a"])
+
+    monkeypatch.setitem(sys.modules, "ptts", SimpleNamespace(TTS=load))
+    args = parse_arguments(
+        [
+            "--tts",
+            "phonon",
+            "--phonon_tts_model_name",
+            "/models/test",
+            "--phonon_tts_voice",
+            "voice-a",
+            "--phonon_tts_language",
+            "fr",
+            "--phonon_tts_revision",
+            "revision",
+            "--phonon_tts_blocksize",
+            "256",
+        ]
+    )
+    assert args.tts_backend.spec.required_extra == "phonon"
+    assert args.tts_backend.config == {
+        "model_name": "/models/test",
+        "revision": "revision",
+        "voice": "voice-a",
+        "language": "fr",
+        "quant": "q8",
+        "blocksize": 256,
+        "gen_kwargs": {},
+    }
+    handler = create_backend_handler(args.tts_backend, _context())
+    assert isinstance(handler, PhononTTSHandler)
+    assert loaded == [{"config": "/models/test", "revision": "revision", "lang": "fr", "quant": "q8", "device": "cpu"}]
+
+
+def test_phonon_missing_dependency_reports_install_extra(monkeypatch):
+    monkeypatch.setitem(sys.modules, "ptts", None)
+    args = parse_arguments(["--tts", "phonon", "--phonon_tts_model_name", "/models/test"])
+    with pytest.raises(ImportError, match=r"speech-to-speech\[phonon\]"):
+        create_backend_handler(args.tts_backend, _context())
+
+
+def test_phonon_stays_on_cpu_when_global_device_is_set():
+    args = parse_arguments(["--tts", "phonon", "--device", "mps"])
+    prepare_all_args(args)
+    assert "device" not in args.tts_backend.config
+
+
+@pytest.mark.parametrize(("normalizer", "expected"), [("en", {"en"}), ("fr", {"fr"}), ("none", set())])
+def test_phonon_session_languages_match_fixed_normalizer(monkeypatch, normalizer, expected):
+    args = parse_arguments(["--stt", "openai", "--tts", "phonon", "--phonon_tts_language", normalizer])
+    monkeypatch.setattr(
+        s2s_pipeline, "_build_handlers", lambda **kwargs: [SimpleNamespace(), SimpleNamespace(language=normalizer)]
+    )
+    unit = s2s_pipeline._build_pipeline_unit(
+        index=0,
+        stop_event=Event(),
+        module_kwargs=args.module_kwargs,
+        vad_handler_kwargs=args.vad_handler_kwargs,
+        stt_backend=args.stt_backend,
+        llm_backend=args.llm_backend,
+        tts_backend=args.tts_backend,
+    )
+    assert unit.service.tts_supported_languages == expected
+
+
 def test_sensevoice_stt_backend_is_registered_with_its_optional_extra():
     spec = STT_BACKENDS["sense-voice"]
 

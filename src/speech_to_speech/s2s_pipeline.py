@@ -319,10 +319,10 @@ def check_mac_settings(module_kwargs: ModuleArguments) -> None:
             logger.warning(
                 "For macOS users, it is recommended to use mlx-lm. You can activate it by passing --llm_backend mlx-lm."
             )
-        if module_kwargs.tts not in ("pocket", "kokoro", "omnivoice", "qwen3"):
+        if module_kwargs.tts not in ("pocket", "phonon", "kokoro", "omnivoice", "qwen3"):
             logger.warning(
                 "For macOS users, it is recommended to use qwen3 for TTS "
-                "(pocket, kokoro, and omnivoice are also valid options)."
+                "(pocket, phonon, kokoro, and omnivoice are also valid options)."
             )
 
 
@@ -622,6 +622,11 @@ def _build_pipeline_unit(
         service.tts_supported_languages = {code for code in tts_module.QWEN3_LANGUAGE_ALIASES if len(code) == 2}
     elif tts_selection.name in {"chatTTS", "pocket"}:
         service.tts_supported_languages = set()
+    elif tts_selection.name == "phonon":
+        # The preview runtime fixes text normalization at model load. Allow
+        # the configured language, but reject session changes we cannot honor.
+        language = handlers[-1].language
+        service.tts_supported_languages = {language} if language != "none" else set()
 
     return PipelineUnit(
         index=index,

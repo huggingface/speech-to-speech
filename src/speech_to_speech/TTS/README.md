@@ -7,6 +7,7 @@ Runtime-supported values in `s2s_pipeline.py`:
 - `chatTTS` → `chatTTS_handler.py`
 - `facebookMMS` → `facebookmms_handler.py`
 - `pocket` → `pocket_tts_handler.py`
+- `phonon` → `phonon_tts_handler.py`
 - `kokoro` → `kokoro_handler.py`
 - `omnivoice` → `omnivoice_handler.py`
 - `qwen3` → `qwen3_tts_handler.py`
@@ -276,6 +277,30 @@ Install the optional dependency with:
 pip install "speech-to-speech[supertonic]"
 ```
 
+### 9) Phonon (`--tts phonon`)
+
+Primary args prefix: `--phonon_tts_*`
+
+```bash
+pip install "speech-to-speech[phonon]"
+speech-to-speech serve \
+  --tts phonon \
+  --phonon_tts_model_name /path/to/checkpoint \
+  --phonon_tts_language en
+```
+
+- Uses the published `ptts==0.4.0rc1` preview Python bindings on CPU. It streams mono float audio and resamples continuously to 16 kHz PCM16 in 512-sample blocks. GPU flags for other components do not move Phonon off CPU.
+- A checkpoint is required. Runtime packages include no weights. Supply a local directory/config path, or a Hugging Face repository ID with `--phonon_tts_revision` when appropriate. The checkpoint needs its own config, tokenizer JSON, weights and voice files. Keep private checkpoint files outside this repository.
+- `--phonon_tts_quant q8` is the default and loads `model.q8.gguf`. Other formats require matching checkpoint weights.
+- `--phonon_tts_voice VOICE_NAME` selects a registered checkpoint voice. Omitting it uses the upstream default. Realtime session and response voice overrides also accept checkpoint voice names. Raw reference-audio voice cloning is not exposed by this handler.
+- `--phonon_tts_language en|fr|de|es|pt|none` selects text normalization at startup, not a different model. The preview cannot change it per utterance, so session language selections must match it; `auto` keeps the configured normalizer. Checkpoint language coverage is independent of text normalization.
+- `--phonon_tts_blocksize` changes the number of samples per output block; the output rate stays 16 kHz.
+- Interruptions and generator cleanup close the native stream and release its workers. Resampling state is fresh for each utterance, and the model remains loaded across sessions.
+
+For a checkout, install with `pip install -e ".[phonon]"`. An optional real-checkpoint test can be run with `PHONON_TEST_CHECKPOINT=/path/to/checkpoint pytest tests/test_phonon_tts_handler.py`; ordinary tests use a fake runtime and require no weights.
+
+Upstream: [runtime preview](https://github.com/gradium-ai/xn-ptts/releases/tag/v0.4.0-rc.1) and [Python guide](https://github.com/gradium-ai/xn-ptts/tree/v0.4.0-rc.1/ptts-pyo3).
+
 ## Setup
 
 ### Low-latency GPU setup
@@ -293,4 +318,4 @@ speech-to-speech local \
   --mac-optimal-settings
 ```
 
-`--tts pocket`, `--tts kokoro`, and `--tts omnivoice` are also valid options on macOS.
+`--tts pocket`, `--tts phonon`, `--tts kokoro`, and `--tts omnivoice` are also valid options on macOS.

@@ -101,6 +101,9 @@ sensevoice = [
 pocket = [
     "pocket-tts>=2.0.0",
 ]
+phonon = [
+    "ptts==0.4.0rc1",
+]
 supertonic = [
     "supertonic>=1.3.1",
 ]

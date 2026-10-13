@@ -128,6 +128,7 @@ Clients using the implemented core Realtime event set can connect. The official 
 * [Multi-language support](#multi-language-support)
 * [OmniVoice](#omnivoice)
 * [Pocket TTS](#pocket-tts)
+* [Phonon TTS](#phonon-tts)
 * [CLI reference](#cli-reference)
 * [Contributing](#contributing)
 * [Star history](#star-history)
@@ -190,6 +191,7 @@ Optional components are installed with pip extras:
 ```bash
 pip install "speech-to-speech[kokoro]"          # Kokoro-82M TTS on non-macOS
 pip install "speech-to-speech[pocket]"          # Pocket TTS
+pip install "speech-to-speech[phonon]"          # Phonon TTS (checkpoint supplied separately)
 pip install "speech-to-speech[chattts]"         # ChatTTS
 pip install "speech-to-speech[omnivoice]"       # OmniVoice TTS (CUDA, Intel XPU, or Apple Silicon)
 pip install "speech-to-speech[faster-whisper]"  # Faster Whisper STT
@@ -243,6 +245,7 @@ This installs the package in editable mode. With the environment activated, use 
 | TTS | [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) (default) | GGML / CUDA on Linux, mlx-audio on macOS | built-in |
 | TTS | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | CUDA / CPU, Apple Silicon | `kokoro` on non-macOS; built-in on macOS |
 | TTS | [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) | CPU / CUDA | `pocket` |
+| TTS | [Phonon](https://github.com/gradium-ai/xn-ptts) | CPU (including Apple Silicon) | `phonon` |
 | TTS | [ChatTTS](https://github.com/2noise/ChatTTS) | CUDA / CPU | `chattts` |
 | TTS | [OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) | CUDA / Intel XPU / Apple Silicon | `omnivoice` |
 | TTS | [MMS TTS](https://huggingface.co/docs/transformers/model_doc/mms) | CUDA / CPU | built-in |
@@ -325,7 +328,7 @@ Start with [Apple Silicon, fully local](#apple-silicon-fully-local). Its `--mac-
 
 The preset supplies these as defaults only: explicit `--device`, component-device flags such as `--qwen3_tts_device`, and `--stt`, `--llm_backend`, `--model_name`, and `--tts` all win. Use it with `serve` instead of `local` when you want to expose the server without starting the microphone/speaker client.
 
-`--tts pocket`, `--tts kokoro`, and `--tts omnivoice` are also valid on macOS.
+`--tts pocket`, `--tts phonon`, `--tts kokoro`, and `--tts omnivoice` are also valid on macOS.
 
 To compare the MLX quantization variants locally:
 
@@ -680,6 +683,23 @@ speech-to-speech serve \
 ```
 
 Available voice presets: `alba`, `marius`, `javert`, `jean`, `fantine`, `cosette`, `eponine`, `azelma`. Custom voice files and Hugging Face paths also work.
+
+## Phonon TTS
+
+Phonon from Gradium streams speech locally through the Rust-backed `ptts` Python runtime. Install the optional extra and point it at a separately supplied checkpoint:
+
+```bash
+pip install "speech-to-speech[phonon]"
+speech-to-speech local \
+    --mac-optimal-settings \
+    --tts phonon \
+    --phonon_tts_model_name /path/to/checkpoint \
+    --phonon_tts_language en
+```
+
+The checkpoint must include its matching `config.json`, `tokenizer.json`, q8 `model.q8.gguf`, and voice embeddings. The runtime preview does not include weights or select a checkpoint automatically. Use `--phonon_tts_voice VOICE_NAME` to select a voice from your checkpoint; omitting it uses the checkpoint's default. Keep private checkpoints outside the repository.
+
+Phonon runs on CPU even when STT or the LLM uses a GPU. Native audio is resampled to the pipeline's 16 kHz PCM16 output, and interruption closes the native stream. The preview fixes text normalization at startup; use `en`, `fr`, `de`, `es`, `pt`, or `none`. Session language changes are restricted to that configured language. See the [TTS component guide](./src/speech_to_speech/TTS/README.md#9-phonon---tts-phonon) for installation and checkpoint options.
 
 ## CLI Reference
 
