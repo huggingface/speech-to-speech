@@ -101,7 +101,7 @@ class ResponseHandler(RealtimeBaseHandler):
     def _log_turn_latency(self, st: ConnState, status: _ResponseStatus, response_key: str | None) -> None:
         assert status != "in_progress", "Latency is only finalized for terminal responses"
         tracker = self._service.turn_latency_store.pop(response_key, session_id=st.session_id)
-        if tracker is None:
+        if tracker is None or tracker.turn_id is None:
             return
         if tracker.speech_anchor is not None and (status != "completed" or not st.pending_function_calls):
             tracker.speech_anchor.close()
@@ -504,7 +504,7 @@ class ResponseHandler(RealtimeBaseHandler):
             metadata.pop(TURN_LATENCY_METADATA_KEY, None)
         if status != "in_progress" and st.current_response_key is not None and len(metadata) < 16:
             tracker = self._service.turn_latency_store.get_response(st.current_response_key)
-            if tracker is not None:
+            if tracker is not None and tracker.turn_id is not None:
                 latency_value = json.dumps(
                     tracker.metadata_payload(
                         response_key=st.current_response_key,

@@ -224,7 +224,7 @@ class TurnLatencyTracker:
         return f"{seconds:.2f}s"
 
     def format_log_line(self) -> str | None:
-        if self.turn_id is None and self.source is None:
+        if self.turn_id is None:
             return None
         revision = 0 if self.turn_revision is None else self.turn_revision
         settle = "" if self.vad_settle_s is None else f"vad_settle={self._fmt(self.vad_settle_s)} "
@@ -236,7 +236,7 @@ class TurnLatencyTracker:
         # A cancelled turn whose TTS already spoke is not a finished reply.
         cut = " tts=cut" if self.status == "cancelled" and self.tts_ttfa_s is not None else ""
         return (
-            f"Turn {self.turn_id or 'n/a'} rev={revision} latency: "
+            f"Turn {self.turn_id} rev={revision} latency: "
             f"stt={self._fmt(self.stt_s)} "
             f"llm={self._fmt(self.llm_s)} "
             f"tts_ttfa={self._fmt(self.tts_ttfa_s)} e2e={self._fmt(self.e2e_s)} "
