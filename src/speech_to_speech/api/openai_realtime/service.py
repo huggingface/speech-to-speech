@@ -710,15 +710,11 @@ class RealtimeService:
             if reference[0] is not None and (not continuation or reference[2] is not None)
             else None
         )
-        source: Literal["speech", "client", "tool"] = "tool" if continuation else "client"
-        if anchor is not None and (continuation or not anchor.requested):
-            if not continuation:
-                source = "speech"
-            if anchor.available:
-                return reference, source, anchor
+        if anchor is not None and anchor.available and (continuation or not anchor.requested):
+            return reference, "tool" if continuation else "speech", anchor
         # Identity still follows input for speculative gates; only the timing
         # anchor is ineligible. A previous answer is not fresh speech input.
-        return (reference[0], reference[1], None), source, None
+        return (reference[0], reference[1], None), "tool" if continuation else "client", None
 
     def _response_input(
         self, conn_id: str, *, origin_call_ids: set[str] | None = None

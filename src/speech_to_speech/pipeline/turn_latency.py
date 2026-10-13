@@ -136,7 +136,7 @@ class TurnLatencyTracker:
             self.tts_ttfa_s = max(0.0, seconds)
 
     def record_e2e(self, seconds: float) -> bool:
-        if self.e2e_s is not None or self.source == "client":
+        if self.e2e_s is not None:
             return False
         if self.speech_anchor is not None and not self.speech_anchor.consume():
             return False
