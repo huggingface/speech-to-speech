@@ -407,3 +407,46 @@ def test_new_text_before_tool_result_supersedes_prefetch_speech_timing(service, 
     assert record["source"] == "client"
     assert record["e2e_s"] is None
     assert record["tts_ttfa_s"] == pytest.approx(0.25)
+
+
+def test_cancelled_unclaimed_tool_prefetch_cannot_lend_speech_anchor_to_retry(service, conn_id, monkeypatch):
+    request = speech(service, conn_id)
+    call = RealtimeConversationItemFunctionCall(
+        type="function_call", id="fc_lookup", call_id="call_lookup", name="lookup", arguments="{}"
+    )
+    request.runtime_config.chat.add_provisional_generation_items(request.response_key, [call])
+    service.dispatch_pipeline_event(
+        conn_id,
+        AssistantOutputEvent(
+            response_key=request.response_key,
+            turn_id=request.turn_id,
+            turn_revision=request.turn_revision,
+            parts=[AssistantToolCallPart(tool=call.model_dump())],
+        ),
+    )
+    service.dispatch_pipeline_event(
+        conn_id, ResponseGenerationDoneEvent(response_key=request.response_key, call_ids=[call.call_id])
+    )
+    finish(service, conn_id, request)
+    service.handle_conversation_item_create(
+        conn_id,
+        ConversationItemCreateEvent(
+            type="conversation.item.create",
+            item={"type": "function_call_output", "call_id": call.call_id, "output": "result"},
+        ),
+    )
+    prefetch = service.text_prompt_queue.get_nowait()
+    anchor = service.turn_latency_store.get_response(prefetch.response_key).speech_anchor
+    assert anchor.available
+    assert service._state(conn_id).response_pending
+    service.handle_response_cancel(conn_id)
+    assert prefetch.prefetch_transaction.discarded
+    assert service.turn_latency_store.get_response(prefetch.response_key) is None
+    assert not service._state(conn_id).response_pending
+    assert not anchor.available
+    retry = create(service, conn_id)
+    assert retry.speech_stopped_at_s is None
+    audio(service, conn_id, retry, monkeypatch, [1011.0])
+    record = finish(service, conn_id, retry)
+    assert record["e2e_s"] is None
+    assert record["tts_ttfa_s"] == pytest.approx(0.25)

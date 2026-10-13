@@ -562,11 +562,14 @@ class RealtimeService:
     def close_pending_responses(self, conn_id: str) -> None:
         """Cancel queued responses without losing usage already reported by their LMs."""
         st = self._state(conn_id)
-        self.response.discard_tool_followup_prefetch(conn_id)
+        # Close eligibility before discarding private prefetch work removes
+        # its tracker/key. Ordinary prefetch replacement keeps its anchor.
         for response_key in tuple(st.pending_response_keys):
             tracker = self.turn_latency_store.get_response(response_key)
             if tracker is not None and tracker.speech_anchor is not None:
                 tracker.speech_anchor.close()
+        self.response.discard_tool_followup_prefetch(conn_id)
+        for response_key in tuple(st.pending_response_keys):
             self.close_response_key(conn_id, response_key)
         st.generation_done_tool_calls.clear()
         st.completed_tool_response_keys.clear()
