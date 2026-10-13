@@ -38,7 +38,7 @@ client metadata is preserved, except that terminal responses remove any
 client-supplied reserved latency key before adding the server measurement.
 The reserved JSON value is included only when it fits Realtime's 512-character
 metadata value limit. Client metadata is never shortened to make room.
-The measurement is omitted when no attributed turn exists or when all 16
+The measurement is omitted when all 16
 Realtime metadata slots are occupied by other client keys. `response.created`
 continues to carry the client-supplied metadata unchanged; server measurements
 are added only to terminal responses.
@@ -123,11 +123,13 @@ Terminal records include an additive `source` field: `speech` for the first
 response to supplied speech (including a manual create with automatic responses
 disabled), `client` for an independent create, and `tool` for a continuation
 resolved through function-call identity. This is a server diagnostic extension,
-not an OpenAI-defined metadata field. A `client` response still carries the
-turn ID of the input it answers, and keeps its LLM/TTS stage timings, but has
-`e2e_s: null`: turn identity alone does not imply E2E eligibility. New supplied
-user input supersedes an earlier tool chain's speech timing, and later tool calls
-inherit the eligibility of the response that emitted them.
+not an OpenAI-defined metadata field. Independent responses also export LLM/TTS
+stage timings, with `e2e_s: null`; input ownership can still carry a turn ID for
+speculative gating, so turn identity alone does not imply E2E eligibility. New
+supplied user input supersedes an earlier tool timing origin, including when
+private follow-up generation is rebuilt for that input. Subsequent tool calls
+inherit the emitting response's timing eligibility, even when generation
+ownership still names the earlier turn.
 
 Tool follow-ups have separate response keys and do not repeat the originating
 turn's VAD/Smart Turn measurements. Their E2E retains the originating speech-end
@@ -136,8 +138,10 @@ Only one response in that chain records speech E2E. A spoken lead-in consumes
 the first-audio measurement too; subsequent tool answers keep stage timings but
 have no second E2E sample. Completed answers and cancelled/failed responses close
 the speech anchor. Idle time before an independent create cannot reuse it.
-These attribution changes retain metadata version 2's timing boundaries; `source`
-is additive. Stages overlap; do not sum them to reconstruct E2E. Configured grace
+These attribution changes retain metadata version 2's timing boundaries. `source`
+is a new field, and `turn_id` is `null` when a `client` or `tool` record has no
+attributed input turn. Out-of-band responses retain their existing metadata
+behavior. Stages overlap; do not sum them to reconstruct E2E. Configured grace
 and delay and Smart Turn analysis are no longer part of the terminal timing record.
 
 Remote timings are measured by this server. They include network transfer and

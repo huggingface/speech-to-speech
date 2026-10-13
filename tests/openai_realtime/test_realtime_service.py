@@ -2705,7 +2705,14 @@ class TestFinishAudioResponse:
 
         events = service.finish_response(conn_id, status=status)
         done = next(event for event in events if isinstance(event, ResponseDoneEvent))
-        assert json.loads(done.model_dump_json())["response"]["metadata"] == (client_metadata or None)
+        wire_metadata = json.loads(done.model_dump_json())["response"]["metadata"] or {}
+        if conversation == "auto":
+            record = json.loads(wire_metadata.pop(TURN_LATENCY_METADATA_KEY))
+            assert record["source"] == "client"
+            assert record["turn_id"] is None
+            assert record["e2e_s"] is None
+            assert record["status"] == status
+        assert wire_metadata == client_metadata
         assert created.response.metadata == metadata
         assert service.turn_latency_store._trackers == {}
 
