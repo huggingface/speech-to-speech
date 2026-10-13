@@ -118,6 +118,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
             ResponseGenerationDoneEvent(
                 response_key=response_key,
                 call_ids=list(self._tool_call_ids),
+                history=lm_output.history,
                 succeeded=succeeded,
                 turn_id=lm_output.turn_id,
                 turn_revision=lm_output.turn_revision,
@@ -179,6 +180,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 self._tts_runtime_config.last_assistant_language = self._detected_assistant_language
             if lm_output.error:
                 yield ResponseFailedEvent(
+                    history=lm_output.history,
                     message=lm_output.error,
                     turn_id=lm_output.turn_id,
                     turn_revision=lm_output.turn_revision,
@@ -187,9 +189,11 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 )
             else:
                 yield AssistantResponseDoneEvent(
+                    history=lm_output.history,
                     status=lm_output.status,
                     reason=lm_output.reason,
                     response_key=response_key,
+                    input_tool_call_ids=lm_output.input_tool_call_ids if succeeded else [],
                     turn_id=lm_output.turn_id,
                     turn_revision=lm_output.turn_revision,
                     cancel_generation=lm_output.cancel_generation,
@@ -226,6 +230,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 if self.text_output_queue is not None:
                     self.text_output_queue.put(
                         AssistantToolCallReadyEvent(
+                            history=lm_output.history,
                             part=part,
                             output_sequence=output_sequence,
                             turn_id=lm_output.turn_id,
@@ -235,6 +240,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                         )
                     )
             event = AssistantOutputEvent(
+                history=lm_output.history,
                 parts=[part],
                 turn_id=lm_output.turn_id,
                 turn_revision=lm_output.turn_revision,

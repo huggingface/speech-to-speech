@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from threading import Lock
+from threading import Lock, RLock
 from types import SimpleNamespace
 
 import speech_to_speech.pipeline.speculative_turns as speculative_module
@@ -11,6 +11,8 @@ from speech_to_speech.pipeline.turn_latency import (
     TurnLatencyStore,
     TurnLatencyTracker,
     bind_active_turn_latency_tracker,
+    record_response_e2e,
+    record_response_tts_ttfa,
 )
 
 
@@ -54,8 +56,10 @@ def test_turn_latency_tracker_record() -> None:
     assert "llm=2.00s" in line
     assert "tts_ttfa=0.20s" in line
     assert "e2e=3.00s" in line
+    # No handler name was given, so the total carries no breakdown.
     assert ("mlx_lock_wait=0.15s" in line) == (sys.platform == "darwin")
     assert "status=cancelled" in line
+    assert "tts=cut" in line
 
     assert TurnLatencyTracker().format_log_line() is None
 
@@ -69,6 +73,8 @@ def test_timed_out_mlx_lock_acquisition_records_wait(monkeypatch) -> None:
             assert not acquired
 
     assert tracker.mlx_lock_wait_s >= 0.01
+    assert tracker.mlx_lock_waits["test-timeout"].total_s == tracker.mlx_lock_wait_s
+    assert tracker.mlx_lock_waits["test-timeout"].count == 1
     assert not lock.locked()
 
 
@@ -80,6 +86,34 @@ def test_turn_latency_tracker_first_write_wins_for_ttfa_and_e2e() -> None:
     tracker.record_e2e(4.0)
     assert tracker.tts_ttfa_s == 0.2
     assert tracker.e2e_s == 1.0
+
+
+def test_record_response_helpers_lookup_existing_tracker_only() -> None:
+    store = TurnLatencyStore()
+    tracker = store.get_or_create_response("resp_1", turn_id="turn_1", turn_revision=0)
+
+    record_response_tts_ttfa(None, "resp_1", 0.5)
+    record_response_e2e(None, "resp_1", 1.5)
+    assert tracker.tts_ttfa_s is None
+    assert tracker.e2e_s is None
+
+    record_response_tts_ttfa(store, None, 0.5)
+    record_response_e2e(store, None, 1.5)
+    assert tracker.tts_ttfa_s is None
+    assert tracker.e2e_s is None
+
+    record_response_tts_ttfa(store, "missing", 0.5)
+    record_response_e2e(store, "missing", 1.5)
+    assert tracker.tts_ttfa_s is None
+    assert tracker.e2e_s is None
+    assert store.get_response("missing") is None
+
+    record_response_tts_ttfa(store, "resp_1", 0.12)
+    record_response_e2e(store, "resp_1", 2.4)
+    record_response_tts_ttfa(store, "resp_1", 9.0)
+    record_response_e2e(store, "resp_1", 9.0)
+    assert tracker.tts_ttfa_s == 0.12
+    assert tracker.e2e_s == 2.4
 
 
 def test_turn_latency_store_pending_turn_merges_into_response() -> None:
@@ -140,7 +174,7 @@ def test_configured_grace_is_not_reported_as_wait_without_a_gate(monkeypatch) ->
     turns = SpeculativeTurnTracker()
     turns._condition = ControlledCondition()
     turns.wait_observer = store.record_smart_wait
-    turns.observe("turn_1", 0)
+    turns.start_turn()
     turns.start_reopen_grace("turn_1", 0, 2.0)
 
     clock[0] = 3.0
@@ -201,6 +235,73 @@ def test_clear_session_keeps_pending_while_other_sessions_active() -> None:
 
     store.clear_session("sess_2")
     assert store.get_or_create_for_turn("turn_9", 0).stt_s is None
+
+
+def test_format_log_line_shows_settle_named_lock_and_cut_tts(monkeypatch) -> None:
+    import speech_to_speech.pipeline.turn_latency as latency
+
+    monkeypatch.setattr(latency.sys, "platform", "darwin")
+    tracker = TurnLatencyTracker(turn_id="turn_1", turn_revision=2, status="cancelled")
+    tracker.record_stt(0.12)
+    tracker.record_vad_settle(0.61)
+    tracker.record_llm(2.08)
+    tracker.record_tts_ttfa(0.18)
+    tracker.record_e2e(3.0)
+    tracker.record_mlx_lock_wait(0.02, "ParakeetSTT-Progressive")
+    tracker.record_mlx_lock_hold(0.88, "Qwen3TTS")
+
+    assert tracker.format_log_line() == (
+        "Turn turn_1 rev=2 latency: stt=0.12s llm=2.08s tts_ttfa=0.18s e2e=3.00s "
+        "vad_settle=0.61s vad_decision=n/a hold=n/a smart_turn_status=n/a status=cancelled "
+        "mlx_lock_wait=0.02s[ParakeetSTT-Progressive:0.02s] "
+        "mlx_lock_hold=0.88s[Qwen3TTS:0.88s] tts=cut"
+    )
+
+
+def test_repeated_lock_waits_are_summed_per_handler(monkeypatch) -> None:
+    """A turn takes the lock many times; the breakdown must stay one entry per
+    handler and account for the printed total."""
+    import speech_to_speech.pipeline.turn_latency as latency
+
+    monkeypatch.setattr(latency.sys, "platform", "darwin")
+    tracker = TurnLatencyTracker(turn_id="turn_1", turn_revision=0)
+    for _ in range(12):
+        tracker.record_mlx_lock_wait(0.01, "ParakeetSTT-Progressive")
+    tracker.record_mlx_lock_wait(0.03, "Qwen3TTS")
+
+    assert tracker.mlx_lock_waits["ParakeetSTT-Progressive"].count == 12
+    assert "mlx_lock_wait=0.15s[ParakeetSTT-Progressive:0.12sx12,Qwen3TTS:0.03s]" in tracker.format_log_line()
+
+
+def test_pending_turn_merges_vad_settle_and_named_lock() -> None:
+    store = TurnLatencyStore()
+    pending = store.get_or_create_for_turn("turn_3", 1)
+    pending.record_vad_settle(0.4)
+    pending.record_mlx_lock_wait(0.02, "ParakeetSTT")
+    pending.record_mlx_lock_hold(0.3, "ParakeetSTT")
+    assert store.pending_for_turn("turn_3", 1) is pending
+
+    tracker = store.get_or_create_response("resp_a", turn_id="turn_3", turn_revision=1)
+    tracker.record_mlx_lock_hold(0.5, "ParakeetSTT")
+    assert tracker.vad_settle_s == 0.4
+    assert tracker.mlx_lock_waits["ParakeetSTT"].total_s == 0.02
+    assert tracker.mlx_lock_hold_s == 0.8
+    assert tracker.mlx_lock_holds["ParakeetSTT"].count == 2
+    assert store.pending_for_turn("turn_3", 1) is None
+
+
+def test_lock_hold_recorded_once_on_outer_release(monkeypatch) -> None:
+    monkeypatch.setattr(mlx_lock, "_mlx_lock", RLock())
+    tracker = TurnLatencyTracker(turn_id="turn_1", turn_revision=0)
+    with bind_active_turn_latency_tracker(tracker):
+        assert mlx_lock.acquire_mlx_lock(handler_name="Qwen3TTS")
+        assert mlx_lock.acquire_mlx_lock(handler_name="Qwen3TTS")
+        mlx_lock.release_mlx_lock(handler_name="Qwen3TTS")
+        assert tracker.mlx_lock_hold_s == 0.0
+        mlx_lock.release_mlx_lock(handler_name="Qwen3TTS")
+
+    assert tracker.mlx_lock_hold_s > 0.0
+    assert tracker.mlx_lock_holds["Qwen3TTS"].count == 1
 
 
 def test_log_platform_and_export_fields(monkeypatch):
