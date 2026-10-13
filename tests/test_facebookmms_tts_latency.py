@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
 
 import numpy as np
 import pytest
 import torch
 
+from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.messages import TTSInput
 from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.TTS import facebookmms_handler
@@ -169,6 +169,7 @@ def test_language_reload_is_excluded_from_ttfa(monkeypatch: pytest.MonkeyPatch) 
     )
 
     assert tracker.tts_ttfa_s == pytest.approx(0.07)
+    assert tracker.e2e_s == pytest.approx(1.57)
 
 
 def test_empty_audio_leaves_latency_unset(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -182,3 +183,115 @@ def test_empty_audio_leaves_latency_unset(monkeypatch: pytest.MonkeyPatch) -> No
     assert list(handler.process(TTSInput(text="x", response_key="resp-3", speech_stopped_at_s=0.5))) == []
     assert tracker.tts_ttfa_s is None
     assert tracker.e2e_s is None
+
+
+@pytest.mark.parametrize("device_type", ["cpu", "cuda", "mps", "xpu", "npu"])
+@pytest.mark.parametrize("cancel_during_wait", [False, True])
+def test_ttfa_waits_for_waveform_readiness_before_cpu_copy(
+    monkeypatch: pytest.MonkeyPatch, device_type: str, cancel_during_wait: bool
+) -> None:
+    clock = [100.0]
+    monkeypatch.setattr(facebookmms_handler, "perf_counter", lambda: clock[0])
+    scope = CancelScope()
+    synchronized_devices = []
+    device = SimpleNamespace(type=device_type)
+
+    def synchronize() -> None:
+        synchronized_devices.append(device)
+        clock[0] = 100.40
+        if cancel_during_wait:
+            scope.cancel()
+
+    def current_stream(actual_device):
+        assert actual_device is device
+        return SimpleNamespace(synchronize=synchronize)
+
+    for backend in ("cuda", "xpu", "npu"):
+        monkeypatch.setattr(torch, backend, SimpleNamespace(current_stream=current_stream), raising=False)
+    monkeypatch.setattr(torch, "mps", SimpleNamespace(synchronize=synchronize))
+
+    class DeferredWaveform:
+        def __init__(self):
+            self.device = device
+
+        def numel(self):
+            return 16000
+
+        def cpu(self):
+            # GPU computation must finish before we begin copying samples.
+            assert len(synchronized_devices) == (0 if device_type == "cpu" else 1)
+            clock[0] += 0.05
+            return _waveform()
+
+    def resample(chunk, **kwargs):
+        clock[0] += 0.20
+        return np.asarray(chunk, dtype=np.float32)
+
+    monkeypatch.setattr(facebookmms_handler, "librosa", SimpleNamespace(resample=resample))
+    handler = _handler()
+    handler.cancel_scope = scope
+    store = handler.turn_latency_store = TurnLatencyStore()
+    tracker = store.get_or_create_response("resp-ready")
+
+    def generate(_text):
+        clock[0] = 100.12
+        return DeferredWaveform()
+
+    handler.generate_audio = generate  # type: ignore[method-assign]
+    outputs = list(handler.process(TTSInput(text="hello", response_key="resp-ready", speech_stopped_at_s=99.0)))
+
+    if cancel_during_wait and device_type != "cpu":
+        assert outputs == []
+        assert tracker.tts_ttfa_s is None
+        assert tracker.e2e_s is None
+    else:
+        assert outputs
+        assert tracker.tts_ttfa_s == pytest.approx(0.12 if device_type == "cpu" else 0.40)
+        assert tracker.e2e_s == pytest.approx(1.37 if device_type == "cpu" else 1.65)
+
+
+@pytest.mark.parametrize("cancel_at", ["generation", "resample", "after_first", "discard"])
+def test_cancelled_or_discarded_audio_cannot_record_another_response(
+    monkeypatch: pytest.MonkeyPatch, cancel_at: str
+) -> None:
+    clock = [10.0]
+    monkeypatch.setattr(facebookmms_handler, "perf_counter", lambda: clock[0])
+    handler = _handler()
+    handler.cancel_scope = CancelScope()
+    store = handler.turn_latency_store = TurnLatencyStore()
+    tracker = store.get_or_create_response("old")
+    other = store.get_or_create_response("new")
+
+    def generate(_text):
+        clock[0] = 10.12
+        if cancel_at == "generation":
+            handler.cancel_scope.cancel()
+        elif cancel_at == "discard":
+            store.discard_response("old")
+        return _waveform()
+
+    def resample(chunk, **kwargs):
+        if cancel_at == "resample":
+            handler.cancel_scope.cancel()
+        return np.asarray(chunk, dtype=np.float32)
+
+    handler.generate_audio = generate  # type: ignore[method-assign]
+    monkeypatch.setattr(facebookmms_handler, "librosa", SimpleNamespace(resample=resample))
+    output = handler.process(TTSInput(text="hello", response_key="old", speech_stopped_at_s=9.0))
+    if cancel_at == "after_first":
+        assert next(output).shape == (512,)
+        handler.cancel_scope.cancel()
+        assert list(output) == []
+        assert tracker.tts_ttfa_s == pytest.approx(0.12)
+        assert tracker.e2e_s == pytest.approx(1.12)
+    elif cancel_at == "discard":
+        assert list(output)
+        assert store.get_response("old") is None
+        assert tracker.tts_ttfa_s is None
+        assert tracker.e2e_s is None
+    else:
+        assert list(output) == []
+        assert tracker.e2e_s is None
+        assert tracker.tts_ttfa_s == (None if cancel_at == "generation" else pytest.approx(0.12))
+    assert other.tts_ttfa_s is None
+    assert other.e2e_s is None

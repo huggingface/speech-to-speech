@@ -16,6 +16,7 @@ from openai.types.realtime.conversation_item import RealtimeConversationItemFunc
 
 import speech_to_speech.LLM.language_model as language_model_module
 import speech_to_speech.STT.qwen3_asr_handler as qwen3_asr_module
+import speech_to_speech.TTS.facebookmms_handler as mms_module
 import speech_to_speech.TTS.qwen3_tts_handler as qwen3_tts_module
 from speech_to_speech.LLM.language_model import LanguageModelHandler
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
@@ -43,6 +44,7 @@ from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
 from speech_to_speech.VAD.smart_turn import SmartTurnResult
+from tests.test_facebookmms_tts_latency import _handler as _mms_handler
 from tests.test_qwen3_asr_transcription_events import _handler as _qwen3_asr_handler
 from tests.test_speculative_turns import (
     _audio_bytes,
@@ -505,6 +507,68 @@ def test_unregister_clears_unfinished_measurements_before_session_reuse(service,
         assert f"response_key={fresh.response_key}" in lines[0]
     finally:
         service.unregister(new_conn_id)
+
+
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize("status", ["completed", "cancelled"])
+def test_mms_segments_reach_terminal_latency_metadata_and_cleanup(
+    service, conn_id, monkeypatch, caplog, stream, status
+):
+    request = _queue_turn(service, conn_id)
+    clock = [10.0]
+    monkeypatch.setattr(mms_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr(mms_module.console, "print", lambda *args, **kwargs: None)
+    waveform = torch.linspace(-0.2, 0.2, 600).unsqueeze(0)
+
+    def resample(chunk, **kwargs):
+        clock[0] += 0.20
+        return np.asarray(chunk, dtype=np.float32)
+
+    monkeypatch.setattr(mms_module, "librosa", SimpleNamespace(resample=resample))
+    handler = _mms_handler(stream=stream)
+    handler.turn_latency_store = service.turn_latency_store
+    for start, duration in [(10.0, 0.12), (20.0, 0.50)]:
+        clock[0] = start
+
+        def generate(_text):
+            clock[0] += duration
+            return waveform
+
+        handler.generate_audio = generate
+        blocks = list(
+            handler.process(
+                TTSInput(
+                    text="Hello.",
+                    response_key=request.response_key,
+                    turn_id=request.turn_id,
+                    turn_revision=request.turn_revision,
+                    speech_stopped_at_s=9.0,
+                )
+            )
+        )
+        pcm = np.concatenate(blocks)
+        assert len(blocks) == 2
+        assert pcm.dtype == np.int16
+        np.testing.assert_array_equal(pcm[:600], (waveform.numpy().squeeze() * 32768).astype(np.int16))
+        assert np.all(pcm[600:] == 0)
+
+    service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=request.response_key))
+    with caplog.at_level(logging.INFO, logger=LATENCY_LOGGER):
+        done = service.finish_response(conn_id, status=status, response_key=request.response_key)[-1]
+    assert done.type == "response.done"
+    payload = json.loads(done.response.metadata[TURN_LATENCY_METADATA_KEY])
+    assert payload["response_key"] == request.response_key
+    assert payload["turn_id"] == request.turn_id
+    assert payload["turn_revision"] == request.turn_revision
+    assert payload["status"] == status
+    assert payload["tts_ttfa_s"] == pytest.approx(0.12)
+    assert payload["e2e_s"] == pytest.approx(1.32)
+    lines = _latency_lines(caplog)
+    assert len(lines) == 1
+    assert "tts_ttfa=0.12s e2e=1.32s" in lines[0]
+    assert f"response_key={request.response_key}" in lines[0]
+    assert service.turn_latency_store._trackers == {}
+    assert len(service.turn_latency_store._session_keys) == 0
 
 
 def test_multiple_qwen_segments_keep_first_audio_timings_in_terminal_log(service, conn_id, monkeypatch, caplog):

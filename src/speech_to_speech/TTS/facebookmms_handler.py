@@ -209,7 +209,13 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
         def cancelled() -> bool:
             return gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen)
 
-        # Full waveform is available before cpu/numpy / resample / block assembly.
+        # Device tensors may return before synthesis kernels finish. Wait for
+        # waveform readiness without including the later CPU copy or resampling.
+        device_type = audio_output.device.type
+        if device_type == "mps":
+            torch.mps.synchronize()
+        elif device_type in {"cuda", "xpu", "npu"}:
+            getattr(torch, device_type).current_stream(audio_output.device).synchronize()
         if not cancelled():
             record_response_tts_ttfa(store, response_key, perf_counter() - started_at_s)
 
@@ -224,8 +230,12 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         first_yielded = True
 
-        def emit(block: np.ndarray) -> Iterator[TTSOut]:
-            nonlocal first_yielded
+        for i in range(0, len(audio_int16), self.chunk_size):
+            if cancelled():
+                logger.info("TTS generation cancelled (interruption)")
+                return
+            chunk = audio_int16[i : i + self.chunk_size]
+            block = np.pad(chunk, (0, self.chunk_size - len(chunk)))
             if first_yielded:
                 if speech_stopped_at_s is not None:
                     record_response_e2e(
@@ -235,13 +245,6 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     )
                 first_yielded = False
             yield block
-
-        for i in range(0, len(audio_int16), self.chunk_size):
-            if cancelled():
-                logger.info("TTS generation cancelled (interruption)")
-                return
-            chunk = audio_int16[i : i + self.chunk_size]
-            yield from emit(np.pad(chunk, (0, self.chunk_size - len(chunk))))
 
     def on_session_end(self) -> None:
         custom_model_changed = self._initial_model_name is not None and self.model_name != self._initial_model_name

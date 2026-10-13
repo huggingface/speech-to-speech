@@ -71,7 +71,11 @@ that lock is not contended, and hold is omitted entirely when nothing held it.
   Pocket Farsi captures this timestamp before buffering and validating the
   phrase, including across retries; it publishes the measurement only if
   validation produces usable audio. Generated sentence pauses are excluded
-  from provider TTFA.
+  from provider TTFA. Facebook MMS returns a full VITS waveform rather than
+  incremental model audio: its TTFA ends after waveform computation completes
+  on the selected device, before CPU copying, resampling, and PCM block assembly.
+  A language-model reload is excluded from MMS TTFA but remains inside E2E;
+  low TTFA alone therefore does not imply that all delay was upstream of TTS.
 - `e2e` runs from estimated speech end to the first audio block yielded by TTS.
   It includes VAD decision time, Smart Turn analysis, audio enhancement, and
   subsequent processing/hold time before that block. The timestamp is propagated
