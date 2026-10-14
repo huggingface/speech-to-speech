@@ -40,6 +40,14 @@ from openai.types.realtime.response_content_part_added_event import Part as Adde
 from openai.types.realtime.response_content_part_done_event import Part as DoneContentPart
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
+from speech_to_speech.api.openai_realtime.tool_followup import (
+    TOOL_FOLLOWUP_ACK_LIMIT,
+    TOOL_FOLLOWUP_COVERED,
+    TOOL_FOLLOWUP_METADATA_KEY,
+    TOOL_FOLLOWUP_WAIT,
+    TOOL_INPUT_METADATA_KEY,
+    tool_call_ids,
+)
 from speech_to_speech.LLM.chat import ChatItemError, add_supported_item
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
@@ -53,6 +61,7 @@ from speech_to_speech.pipeline.messages import (
     GenerateResponseRequest,
     ResponsePrefetchTransaction,
 )
+from speech_to_speech.pipeline.speculative_turns import TurnGateAction, TurnOutputHeld, TurnPhase
 from speech_to_speech.pipeline.transcript_logging import log_exception
 from speech_to_speech.pipeline.turn_latency import TURN_LATENCY_METADATA_KEY
 from speech_to_speech.utils.utils import _generate_id, is_out_of_band, response_wants_audio
@@ -92,8 +101,10 @@ class ResponseHandler(RealtimeBaseHandler):
     def _log_turn_latency(self, st: ConnState, status: _ResponseStatus, response_key: str | None) -> None:
         assert status != "in_progress", "Latency is only finalized for terminal responses"
         tracker = self._service.turn_latency_store.pop(response_key, session_id=st.session_id)
-        if tracker is None or tracker.turn_id is None:
+        if tracker is None:
             return
+        if tracker.speech_anchor is not None and (status != "completed" or not st.pending_function_calls):
+            tracker.speech_anchor.close()
         tracker.status = status
         line = tracker.format_log_line()
         if line:
@@ -120,6 +131,11 @@ class ResponseHandler(RealtimeBaseHandler):
             self._service.total_usage.audio_duration_s,
         )
         st.response_usage.reset()
+        if self._service.speculative_turns is not None:
+            self._service.speculative_turns.close(
+                st.current_response_turn_id,
+                st.current_response_turn_revision,
+            )
         completed_with_tools = bool(st.pending_function_calls)
         if (
             status == "completed"
@@ -140,7 +156,11 @@ class ResponseHandler(RealtimeBaseHandler):
                 st.completed_tool_response_keys.pop(completed_response_key, None)
         st.current_response_id = None
         st.current_response_key = None
+        st.current_response_turn_id = None
+        st.current_response_turn_revision = None
         st.response_failed = False
+        st.response_incomplete = False
+        st.response_incomplete_reason = None
         st.response_error_type = None
         st.current_item_id = None
         st.content_index = 0
@@ -206,11 +226,15 @@ class ResponseHandler(RealtimeBaseHandler):
         if origin_response_key is None or queue is None:
             return False
 
+        reference, source, anchor = self._service.response_latency_context(
+            conn_id, origin_call_ids=st.generation_done_tool_calls[origin_response_key]
+        )
+        turn_id, turn_revision, speech_stopped_at_s = reference
         request = GenerateResponseRequest(
             runtime_config=st.runtime_config,
-            turn_id=st.speculative_user_turn_id,
-            turn_revision=st.speculative_user_turn_revision,
-            speech_stopped_at_s=st.speculative_user_speech_stopped_at_s,
+            turn_id=turn_id,
+            turn_revision=turn_revision,
+            speech_stopped_at_s=speech_stopped_at_s,
             prefetch_transaction=ResponsePrefetchTransaction(),
         )
         self._service.bind_response_latency_tracker(
@@ -218,6 +242,8 @@ class ResponseHandler(RealtimeBaseHandler):
             request.response_key,
             turn_id=request.turn_id,
             turn_revision=request.turn_revision,
+            source=source,
+            speech_anchor=anchor,
         )
         st.tool_followup_prefetch_request = request
         st.tool_followup_prefetch_origin_response_key = origin_response_key
@@ -259,7 +285,6 @@ class ResponseHandler(RealtimeBaseHandler):
                     queue.not_full.notify()
         if request.prefetch_transaction is not None:
             request.prefetch_transaction.discard()
-        st.runtime_config.chat.rollback_provisional_generation(request.response_key)
         self._service.close_response_key(conn_id, request.response_key)
         st.generation_done_tool_calls.pop(request.response_key, None)
         st.completed_tool_response_keys.pop(request.response_key, None)
@@ -312,6 +337,8 @@ class ResponseHandler(RealtimeBaseHandler):
         st.current_response_params = event.response
         st.current_response_id = _generate_id("resp")
         st.current_response_key = request.response_key
+        st.current_response_turn_id = request.turn_id
+        st.current_response_turn_revision = request.turn_revision
         st.response_created_pending_key = request.response_key
         self._start_item(conn_id)
         logger.debug("Standard response.create claimed internal tool follow-up prefetch")
@@ -405,7 +432,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.pending_assistant_item_id = item_id
         st.pending_assistant_output_index = output_index
         if st.last_item_id is None:
-            st.last_item_id = item_id
+            self._service.conversation.record_acknowledged_item(conn_id, item_id)
         return item_id, output_index
 
     def _next_content_index(self, conn_id: str) -> int:
@@ -465,13 +492,20 @@ class ResponseHandler(RealtimeBaseHandler):
 
         rp = st.current_response_params
         metadata = dict(rp.metadata) if rp and rp.metadata else {}
+        # Only the server can report which tool results reached the model.
+        metadata.pop(TOOL_INPUT_METADATA_KEY, None)
+        if status == "completed" and not is_out_of_band(rp):
+            tool_inputs = st.response_tool_inputs.get(st.current_response_key or "", set())
+            value = json.dumps(sorted(tool_inputs), separators=(",", ":"))
+            if tool_inputs and len(metadata) < 16 and len(value) <= 512:
+                metadata[TOOL_INPUT_METADATA_KEY] = value
         if status != "in_progress":
             # Terminal latency metadata is server-owned, even when no measurement exists.
             metadata.pop(TURN_LATENCY_METADATA_KEY, None)
         if status != "in_progress" and st.current_response_key is not None and len(metadata) < 16:
             tracker = self._service.turn_latency_store.get_response(st.current_response_key)
-            if tracker is not None and tracker.turn_id is not None:
-                metadata[TURN_LATENCY_METADATA_KEY] = json.dumps(
+            if tracker is not None:
+                latency_value = json.dumps(
                     tracker.metadata_payload(
                         response_key=st.current_response_key,
                         status=status,
@@ -479,6 +513,8 @@ class ResponseHandler(RealtimeBaseHandler):
                     separators=(",", ":"),
                     sort_keys=True,
                 )
+                if len(latency_value) <= 512:
+                    metadata[TURN_LATENCY_METADATA_KEY] = latency_value
 
         voice: str | None = None
         if rp and rp.audio and rp.audio.output and rp.audio.output.voice:
@@ -755,6 +791,18 @@ class ResponseHandler(RealtimeBaseHandler):
                     message="Only string tool_choice values are supported for now (auto, required, none).",
                     _type="tool_choice_not_supported",
                 )
+        metadata = event.response.metadata if event.response else None
+        followup_ids = tool_call_ids(metadata.get(TOOL_FOLLOWUP_METADATA_KEY)) if metadata else set()
+        if not is_out_of_band(event.response) and followup_ids and followup_ids <= st.answered_tool_call_ids.keys():
+            return self.make_error("Tool results already used by a completed response.", TOOL_FOLLOWUP_COVERED)
+        turns = self._service.speculative_turns
+        if (
+            not is_out_of_band(event.response)
+            and followup_ids
+            and turns is not None
+            and turns.phase in {TurnPhase.LISTENING, TurnPhase.SOFT_ENDED}
+        ):
+            return self.make_error("User input has not committed yet.", TOOL_FOLLOWUP_WAIT)
         prefetch_request = st.tool_followup_prefetch_request if not st.in_response else None
         if prefetch_request is not None:
             if self._prefetch_matches(event):
@@ -777,11 +825,7 @@ class ResponseHandler(RealtimeBaseHandler):
         input_items: list[ConversationItem] = []
         if not out_of_band:
             input_items = list(event.response.input) if event.response and event.response.input else []
-            candidate_chat = (
-                st.runtime_config.chat.copy_without_provisional_generation(prefetch_request.response_key)
-                if prefetch_request is not None
-                else st.runtime_config.chat.copy(deep=True)
-            )
+            candidate_chat = st.runtime_config.chat.copy(deep=True)
             try:
                 for input_item in input_items:
                     add_supported_item(candidate_chat, input_item.model_copy(deep=True))
@@ -818,12 +862,14 @@ class ResponseHandler(RealtimeBaseHandler):
 
         cfg = st.runtime_config
         queue = self._queue(conn_id)
+        reference, source, anchor = self._service.response_latency_context(conn_id)
+        turn_id, turn_revision, speech_stopped_at_s = reference
         request = GenerateResponseRequest(
             runtime_config=cfg,
             response=event.response,
-            turn_id=None if out_of_band else st.speculative_user_turn_id,
-            turn_revision=None if out_of_band else st.speculative_user_turn_revision,
-            speech_stopped_at_s=None if out_of_band else st.speculative_user_speech_stopped_at_s,
+            turn_id=None if out_of_band else turn_id,
+            turn_revision=None if out_of_band else turn_revision,
+            speech_stopped_at_s=None if out_of_band else speech_stopped_at_s,
         )
         if not out_of_band:
             self._service.bind_response_latency_tracker(
@@ -831,12 +877,16 @@ class ResponseHandler(RealtimeBaseHandler):
                 request.response_key,
                 turn_id=request.turn_id,
                 turn_revision=request.turn_revision,
+                source=source,
+                speech_anchor=anchor,
             )
         st.in_response = True
         st.clear_pending_response(request.response_key)
         st.current_response_params = event.response
         st.current_response_id = _generate_id("resp")
         st.current_response_key = request.response_key
+        st.current_response_turn_id = request.turn_id
+        st.current_response_turn_revision = request.turn_revision
         st.response_created_pending_key = request.response_key
         self._start_item(conn_id)
 
@@ -854,8 +904,11 @@ class ResponseHandler(RealtimeBaseHandler):
 
     def handle_response_cancel(self, conn_id: str) -> list[ServerEvent]:
         """Cancel the in-progress response and re-enable listening."""
+        if not self._state(conn_id).in_response:
+            self._service.close_pending_responses(conn_id)
         events = self.finish_response(conn_id, status="cancelled", reason="client_cancelled")
         self._service.close_pending_responses(conn_id)
+        events.extend(self._service.conversation.flush_deferred_items(conn_id))
         should_listen = self._should_listen(conn_id)
         if should_listen:
             should_listen.set()
@@ -939,6 +992,9 @@ class ResponseHandler(RealtimeBaseHandler):
         if st.in_response:
             if status == "completed" and st.response_failed:
                 status = "failed"
+            elif status == "completed" and st.response_incomplete:
+                status = "incomplete"
+                reason = st.response_incomplete_reason
             resp_id, _ = self._ensure_response(conn_id)
             wants_audio = response_wants_audio(st.current_response_params)
             if wants_audio and st.pending_text_outputs:
@@ -974,13 +1030,21 @@ class ResponseHandler(RealtimeBaseHandler):
                     response=terminal_response,
                 )
             )
+            tool_inputs = st.response_tool_inputs.pop(st.current_response_key or "", set())
+            if status == "completed" and terminal_response.output and not is_out_of_band(st.current_response_params):
+                for call_id in sorted(tool_inputs):
+                    st.answered_tool_call_ids.pop(call_id, None)
+                    st.answered_tool_call_ids[call_id] = None
+                while len(st.answered_tool_call_ids) > TOOL_FOLLOWUP_ACK_LIMIT:
+                    st.answered_tool_call_ids.pop(next(iter(st.answered_tool_call_ids)))
             if status == "completed":
-                st.runtime_config.chat.finalize_provisional_generation(st.current_response_key)
-            elif status in ("cancelled", "failed", "incomplete"):
-                # Tool calls are recorded before their chunks reach the client.
-                # Remove incomplete response history before deferred client items
-                # are applied, so an unseen call cannot poison the next turn.
-                st.runtime_config.chat.rollback_provisional_generation(st.current_response_key)
+                st.runtime_config.chat.bind_assistant_item_ids(
+                    st.current_response_key,
+                    terminal_response.output or [],
+                )
+                self._service.history.finalize(conn_id, st.current_response_key)
+            # Ending the response closes its key, which rolls back unfinalized
+            # history before deferred client items are applied below.
             self._end_response(conn_id, status)
         # Apply any client items that arrived mid-generation now that in_response
         # is cleared and the generation's own write-back has landed. Done outside
@@ -996,32 +1060,34 @@ class ResponseHandler(RealtimeBaseHandler):
 
     # ── Pipeline event handlers ───────────────────
 
+    def _accept_turn_output(self, conn_id: str, event: AssistantOutputEvent | AssistantResponseDoneEvent) -> bool:
+        """Commit the event's turn and write its history, or report it stale."""
+        if self._service.speculative_turns is not None:
+            # VAD can start resumed speech after the send loop's hold check, so
+            # check again and commit under one lock.
+            decision = self._service.speculative_turns.gate(event.turn_id, event.turn_revision, commit=True)
+            if decision.action is TurnGateAction.HOLD:
+                raise TurnOutputHeld
+            if decision.action is TurnGateAction.DROP:
+                logger.debug("Dropping stale assistant output for turn=%s rev=%s", event.turn_id, event.turn_revision)
+                return False
+        self._service.history.accept(conn_id, event.response_key)
+        st = self._state(conn_id)
+        if st.current_response_turn_id is None and event.turn_id is not None:
+            st.current_response_turn_id = event.turn_id
+            st.current_response_turn_revision = event.turn_revision
+        return True
+
     def on_assistant_output(
         self,
         conn_id: str,
         event: AssistantOutputEvent,
         *,
-        wait_for_pending_reopen: bool = True,
         _early_tool_call: bool = False,
-    ) -> list[ServerEvent] | None:
+    ) -> list[ServerEvent]:
         """Translate ordered assistant output into OpenAI Realtime events."""
-        if self._service.speculative_turns:
-            commit_result: bool | None
-            if wait_for_pending_reopen:
-                commit_result = self._service.speculative_turns.commit_if_latest_after_reopen_grace(
-                    event.turn_id,
-                    event.turn_revision,
-                )
-            else:
-                commit_result = self._service.speculative_turns.try_commit_if_latest_after_reopen_grace(
-                    event.turn_id,
-                    event.turn_revision,
-                )
-            if commit_result is None:
-                return None
-            if not commit_result:
-                logger.debug("Dropping stale assistant output for turn=%s rev=%s", event.turn_id, event.turn_revision)
-                return []
+        if not self._accept_turn_output(conn_id, event):
+            return []
         st = self._state(conn_id)
         # Accepting this output commits the turn it answers. The user item that
         # prompted it is permanent from here, so it is published first.
@@ -1106,7 +1172,7 @@ class ResponseHandler(RealtimeBaseHandler):
                             delta=text,
                         )
                     )
-                st.last_item_id = item_id
+                self._service.conversation.record_acknowledged_item(conn_id, item_id)
             elif isinstance(part, AssistantToolCallPart):
                 # An early tool call defers closing the message only while TTS
                 # still owes it audio. Text-only output has nothing to wait for,
@@ -1115,6 +1181,22 @@ class ResponseHandler(RealtimeBaseHandler):
                 if not _early_tool_call or not wants_audio:
                     events.extend(self._finish_current_message_output(conn_id, event.response_key))
                 tool = part.tool
+                accounting = st.input_turn_accounting.get(event.turn_id) if event.turn_id is not None else None
+                tracker = self._service.turn_latency_store.get_response(st.current_response_key)
+                # New input can supersede speech timing while generation keeps
+                # its original turn. Calls inherit this response's eligibility.
+                speech_stopped_at_s = (
+                    accounting.speech_stopped_at_s
+                    if accounting is not None and tracker is not None and tracker.speech_anchor is not None
+                    else None
+                )
+                st.input_turn_by_call_id[tool.call_id] = (
+                    event.turn_id,
+                    event.turn_revision,
+                    speech_stopped_at_s,
+                )
+                while len(st.input_turn_by_call_id) > 128:
+                    st.input_turn_by_call_id.pop(next(iter(st.input_turn_by_call_id)))
                 function_item_id = tool.id or _generate_id("item")
                 output_idx, function_item_id = self._output_part_context(
                     conn_id,
@@ -1168,17 +1250,12 @@ class ResponseHandler(RealtimeBaseHandler):
                 # Explicitly in-progress calls receive output_item.done at
                 # response close, once the outcome is known.
                 st.pending_function_calls[output_idx] = pending_call
-                st.last_item_id = function_item_id
+                self._service.conversation.record_acknowledged_item(conn_id, function_item_id)
         if output_sequence is not None:
             st.pending_early_tool_calls.pop(output_sequence, None)
             st.next_assistant_output_sequence = max(st.next_assistant_output_sequence, output_sequence + 1)
             if not _early_tool_call:
-                events.extend(
-                    self._flush_early_tool_calls(
-                        conn_id,
-                        wait_for_pending_reopen=wait_for_pending_reopen,
-                    )
-                )
+                events.extend(self._flush_early_tool_calls(conn_id))
         return events
 
     def on_assistant_tool_call_ready(
@@ -1193,12 +1270,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.pending_early_tool_calls[event.output_sequence] = event
         return self._flush_early_tool_calls(conn_id)
 
-    def _flush_early_tool_calls(
-        self,
-        conn_id: str,
-        *,
-        wait_for_pending_reopen: bool = True,
-    ) -> list[ServerEvent]:
+    def _flush_early_tool_calls(self, conn_id: str) -> list[ServerEvent]:
         st = self._state(conn_id)
         events: list[ServerEvent] = []
         while st.next_assistant_output_sequence in st.pending_early_tool_calls:
@@ -1207,6 +1279,7 @@ class ResponseHandler(RealtimeBaseHandler):
             emitted = self.on_assistant_output(
                 conn_id,
                 AssistantOutputEvent(
+                    history=ready.history,
                     parts=[ready.part],
                     turn_id=ready.turn_id,
                     turn_revision=ready.turn_revision,
@@ -1214,11 +1287,8 @@ class ResponseHandler(RealtimeBaseHandler):
                     response_key=ready.response_key,
                     output_sequence=ready.output_sequence,
                 ),
-                wait_for_pending_reopen=wait_for_pending_reopen,
                 _early_tool_call=True,
             )
-            if emitted is None:
-                break
             events.extend(emitted)
         return events
 
@@ -1228,9 +1298,23 @@ class ResponseHandler(RealtimeBaseHandler):
         event: AssistantResponseDoneEvent,
     ) -> list[ServerEvent]:
         """Record that all ordered text/tool output for one response was emitted."""
+        if not self._accept_turn_output(conn_id, event):
+            return []
         st = self._state(conn_id)
         response_was_missing = st.current_response_id is None
         self._ensure_response(conn_id, event.response_key)
+        if (
+            event.status == "completed"
+            and event.response_key is not None
+            and event.input_tool_call_ids
+            and not is_out_of_band(st.current_response_params)
+        ):
+            # This event precedes the terminal on the same queue. The logical
+            # completion side channel can still be behind transcription events.
+            st.response_tool_inputs[event.response_key] = set(event.input_tool_call_ids)
+        if event.status == "incomplete":
+            st.response_incomplete = True
+            st.response_incomplete_reason = event.reason
         events = self.finish_audio_output(conn_id, event.response_key)
         events.extend(
             [

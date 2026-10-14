@@ -23,7 +23,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
+from openai.types.realtime import RealtimeSessionCreateRequest
 
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.pipeline.messages import VADAudio
 from speech_to_speech.STT.whisper_stt_handler import WhisperSTTHandler
 
@@ -172,6 +174,47 @@ def test_forced_language_survives_missing_decoder_prefix():
     # One generate() call, and no detection at all: the request is authoritative.
     assert len(handler.model.calls) == 1
     assert handler.model.detect_language_calls == 0
+
+
+def test_session_language_overrides_whisper_setup_without_changing_it():
+    handler = make_handler(
+        start_language="en",
+        last_language="en",
+        gen_kwargs={"language": "en", "task": "transcribe"},
+        responses=[FakeSequences([2626], "Hola.")],
+    )
+    audio = vad_audio()
+    audio.runtime_config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(type="realtime", audio={"input": {"transcription": {"language": "es"}}})
+    )
+
+    result = list(handler.process(audio))[0]
+
+    assert handler.model.calls[0]["language"] == "es"
+    assert result.language_code == "es"
+    assert handler.gen_kwargs["language"] == "en"
+    assert handler.last_language == "en"
+
+
+def test_session_auto_removes_whisper_setup_language():
+    handler = make_handler(
+        start_language="en",
+        last_language="en",
+        gen_kwargs={"language": "en", "task": "transcribe"},
+        responses=[FakeSequences([2626], "Hallo.")],
+        detect_language_result="<|de|>",
+    )
+    audio = vad_audio()
+    audio.runtime_config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(type="realtime", audio={"input": {"transcription": {"language": "auto"}}})
+    )
+
+    result = list(handler.process(audio))[0]
+
+    assert handler.model.detect_language_calls == 1
+    assert handler.model.calls[0]["language"] == "de"
+    assert result.language_code == "de-auto"
+    assert handler.gen_kwargs["language"] == "en"
 
 
 # --- auto mode: detection via detect_language() -------------------------------------------

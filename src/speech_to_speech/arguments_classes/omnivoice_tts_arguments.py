@@ -11,7 +11,7 @@ class OmniVoiceTTSHandlerArguments:
     omnivoice_device: str = field(
         default="auto",
         metadata={
-            "help": "Device passed to OmniVoice: 'auto', 'cuda', 'cuda:0', 'mps', 'xpu', or 'cpu'. Default is 'auto'."
+            "help": "Device passed to OmniVoice: 'auto', 'cuda', 'cuda:0', 'npu', 'xpu', 'mps', or 'cpu'. Default is 'auto'."
         },
     )
     omnivoice_dtype: Literal["float16", "bfloat16", "float32"] = field(
@@ -32,6 +32,14 @@ class OmniVoiceTTSHandlerArguments:
         default=None,
         metadata={
             "help": "Saved OmniVoice VoiceClonePrompt path. Replaces --omnivoice_ref_audio and --omnivoice_ref_text."
+        },
+    )
+    omnivoice_ref_voices_dir: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Directory of per-language references named <language>.wav with a matching <language>.txt "
+            "transcript (e.g. fr.wav + fr.txt). Each utterance clones the reference for its language (exact code, "
+            "then base language) and falls back to the default voice."
         },
     )
     omnivoice_instruct: Optional[str] = field(

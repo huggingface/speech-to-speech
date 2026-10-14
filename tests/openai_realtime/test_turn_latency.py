@@ -1,6 +1,8 @@
 """Latency records emitted by the actual response lifecycle."""
 
+import json
 import logging
+import sys
 from contextlib import nullcontext
 from queue import Queue
 from threading import Event, Thread
@@ -8,10 +10,13 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 from openai.types.realtime import ConversationItemCreateEvent, ResponseCreateEvent
 from openai.types.realtime.conversation_item import RealtimeConversationItemFunctionCall
 
 import speech_to_speech.LLM.language_model as language_model_module
+import speech_to_speech.STT.qwen3_asr_handler as qwen3_asr_module
+import speech_to_speech.TTS.facebookmms_handler as mms_module
 import speech_to_speech.TTS.qwen3_tts_handler as qwen3_tts_module
 from speech_to_speech.LLM.language_model import LanguageModelHandler
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
@@ -34,9 +39,23 @@ from speech_to_speech.pipeline.messages import (
     VADAudio,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.turn_latency import TURN_LATENCY_METADATA_KEY, bind_active_turn_latency_tracker
 from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
+from speech_to_speech.VAD.smart_turn import SmartTurnResult
+from tests.test_chattts_tts_latency import _handler as _chattts_handler
+from tests.test_chattts_tts_latency import chattts_modules as chattts_modules
+from tests.test_facebookmms_tts_latency import _handler as _mms_handler
+from tests.test_qwen3_asr_transcription_events import _handler as _qwen3_asr_handler
+from tests.test_speculative_turns import (
+    _audio_bytes,
+    _StaticSmartTurnAnalyzer,
+    _StaticVADIterator,
+    _vad_handler_for_iterator,
+)
+from tests.test_whisper_progressive_transcription import BUILDERS as WHISPER_BUILDERS
+from tests.turns import reopen
 
 LATENCY_LOGGER = "speech_to_speech.api.openai_realtime.handlers.response"
 
@@ -59,6 +78,81 @@ def _latency_lines(caplog):
     return [r.message for r in caplog.records if r.name == LATENCY_LOGGER and " latency: " in r.message]
 
 
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize("cancel_during", [None, "provider", "resample"])
+def test_chattts_first_audio_reaches_terminal_response(
+    service, conn_id, monkeypatch, caplog, chattts_modules, stream, cancel_during
+):
+    chattts_module, handler_type = chattts_modules
+    request = _queue_turn(service, conn_id)
+    service.response._ensure_response(conn_id, request.response_key)
+    clock = [10.0]
+    monkeypatch.setattr(chattts_module, "perf_counter", lambda: clock[0])
+    handler = _chattts_handler(handler_type, stream=stream, chunks=[])
+    handler.cancel_scope = CancelScope()
+    handler.turn_latency_store = service.turn_latency_store
+
+    def infer(*_args, **_kwargs):
+        clock[0] = 10.05
+        if cancel_during == "provider":
+            handler.cancel_scope.cancel()
+        audio = [np.full(768, 0.1, dtype=np.float32)]
+        return iter([audio]) if stream else audio
+
+    def resample(audio, **_kwargs):
+        clock[0] = 10.40
+        if cancel_during == "resample":
+            handler.cancel_scope.cancel()
+        return audio[:512]
+
+    handler.model = SimpleNamespace(infer=infer)
+    monkeypatch.setattr(chattts_module, "librosa", SimpleNamespace(resample=resample))
+    tts_input = TTSInput(
+        text="Hello",
+        response_key=request.response_key,
+        turn_id=request.turn_id,
+        turn_revision=request.turn_revision,
+        speech_stopped_at_s=8.0,
+        cancel_generation=0,
+    )
+    outputs = list(handler.process(tts_input))
+    if cancel_during is None:
+        assert outputs
+        for output in outputs:
+            service.encode_audio_chunk(conn_id, output.tobytes(), request.response_key)
+    else:
+        # The router drops stale output; finalize while the tracker still exists.
+        assert all(
+            handler.cancel_scope.is_stale(handler.output_for_queue(output, tts_input).cancel_generation)
+            for output in outputs
+        )
+        assert service.turn_latency_store.get_response(request.response_key) is not None
+
+    with caplog.at_level(logging.INFO, logger=LATENCY_LOGGER):
+        events = (
+            service.finish_response(conn_id, response_key=request.response_key)
+            if cancel_during is None
+            else service.handle_response_cancel(conn_id)
+        )
+    terminal = next(event for event in events if event.type == "response.done")
+    payload = json.loads(terminal.response.metadata[TURN_LATENCY_METADATA_KEY])
+    assert payload["response_key"] == request.response_key
+    assert payload["status"] == ("completed" if cancel_during is None else "cancelled")
+    if cancel_during == "provider":
+        assert payload["tts_ttfa_s"] is None
+    else:
+        assert payload["tts_ttfa_s"] == pytest.approx(0.05)
+    if cancel_during is None:
+        assert payload["e2e_s"] == pytest.approx(2.40)
+    else:
+        assert payload["e2e_s"] is None
+    lines = _latency_lines(caplog)
+    assert len(lines) == 1
+    assert f"response_key={request.response_key}" in lines[0]
+    assert ("e2e=2.40s" if cancel_during is None else "e2e=n/a") in lines[0]
+    assert service.turn_latency_store.get_response(request.response_key) is None
+
+
 @pytest.fixture
 def final_stt_event(service):
     """Run final STT and notification with model inference and locking stubbed."""
@@ -72,14 +166,102 @@ def final_stt_event(service):
     notifier = object.__new__(TranscriptionNotifier)
     notifier.setup(text_output_queue=Queue(), should_listen=Event())
 
-    def transcribe(turn_id, revision, text):
-        handler._process_mlx_final = lambda audio: (text, "en")
-        audio = VADAudio(audio=np.zeros(1600, dtype=np.float32), mode="final", turn_id=turn_id, turn_revision=revision)
+    def transcribe(turn_id, revision, text, source_audio=None):
+        handler._process_mlx_final = lambda audio: text
+        handler._detect_language_from_text = lambda text: "en"
+        audio = source_audio or VADAudio(
+            audio=np.zeros(1600, dtype=np.float32), mode="final", turn_id=turn_id, turn_revision=revision
+        )
         for transcription in handler.process(audio):
             list(notifier.process(transcription))
         return notifier.text_output_queue.get_nowait()
 
     return transcribe
+
+
+@pytest.mark.parametrize("decision", ["complete", "incomplete", "disabled", "failed"])
+def test_vad_decision_reaches_terminal_response_metadata(service, conn_id, final_stt_event, monkeypatch, decision):
+    import speech_to_speech.VAD.vad_handler as vad_module
+
+    iterator = _StaticVADIterator(
+        triggered=False,
+        vad_output=[torch.zeros(512) for _ in range(31)],
+        last_utterance_active_speech_samples=12 * 512,
+    )
+    iterator.last_speech_end_sample = 0
+    vad = _vad_handler_for_iterator(iterator)
+    vad.turn_latency_store = service.turn_latency_store
+    if decision in ("complete", "incomplete"):
+        vad.smart_turn_analyzer = _StaticSmartTurnAnalyzer(
+            SmartTurnResult(complete=decision == "complete", probability=0.9, inference_ms=30.0)
+        )
+    elif decision == "failed":
+
+        class FailingAnalyzer:
+            def predict(self, audio, *, sample_rate):
+                raise RuntimeError("controlled inference failure")
+
+        vad.smart_turn_analyzer = FailingAnalyzer()
+
+    clock = iter([10.0, 10.04, 10.04, 10.07])
+    monkeypatch.setattr(vad_module, "time", SimpleNamespace(time=lambda: 100.0, perf_counter=lambda: next(clock)))
+    outputs = list(vad.process(_audio_bytes()))
+    assert len(outputs) == 1
+    source_audio = outputs[0]
+    while not vad.text_output_queue.empty():
+        service.dispatch_pipeline_event(conn_id, vad.text_output_queue.get_nowait())
+    service.dispatch_pipeline_event(conn_id, final_stt_event("turn_1", 0, "Hello", source_audio))
+    request = service.text_prompt_queue.get_nowait()
+    assert request.speech_stopped_at_s == source_audio.speech_end_at_s
+    assert request.speech_stopped_at_s == pytest.approx(9.968)
+    # Use the production first-audio recorder with the timestamp that traversed VAD/STT/service.
+    monkeypatch.setattr(qwen3_tts_module, "perf_counter", lambda: 11.0)
+    tts = object.__new__(Qwen3TTSHandler)
+    with bind_active_turn_latency_tracker(service.turn_latency_store.get_response(request.response_key)):
+        tts._log_first_audio_latency(TTSInput(text="Hello", speech_stopped_at_s=request.speech_stopped_at_s))
+    service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=request.response_key))
+    done = service.finish_response(conn_id, response_key=request.response_key)[-1]
+    payload = json.loads(done.response.metadata[TURN_LATENCY_METADATA_KEY])
+
+    assert payload["turn_id"] == "turn_1"
+    assert payload["turn_revision"] == 0
+    assert payload["response_key"] == request.response_key
+    assert payload["vad_decision_s"] == pytest.approx(0.072)
+    assert payload["e2e_s"] == pytest.approx(1.032)
+    assert payload["version"] == 2
+    assert payload["smart_status"] == decision
+    assert payload["hold_s"] == (None if decision == "disabled" else 0.0)
+    assert len(done.response.metadata[TURN_LATENCY_METADATA_KEY]) <= 512
+
+
+def test_new_timing_fields_fit_realtime_metadata_with_precise_measurements(service, conn_id):
+    request = _queue_turn(service, conn_id)
+    tracker = service.turn_latency_store.get_response(request.response_key)
+    precise = 0.12345678912345678
+    for field in (
+        "stt_s",
+        "llm_ttft_s",
+        "llm_s",
+        "tts_ttfa_s",
+        "e2e_s",
+        "vad_decision_s",
+        "smart_turn_analysis_s",
+        "smart_turn_grace_s",
+        "smart_turn_processing_delay_s",
+        "smart_turn_wait_s",
+        "mlx_lock_wait_s",
+    ):
+        setattr(tracker, field, precise)
+    tracker.smart_turn_status = "complete"
+    service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=request.response_key))
+    done = service.finish_response(conn_id, response_key=request.response_key)[-1]
+
+    raw = done.response.metadata[TURN_LATENCY_METADATA_KEY]
+    assert len(raw) <= 512
+    payload = json.loads(raw)
+    assert payload["vad_decision_s"] == pytest.approx(precise, abs=1e-9)
+    assert payload["hold_s"] == pytest.approx(precise, abs=1e-9)
+    assert payload["e2e_s"] == precise
 
 
 def test_empty_final_stt_discards_only_its_pending_measurement(service, conn_id, final_stt_event):
@@ -106,10 +288,12 @@ def test_stale_final_stt_discards_only_superseded_revision(
     service, conn_id, final_stt_event, caplog, stt_finishes_after_reopen
 ):
     service.speculative_turns = SpeculativeTurnTracker()
+    service.speculative_turns.start_turn()
     service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
     if not stt_finishes_after_reopen:
         stale = final_stt_event("turn_1", 0, "Old transcript")
 
+    reopen(service.speculative_turns)
     service.dispatch_pipeline_event(
         conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True, interrupt_response=False)
     )
@@ -142,6 +326,7 @@ def test_stale_final_stt_discards_only_superseded_revision(
 def test_stt_worker_discards_latency_when_revision_changes_during_inference(service, conn_id, caplog):
     speculative_turns = SpeculativeTurnTracker()
     service.speculative_turns = speculative_turns
+    speculative_turns.start_turn()
     service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
     store = service.turn_latency_store
     unrelated = store.get_or_create_for_turn("other_turn", 0)
@@ -167,11 +352,12 @@ def test_stt_worker_discards_latency_when_revision_changes_during_inference(serv
         if len(inference_calls) == 1:
             # Reopening while the model runs makes the final output stale at
             # the worker's output gate, before the notifier/service sees it.
-            speculative_turns.observe("turn_1", 1)
-            return "Superseded transcript", "en"
-        return "Current transcript", "en"
+            reopen(speculative_turns)
+            return "Superseded transcript"
+        return "Current transcript"
 
     handler._process_mlx_final = infer
+    handler._detect_language_from_text = lambda text: "en"
     for revision in (0, 1):
         handler.queue_in.put(
             VADAudio(audio=np.zeros(1600, dtype=np.float32), mode="final", turn_id="turn_1", turn_revision=revision)
@@ -255,7 +441,7 @@ def test_cancelled_inflight_llm_cannot_recreate_latency_tracker(service, conn_id
     assert service.turn_latency_store._trackers == {}
     service.close_response_key(conn_id, request.response_key)
     service.unregister(conn_id)
-    assert service.turn_latency_store.active_session_count == 0
+    assert len(service.turn_latency_store._session_keys) == 0
     assert service.turn_latency_store._trackers == {}
 
 
@@ -295,7 +481,7 @@ def test_failed_generation_records_duration_before_terminal_output(
                     terminals.extend(service.finish_response(conn_id, response_key=output.response_key))
                     lines = _latency_lines(caplog)
                     assert len(lines) == 1
-                    assert "llm_ttft=n/a llm=0.25s" in lines[0]
+                    assert "llm=0.25s" in lines[0]
                     assert "status=failed" in lines[0]
 
     done = [event for event in terminals if event.type == "response.done"]
@@ -312,22 +498,27 @@ def test_terminal_response_emits_one_latency_record(service, conn_id, caplog, st
     tracker.record_llm(1.28)
     tracker.record_tts_ttfa(0.16)
     tracker.record_e2e(1.61)
-    tracker.record_mlx_lock_wait(0.03)
+    tracker.record_mlx_lock_wait(0.03, "Qwen3TTS")
     service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=request.response_key))
 
     with caplog.at_level(logging.INFO, logger=LATENCY_LOGGER):
         events = service.finish_response(conn_id, status=status, response_key=request.response_key)
         service.finish_response(conn_id, status=status, response_key=request.response_key)
 
+    cut = " tts=cut" if status == "cancelled" else ""
     assert _latency_lines(caplog) == [
-        "Turn turn_1 rev=0 latency: stt=0.12s llm_ttft=0.19s llm=1.28s tts_ttfa=0.16s e2e=1.61s "
-        f"mlx_lock_wait=0.03s status={status} response_key={request.response_key}"
+        "Turn turn_1 rev=0 latency: stt=0.12s llm=1.28s tts_ttfa=0.16s e2e=1.61s "
+        f"vad_decision=n/a hold=n/a smart_turn_status=n/a "
+        f"status={status}"
+        + (" mlx_lock_wait=0.03s[Qwen3TTS:0.03s]" if sys.platform == "darwin" else "")
+        + cut
+        + f" source=speech response_key={request.response_key}"
     ]
     done = [event for event in events if event.type == "response.done"]
     assert len(done) == 1
     assert done[0].response.status == status
     assert service.turn_latency_store._trackers == {}
-    assert service.turn_latency_store.active_session_count == 0
+    assert len(service.turn_latency_store._session_keys) == 0
 
 
 @pytest.mark.parametrize("new_turn,revision,reopened", [("turn_2", 0, False), ("turn_1", 1, True)])
@@ -335,10 +526,18 @@ def test_non_interrupting_speech_keeps_original_response_attribution(
     service, conn_id, caplog, new_turn, revision, reopened
 ):
     original = _queue_turn(service, conn_id)
+    original_tracker = service.turn_latency_store.get_response(original.response_key)
+    original_tracker.vad_decision_s = 0.2
+    original_tracker.smart_turn_status = "complete"
+    original_tracker.smart_turn_wait_s = 0.1
     service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=original.response_key))
     newer = _queue_turn(
         service, conn_id, turn_id=new_turn, revision=revision, interrupt=False, reopened=reopened, stt_s=0.34
     )
+    newer_tracker = service.turn_latency_store.get_response(newer.response_key)
+    newer_tracker.vad_decision_s = 0.4
+    newer_tracker.smart_turn_status = "incomplete"
+    newer_tracker.smart_turn_wait_s = 0.3
     assert service._state(conn_id).current_response_key == original.response_key
 
     with caplog.at_level(logging.INFO, logger=LATENCY_LOGGER):
@@ -351,8 +550,10 @@ def test_non_interrupting_speech_keeps_original_response_attribution(
     assert len(lines) == 2
     assert "Turn turn_1 rev=0 latency: stt=0.12s" in lines[0]
     assert f"response_key={original.response_key}" in lines[0]
+    assert "vad_decision=0.20s hold=0.10s smart_turn_status=complete" in lines[0]
     assert f"Turn {new_turn} rev={revision} latency: stt=0.34s" in lines[1]
     assert f"response_key={newer.response_key}" in lines[1]
+    assert "vad_decision=0.40s hold=0.30s smart_turn_status=incomplete" in lines[1]
 
 
 def test_unregister_clears_unfinished_measurements_before_session_reuse(service, conn_id, caplog):
@@ -361,12 +562,14 @@ def test_unregister_clears_unfinished_measurements_before_session_reuse(service,
     old.record_llm(9.0)
     old.record_tts_ttfa(8.0)
     old.record_e2e(7.0)
+    old.vad_decision_s = 6.0
+    old.smart_turn_status = "incomplete"
     service.turn_latency_store.get_or_create_for_turn("turn_2", 0).record_stt(6.0)
 
     service.unregister(conn_id)
     assert service.turn_latency_store._trackers == {}
     assert service.turn_latency_store._pending_turn == {}
-    assert service.turn_latency_store.active_session_count == 0
+    assert len(service.turn_latency_store._session_keys) == 0
 
     new_conn_id = service.register()
     try:
@@ -376,10 +579,73 @@ def test_unregister_clears_unfinished_measurements_before_session_reuse(service,
             service.finish_response(new_conn_id, response_key=fresh.response_key)
         lines = _latency_lines(caplog)
         assert len(lines) == 1
-        assert "stt=0.12s llm_ttft=n/a llm=n/a tts_ttfa=n/a e2e=n/a" in lines[0]
+        assert "stt=0.12s llm=n/a tts_ttfa=n/a e2e=n/a" in lines[0]
+        assert "vad_decision=n/a hold=n/a smart_turn_status=n/a" in lines[0]
         assert f"response_key={fresh.response_key}" in lines[0]
     finally:
         service.unregister(new_conn_id)
+
+
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize("status", ["completed", "cancelled"])
+def test_mms_segments_reach_terminal_latency_metadata_and_cleanup(
+    service, conn_id, monkeypatch, caplog, stream, status
+):
+    request = _queue_turn(service, conn_id)
+    clock = [10.0]
+    monkeypatch.setattr(mms_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr(mms_module.console, "print", lambda *args, **kwargs: None)
+    waveform = torch.linspace(-0.2, 0.2, 600).unsqueeze(0)
+
+    def resample(chunk, **kwargs):
+        clock[0] += 0.20
+        return np.asarray(chunk, dtype=np.float32)
+
+    monkeypatch.setattr(mms_module, "librosa", SimpleNamespace(resample=resample))
+    handler = _mms_handler(stream=stream)
+    handler.turn_latency_store = service.turn_latency_store
+    for start, duration in [(10.0, 0.12), (20.0, 0.50)]:
+        clock[0] = start
+
+        def generate(_text):
+            clock[0] += duration
+            return waveform
+
+        handler.generate_audio = generate
+        blocks = list(
+            handler.process(
+                TTSInput(
+                    text="Hello.",
+                    response_key=request.response_key,
+                    turn_id=request.turn_id,
+                    turn_revision=request.turn_revision,
+                    speech_stopped_at_s=9.0,
+                )
+            )
+        )
+        pcm = np.concatenate(blocks)
+        assert len(blocks) == 2
+        assert pcm.dtype == np.int16
+        np.testing.assert_array_equal(pcm[:600], (waveform.numpy().squeeze() * 32768).astype(np.int16))
+        assert np.all(pcm[600:] == 0)
+
+    service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=request.response_key))
+    with caplog.at_level(logging.INFO, logger=LATENCY_LOGGER):
+        done = service.finish_response(conn_id, status=status, response_key=request.response_key)[-1]
+    assert done.type == "response.done"
+    payload = json.loads(done.response.metadata[TURN_LATENCY_METADATA_KEY])
+    assert payload["response_key"] == request.response_key
+    assert payload["turn_id"] == request.turn_id
+    assert payload["turn_revision"] == request.turn_revision
+    assert payload["status"] == status
+    assert payload["tts_ttfa_s"] == pytest.approx(0.12)
+    assert payload["e2e_s"] == pytest.approx(1.32)
+    lines = _latency_lines(caplog)
+    assert len(lines) == 1
+    assert "tts_ttfa=0.12s e2e=1.32s" in lines[0]
+    assert f"response_key={request.response_key}" in lines[0]
+    assert service.turn_latency_store._trackers == {}
+    assert len(service.turn_latency_store._session_keys) == 0
 
 
 def test_multiple_qwen_segments_keep_first_audio_timings_in_terminal_log(service, conn_id, monkeypatch, caplog):
@@ -434,7 +700,13 @@ def test_multiple_qwen_segments_keep_first_audio_timings_in_terminal_log(service
 
 @pytest.mark.parametrize("followup_status", ["completed", "cancelled"])
 def test_tool_followup_logs_distinct_responses_in_same_turn(service, conn_id, caplog, followup_status):
+    service.speculative_turns = SpeculativeTurnTracker()
+    service.speculative_turns.start_turn()
     request = _queue_turn(service, conn_id)
+    original_tracker = service.turn_latency_store.get_response(request.response_key)
+    original_tracker.vad_decision_s = 0.2
+    original_tracker.smart_turn_status = "complete"
+    original_tracker.smart_turn_wait_s = 0.1
     call = RealtimeConversationItemFunctionCall(
         type="function_call", id="fc_lookup", call_id="call_lookup", name="lookup", arguments="{}"
     )
@@ -443,6 +715,8 @@ def test_tool_followup_logs_distinct_responses_in_same_turn(service, conn_id, ca
         conn_id,
         AssistantOutputEvent(
             response_key=request.response_key,
+            turn_id=request.turn_id,
+            turn_revision=request.turn_revision,
             parts=[
                 AssistantToolCallPart(
                     tool={"type": "function_call", **call.model_dump(include={"id", "call_id", "name", "arguments"})}
@@ -477,6 +751,168 @@ def test_tool_followup_logs_distinct_responses_in_same_turn(service, conn_id, ca
     assert f"response_key={followup.response_key}" in lines[1]
     assert "stt=0.12s" in lines[0]
     assert "stt=n/a" in lines[1]
+    assert "vad_decision=0.20s" in lines[0]
+    assert "smart_turn_status=complete" in lines[0]
+    assert "vad_decision=n/a" in lines[1]
+    assert "smart_turn_status=n/a" in lines[1]
     assert "status=completed" in lines[0]
     assert f"status={followup_status}" in lines[1]
+    assert service.turn_latency_store._trackers == {}
+
+
+def _time_whisper_by_audio_length(handler, monkeypatch):
+    """Advance the handler's clock by 0.1s per second of audio it transcribes."""
+    clock = [10.0]
+    monkeypatch.setattr(sys.modules[type(handler).__module__], "perf_counter", lambda: clock[0])
+    for name in ("generate", "transcribe"):
+        infer = getattr(handler.model, name, None)
+        if infer is not None:
+
+            def timed(audio, *args, _infer=infer, **kwargs):
+                clock[0] += 0.1 * len(audio) / 16000
+                return _infer(audio, *args, **kwargs)
+
+            setattr(handler.model, name, timed)
+
+
+@pytest.fixture
+def whisper_builders():
+    """Forget optional backends the builders stub, so later tests still skip."""
+    optional = ("lightning_whisper_mlx", "speech_to_speech.STT.lightning_whisper_mlx_handler")
+    missing = [name for name in optional if name not in sys.modules]
+    yield WHISPER_BUILDERS
+    for name in missing:
+        sys.modules.pop(name, None)
+
+
+@pytest.mark.parametrize("backend", sorted(WHISPER_BUILDERS))
+def test_whisper_final_stt_reaches_response_log_without_progressive_time(
+    service, conn_id, monkeypatch, caplog, whisper_builders, backend
+):
+    handler = whisper_builders[backend](monkeypatch)
+    handler.turn_latency_store = service.turn_latency_store
+    _time_whisper_by_audio_length(handler, monkeypatch)
+    notifier = object.__new__(TranscriptionNotifier)
+    notifier.setup(text_output_queue=Queue(), should_listen=Event())
+    service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
+
+    for mode, seconds in [("progressive", 1), ("progressive", 2)]:
+        audio = VADAudio(
+            audio=np.zeros(16000 * seconds, dtype=np.float32), mode=mode, turn_id="turn_1", turn_revision=0
+        )
+        list(handler.process(audio))
+    assert service.turn_latency_store._pending_turn == {}
+
+    final = VADAudio(audio=np.zeros(16000 * 3, dtype=np.float32), mode="final", turn_id="turn_1", turn_revision=0)
+    for transcription in handler.process(final):
+        list(notifier.process(transcription))
+    service.dispatch_pipeline_event(conn_id, notifier.text_output_queue.get_nowait())
+    request = service.text_prompt_queue.get_nowait()
+    service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=request.response_key))
+    with caplog.at_level(logging.INFO, logger=LATENCY_LOGGER):
+        service.finish_response(conn_id, response_key=request.response_key)
+
+    lines = _latency_lines(caplog)
+    assert len(lines) == 1
+    assert lines[0].startswith("Turn turn_1 rev=0 latency: stt=0.30s llm=n/a ")
+    assert lines[0].endswith(f"response_key={request.response_key}")
+    assert service.turn_latency_store._pending_turn == {}
+    assert service.turn_latency_store._trackers == {}
+
+
+def test_faster_whisper_silent_final_leaves_no_pending_stt(service, monkeypatch):
+    handler = WHISPER_BUILDERS["faster-whisper"](monkeypatch)
+    handler.turn_latency_store = service.turn_latency_store
+    handler.model.transcribe = lambda audio, **kwargs: ([], SimpleNamespace(language="en"))
+    final = VADAudio(audio=np.zeros(16000, dtype=np.float32), mode="final", turn_id="turn_1", turn_revision=0)
+
+    assert list(handler.process(final)) == []
+    assert service.turn_latency_store._pending_turn == {}
+
+
+@pytest.mark.parametrize("late_mode", ["progressive", "final"])
+@pytest.mark.parametrize("queued_duplicate", [False, True])
+def test_queued_final_keeps_latency_until_notifier_consumes_it(
+    service, conn_id, monkeypatch, late_mode, queued_duplicate
+):
+    from tests.test_stt_stale_filter import RecordingSTTHandler, _handler, _vad_audio
+
+    revisions = SpeculativeTurnTracker()
+    turn_id, revision = revisions.start_turn()
+    service.speculative_turns = revisions
+    service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id=turn_id, turn_revision=revision))
+    handler = _handler(revisions, Queue(), Queue())
+    store = handler.turn_latency_store = service.turn_latency_store
+    pending = store.get_or_create_for_turn(turn_id, revision)
+    pending.record_vad_settle(0.61)
+    pending.record_mlx_lock_hold(0.88, "ParakeetSTT-Final")
+
+    def transcribe(self, audio):
+        self._record_final_stt(audio, 0.12)
+        yield Transcription(text="Hello", turn_id=audio.turn_id, turn_revision=audio.turn_revision)
+
+    monkeypatch.setattr(RecordingSTTHandler, "process", transcribe)
+    handler.queue_in.put(_vad_audio(mode="final"))
+    handler.queue_in.put(_vad_audio(mode=late_mode))
+    if queued_duplicate:
+        handler.queue_in.put(_vad_audio(mode="final"))
+    handler.queue_in.put(PIPELINE_END)
+    handler.run()
+
+    final = handler.queue_out.get_nowait()
+    assert isinstance(final, Transcription)
+    assert handler.queue_out.get_nowait() == PIPELINE_END
+    assert handler.queue_out.empty()
+    assert store.pending_for_turn(turn_id, revision) is pending
+
+    notifier = object.__new__(TranscriptionNotifier)
+    notifier.setup(text_output_queue=Queue(), should_listen=Event())
+    list(notifier.process(final))
+    service.dispatch_pipeline_event(conn_id, notifier.text_output_queue.get_nowait())
+    request = service.text_prompt_queue.get_nowait()
+    response = store.get_response(request.response_key)
+    assert response.stt_s == 0.12
+    assert response.vad_settle_s == 0.61
+    assert response.mlx_lock_hold_s == 0.88
+    assert store.pending_for_turn(turn_id, revision) is None
+
+
+def test_qwen3_asr_final_stt_reaches_response_log_without_progressive_time(service, conn_id, monkeypatch, caplog):
+    handler = _qwen3_asr_handler()
+    handler.turn_latency_store = service.turn_latency_store
+    # Advance the handler's clock by 0.1s per second of audio sent to the model.
+    clock = [10.0]
+    monkeypatch.setattr(qwen3_asr_module, "perf_counter", lambda: clock[0])
+    request = handler.processor.apply_transcription_request
+
+    def timed_request(audio, *args, **kwargs):
+        clock[0] += 0.1 * len(audio) / 16000
+        return request(audio, *args, **kwargs)
+
+    handler.processor.apply_transcription_request = timed_request
+    notifier = object.__new__(TranscriptionNotifier)
+    notifier.setup(text_output_queue=Queue(), should_listen=Event())
+    service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
+
+    for seconds in (1, 2):
+        progressive = VADAudio(
+            audio=np.zeros(16000 * seconds, dtype=np.float32), mode="progressive", turn_id="turn_1", turn_revision=0
+        )
+        list(handler.process(progressive))
+    assert service.turn_latency_store._pending_turn == {}
+
+    final = VADAudio(audio=np.zeros(16000 * 3, dtype=np.float32), mode="final", turn_id="turn_1", turn_revision=0)
+    for transcription in handler.process(final):
+        list(notifier.process(transcription))
+    service.dispatch_pipeline_event(conn_id, notifier.text_output_queue.get_nowait())
+    response = service.text_prompt_queue.get_nowait()
+    service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=response.response_key))
+    with caplog.at_level(logging.INFO, logger=LATENCY_LOGGER):
+        service.finish_response(conn_id, response_key=response.response_key)
+
+    lines = _latency_lines(caplog)
+    assert len(lines) == 1
+    assert lines[0].startswith("Turn turn_1 rev=0 latency: stt=0.30s llm=n/a ")
+    assert lines[0].endswith(f"response_key={response.response_key}")
+    assert service.turn_latency_store._pending_turn == {}
     assert service.turn_latency_store._trackers == {}

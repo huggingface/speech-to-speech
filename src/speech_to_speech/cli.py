@@ -154,6 +154,7 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
     )
     parser.add_argument(
         "--connection-retry-timeout",
+        dest="connection_retry_timeout_s",
         type=float,
         default=defaults.connection_retry_timeout_s,
         help="Seconds to wait for the Realtime endpoint to become available.",
@@ -179,15 +180,63 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
         print_json=namespace.print_json,
         block_mic_during_playback=namespace.block_mic_during_playback,
         log_transcripts=namespace.log_transcripts,
-        connection_retry_timeout_s=namespace.connection_retry_timeout,
+        connection_retry_timeout_s=namespace.connection_retry_timeout_s,
         tools=tools,
         tool_executor=tool_executor,
         tool_response_create=tool_response_create,
     )
 
 
+def _run_file_command(command: Command, command_args: list[str]) -> None:
+    from speech_to_speech.config import ConfigurationError, load_config, resolve_config
+
+    parser = argparse.ArgumentParser(prog=f"speech-to-speech {command}", allow_abbrev=False, exit_on_error=False)
+    parser.add_argument("-f", "--file", action="append", metavar="YAML", help="Read a YAML configuration file.")
+    parser.add_argument("--name", action="append", help="Select one pipeline definition; repeat for distinct names.")
+    if "-h" in command_args or "--help" in command_args:
+        parser.print_help()
+        raise SystemExit(0)
+    try:
+        namespace, unknown = parser.parse_known_args(command_args)
+    except argparse.ArgumentError:
+        parser.exit(2, "Configuration error: use --file YAML and optional --name values.\n")
+    if unknown:
+        parser.error("File mode accepts only --file and --name; put settings in the YAML file.")
+    if not namespace.file or len(namespace.file) != 1:
+        parser.error("Specify exactly one configuration file with -f or --file.")
+    if command == "talk" and namespace.name is not None:
+        parser.error("talk does not accept --name.")
+    try:
+        document = load_config(namespace.file[0])
+        config = resolve_config(
+            document,
+            names=namespace.name,
+            include_client=command == "local",
+            client_only=command == "talk",
+        )
+        if command != "talk" and len(config.pipelines) != 1:
+            parser.error("serve and local require exactly one selected definition; use --name.")
+    except (ConfigurationError, ImportError):
+        parser.exit(2, "Configuration error: check the YAML file, selected names, and required environment settings.\n")
+    try:
+        from speech_to_speech.configured_runtime import run_configured_command
+
+        run_configured_command(command, config)
+    except ConfigurationError:
+        parser.exit(2, "Configuration error: check the configured runtime and client settings.\n")
+    except Exception:
+        parser.exit(1, "Configured startup failed; check the selected backends and runtime resources.\n")
+
+
 def main() -> None:
     command, command_args = parse_command()
+    if any(
+        argument.startswith("-f") or argument == "--file" or argument.startswith("--file=") for argument in command_args
+    ):
+        _run_file_command(command, command_args)
+        return
+    if any(argument == "--name" or argument.startswith("--name=") for argument in command_args):
+        _command_parser().error("--name requires a configuration file.")
     if command == "talk":
         config = parse_talk_arguments(command_args)
         set_log_transcripts(config.log_transcripts)

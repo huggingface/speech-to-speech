@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "latest"
       - run: uv sync --group dev
@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "latest"
       - run: uv sync --group dev
@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "latest"
       - run: uv sync --group dev
@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "latest"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -79,7 +79,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "latest"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -98,7 +98,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "latest"
       - name: Build distributions
@@ -110,32 +110,8 @@ jobs:
           name: dist
           path: dist/*
 
-  omnivoice-resolver:
-    permissions:
-      contents: read
-    name: OmniVoice resolver (${{ matrix.label }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - label: linux
-            platform: x86_64-manylinux_2_39
-          - label: windows
-            platform: x86_64-pc-windows-msvc
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
-        with:
-          version: "latest"
-      - name: Resolve speech-to-speech[omnivoice]
-        run: >-
-          uv pip compile pyproject.toml
-          --extra omnivoice
-          --python-version 3.11
-          --python-platform ${{ matrix.platform }}
-          --output-file ${{ runner.temp }}/omnivoice-${{ matrix.label }}.txt
-
+  # Optional OmniVoice compatibility checks live in omnivoice.yml.
+  # Keep these checks focused on the default installation on every PR.
   install-smoke:
     permissions:
       contents: read
@@ -149,12 +125,8 @@ jobs:
         include:
           - label: linux
             os: ubuntu-latest
-            extra: "[omnivoice]"
-            smoke_extra: omnivoice
           - label: macos-arm64
             os: macos-14
-            extra: ""
-            smoke_extra: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -171,12 +143,10 @@ jobs:
           source .venv-smoke/bin/activate
           python -m pip install --upgrade pip
           wheel=$(find dist -name 'speech_to_speech-*.whl' -print -quit)
-          python -m pip install "${wheel}${{ matrix.extra }}"
+          python -m pip install "${wheel}"
           python -m pip check
       - name: Run installed CLI smoke test
         shell: bash
-        env:
-          SPEECH_TO_SPEECH_SMOKE_EXTRA: ${{ matrix.smoke_extra }}
         run: |
           source .venv-smoke/bin/activate
           unset OPENAI_API_KEY

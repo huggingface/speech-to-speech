@@ -31,7 +31,7 @@ from openai.types.responses import ResponseFunctionToolCall
 import speech_to_speech.LLM.base_openai_compatible_language_model as base_mod
 import speech_to_speech.LLM.chat_completions_language_model as ccm
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
-from speech_to_speech.LLM.chat import Chat, make_user_audio_message, make_user_message
+from speech_to_speech.LLM.chat import Chat, make_system_message, make_user_audio_message, make_user_message
 from speech_to_speech.LLM.chat_completions_language_model import (
     ChatCompletionsApiModelHandler,
     _to_chat_tool_choice,
@@ -49,6 +49,8 @@ from speech_to_speech.pipeline.messages import (
     TTSInput,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from tests.llm_history import drive_llm
+from tests.turns import reopen
 
 # ── Fakes ────────────────────────────────────────────────────────────────────
 
@@ -161,10 +163,10 @@ def _drive(
         session.tool_choice = tool_choice
     rc = RuntimeConfig(chat=chat, session=session)
     req = GenerateResponseRequest(
-        runtime_config=rc, response=response, language_code="de", turn_id="t", turn_revision=0
+        runtime_config=rc, response=response, language_code="de", turn_id="turn_1", turn_revision=0
     )
     text, tools_out, usage, end = "", [], None, None
-    for out in handler.process(req):
+    for out in drive_llm(handler, req):
         if isinstance(out, LLMResponseChunk):
             text += out.text
             tools_out += list(out.tools)
@@ -341,12 +343,13 @@ def test_chat_completions_backend_processes_audio_without_responses_api():
     )
 
     outputs = list(
-        handler.process(
+        drive_llm(
+            handler,
             GenerateResponseRequest(
                 runtime_config=cfg,
                 audio=np.zeros(1600, dtype=np.float32),
                 audio_sample_rate=16000,
-            )
+            ),
         )
     )
 
@@ -459,6 +462,7 @@ def test_streaming_tool_call_accumulates_arguments():
     tc = tools[0]
     assert isinstance(tc, ResponseFunctionToolCall)
     assert tc.name == "search_docs"
+    assert tc.call_id.startswith("call_") and len(tc.call_id) <= 32
     # Markdown cleanup only applies to spoken text, never structured tool arguments.
     assert json.loads(tc.arguments) == {"query": "**bold** _italic_ x*y"}
     assert usage == (20, 8)
@@ -481,7 +485,7 @@ def test_streaming_preserves_text_tool_text_order():
     session.tools = [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}]
     request = GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat, session=session))
 
-    outputs = list(h.process(request))
+    outputs = list(drive_llm(h, request))
 
     output_parts = [part.type for output in outputs if isinstance(output, LLMResponseChunk) for part in output.parts]
     assert output_parts == ["text", "tool_call", "text"]
@@ -528,7 +532,7 @@ def test_prefetch_defers_irreversible_chat_cleanup_until_claim():
         prefetch_transaction=transaction,
     )
 
-    list(handler.process(request))
+    list(drive_llm(handler, request))
 
     assert any(item.id == old_message.id for item in chat.buffer)
     live_image = next(item for item in chat.buffer if item.id == image_message.id)
@@ -558,7 +562,7 @@ def test_prefetch_cleanup_failure_restores_consumed_image_and_history(monkeypatc
         runtime_config=RuntimeConfig(chat=chat, session=session),
         prefetch_transaction=transaction,
     )
-    list(handler.process(request))
+    list(drive_llm(handler, request))
 
     def fail_after_image_strip(compactor=None):
         live_image = next(item for item in chat.buffer if item.id == image_message.id)
@@ -596,7 +600,7 @@ def test_tool_call_recorded_before_chunk_is_emitted():
     req = GenerateResponseRequest(runtime_config=rc, language_code="de", turn_id="t", turn_revision=0)
 
     emitted_call_id = None
-    for out in h.process(req):
+    for out in drive_llm(h, req):
         if isinstance(out, LLMResponseChunk) and out.tools:
             emitted_call_id = out.tools[0].call_id
             # At the moment the client receives the call, it must exist in history.
@@ -632,7 +636,7 @@ def test_cancelled_text_tool_turn_rolls_back_ordered_call():
         turn_id="t",
         turn_revision=0,
     )
-    generation = h.process(request)
+    generation = drive_llm(h, request)
 
     while True:
         output = next(generation)
@@ -951,12 +955,12 @@ def test_cancelled_provider_failure_does_not_emit_fallback():
 
 def test_stale_provider_failure_does_not_emit_fallback():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("t", 0)
+    tracker.start_turn()
     h = _make_handler(stream=True)
     h.speculative_turns = tracker
 
     def fail(**kwargs):
-        tracker.observe("t", 1)
+        reopen(tracker)
         raise RuntimeError("stale request failed")
 
     h.client.chat.completions.create = fail
@@ -986,6 +990,22 @@ def test_out_of_band_does_not_commit_to_default_conversation():
 
 
 # ── Standalone runner (no pytest required) ────────────────────────────────────
+
+
+def test_chat_backend_keeps_injected_context_with_session_instructions():
+    handler = _make_handler(stream=False)
+    chat = Chat(10)
+    snapshot = make_system_message("CURRENT CHAT SNAPSHOT")
+    chat.add_item(snapshot)
+
+    for _ in range(2):
+        _drive(handler, chat=chat, instructions="SESSION INSTRUCTIONS")
+        prompt = handler.client.chat.completions.last_kwargs["messages"][0]["content"]
+        assert "SESSION INSTRUCTIONS" in prompt
+        assert prompt.count("CURRENT CHAT SNAPSHOT") == 1
+        assert chat.init_chat_message is snapshot
+        assert snapshot.content[0].text == "CURRENT CHAT SNAPSHOT"
+
 
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

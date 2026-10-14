@@ -15,7 +15,7 @@ hf_oauth_expiration_minutes: 10080
 
 Browser voice-chat UI for the
 [huggingface/speech-to-speech](https://github.com/huggingface/speech-to-speech)
-backend, speaking the OpenAI Realtime **GA** protocol over **WebSocket**
+backend, which runs locally by default. The UI speaks the OpenAI Realtime **GA** protocol over **WebSocket**
 (default) or **WebRTC** (Settings → Transport, env-pinned deploys only — see
 [WebRTC transport](#webrtc-transport)).
 
@@ -24,42 +24,19 @@ Both choices run one `RealtimeSession` adapter over the pinned official
 queue, audio, visualization, device, camera, and metering behavior out of the
 protocol implementation.
 
-## Response timings
-
-Open Conversation and expand **Server timings** beneath a response to inspect
-transcription, full response generation, first voice audio, speech-end-to-first-audio,
-and MLX lock-wait measurements. First-audio time is visible in the collapsed summary.
-Tool-only responses receive their own timing entry; follow-ups do not repeat STT.
-
-These are server measurements, excluding browser buffering and playback. Stages
-can overlap and must not be summed. Missing stages display **Unavailable**. Older
-servers, absent metadata, and unsupported or malformed records leave the transcript
-unchanged. Server timings become available when the response finishes, including
-interrupted, failed, and incomplete responses.
-
-Validation: `npm run test:agents:adapter` checks parsing and adapter behavior;
-`npm run test:ui` checks the history display at desktop and phone widths (requires
-`npx playwright install chromium`).
-
 ## Quick start (local)
 
-1. **Start the speech-to-speech backend** (from the repo root;
-   see the [backend README](https://github.com/huggingface/speech-to-speech/blob/main/src/speech_to_speech/api/openai_realtime/README.md)
-   for more model combinations):
+You need a repository checkout, [uv](https://docs.astral.sh/uv/getting-started/installation/), and Node.js/npm. See the [main README](../README.md#quickstart) for platform notes.
+
+1. **Start the speech server** from the repository root:
 
    ```bash
-   uv run speech-to-speech serve \
-     --stt parakeet-tdt \
-     --llm_backend transformers \
-     --tts kokoro \
-     --model_name "Qwen/Qwen3-4B-Instruct-2507" \
-     --llm_device mps \
-     --llm_torch_dtype float16 \
-     --enable_live_transcription
+   uv sync --python 3.11
+   uv run speech-to-speech serve
    ```
 
-   The realtime server listens on `ws://localhost:8765/v1/realtime` by default
-   (`--host` / `--port` to change).
+   The first start downloads the models. Wait until the server listens at
+   `ws://127.0.0.1:8765/v1/realtime`.
 
 2. **Install the pinned browser SDK and start this app**, pointing it at the
    backend with `SPEECH_TO_SPEECH_URL`:
@@ -68,8 +45,6 @@ Validation: `npm run test:agents:adapter` checks parsing and adapter behavior;
    npm ci --prefix demo
    uv pip install -r demo/requirements.txt
    export SPEECH_TO_SPEECH_URL=ws://localhost:8765/v1/realtime
-   export SERPER_API_KEY=...   # optional; web search is disabled without it
-   export STARTUP_GREETING=... # optional; empty disables the automatic greeting
    uv run uvicorn --app-dir demo server:app --reload --port 7860
    ```
 
@@ -100,6 +75,10 @@ Validation: `npm run test:agents:adapter` checks parsing and adapter behavior;
 
 3. Open <http://localhost:7860/>, click the orb, allow the mic, talk.
 
+To change models, configure the speech server (see the
+[LLM guide](../src/speech_to_speech/LLM/README.md)). Optional [web search](#tools) and
+[startup greetings](#startup-greeting) are covered below.
+
 > Browsers require **HTTPS or `localhost`** for `getUserMedia()` (mic + camera).
 > `127.0.0.1` and `localhost` both work; plain `http://192.168.x.y` does NOT.
 
@@ -109,6 +88,25 @@ Smoke-test the backend from the shell:
 websocat ws://localhost:8765/v1/realtime
 # -> you should get a session.created event back immediately
 ```
+
+## Response timings
+
+Open Conversation and expand **Server timings** beneath a response to inspect
+E2E (estimated speech end to first generated audio), VAD end decision, Smart Turn
+decision, transcription, response generation, voice synthesis to first audio,
+and hold time before response. E2E is visible in the collapsed summary.
+MLX lock wait is available only in macOS terminal logs.
+Tool-only responses receive their own timing entry; follow-ups do not repeat STT.
+
+These are server measurements, excluding browser buffering and playback. Stages
+can overlap and must not be summed. Missing stages display **Unavailable**. Older
+servers, absent metadata, and unsupported or malformed records leave the transcript
+unchanged. Server timings become available when the response finishes, including
+interrupted, failed, and incomplete responses.
+
+Validation: `npm run test:agents:adapter` checks parsing and adapter behavior;
+`npm run test:ui` checks the history display at desktop and phone widths (requires
+`npx playwright install chromium`).
 
 ## How it works
 
@@ -220,7 +218,9 @@ button, top-right):
   Tools panel.
 - **Camera** — while enabled, a live self-view shows bottom-left; when the model
   calls the tool, the current frame is sent to the vision-language model so it can
-  see what you're showing it.
+  see what you're showing it. This needs a vision-language model on the server
+  (`--llm_is_vlm`; the default model is text-only); see the
+  [LLM guide](../src/speech_to_speech/LLM/README.md#local-generation-options).
 
 ## Usage limits (deployed Space only)
 
@@ -270,7 +270,7 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
 | `limiter.py` | SQLite per-day talk-time budget (chunked server-clock reservation) |
 | `s2s-realtime-client.js` | Narrow demo adapter around one Agents SDK `RealtimeSession` and SDK transports with browser-owned WebSocket truncation |
 | `package.json` / `package-lock.json` | Exact official Agents SDK and browser-test dependency pins |
-| `ws/codec.js` | base64 <-> PCM helpers + transcript extraction (pure) |
+| `ws/codec.js` | URL normalization + transcript extraction (pure) |
 | `ws/user-audio-recorder.js` | Bounded sent-PCM buffer + VAD slicing + browser-playable WAV wrapping |
 | `ws/orb-visualizer.js` | `OrbVisualiser`: FFT bands -> orb CSS custom properties |
 | `worklets/mic-capture.js` | AudioWorklet: 48 kHz Float32 -> 24 kHz Int16 PCM, posts ~40 ms chunks |

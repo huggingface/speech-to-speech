@@ -42,6 +42,7 @@ def test_triggering_chunk_is_kept_in_buffer() -> None:
     spoken_utterance = _finish_utterance(iterator, silence_chunk)
 
     assert spoken_utterance is not None
+    assert iterator.last_speech_end_sample == 2 * 512
     assert len(spoken_utterance) == 7
     assert torch.equal(spoken_utterance[0], first_chunk)
     assert torch.equal(spoken_utterance[1], second_chunk)

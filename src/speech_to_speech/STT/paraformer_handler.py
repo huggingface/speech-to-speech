@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from time import perf_counter
 from typing import Any, Iterator
 
 import numpy as np
@@ -10,6 +11,7 @@ from rich.console import Console
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
+from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +35,7 @@ class ParaformerSTTHandler(BaseSTTHandler):
         if len(model_name.split("/")) > 1:
             model_name = model_name.split("/")[-1]
         self.language = model_name.split("-")[1] if "-" in model_name else "zh"
-        self.device = device
+        self.device = resolve_device(device, TORCH_DEVICES, "Paraformer STT")
         try:
             from funasr import AutoModel
         except ModuleNotFoundError as exc:
@@ -41,7 +43,7 @@ class ParaformerSTTHandler(BaseSTTHandler):
                 "Paraformer STT requires the optional 'paraformer' extra. "
                 "Install it with `pip install speech-to-speech[paraformer]`."
             ) from exc
-        self.model = AutoModel(model=model_name, device=device)
+        self.model = AutoModel(model=model_name, device=self.device)
         self.warmup()
 
     def warmup(self) -> None:
@@ -56,6 +58,7 @@ class ParaformerSTTHandler(BaseSTTHandler):
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         logger.debug("infering paraformer...")
 
+        started_at_s = perf_counter()
         pred_text = self.model.generate(vad_audio.audio)[0]["text"].strip().replace(" ", "")
         # Same idea as ChatTTSHandler: MPS cache clear only on Apple Silicon.
         if self.device == "mps":
@@ -70,11 +73,13 @@ class ParaformerSTTHandler(BaseSTTHandler):
                 turn_id=vad_audio.turn_id,
                 turn_revision=vad_audio.turn_revision,
             )
-        else:
-            yield Transcription(
-                text=pred_text,
-                language_code=self.language,
-                turn_id=vad_audio.turn_id,
-                turn_revision=vad_audio.turn_revision,
-                speech_stopped_at_s=vad_audio.created_at_s,
-            )
+            return
+
+        self._record_final_stt(vad_audio, perf_counter() - started_at_s)
+        yield Transcription(
+            text=pred_text,
+            language_code=self.language,
+            turn_id=vad_audio.turn_id,
+            turn_revision=vad_audio.turn_revision,
+            speech_stopped_at_s=vad_audio.speech_end_at_s,
+        )

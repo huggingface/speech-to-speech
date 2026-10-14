@@ -11,5 +11,7 @@ class ParaformerSTTHandlerArguments:
     )
     paraformer_stt_device: str = field(
         default="cuda",
-        metadata={"help": "The device type on which the model will run. Default is 'cuda' for GPU acceleration."},
+        metadata={
+            "help": "The device type on which the model will run: 'auto' (first available of CUDA, NPU, XPU, MPS, CPU), 'cuda', 'npu', 'xpu', 'mps', or 'cpu'. Default is 'cuda'."
+        },
     )
