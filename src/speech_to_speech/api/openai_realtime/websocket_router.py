@@ -21,7 +21,7 @@ from openai.types.realtime import (
     SessionUpdateEvent,
 )
 
-from speech_to_speech.api.openai_realtime.llm_proxy import LLMProxyConfig, mount_llm_proxy
+from speech_to_speech.api.openai_realtime.llm_proxy import LLMProxyConfig, LLMProxyUsage, mount_llm_proxy
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit, SessionState
 from speech_to_speech.api.openai_realtime.service import (
     PIPELINE_SAMPLE_RATE,
@@ -33,6 +33,7 @@ from speech_to_speech.api.openai_realtime.transports import (
     send_ws_event,
 )
 from speech_to_speech.api.openai_realtime.visemes import SpeechToSpeechVisemesEvent
+from speech_to_speech.config import _ID
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
@@ -325,22 +326,19 @@ async def _release_unit_after_drain(unit: PipelineUnit, session: Any, session_id
                 )
     finally:
         # Runs when the drain completed (chain proven clean) or the task is
-        # cancelled at shutdown. Release unconditionally: even if unregister
-        # raises, the unit must not stay claimed forever.
+        # cancelled at shutdown. Clear only this task's reservation, even if
+        # unregister fails or a later session now owns the unit.
         try:
             _safe_unregister(unit, session_id)
         finally:
-            unit.session = None
+            with unit.lock:
+                if unit.session is session:
+                    unit.session = None
         recovered = " after quarantine" if session.quarantined_at is not None else ""
         logger.info(f"Pipeline {unit.index} released{recovered} (session {session_id} ended)")
 
 
-# Strong references to in-flight drain-and-release tasks (asyncio only
-# holds tasks weakly); each task removes itself on completion.
-_release_tasks: set[asyncio.Task[None]] = set()
-
-
-def _release_session(unit: PipelineUnit, session_id: str) -> None:
+def _release_session(unit: PipelineUnit, session_id: str, tasks: set[asyncio.Task[None]] | None = None) -> None:
     """Start the release of a unit after its client disconnected.
 
     Shared by the WebSocket route's finally block and the WebRTC session's
@@ -348,11 +346,11 @@ def _release_session(unit: PipelineUnit, session_id: str) -> None:
     SESSION_END, and spawns the drain-and-release task — the unit stays
     claimed until SESSION_END propagates back to output_queue.
     """
-    old_session = unit.session
-    if old_session is None:
-        # Already released (e.g. duplicate close callbacks racing).
-        return
-    old_session.released_at = time.monotonic()
+    with unit.lock:
+        old_session = unit.session
+        if old_session is None or old_session.session_id != session_id or old_session.released_at is not None:
+            return
+        old_session.released_at = time.monotonic()
     # The send loop can be parked on output from an unclaimed internal
     # prefetch. Invalidate that response while its connection state is still
     # registered, and drop the per-session held item so SESSION_END can drain.
@@ -381,8 +379,9 @@ def _release_session(unit: PipelineUnit, session_id: str) -> None:
     # release, a late arrival can't satisfy the next session's drain.
     unit.input_queue.put(PipelineControlMessage(SESSION_END.kind, session_id=session_id))
     task = asyncio.create_task(_release_unit_after_drain(unit, old_session, session_id))
-    _release_tasks.add(task)
-    task.add_done_callback(_release_tasks.discard)
+    owned_tasks = set() if tasks is None else tasks
+    owned_tasks.add(task)
+    task.add_done_callback(owned_tasks.discard)
 
 
 async def _dispatch_client_event(
@@ -511,65 +510,140 @@ def create_app(
     pool: list[PipelineUnit],
     stop_event: ThreadingEvent,
     llm_proxy_config: LLMProxyConfig | None = None,
+    *,
+    pipeline_pools: dict[str, list[PipelineUnit]] | None = None,
+    llm_proxy_configs: dict[str, LLMProxyConfig | None] | None = None,
 ) -> FastAPI:
+    if pipeline_pools is not None:
+        grouped = [unit for units in pipeline_pools.values() for unit in units]
+        if (
+            not pipeline_pools
+            or any(
+                not isinstance(name, str) or not _ID.fullmatch(name) or not units
+                for name, units in pipeline_pools.items()
+            )
+            or len({id(unit) for unit in grouped}) != len(grouped)
+            or {id(unit) for unit in grouped} != {id(unit) for unit in pool}
+            or len({unit.index for unit in pool}) != len(pool)
+        ):
+            raise ValueError("Named pools must contain each aggregate unit exactly once with unique indexes")
+        if llm_proxy_config is not None:
+            raise ValueError("Named pools cannot use the legacy proxy configuration")
+    elif llm_proxy_configs is not None:
+        raise ValueError("Named proxy configurations require named pools")
+    if llm_proxy_configs is not None and set(llm_proxy_configs) != set(pipeline_pools or {}):
+        raise ValueError("Named proxy configurations must match named pools")
+    release_tasks: set[asyncio.Task[None]] = set()
+    accepting = True
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # One send loop per pipeline unit; each polls its own queues and forwards
         # to the websocket currently attached via unit.session.
         send_tasks = [asyncio.create_task(_send_loop_for(unit)) for unit in pool]
-        yield
-        for task in send_tasks:
-            task.cancel()
-        for task in send_tasks:
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        for unit in pool:
-            sess = unit.session
-            if sess is not None and sess.transport is not None:
-                try:
-                    await sess.transport.close()
-                except Exception:
-                    pass
+        try:
+            yield
+        finally:
+            nonlocal accepting
+            accepting = False
+            for unit in pool:
+                sess = unit.session
+                if sess is not None and sess.transport is not None:
+                    try:
+                        await sess.transport.close()
+                    except Exception:
+                        pass
+            for task in [*send_tasks, *release_tasks]:
+                task.cancel()
+            await asyncio.gather(*send_tasks, *release_tasks, return_exceptions=True)
 
     app = FastAPI(lifespan=lifespan)
 
-    llm_proxy_usage = mount_llm_proxy(app, llm_proxy_config)
+    def _error(error_type: str, message: str, status: int) -> Response:
+        return Response(
+            content=build_error_event(message, error_type=error_type).model_dump_json(),
+            status_code=status,
+            media_type="application/json",
+        )
 
-    def _claim_unit(transport: SessionTransport | None) -> PipelineUnit | None:
-        """Atomically (between asyncio yield points) reserve the first idle unit.
+    def _select(name: str | None) -> tuple[list[PipelineUnit], Response | None]:
+        if pipeline_pools is None:
+            if name is not None:
+                return [], _error("unknown_pipeline", "Unknown pipeline", 404)
+            return pool, None
+        if name is None:
+            if len(pipeline_pools) != 1:
+                return [], _error("pipeline_selection_required", "Select a pipeline by name", 400)
+            name = next(iter(pipeline_pools))
+        if name not in pipeline_pools:
+            return [], _error("unknown_pipeline", "Unknown pipeline", 404)
+        return pipeline_pools[name], None
 
-        Creates a placeholder SessionState that the caller fills in with the
-        session_id after RealtimeService.register(). The WebRTC route claims
-        with transport=None and attaches the session object once constructed.
-        """
-        for unit in pool:
-            if unit.session is None:
-                unit.session = SessionState(transport=transport)
-                return unit
-        return None
+    proxy_usages: dict[str, LLMProxyUsage] = {}
+    if pipeline_pools is None:
+        llm_proxy_usage = mount_llm_proxy(app, llm_proxy_config)
+    else:
+        for name in pipeline_pools:
+            usage = LLMProxyUsage()
+            proxy_usages[name] = usage
+            config = (llm_proxy_configs or {}).get(name)
+            mount_llm_proxy(app, config, route_prefix=f"/v1/pipelines/{name}", usage=usage)
+            if len(pipeline_pools) == 1:
+                mount_llm_proxy(app, config, usage=usage)
+        llm_proxy_usage = LLMProxyUsage()
+
+        @app.post("/v1/pipelines/{name}/responses")
+        @app.post("/v1/pipelines/{name}/chat/completions")
+        async def unknown_proxy(name: str) -> Response:
+            return _error("unknown_pipeline", "Unknown pipeline", 404)
+
+        if len(pipeline_pools) > 1:
+
+            @app.post("/v1/responses")
+            @app.post("/v1/chat/completions")
+            async def ambiguous_proxy() -> Response:
+                return _error("pipeline_selection_required", "Select a pipeline by name", 400)
+
+    def _claim_unit(
+        transport: SessionTransport | None, name: str | None
+    ) -> tuple[PipelineUnit | None, Response | None]:
+        selected, error = _select(name)
+        if error is not None:
+            return None, error
+        if not accepting or stop_event.is_set():
+            return None, _error("session_limit_reached", "The server is stopping", 503)
+        healthy = False
+        for unit in selected:
+            with unit.lock:
+                if not unit.healthy:
+                    continue
+                healthy = True
+                if unit.session is None:
+                    unit.session = SessionState(transport=transport)
+                    return unit, None
+        if not healthy:
+            return None, _error("pipeline_unavailable", "No healthy pipeline instances", 503)
+        return None, _error(
+            "session_limit_reached",
+            f"All {len(selected)} session slots are in use. Disconnect an existing client first.",
+            503,
+        )
 
     @app.websocket("/v1/realtime")
+    @app.websocket("/v1/pipelines/{name}/realtime")
     async def realtime_endpoint(ws: WebSocket) -> None:
+        name = ws.path_params.get("name")
         offered_subprotocols = {
             protocol.strip() for protocol in ws.headers.get("sec-websocket-protocol", "").split(",")
         }
         await ws.accept(subprotocol="realtime" if "realtime" in offered_subprotocols else None)
 
-        transport = WebSocketTransport(ws)
-        unit = _claim_unit(transport)
+        transport = WebSocketTransport(ws, raise_errors=pipeline_pools is not None)
+        unit, error = _claim_unit(transport, name)
         if unit is None:
-            logger.warning(f"Rejected connection: all {len(pool)} pipeline slots in use")
-            # Stateless error event — rejection is not chargeable to any unit's usage metrics.
-            await send_ws_event(
-                ws,
-                build_error_event(
-                    f"All {len(pool)} session slots are in use. Disconnect an existing client first.",
-                    error_type="session_limit_reached",
-                ),
-            )
-            await ws.close(code=1008, reason="All session slots are in use")
+            assert error is not None
+            await ws.send_text(bytes(error.body).decode())
+            await ws.close(code=1008, reason="Session admission rejected")
             return
 
         pipeline_log_ctx.set(unit.index)
@@ -587,7 +661,19 @@ def create_app(
             # previous session that survived SESSION_END propagation doesn't leak.
             _clean_unit(unit)
 
-            await send_ws_event(ws, unit.service.build_session_created(session_id))
+            with unit.lock:
+                healthy = unit.healthy and accepting and not stop_event.is_set()
+                created = unit.service.build_session_created(session_id) if healthy else None
+            if created is None:
+                await send_ws_event(ws, build_error_event("Pipeline unavailable", error_type="pipeline_unavailable"))
+                await transport.close()
+                return
+            try:
+                await send_ws_event(ws, created, raise_errors=pipeline_pools is not None)
+            except Exception:
+                unit.mark_failed()
+                await transport.close()
+                raise
 
             while not stop_event.is_set():
                 try:
@@ -610,7 +696,7 @@ def create_app(
             # this finally returns immediately. Awaiting here is unreliable: after
             # WebSocketDisconnect propagates, subsequent awaits in the same task
             # can be skipped/cancelled by Starlette's runner and never resume.
-            _release_session(unit, session_id)
+            _release_session(unit, session_id, release_tasks)
 
     @app.get("/v1/usage")
     async def usage_endpoint() -> dict[str, Any]:
@@ -634,6 +720,18 @@ def create_app(
         # Additive section: proxy traffic is app-level, not per-unit, so it
         # lands after the per-unit merge and never collides with unit keys.
         total["llm_proxy"] = llm_proxy_usage.model_dump()
+        if pipeline_pools is not None:
+            proxy_total: dict[str, Any] = {}
+            summaries = {}
+            for name, units in pipeline_pools.items():
+                summary: dict[str, Any] = {}
+                for unit in units:
+                    _merge(summary, unit.service.get_usage())
+                summary["llm_proxy"] = proxy_usages[name].model_dump()
+                _merge(proxy_total, summary["llm_proxy"])
+                summaries[name] = summary
+            total["llm_proxy"] = proxy_total
+            total["pipelines"] = summaries
         return total
 
     @app.get("/v1/pool")
@@ -667,13 +765,40 @@ def create_app(
                 "draining_for_s": round(now - s.released_at, 2),
             }
 
-        return {
+        states = [_state(u) for u in pool]
+        result: dict[str, Any] = {
             "size": len(pool),
             "in_use": sum(1 for u in pool if u.session is not None),
-            "units": [_state(u) for u in pool],
+            "units": states,
         }
+        if pipeline_pools is not None:
+            for unit, state in zip(pool, states, strict=True):
+                state.update(
+                    pipeline_name=unit.pipeline_name,
+                    instance_index=unit.instance_index,
+                    lifecycle_state=unit.lifecycle_state,
+                    available=accepting and not stop_event.is_set() and unit.available,
+                )
+            result["available"] = sum(state["available"] for state in states)
+            summaries = {}
+            for name, units in pipeline_pools.items():
+                named_states = [
+                    state for unit, state in zip(pool, states, strict=True) if any(unit is member for member in units)
+                ]
+                summary = {
+                    "size": len(units),
+                    "in_use": sum(u.session is not None for u in units),
+                    "available": sum(state["available"] for state in named_states),
+                    "failed": sum(u.lifecycle_state == "failed" for u in units),
+                }
+                for occupancy in ("idle", "active", "draining", "stuck"):
+                    summary[occupancy] = sum(state["state"] == occupancy for state in named_states)
+                summaries[name] = summary
+            result["pipelines"] = summaries
+        return result
 
     @app.post("/v1/realtime/calls")
+    @app.post("/v1/pipelines/{name}/realtime/calls")
     async def webrtc_calls_endpoint(request: Request) -> Response:
         """WebRTC SDP handshake (OpenAI GA Realtime 'calls' endpoint).
 
@@ -682,6 +807,10 @@ def create_app(
         events flow over the 'oai-events' data channel using the same JSON
         protocol as the WebSocket transport.
         """
+        name = request.path_params.get("name")
+        _, selection_error = _select(name)
+        if selection_error is not None:
+            return selection_error
         if not WEBRTC_AVAILABLE:
             return Response(
                 content="WebRTC support requires the 'webrtc' extra: pip install 'speech-to-speech[webrtc]'",
@@ -699,17 +828,10 @@ def create_app(
 
         # Claim with a placeholder transport; the send loop tolerates a
         # transport-less snapshot until the session object below is attached.
-        unit = _claim_unit(None)
+        unit, error = _claim_unit(None, name)
         if unit is None:
-            logger.warning(f"Rejected WebRTC offer: all {len(pool)} pipeline slots in use")
-            return Response(
-                content=build_error_event(
-                    f"All {len(pool)} session slots are in use. Disconnect an existing client first.",
-                    error_type="session_limit_reached",
-                ).model_dump_json(),
-                status_code=503,
-                media_type="application/json",
-            )
+            assert error is not None
+            return error
 
         pipeline_log_ctx.set(unit.index)
         try:
@@ -722,10 +844,14 @@ def create_app(
             # previous session that survived SESSION_END propagation doesn't leak.
             _clean_unit(unit)
         except Exception as e:  # noqa: BLE001
-            logger.error(f"WebRTC call setup failed (pipeline {unit.index}): {type(e).__name__}: {e}")
+            log_exception(logger, f"WebRTC call setup failed (pipeline {unit.index})", e)
             # No transport or drain task exists yet, so undoing the claim
             # directly is the whole release.
-            unit.session = None
+            with unit.lock:
+                failed_session = unit.session
+                if failed_session is not None:
+                    _safe_unregister(unit, failed_session.session_id)
+                    unit.session = None
             return Response(content="WebRTC session setup failed", status_code=500, media_type="text/plain")
 
         released = False
@@ -738,7 +864,7 @@ def create_app(
                 return
             released = True
             logger.info(f"WebRTC client {session_id} disconnected from pipeline {unit.index}")
-            _release_session(unit, session_id)
+            _release_session(unit, session_id, release_tasks)
 
         async def _on_client_event(raw: dict[str, Any]) -> None:
             assert session is not None  # callbacks only fire after setup()
@@ -774,7 +900,7 @@ def create_app(
             session.setup()
             unit.session.transport = session
         except Exception as e:  # noqa: BLE001
-            logger.error(f"WebRTC session setup failed (session {session_id}): {type(e).__name__}: {e}")
+            log_exception(logger, f"WebRTC session setup failed (session {session_id})", e)
             if session is not None:
                 await session.close()  # fires _on_closed → _release_session
             else:
@@ -784,22 +910,36 @@ def create_app(
         try:
             answer_sdp = await session.negotiate(offer_sdp)
         except Exception as e:  # noqa: BLE001
-            logger.error(f"WebRTC negotiation failed (session {session_id}): {type(e).__name__}: {e}")
+            log_exception(logger, f"WebRTC negotiation failed (session {session_id})", e)
             await session.close()
             return Response(content="Invalid SDP offer", status_code=400, media_type="text/plain")
 
+        with unit.lock:
+            healthy = unit.healthy and accepting and not stop_event.is_set()
+        if not healthy:
+            await session.close()
+            return _error("pipeline_unavailable", "Pipeline unavailable", 503)
         logger.info(f"WebRTC SDP answer returned (session {session_id})")
         return Response(
             content=answer_sdp,
             status_code=201,
             media_type="application/sdp",
-            headers={"Location": f"/v1/realtime/calls/{session_id}"},
+            headers={
+                "Location": f"/v1/pipelines/{name}/realtime/calls/{session_id}"
+                if name is not None
+                else f"/v1/realtime/calls/{session_id}"
+            },
         )
 
     @app.delete("/v1/realtime/calls/{call_id}")
-    async def webrtc_hangup_endpoint(call_id: str) -> Response:
+    @app.delete("/v1/pipelines/{name}/realtime/calls/{call_id}")
+    async def webrtc_hangup_endpoint(call_id: str, request: Request) -> Response:
         """Hang up a WebRTC call — the Location URL advertised by the POST above."""
-        for unit in pool:
+        name = request.path_params.get("name")
+        selected, error = _select(name) if name is not None else (pool, None)
+        if error is not None:
+            return error
+        for unit in selected:
             session = unit.session
             if (
                 session is None
@@ -831,6 +971,13 @@ def create_app(
                 # unit mid-iteration, we continue against the prior snapshot which is
                 # consistent (its transport is still valid until close() returns).
                 session = unit.session
+                if unit.lifecycle_state == "constructed" and (unit.stop_event is None or not unit.stop_event.is_set()):
+                    await asyncio.sleep(0.01)
+                    continue
+                if not unit.healthy:
+                    if session is not None and session.transport is not None:
+                        await session.transport.close()
+                    break
                 transport = session.transport if session is not None else None
                 session_id = session.session_id if session is not None else None
 
@@ -981,8 +1128,11 @@ def create_app(
                         continue
 
                     if _is_pipeline_end(audio_chunk):
+                        unit.mark_failed()
                         if transport is not None and session_id:
                             await transport.send_events(unit.service.finish_response(session_id))
+                        if transport is not None:
+                            await transport.close()
                         break
 
                     if _is_audio_done(audio_chunk):
@@ -1144,7 +1294,14 @@ def create_app(
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Pipeline {unit.index} send loop error: {e}")
-                await asyncio.sleep(0.1)
+                log_exception(logger, f"Pipeline {unit.index} send loop error", e)
+                unit.mark_failed()
+                session = unit.session
+                if session is not None and session.transport is not None:
+                    try:
+                        await session.transport.close()
+                    except Exception:
+                        pass
+                break
 
     return app

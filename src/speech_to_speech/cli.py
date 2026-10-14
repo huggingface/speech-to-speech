@@ -188,7 +188,7 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
 
 
 def _run_file_command(command: Command, command_args: list[str]) -> None:
-    from speech_to_speech.config import ConfigurationError, load_config, resolve_config
+    from speech_to_speech.config import ConfigurationError, load_config, resolve_config, validate_config
 
     parser = argparse.ArgumentParser(prog=f"speech-to-speech {command}", allow_abbrev=False, exit_on_error=False)
     parser.add_argument("-f", "--file", action="append", metavar="YAML", help="Read a YAML configuration file.")
@@ -204,24 +204,33 @@ def _run_file_command(command: Command, command_args: list[str]) -> None:
         parser.error("File mode accepts only --file and --name; put settings in the YAML file.")
     if not namespace.file or len(namespace.file) != 1:
         parser.error("Specify exactly one configuration file with -f or --file.")
-    if command == "talk" and namespace.name is not None:
-        parser.error("talk does not accept --name.")
+    if command == "talk" and namespace.name is not None and len(namespace.name) != 1:
+        parser.error("talk accepts exactly one declared pipeline name.")
     try:
         document = load_config(namespace.file[0])
+        pipeline_name = None
+        if command == "talk" and namespace.name is not None:
+            validate_config(document)
+            pipeline_name = namespace.name[0]
+            if pipeline_name not in document.data["pipelines"]:
+                parser.error("talk requires an existing declared pipeline name.")
         config = resolve_config(
             document,
-            names=namespace.name,
+            names=None if command == "talk" else namespace.name,
             include_client=command == "local",
             client_only=command == "talk",
         )
-        if command != "talk" and len(config.pipelines) != 1:
-            parser.error("serve and local require exactly one selected definition; use --name.")
+        if command == "local" and len(config.pipelines) != 1:
+            parser.error("local requires exactly one selected definition; use --name.")
     except (ConfigurationError, ImportError):
         parser.exit(2, "Configuration error: check the YAML file, selected names, and required environment settings.\n")
     try:
         from speech_to_speech.configured_runtime import run_configured_command
 
-        run_configured_command(command, config)
+        if pipeline_name is None:
+            run_configured_command(command, config)
+        else:
+            run_configured_command(command, config, pipeline_name=pipeline_name)
     except ConfigurationError:
         parser.exit(2, "Configuration error: check the configured runtime and client settings.\n")
     except Exception:

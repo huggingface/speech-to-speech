@@ -1,0 +1,43 @@
+schema_version: 1
+
+runtime:
+  server: {host: 127.0.0.1, port: 8765}
+  client:
+    url: ws://127.0.0.1:8765/v1/realtime
+
+blocks:
+  vad: {kind: vad, backend: silero}
+  stt:
+    kind: stt
+    backend: openai
+    settings:
+      openai_stt_base_url: http://127.0.0.1:8000/v1
+  tts:
+    kind: tts
+    backend: openai
+    settings:
+      openai_tts_base_url: http://127.0.0.1:8091/v1
+  primary_llm:
+    kind: llm
+    backend: responses-api
+    settings:
+      model_name: {env: PRIMARY_LLM_MODEL}
+      responses_api_base_url: {env: PRIMARY_LLM_URL}
+      responses_api_api_key: {env: PRIMARY_LLM_KEY}
+  secondary_llm:
+    kind: llm
+    backend: chat-completions
+    settings:
+      model_name: {env: SECONDARY_LLM_MODEL}
+      responses_api_base_url: {env: SECONDARY_LLM_URL}
+      responses_api_api_key: {env: SECONDARY_LLM_KEY}
+
+pipelines:
+  primary:
+    num_pipelines: 2
+    options: {enable_llm_proxy: true}
+    stages: {vad: vad, stt: stt, llm: primary_llm, tts: tts}
+  secondary:
+    num_pipelines: 1
+    options: {enable_llm_proxy: true}
+    stages: {vad: vad, stt: stt, llm: secondary_llm, tts: tts}
