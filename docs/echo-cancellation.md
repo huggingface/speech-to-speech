@@ -17,8 +17,8 @@ playback and so disables voice interruptions.
 
 ## Limits
 
-- `--send-rate` and `--recv-rate` must match, at 8, 16, 32 or 48 kHz. Both
-  default to 16 kHz.
+- Echo cancellation in the packaged client requires `--send-rate` and
+  `--recv-rate` to both be 16 kHz, their default.
 - The client does not correct clock drift between separate input and output
   devices.
 - While the assistant speaks, the canceller can turn the user's voice down
