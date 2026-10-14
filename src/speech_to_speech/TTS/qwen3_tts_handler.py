@@ -902,8 +902,8 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         if latency_s < 0:
             return
         tracker = active_turn_latency_tracker()
-        if tracker is not None:
-            tracker.record_e2e(latency_s)
+        if tracker is not None and not tracker.record_e2e(latency_s):
+            return
         logger.info(
             "Last speech detected to first speech out: %.3fs (turn=%s rev=%s)",
             latency_s,

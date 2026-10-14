@@ -101,8 +101,10 @@ class ResponseHandler(RealtimeBaseHandler):
     def _log_turn_latency(self, st: ConnState, status: _ResponseStatus, response_key: str | None) -> None:
         assert status != "in_progress", "Latency is only finalized for terminal responses"
         tracker = self._service.turn_latency_store.pop(response_key, session_id=st.session_id)
-        if tracker is None or tracker.turn_id is None:
+        if tracker is None:
             return
+        if tracker.speech_anchor is not None and (status != "completed" or not st.pending_function_calls):
+            tracker.speech_anchor.close()
         tracker.status = status
         line = tracker.format_log_line()
         if line:
@@ -224,9 +226,10 @@ class ResponseHandler(RealtimeBaseHandler):
         if origin_response_key is None or queue is None:
             return False
 
-        turn_id, turn_revision, speech_stopped_at_s = self._service.response_input_turn(
+        reference, source, anchor = self._service.response_latency_context(
             conn_id, origin_call_ids=st.generation_done_tool_calls[origin_response_key]
         )
+        turn_id, turn_revision, speech_stopped_at_s = reference
         request = GenerateResponseRequest(
             runtime_config=st.runtime_config,
             turn_id=turn_id,
@@ -239,6 +242,8 @@ class ResponseHandler(RealtimeBaseHandler):
             request.response_key,
             turn_id=request.turn_id,
             turn_revision=request.turn_revision,
+            source=source,
+            speech_anchor=anchor,
         )
         st.tool_followup_prefetch_request = request
         st.tool_followup_prefetch_origin_response_key = origin_response_key
@@ -499,7 +504,7 @@ class ResponseHandler(RealtimeBaseHandler):
             metadata.pop(TURN_LATENCY_METADATA_KEY, None)
         if status != "in_progress" and st.current_response_key is not None and len(metadata) < 16:
             tracker = self._service.turn_latency_store.get_response(st.current_response_key)
-            if tracker is not None and tracker.turn_id is not None:
+            if tracker is not None:
                 latency_value = json.dumps(
                     tracker.metadata_payload(
                         response_key=st.current_response_key,
@@ -857,7 +862,8 @@ class ResponseHandler(RealtimeBaseHandler):
 
         cfg = st.runtime_config
         queue = self._queue(conn_id)
-        turn_id, turn_revision, speech_stopped_at_s = self._service.response_input_turn(conn_id)
+        reference, source, anchor = self._service.response_latency_context(conn_id)
+        turn_id, turn_revision, speech_stopped_at_s = reference
         request = GenerateResponseRequest(
             runtime_config=cfg,
             response=event.response,
@@ -871,6 +877,8 @@ class ResponseHandler(RealtimeBaseHandler):
                 request.response_key,
                 turn_id=request.turn_id,
                 turn_revision=request.turn_revision,
+                source=source,
+                speech_anchor=anchor,
             )
         st.in_response = True
         st.clear_pending_response(request.response_key)
@@ -1174,10 +1182,18 @@ class ResponseHandler(RealtimeBaseHandler):
                     events.extend(self._finish_current_message_output(conn_id, event.response_key))
                 tool = part.tool
                 accounting = st.input_turn_accounting.get(event.turn_id) if event.turn_id is not None else None
+                tracker = self._service.turn_latency_store.get_response(st.current_response_key)
+                # New input can supersede speech timing while generation keeps
+                # its original turn. Calls inherit this response's eligibility.
+                speech_stopped_at_s = (
+                    accounting.speech_stopped_at_s
+                    if accounting is not None and tracker is not None and tracker.speech_anchor is not None
+                    else None
+                )
                 st.input_turn_by_call_id[tool.call_id] = (
                     event.turn_id,
                     event.turn_revision,
-                    accounting.speech_stopped_at_s if accounting is not None else None,
+                    speech_stopped_at_s,
                 )
                 while len(st.input_turn_by_call_id) > 128:
                     st.input_turn_by_call_id.pop(next(iter(st.input_turn_by_call_id)))

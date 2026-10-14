@@ -805,11 +805,10 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         logger.info("OpenAI-compatible TTS time to first audio: %.3fs", perf_counter() - request_started_at_s)
         if tts_input.speech_stopped_at_s is not None:
             latency_s = max(0.0, perf_counter() - tts_input.speech_stopped_at_s)
-            record_response_e2e(
-                getattr(self, "turn_latency_store", None),
-                tts_input.response_key,
-                latency_s,
-            )
+            store = getattr(self, "turn_latency_store", None)
+            recorded = record_response_e2e(store, tts_input.response_key, latency_s)
+            if store is not None and not recorded:
+                return
             logger.info(
                 "Last speech detected to first speech out: %.3fs (turn=%s rev=%s)",
                 latency_s,
