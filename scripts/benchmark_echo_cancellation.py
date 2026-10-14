@@ -34,8 +34,8 @@ def run(backend, scenario, duration, paced):
     cpu_start, wall_start = time.process_time(), time.perf_counter()
     for index, (far, near) in enumerate(zip(rendered, captured)):
         if processor:
-            processor.render(far, 0.01)
-            near = processor.capture(near, 0.01)
+            processor.render(far, index * block / rate)
+            near = processor.capture(near, index * block / rate)
         cleaned.extend(near)
         if paced:
             time.sleep(max(0, wall_start + (index + 1) * block / rate - time.perf_counter()))

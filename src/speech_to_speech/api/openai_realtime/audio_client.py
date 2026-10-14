@@ -12,14 +12,16 @@ import base64
 import inspect
 import json
 import logging
+import multiprocessing
 import signal
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from importlib import import_module
 from ipaddress import ip_address
 from queue import Empty, Full, Queue
-from threading import Event, Lock
+from threading import Event, Lock, Thread
 from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
 
@@ -81,7 +83,6 @@ class RealtimeAudioClientConfig:
         if not 0 <= self.playback_buffer_ms < float("inf"):
             raise ValueError("playback_buffer_ms must be a finite non-negative number")
         if self.echo_cancellation and self.block_mic_during_playback:
-            # A paused microphone stops consuming speaker references, so the canceller would fall out of step.
             raise ValueError("Echo cancellation cannot be combined with blocking the microphone during playback")
 
 
@@ -925,25 +926,32 @@ async def _wait_for_stop(stop_event: Event) -> None:
         await asyncio.to_thread(stop_event.wait, 0.1)
 
 
-async def _run_audio_session(
-    conn: Any,
-    config: RealtimeAudioClientConfig,
-    stop_event: Event,
-) -> None:
+def _stream_clock_offset(stream: Any) -> float:
+    """Map a PortAudio stream's time base to the common monotonic clock."""
+    estimates = []
+    for _ in range(5):
+        before = time.monotonic()
+        stream_time = stream.time
+        after = time.monotonic()
+        estimates.append((after - before, (before + after) / 2 - stream_time))
+    # Use the shortest read so thread scheduling cannot skew the clock mapping.
+    return min(estimates)[1]
+
+
+@contextmanager
+def _open_audio_streams(config: RealtimeAudioClientConfig, playback: PlaybackBuffer, mic_queue: Any) -> Iterator[None]:
     import sounddevice as sd
 
-    mic_queue: Queue[bytes] = Queue(maxsize=128)
-    playback = PlaybackBuffer(config.recv_rate, startup_buffer_ms=config.playback_buffer_ms)
-    renderer = _FriendlyEventRenderer()
-    tool_calls = _ToolCallCoordinator(conn, config)
     echo_canceller = EchoCanceller(config.send_rate, config.recv_rate) if config.echo_cancellation else None
+
+    input_clock_offset = output_clock_offset = 0.0
 
     def callback_recv(outdata: Any, _frames: int, time_info: Any, status: Any) -> None:
         if status:
             logger.warning("Speaker status: %s", status)
         playback.write(outdata)
         if echo_canceller is not None:
-            echo_canceller.render(bytes(outdata), time_info.outputBufferDacTime - time_info.currentTime)
+            echo_canceller.render(bytes(outdata), time_info.outputBufferDacTime + output_clock_offset)
 
     def callback_send(indata: Any, _frames: int, time_info: Any, status: Any) -> None:
         if status:
@@ -954,7 +962,7 @@ async def _run_audio_session(
         if echo_canceller is not None:
             chunk = echo_canceller.capture(
                 chunk,
-                time_info.currentTime - time_info.inputBufferAdcTime,
+                time_info.inputBufferAdcTime + input_clock_offset,
                 lost_input=bool(status and status.input_overflow),
             )
             if not chunk:
@@ -963,6 +971,216 @@ async def _run_audio_session(
             mic_queue.put_nowait(chunk)
         except Full:
             logger.debug("Dropping local microphone chunk because the send queue is full")
+
+    opened_streams: list[Any] = []
+    started_streams: list[Any] = []
+    try:
+        input_stream = sd.RawInputStream(
+            samplerate=config.send_rate,
+            channels=1,
+            dtype="int16",
+            blocksize=config.chunk_size,
+            callback=callback_send,
+            device=config.input_device,
+        )
+        opened_streams.append(input_stream)
+        output_stream = sd.RawOutputStream(
+            samplerate=config.recv_rate,
+            channels=1,
+            dtype="int16",
+            blocksize=config.chunk_size,
+            callback=callback_recv,
+            device=config.output_device,
+        )
+        opened_streams.append(output_stream)
+
+        if echo_canceller is not None:
+            input_clock_offset = _stream_clock_offset(input_stream)
+            output_clock_offset = _stream_clock_offset(output_stream)
+
+        for stream in opened_streams:
+            stream.start()
+            started_streams.append(stream)
+
+        yield
+    finally:
+        for stream in reversed(started_streams):
+            try:
+                stream.stop()
+            except Exception:
+                logger.exception("Failed to stop local audio stream")
+        for stream in reversed(opened_streams):
+            try:
+                stream.close()
+            except Exception:
+                logger.exception("Failed to close local audio stream")
+
+
+class _PlaybackCommands(PlaybackBuffer):
+    """Forward playback changes to the process that owns the audio device."""
+
+    def __init__(self, recv_rate: int, commands: Any, buffered: Any, active: Any) -> None:
+        super().__init__(recv_rate)
+        self._commands = commands
+        self._buffered = buffered
+        self._active = active
+
+    def append(self, audio: bytes) -> None:
+        if audio:
+            self._commands.put_nowait(("append", audio))
+
+    def clear(self) -> None:
+        self._commands.put_nowait(("clear", b""))
+
+    def finish(self) -> None:
+        self._commands.put_nowait(("finish", b""))
+
+    def is_active(self) -> bool:
+        return bool(self._active.value)
+
+    @property
+    def buffered_bytes(self) -> int:
+        return int(self._buffered.value)
+
+
+class _WorkerPlaybackBuffer(PlaybackBuffer):
+    def __init__(self, config: RealtimeAudioClientConfig, buffered: Any, active: Any) -> None:
+        super().__init__(config.recv_rate, config.playback_buffer_ms)
+        self._buffered = buffered
+        self._active = active
+
+    def write(self, outdata: Any) -> None:
+        super().write(outdata)
+        self._buffered.value = self.buffered_bytes
+        self._active.value = self.is_active()
+
+
+def _run_audio_worker(
+    config: RealtimeAudioClientConfig,
+    mic_queue: Any,
+    commands: Any,
+    stop_event: Any,
+    errors: Any,
+    buffered: Any,
+    active: Any,
+) -> None:
+    # The parent handles Ctrl-C and requests orderly stream shutdown.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if stop_event.is_set():
+        mic_queue.cancel_join_thread()
+        errors.close()
+        return
+    playback = _WorkerPlaybackBuffer(config, buffered, active)
+
+    def receive_playback() -> None:
+        while not stop_event.is_set():
+            try:
+                command, audio = commands.get(timeout=0.1)
+            except Empty:
+                continue
+            if command == "append":
+                playback.append(audio)
+            elif command == "clear":
+                playback.clear()
+            elif command == "finish":
+                playback.finish()
+            buffered.value = playback.buffered_bytes
+            active.value = playback.is_active()
+
+    receiver = Thread(target=receive_playback, daemon=True)
+    receiver.start()
+    try:
+        with _open_audio_streams(config, playback, mic_queue):
+            parent = multiprocessing.parent_process()
+            while not stop_event.wait(0.1):
+                if parent is not None and not parent.is_alive():
+                    break
+    except Exception as exc:
+        errors.send(str(exc))
+        raise
+    finally:
+        stop_event.set()
+        receiver.join(timeout=1)
+        # The parent stops consuming microphone audio during shutdown.
+        mic_queue.cancel_join_thread()
+        errors.close()
+
+
+class _AudioWorker:
+    """Keep device callbacks independent of model and tool code's Python GIL."""
+
+    def __init__(self, config: RealtimeAudioClientConfig) -> None:
+        context = multiprocessing.get_context("spawn")
+        self.mic_queue = context.Queue(maxsize=128)
+        self._commands = context.Queue()
+        self._stop = context.Event()
+        buffered = context.RawValue("q", 0)
+        active = context.RawValue("b", 0)
+        self.playback = _PlaybackCommands(config.recv_rate, self._commands, buffered, active)
+        self._errors, self._error_sender = context.Pipe(duplex=False)
+        # Keep executors and their state in the parent; the worker only needs
+        # hardware settings and audio, not models, tools or network credentials.
+        worker_config = RealtimeAudioClientConfig(
+            send_rate=config.send_rate,
+            recv_rate=config.recv_rate,
+            chunk_size=config.chunk_size,
+            playback_buffer_ms=config.playback_buffer_ms,
+            input_device=config.input_device,
+            output_device=config.output_device,
+            echo_cancellation=True,
+        )
+        self._process = context.Process(
+            target=_run_audio_worker,
+            args=(worker_config, self.mic_queue, self._commands, self._stop, self._error_sender, buffered, active),
+            name="realtime-audio",
+        )
+
+    def __enter__(self) -> _AudioWorker:
+        try:
+            self._process.start()
+        except Exception:
+            self.__exit__(None, None, None)
+            raise
+        self._error_sender.close()
+        return self
+
+    async def wait_for_failure(self) -> None:
+        while self._process.is_alive():
+            await asyncio.sleep(0.1)
+        message = "Audio process stopped unexpectedly"
+        if self._errors.poll():
+            try:
+                message = self._errors.recv()
+            except EOFError:
+                pass
+        logger.error("Local audio process failed: %s", message)
+        raise RuntimeError(message)
+
+    def __exit__(self, _type: Any, _value: Any, _traceback: Any) -> None:
+        self._stop.set()
+        if self._process.pid is not None:
+            self._process.join(timeout=5)
+            if self._process.is_alive():
+                logger.warning("Stopping an unresponsive local audio process")
+                self._process.terminate()
+                self._process.join(timeout=5)
+        self._commands.cancel_join_thread()
+        self._commands.close()
+        self.mic_queue.close()
+        self._errors.close()
+        self._error_sender.close()
+
+
+async def _run_audio_session(
+    conn: Any,
+    config: RealtimeAudioClientConfig,
+    stop_event: Event,
+) -> None:
+    worker = _AudioWorker(config) if config.echo_cancellation else None
+    mic_queue: Any = worker.mic_queue if worker is not None else Queue(maxsize=128)
+    playback = worker.playback if worker is not None else PlaybackBuffer(config.recv_rate, config.playback_buffer_ms)
+    renderer = _FriendlyEventRenderer()
+    tool_calls = _ToolCallCoordinator(conn, config)
 
     async def send_audio() -> None:
         while not stop_event.is_set():
@@ -988,32 +1206,10 @@ async def _run_audio_session(
                 print_json=config.print_json,
             )
 
-    opened_streams: list[Any] = []
-    started_streams: list[Any] = []
+    streams = ExitStack()
+    tasks: set[asyncio.Task[Any]] = set()
     try:
-        input_stream = sd.RawInputStream(
-            samplerate=config.send_rate,
-            channels=1,
-            dtype="int16",
-            blocksize=config.chunk_size,
-            callback=callback_send,
-            device=config.input_device,
-        )
-        opened_streams.append(input_stream)
-        output_stream = sd.RawOutputStream(
-            samplerate=config.recv_rate,
-            channels=1,
-            dtype="int16",
-            blocksize=config.chunk_size,
-            callback=callback_recv,
-            device=config.output_device,
-        )
-        opened_streams.append(output_stream)
-
-        for stream in opened_streams:
-            stream.start()
-            started_streams.append(stream)
-
+        streams.enter_context(worker if worker is not None else _open_audio_streams(config, playback, mic_queue))
         tasks = {
             asyncio.create_task(send_audio()),
             asyncio.create_task(receive_events()),
@@ -1021,29 +1217,25 @@ async def _run_audio_session(
             asyncio.create_task(tool_calls.wait_for_failure()),
         }
 
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        if worker is not None:
+            tasks.add(asyncio.create_task(worker.wait_for_failure()))
+
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         stop_event.set()
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
         for task in done:
             if not task.cancelled() and task.exception() is not None:
                 raise task.exception()  # type: ignore[misc]
     finally:
         stop_event.set()
-        await tool_calls.close()
-        renderer.clear_live_user_text()
-        renderer.reset_assistant_text()
-        for stream in reversed(started_streams):
-            try:
-                stream.stop()
-            except Exception:
-                logger.exception("Failed to stop local audio stream")
-        for stream in reversed(opened_streams):
-            try:
-                stream.close()
-            except Exception:
-                logger.exception("Failed to close local audio stream")
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await tool_calls.close()
+        finally:
+            streams.close()
+            renderer.clear_live_user_text()
+            renderer.reset_assistant_text()
 
 
 async def listen_and_play_realtime(

@@ -3,6 +3,7 @@ import json
 import logging
 import signal
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
@@ -285,15 +286,16 @@ def _reference_speech(np, rate):
 
 
 @pytest.mark.parametrize("mode", ["echo", "overlap", "no_playback"])
-def test_echo_canceller_removes_played_audio_from_microphone_blocks(mode):
+@pytest.mark.parametrize("block,device_delay_ms", [(1024, 256), (8192, 1000)])
+def test_echo_canceller_removes_played_audio_from_microphone_blocks(mode, block, device_delay_ms):
     np = pytest.importorskip("numpy")
     from scipy.signal import correlate, correlation_lags
 
     rate = 16000
     played = _reference_speech(np, rate)
-    block = 1024  # Not a whole number of 10 ms frames.
     echo = np.zeros_like(played)
-    echo[320:] = (played[:-320] * 0.3).astype(np.int16)
+    delay = rate * device_delay_ms // 1000 + 320
+    echo[delay:] = (played[:-delay] * 0.3).astype(np.int16)
     near = np.zeros_like(played)
     if mode == "overlap":
         near[6 * rate : 8 * rate] = played[10 * rate : 12 * rate]
@@ -303,13 +305,11 @@ def test_echo_canceller_removes_played_audio_from_microphone_blocks(mode):
     microphone = (echo.astype(np.int32) + near).astype(np.int16)
     canceller = EchoCanceller(rate, rate)
     cleaned = bytearray()
-    if mode != "no_playback":
-        canceller.render(played[:block].tobytes(), output_delay_s=0.01)
     for start in range(0, len(played), block):
         if mode != "no_playback":
-            # The speaker callback queues the next block before the microphone delivers this one.
-            canceller.render(played[start + block : start + 2 * block].tobytes(), output_delay_s=0.01)
-        cleaned += canceller.capture(microphone[start : start + block].tobytes(), input_delay_s=0.01)
+            jitter = 0.002 * (start // block % 2) if block == 1024 else 0
+            canceller.render(played[start : start + block].tobytes(), (start + delay - 320) / rate + jitter)
+        cleaned += canceller.capture(microphone[start : start + block].tobytes(), start / rate)
 
     assert len(cleaned) == len(played) // (rate // 100) * (rate // 100) * 2
     output = np.frombuffer(bytes(cleaned), dtype=np.int16).astype(float)
@@ -329,7 +329,7 @@ def test_echo_canceller_removes_played_audio_from_microphone_blocks(mode):
         assert reduction_db > 30
 
 
-@pytest.mark.parametrize("case", ["late_microphone_start", "lost_microphone_block"])
+@pytest.mark.parametrize("case", ["late_microphone_start", "lost_microphone_block", "unreported_microphone_gap"])
 def test_echo_canceller_realigns_after_microphone_discontinuity(case):
     np = pytest.importorskip("numpy")
 
@@ -340,17 +340,22 @@ def test_echo_canceller_realigns_after_microphone_discontinuity(case):
     # Silence the speaker played before the first microphone callback.
     skew = 5 * block if case == "late_microphone_start" else 0
     speaker = np.concatenate([np.zeros(skew, dtype=np.int16), played])
-    lost = 4 * rate // block if case == "lost_microphone_block" else -2
+    lost = 4 * rate // block if case != "late_microphone_start" else -2
     canceller = EchoCanceller(rate, rate)
     for start in range(0, skew + block, block):
-        canceller.render(speaker[start : start + block].tobytes(), output_delay_s=0.01)
+        canceller.render(speaker[start : start + block].tobytes(), start / rate)
     cleaned = bytearray()
     for index, start in enumerate(range(0, len(played), block)):
-        canceller.render(speaker[start + skew + block : start + skew + 2 * block].tobytes(), output_delay_s=0.01)
+        canceller.render(
+            speaker[start + skew + block : start + skew + 2 * block].tobytes(),
+            (start + skew + block) / rate,
+        )
         if index == lost:
             continue
         cleaned += canceller.capture(
-            echo[start : start + block].tobytes(), input_delay_s=0.01, lost_input=index == lost + 1
+            echo[start : start + block].tobytes(),
+            (start + skew) / rate,
+            lost_input=case == "lost_microphone_block" and index == lost + 1,
         )
 
     output = np.frombuffer(bytes(cleaned), dtype=np.int16).astype(float)
@@ -367,16 +372,20 @@ def test_echo_canceller_rejects_unsupported_rates():
 
 
 def test_echo_canceller_passes_raw_audio_after_processor_failure(caplog):
-    def fail(_near, _far):
+    calls = []
+
+    def fail(near, far):
+        calls.append((len(near), len(far)))
         raise RuntimeError("native failure")
 
     canceller = EchoCanceller(16000, 16000)
     canceller._apm = SimpleNamespace(process=fail)
     block = bytes(range(256)) * 8
 
-    canceller.render(block, output_delay_s=0.01)
-    assert canceller.capture(block, input_delay_s=0.01) == block
-    assert canceller.capture(block, input_delay_s=0.01) == block
+    canceller.render(block, playback_time_s=0)
+    assert canceller.capture(block, capture_time_s=0) == block
+    assert canceller.capture(block, capture_time_s=1024 / 16000) == block
+    assert calls == [(960, 960)]
     assert [record.getMessage() for record in caplog.records if record.levelname == "ERROR"] == [
         "Echo cancellation failed; sending raw microphone audio for the rest of the session"
     ]
@@ -1587,20 +1596,29 @@ def test_audio_client_does_not_duplicate_partial_transcript_on_cancel(capsys):
     assert playback.buffered_bytes == 0
 
 
-async def test_audio_streams_are_cleaned_up_when_output_start_fails(monkeypatch):
+def test_audio_stream_clock_mapping_uses_the_shortest_read(monkeypatch):
+    readings = iter([0, 10, 20, 22, 30, 34, 40, 46, 50, 58])
+    stream_times = iter([101, 121, 131, 141, 151])
+
+    class Stream:
+        @property
+        def time(self):
+            return next(stream_times)
+
+    monkeypatch.setattr(audio_client_module.time, "monotonic", lambda: next(readings))
+
+    assert audio_client_module._stream_clock_offset(Stream()) == -100
+
+
+@pytest.mark.parametrize("echo_cancellation", [False, True])
+def test_audio_streams_are_cleaned_up_when_startup_fails(monkeypatch, echo_cancellation):
     events = []
-    playback_args = []
-
-    original_playback_buffer = PlaybackBuffer
-
-    def recording_playback_buffer(recv_rate, startup_buffer_ms):
-        playback_args.append((recv_rate, startup_buffer_ms))
-        return original_playback_buffer(recv_rate, startup_buffer_ms)
 
     class FakeStream:
         def __init__(self, name, *, fail_start=False):
             self.name = name
             self.fail_start = fail_start
+            self.time = 0.0
 
         def start(self):
             events.append(f"{self.name}.start")
@@ -1620,23 +1638,30 @@ async def test_audio_streams_are_cleaned_up_when_output_start_fails(monkeypatch)
         RawOutputStream=lambda **_kwargs: output_stream,
     )
     monkeypatch.setitem(sys.modules, "sounddevice", fake_sounddevice)
-    monkeypatch.setattr(audio_client_module, "PlaybackBuffer", recording_playback_buffer)
 
+    config = RealtimeAudioClientConfig(playback_buffer_ms=240, echo_cancellation=echo_cancellation)
     with pytest.raises(RuntimeError, match="output start failed"):
-        await audio_client_module._run_audio_session(
-            SimpleNamespace(),
-            RealtimeAudioClientConfig(playback_buffer_ms=240),
-            Event(),
-        )
+        with audio_client_module._open_audio_streams(config, PlaybackBuffer(16000, 240), audio_client_module.Queue()):
+            pass
 
-    assert playback_args == [(16000, 240)]
-    assert events == [
-        "input.start",
-        "output.start",
-        "input.stop",
-        "output.close",
-        "input.close",
-    ]
+    assert events == ["input.start", "output.start", "input.stop", "output.close", "input.close"]
+
+
+async def test_audio_worker_reports_startup_failure_and_exits():
+    config = RealtimeAudioClientConfig(echo_cancellation=True, input_device=-9999)
+    worker = audio_client_module._AudioWorker(config)
+    with worker:
+        with pytest.raises(RuntimeError):
+            await asyncio.wait_for(worker.wait_for_failure(), timeout=15)
+    assert not worker._process.is_alive()
+
+
+def test_audio_worker_can_stop_before_opening_devices():
+    worker = audio_client_module._AudioWorker(RealtimeAudioClientConfig(echo_cancellation=True, input_device=-9999))
+    worker._stop.set()
+    with worker:
+        pass
+    assert worker._process.exitcode == 0
 
 
 async def test_open_input_stream_is_closed_when_output_construction_fails(monkeypatch):
@@ -1708,6 +1733,38 @@ async def test_audio_client_startup_and_shutdown_use_public_realtime_connection(
     assert len(audio_session_calls) == 1
     assert audio_session_calls[0][2] is stop_event
     assert fake_client.closed is True
+
+
+async def test_audio_session_cancellation_closes_streams_and_stops_receiving(monkeypatch):
+    receiving = asyncio.Event()
+    closed = []
+
+    @contextmanager
+    def streams(*_args):
+        try:
+            yield
+        finally:
+            closed.append("streams")
+
+    class Connection:
+        async def recv(self):
+            receiving.set()
+            try:
+                await asyncio.Future()
+            finally:
+                closed.append("receiver")
+
+    monkeypatch.setattr(audio_client_module, "_open_audio_streams", streams)
+    stop_event = Event()
+    session = asyncio.create_task(
+        audio_client_module._run_audio_session(Connection(), RealtimeAudioClientConfig(), stop_event)
+    )
+    await asyncio.wait_for(receiving.wait(), timeout=1)
+    session.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await session
+    assert stop_event.is_set()
+    assert closed == ["receiver", "streams"]
 
 
 def test_talk_client_uses_signal_driven_shutdown(monkeypatch):
