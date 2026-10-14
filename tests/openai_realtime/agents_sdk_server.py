@@ -15,6 +15,7 @@ from openai.types.realtime.realtime_conversation_item_function_call import (
     RealtimeConversationItemFunctionCall,
 )
 
+from speech_to_speech.LLM.chat import make_assistant_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
@@ -23,6 +24,7 @@ from speech_to_speech.pipeline.events import (
     SpeechStoppedEvent,
     TranscriptionCompletedEvent,
 )
+from speech_to_speech.pipeline.history import ResponseHistory
 from speech_to_speech.pipeline.messages import (
     AUDIO_RESPONSE_DONE,
     AssistantTextPart,
@@ -50,7 +52,12 @@ def _queue_completed_response(env: _ServerEnv, response_key: str, text: str) -> 
         )
     )
     env.output_queue.put(AudioOutput(audio=_audio(), response_key=response_key))
-    env.output_queue.put(AssistantResponseDoneEvent(response_key=response_key))
+    conn_id = list(env.service._conns)[0]
+    chat = env.service._state(conn_id).runtime_config.chat
+    proposal = ResponseHistory.capture(
+        chat, [make_assistant_message(text)], after_item_id=chat.history_anchor_id(), complete=True
+    )
+    env.output_queue.put(AssistantResponseDoneEvent(response_key=response_key, history=proposal))
     env.output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=response_key))
 
 
@@ -73,9 +80,9 @@ def main() -> None:
 
     @env.app.get("/test/state")
     async def state():
-        if not env.service.connection_ids:
+        if not list(env.service._conns):
             return {"connected": False, "inputChunks": env.input_queue.qsize()}
-        conn_id = env.service.connection_ids[0]
+        conn_id = list(env.service._conns)[0]
         st = env.service._state(conn_id)
         session = st.runtime_config.session
         audio_input = session.audio.input
@@ -101,7 +108,7 @@ def main() -> None:
 
     @env.app.post("/test/voice")
     async def voice():
-        if not env.service.connection_ids:
+        if not list(env.service._conns):
             raise HTTPException(status_code=409, detail="No SDK session")
         env.text_output_queue.put(SpeechStartedEvent())
         env.text_output_queue.put(PartialTranscriptionEvent(delta="hello"))
@@ -112,7 +119,7 @@ def main() -> None:
 
     @env.app.post("/test/start-audio")
     async def start_audio():
-        if not env.service.connection_ids:
+        if not list(env.service._conns):
             raise HTTPException(status_code=409, detail="No SDK session")
         response_key = _response_key(env, "interrupt")
         env.output_queue.put(
@@ -134,14 +141,14 @@ def main() -> None:
 
     @env.app.post("/test/barge-in")
     async def barge_in():
-        if not env.service.connection_ids:
+        if not list(env.service._conns):
             raise HTTPException(status_code=409, detail="No SDK session")
         env.text_output_queue.put(SpeechStartedEvent())
         return {"ok": True}
 
     @env.app.post("/test/tool")
     async def tool_call():
-        if not env.service.connection_ids:
+        if not list(env.service._conns):
             raise HTTPException(status_code=409, detail="No SDK session")
         response_key = _response_key(env, "tool")
         call = RealtimeConversationItemFunctionCall(
@@ -150,11 +157,13 @@ def main() -> None:
             name="lookup",
             arguments='{"query":"sdk"}',
         )
-        conn_id = env.service.connection_ids[0]
-        env.service._state(conn_id).runtime_config.chat.add_item(call)
+        conn_id = list(env.service._conns)[0]
+        chat = env.service._state(conn_id).runtime_config.chat
+        proposal = ResponseHistory.capture(chat, [call], after_item_id=chat.history_anchor_id(), complete=True)
         env.text_output_queue.put(
             AssistantOutputEvent(
                 response_key=response_key,
+                history=proposal,
                 parts=[
                     AssistantToolCallPart(
                         tool={
@@ -173,9 +182,9 @@ def main() -> None:
 
     @env.app.post("/test/finish-response")
     async def finish_response():
-        if not env.service.connection_ids:
+        if not list(env.service._conns):
             raise HTTPException(status_code=409, detail="No SDK session")
-        conn_id = env.service.connection_ids[0]
+        conn_id = list(env.service._conns)[0]
         response_key = env.service._state(conn_id).current_response_key
         if response_key is None:
             raise HTTPException(status_code=409, detail="No active response")

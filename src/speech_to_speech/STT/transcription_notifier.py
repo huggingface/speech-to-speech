@@ -77,6 +77,18 @@ class TranscriptionNotifier(BaseHandler[STTOut, LLMIn]):
             speech_stopped_at_s = None
 
         transcript = str(text)
+        if isinstance(transcription, Transcription) and transcription.speaker_attribution is not None:
+            attribution = transcription.speaker_attribution
+            speakers = sorted({interval.speaker for interval in attribution.intervals})
+            status = "unavailable" if not attribution.available else "complete" if attribution.complete else "partial"
+            logger.info(
+                "Diarization at transcription: turn=%s rev=%s speakers=%s status=%s durations=[%s]",
+                turn_id,
+                turn_revision,
+                ",".join(f"speaker_{speaker}" for speaker in speakers) or "unknown",
+                status,
+                attribution.durations_for_log(),
+            )
         # Always close the client-visible transcription item. Empty final STT
         # results should not trigger the LLM, but clients may already have
         # received partial deltas and still need a completed event.
@@ -84,6 +96,9 @@ class TranscriptionNotifier(BaseHandler[STTOut, LLMIn]):
             self.text_output_queue.put(
                 TranscriptionCompletedEvent(
                     transcript=transcript,
+                    speaker_attribution=(
+                        transcription.speaker_attribution if isinstance(transcription, Transcription) else None
+                    ),
                     language_code=language_code,
                     turn_id=turn_id,
                     turn_revision=turn_revision,

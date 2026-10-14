@@ -11,6 +11,7 @@ from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, AudioOutput,
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS import supertonic_tts_handler as supertonic_module
 from speech_to_speech.TTS.supertonic_tts_handler import SupertonicTTSHandler
+from tests.turns import reopen
 
 
 class FakeTTS:
@@ -81,6 +82,24 @@ def test_process_normalizes_or_falls_back_from_pipeline_language_codes(
     assert languages == [expected_code]
 
 
+@pytest.mark.parametrize(("detected", "expected_code"), [("fr", "fr"), ("zh", "es")])
+def test_process_keeps_session_language_for_unsupported_detected_language(
+    monkeypatch: pytest.MonkeyPatch, detected: str, expected_code: str
+) -> None:
+    languages = []
+
+    def synthesize(**kwargs):
+        languages.append(kwargs["lang"])
+        return np.zeros((1, 4), dtype=np.float32), np.array([0.1])
+
+    monkeypatch.setattr(supertonic_module.scipy.signal, "resample_poly", lambda *_args: np.zeros(4))
+    handler = make_handler(synthesize)
+
+    list(handler.process(TTSInput(text="Hello", selected_language="es", tts_language_code=detected)))
+
+    assert languages == [expected_code]
+
+
 def test_process_clips_int16_audio_and_pads_the_tail(monkeypatch: pytest.MonkeyPatch) -> None:
     def synthesize(**_kwargs):
         return np.zeros((1, 3), dtype=np.float32), np.array([0.1])
@@ -113,7 +132,7 @@ def test_process_drops_audio_when_cancelled_during_synthesis() -> None:
 
 def test_stale_keyed_terminal_becomes_cleanup_after_lm_tts_handoff() -> None:
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     handler = SupertonicTTSHandler.__new__(SupertonicTTSHandler)
     handler.speculative_turns = tracker
     terminal = EndOfResponse(
@@ -122,7 +141,7 @@ def test_stale_keyed_terminal_becomes_cleanup_after_lm_tts_handoff() -> None:
         turn_revision=0,
         cancel_generation=7,
     )
-    tracker.observe("turn_1", 1)
+    reopen(tracker)
 
     outputs = list(handler.process(terminal))
     queued = handler.output_for_queue(outputs[0], terminal)

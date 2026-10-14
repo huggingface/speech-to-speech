@@ -1046,7 +1046,7 @@ class StatefulStreamingSTTHandler(BaseSTTHandler):
                 message=commit.error,
                 turn_id=vad_audio.turn_id,
                 turn_revision=vad_audio.turn_revision,
-                speech_stopped_at_s=vad_audio.created_at_s,
+                speech_stopped_at_s=vad_audio.speech_end_at_s,
             )
             return
         if self.speculative_turns is not None and not self.speculative_turns.is_latest(
@@ -1064,7 +1064,7 @@ class StatefulStreamingSTTHandler(BaseSTTHandler):
             language_code=commit.language,
             turn_id=vad_audio.turn_id,
             turn_revision=vad_audio.turn_revision,
-            speech_stopped_at_s=vad_audio.created_at_s,
+            speech_stopped_at_s=vad_audio.speech_end_at_s,
         )
 
     def on_session_end(self) -> None:

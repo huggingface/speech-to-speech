@@ -1,6 +1,8 @@
+import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
+from speech_to_speech.arguments_classes.w2v_stv_arguments import Wav2Vec2STVHandlerArguments
 from speech_to_speech.backend_registry import LLM_BACKENDS, STT_BACKENDS, TTS_BACKENDS
 
 _AUDIO_INPUT_LLM_BACKENDS = ", ".join(
@@ -10,7 +12,41 @@ _PROXY_LLM_BACKENDS = ", ".join(name for name, spec in LLM_BACKENDS.items() if s
 
 
 @dataclass
-class ModuleArguments:
+class ModuleArguments(Wav2Vec2STVHandlerArguments):
+    diarization: bool = field(
+        default=False,
+        metadata={"help": "Enable speaker-aware conversation with Nemotron 3 Diarization."},
+    )
+    diarization_model_name: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Optional Transformers streaming diarization checkpoint. Adds session-local speaker metadata to LLM input."
+        },
+    )
+    diarization_revision: Optional[str] = field(default=None, metadata={"help": "Diarization checkpoint revision."})
+    diarization_device: str = field(
+        default="auto",
+        metadata={
+            "help": "Diarization device: auto, cuda, mps, or cpu. Auto selects CUDA, then MPS, then CPU. "
+            "The global --device overrides this setting. CUDA or MPS is recommended for live sessions."
+        },
+    )
+    diarization_dtype: str = field(default="float32", metadata={"choices": ("float32", "float16", "bfloat16")})
+    diarization_streaming_mode: str = field(
+        default="low_latency",
+        metadata={"choices": ("low_latency", "very_low_latency", "ultra_low_latency")},
+    )
+    diarization_threshold: float = field(
+        default=0.5, metadata={"help": "Speaker activity probability cutoff, between 0 and 1."}
+    )
+    detect_llm_output_language: bool = field(
+        default=False,
+        metadata={
+            "help": "Detect the language of each assistant text chunk before TTS and pass that code to the TTS "
+            "backend. Sends no code for an initial chunk that is too short or ambiguous to classify. "
+            "The detector is warmed at startup. Off by default."
+        },
+    )
     device: Optional[str] = field(
         default=None,
         metadata={"help": "If specified, overrides the device for all handlers."},
@@ -33,10 +69,11 @@ class ModuleArguments:
         },
     )
     llm_backend: Optional[str] = field(
-        default="responses-api",
+        default_factory=lambda: "mlx-lm" if sys.platform == "darwin" else "transformers",
         metadata={
             "choices": tuple(LLM_BACKENDS),
-            "help": "The LLM backend to use. Default is 'responses-api'.",
+            "help": "The LLM backend to use. Defaults to local inference: 'mlx-lm' on macOS, "
+            "'transformers' elsewhere. API backends must be selected explicitly.",
         },
     )
     tts: Optional[str] = field(
@@ -61,6 +98,17 @@ class ModuleArguments:
             )
         },
     )
+    torch_num_threads: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Set PyTorch's CPU intra-op thread count (torch.set_num_threads) for the whole process. "
+            "Unset by default, which keeps the current behaviour: Silero VAD sets PyTorch to one thread "
+            "when it loads. The value is shared by Silero and every other PyTorch CPU model, such as a "
+            "CPU STT, so more threads can speed up CPU STT while slowing Silero; tune it for the whole "
+            "pipeline. It does not configure ONNX Runtime, MLX or other non-PyTorch backends. Must be a "
+            "positive integer."
+        },
+    )
     enable_live_transcription: bool = field(
         default=True,
         metadata={
@@ -70,12 +118,6 @@ class ModuleArguments:
     live_transcription_update_interval: float = field(
         default=0.5,
         metadata={"help": "Update interval for live transcription in seconds (default: 0.5s = 500ms)"},
-    )
-    live_transcription_min_silence_ms: int = field(
-        default=500,
-        metadata={
-            "help": "Minimum silence duration (ms) before ending speech when live transcription is enabled (default: 500ms)"
-        },
     )
     enable_llm_proxy: bool = field(
         default=False,

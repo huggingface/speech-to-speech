@@ -21,7 +21,10 @@ from openai.types.responses.response_function_tool_call import ResponseFunctionT
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.pipeline.history import ResponseHistory
+from speech_to_speech.pipeline.speaker_metadata import PendingSpeakerAttribution, SpeakerAttribution
 from speech_to_speech.pipeline.transcript_logging import log_exception
+from speech_to_speech.pipeline.visemes import Viseme
 
 logger = logging.getLogger(__name__)
 
@@ -48,12 +51,16 @@ class VADAudio(PipelineMessage):
 
     tag: Literal["vad_audio"] = "vad_audio"
     audio: np.ndarray
+    speaker_attribution: SpeakerAttribution | None = None
+    speaker_pending: PendingSpeakerAttribution | None = Field(default=None, exclude=True, repr=False)
     runtime_config: RuntimeConfig | None = None
     mode: Literal["progressive", "final"] | None = None
     turn_id: str | None = None
     turn_revision: int | None = None
     processing_delay_s: float = 0.0
     created_at_s: float = Field(default_factory=perf_counter)
+    # Estimated voiced-audio end on the server monotonic clock, separate from gate age.
+    speech_end_at_s: float | None = None
 
 
 # ── STT → TranscriptionNotifier → LLM ────────────────────────────────
@@ -73,6 +80,7 @@ class Transcription(PipelineMessage):
 
     tag: Literal["transcription"] = "transcription"
     text: str
+    speaker_attribution: SpeakerAttribution | None = None
     language_code: Optional[str] = None
     turn_id: str | None = None
     turn_revision: int | None = None
@@ -143,10 +151,13 @@ class LLMResponseChunk(PipelineMessage):
     represent arbitrary text/tool interleaving without losing order.
     """
 
+    history: ResponseHistory | None = Field(default=None, exclude=True, repr=False)
+
     tag: Literal["llm_response_chunk"] = "llm_response_chunk"
     parts: list[AssistantOutputPart] = Field(default_factory=list)
     text: str = ""
     language_code: Optional[str] = None
+    selected_language: str | None = Field(default=None, exclude=True)
     tools: list[ResponseFunctionToolCall] = Field(default_factory=list)
     runtime_config: RuntimeConfig | None = None
     response: RealtimeResponseCreateParams | None = None
@@ -177,14 +188,21 @@ class TokenUsage(PipelineMessage):
     response_key: str | None = Field(default=None, exclude=True, repr=False)
 
 
+ResponseIncompleteReason: TypeAlias = Literal["max_output_tokens", "content_filter"]
+
+
 class EndOfResponse(PipelineMessage):
     """Sentinel marking the end of a response.
 
-    ``error`` is set when generation could not start (e.g. an out-of-band
-    response whose ``input`` failed validation); the output processor turns it
+    ``error`` is set when generation fails; the output processor turns it
     into a ``response.done(status="failed")`` while still closing the response
     normally for pipeline cleanup.
+
+    ``status`` and ``reason`` describe a provider limit or filter that cut the
+    reply short. An error takes precedence over this incomplete status.
     """
+
+    history: ResponseHistory | None = Field(default=None, exclude=True, repr=False)
 
     tag: Literal["end_of_response"] = "end_of_response"
     turn_id: str | None = None
@@ -192,7 +210,10 @@ class EndOfResponse(PipelineMessage):
     cancel_generation: int | None = None
     response_key: str | None = Field(default=None, exclude=True, repr=False)
     error: str | None = None
+    status: Literal["completed", "incomplete"] = "completed"
+    reason: ResponseIncompleteReason | None = None
     cleanup_only: bool = False
+    input_tool_call_ids: list[str] = Field(default_factory=list)
 
 
 # ── LMOutputProcessor → TTS ──────────────────────────────────────────
@@ -204,6 +225,9 @@ class TTSInput(PipelineMessage):
     tag: Literal["tts_input"] = "tts_input"
     text: str
     language_code: Optional[str] = None
+    selected_language: str | None = Field(default=None, exclude=True)
+    tts_language_code: str | None = Field(default=None, exclude=True)
+    response_assistant_language_code: str | None = Field(default=None, exclude=True)
     runtime_config: RuntimeConfig | None = None
     response: RealtimeResponseCreateParams | None = None
     turn_id: str | None = None
@@ -213,12 +237,30 @@ class TTSInput(PipelineMessage):
     response_key: str | None = Field(default=None, exclude=True, repr=False)
     prefetch_transaction: Any = Field(default=None, exclude=True, repr=False)
 
+    @model_validator(mode="before")
+    @classmethod
+    def snapshot_language(cls, values: Any) -> Any:
+        """Resolve direct TTS inputs once; the LM processor supplies response snapshots."""
+        if not isinstance(values, dict):
+            return values
+        values = values.copy()
+        if "selected_language" not in values:
+            config = values.get("runtime_config")
+            values["selected_language"] = config.selected_language if config is not None else None
+        if "tts_language_code" not in values:
+            selected = values["selected_language"]
+            values["tts_language_code"] = (
+                None if selected == "auto" else selected if selected is not None else values.get("language_code")
+            )
+        return values
+
 
 class AudioOutput(PipelineMessage):
     """Audio queue item tagged with the response generation that produced it."""
 
     tag: Literal["audio_output"] = "audio_output"
     audio: bytes | np.ndarray
+    visemes: list[Viseme] = Field(default_factory=list)
     cancel_generation: int | None = None
     response_key: str | None = Field(default=None, exclude=True, repr=False)
     cleanup_only: bool = False
@@ -230,10 +272,9 @@ class AudioOutput(PipelineMessage):
 class ResponsePrefetchTransaction:
     """Commit irreversible chat cleanup only after a prefetch is claimed.
 
-    Generated assistant items are already provisional and can be rolled back
-    by response key. Image stripping and history trimming are not reversible,
-    so an unclaimed prefetch parks those operations here until the matching
-    standard ``response.create`` arrives.
+    A prefetch's history proposal waits here, unwritten, until the matching
+    standard ``response.create`` claims it. A discarded prefetch never
+    writes history.
     """
 
     def __init__(self) -> None:
@@ -346,21 +387,29 @@ class GenerateResponseRequest(PipelineMessage):
     tag: Literal["generate_response"] = "generate_response"
     response_key: str = Field(default_factory=lambda: uuid4().hex, exclude=True, repr=False)
     runtime_config: RuntimeConfig
+    selected_language: str | None = Field(default=None, exclude=True)
     response: RealtimeResponseCreateParams | None = None
     audio: np.ndarray | None = None
     audio_sample_rate: int = 16000
+    # Stable chat identity for direct audio input, assigned before generation.
+    input_item_id: str | None = None
     language_code: Optional[str] = None
     turn_id: str | None = None
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
     prefetch_transaction: ResponsePrefetchTransaction | None = Field(default=None, exclude=True, repr=False)
 
+    @model_validator(mode="before")
+    @classmethod
+    def snapshot_selected_language(cls, values: Any) -> Any:
+        if not isinstance(values, dict) or "selected_language" in values:
+            return values
+        values = values.copy()
+        values["selected_language"] = values["runtime_config"].selected_language
+        return values
+
 
 # ── Binary sentinels (audio/output queue) ─────────────────────────────
 
 AUDIO_RESPONSE_DONE: Final[bytes] = b"__RESPONSE_DONE__"
 PIPELINE_END: Final[bytes] = b"END"
-
-PipelineEndSentinel: TypeAlias = Literal[b"END"]
-AudioResponseDoneSentinel: TypeAlias = Literal[b"__RESPONSE_DONE__"]
-SentinelMessage: TypeAlias = PipelineEndSentinel | AudioResponseDoneSentinel

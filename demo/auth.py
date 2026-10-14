@@ -140,12 +140,6 @@ def oauth_login_required_reason(request) -> "str | None":
     return None
 
 
-def current_user(request):
-    """The signed-in HF user-info, or None."""
-    info = current_oauth(request)
-    if _oauth_token_expired(info) or not _oauth_token(info):
-        return None
-    return _field(info, "user_info")
 
 
 def current_access_token(request) -> "str | None":

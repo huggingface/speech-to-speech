@@ -30,7 +30,9 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from openai.types.realtime import RealtimeSessionCreateRequest
 
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription, VADAudio
 
 SAMPLE_RATE = 16000
@@ -103,7 +105,10 @@ def build_faster_whisper(monkeypatch):
 
 
 def build_lightning_whisper_mlx(monkeypatch):
-    _ensure_module("lightning_whisper_mlx", LightningWhisperMLX=object)
+    # Importing the installed package initializes Metal even though this test uses a fake model.
+    fake_module = types.ModuleType("lightning_whisper_mlx")
+    fake_module.LightningWhisperMLX = object
+    monkeypatch.setitem(sys.modules, "lightning_whisper_mlx", fake_module)
     from speech_to_speech.STT import lightning_whisper_mlx_handler
     from speech_to_speech.STT.lightning_whisper_mlx_handler import LightningWhisperSTTHandler
 
@@ -240,3 +245,25 @@ def test_lightning_whisper_mlx_keeps_unsupported_language_transcription(monkeypa
     assert outputs[0].text == "Privet, kak dela?"
     assert outputs[0].language_code == "ru-auto"
     assert calls == [{}]
+
+
+def test_lightning_whisper_mlx_uses_session_selection_without_changing_setup(monkeypatch):
+    handler = build_lightning_whisper_mlx(monkeypatch)
+    calls = []
+
+    def transcribe(audio, **kwargs):
+        calls.append(kwargs)
+        return {"text": "Hola", "language": "es"}
+
+    handler.model = SimpleNamespace(transcribe=transcribe)
+    config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(type="realtime", audio={"input": {"transcription": {"language": "es"}}})
+    )
+    item = vad_chunk("final", 3)
+    item.runtime_config = config
+
+    outputs = list(handler.process(item))
+
+    assert calls == [{"language": "es"}]
+    assert outputs[0].language_code == "es"
+    assert handler.start_language == "en"

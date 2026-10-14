@@ -23,8 +23,9 @@ from speech_to_speech.api.openai_realtime.input_state import (
     InputTranscriptionTerminal,
     PendingInputTerminal,
 )
-from speech_to_speech.api.openai_realtime.utils import StreamingPcm16Resampler, resample
+from speech_to_speech.api.openai_realtime.utils import StreamingPcm16Resampler
 from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEvent
+from speech_to_speech.pipeline.speculative_turns import TurnGateAction
 
 if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import ServerEvent
@@ -183,21 +184,46 @@ class AudioHandler(RealtimeBaseHandler):
         if turns is None or pending.turn_id is None:
             return "publish"
         if not turns.is_latest(pending.turn_id, pending.turn_revision):
-            # A later revision replaced this one. The client never learned that
-            # the item stopped, so nothing has to be retracted.
-            return "discard"
+            if turns.is_current_turn(pending.turn_id):
+                # A later revision replaced this one. The client never learned
+                # that the item stopped, so nothing has to be retracted.
+                return "discard"
+            # A newer turn replaced this one. Its user item is final, and no
+            # later event for it will be accepted, so release it once published.
+            pending.input_closed = True
+            return "publish"
         if started_turn_id is not None and pending.turn_id != started_turn_id:
             return "publish"
         st = self._state(conn_id)
-        unanswered = pending.input_closed and not (st.in_response or st.response_pending)
+        active_owns_turn = st.in_response and (
+            st.current_response_turn_id is None
+            or (st.current_response_turn_id, st.current_response_turn_revision)
+            == (pending.turn_id, pending.turn_revision)
+        )
+        pending_owns_turn = False
+        for response_key in st.pending_response_keys:
+            response_latency = self._service.turn_latency_store.get_response(response_key)
+            if response_latency is None or (response_latency.turn_id, response_latency.turn_revision) == (
+                pending.turn_id,
+                pending.turn_revision,
+            ):
+                pending_owns_turn = True
+                break
+        has_response = active_owns_turn or pending_owns_turn
+        unanswered = pending.input_closed and not has_response
         if unanswered or isinstance(pending.transcription, ConversationItemInputAudioTranscriptionFailedEvent):
             # No output will commit this turn: its transcription failed, was
             # empty, or its response ended without output. The item cannot
             # reopen once published, so commit after the same reopen gate
             # used for accepted output.
-            committed = turns.try_commit_if_latest_after_reopen_grace(pending.turn_id, pending.turn_revision)
-            if committed is None:
+            decision = turns.gate(pending.turn_id, pending.turn_revision, commit=True)
+            if decision.action is TurnGateAction.HOLD:
                 return "hold"
+            committed = decision.action is TurnGateAction.ACCEPT
+            if committed and not has_response:
+                # Terminal-only input has no response completion to retire its
+                # commitment. Retire that record once the input is final.
+                turns.close(pending.turn_id, pending.turn_revision)
             return "publish" if committed else "discard"
         if turns.is_committed(pending.turn_id, pending.turn_revision):
             return "publish"
@@ -271,7 +297,13 @@ class AudioHandler(RealtimeBaseHandler):
         one place regardless of how audio arrives.
         """
         st = self._state(conn_id)
-        pcm_bytes = resample(pcm_bytes, src_rate, PIPELINE_SAMPLE_RATE)
+        if src_rate != PIPELINE_SAMPLE_RATE:
+            # The filter state carries over between appends, so chunk boundaries
+            # leave no trace in the audio the VAD and the STT receive.
+            if st.input_audio_resampler_rate != src_rate:
+                st.input_audio_resampler = StreamingPcm16Resampler(src_rate, PIPELINE_SAMPLE_RATE)
+                st.input_audio_resampler_rate = src_rate
+            pcm_bytes = st.input_audio_resampler.push(pcm_bytes)
 
         pcm_bytes = st.audio_remainder + pcm_bytes
 
@@ -290,17 +322,31 @@ class AudioHandler(RealtimeBaseHandler):
             st.audio_buffer_has_data = True
         return chunks
 
-    def handle_audio_commit(self, conn_id: str) -> RealtimeErrorEvent | None:
-        """Commit the audio buffer. Returns an error if no audio was appended."""
+    def handle_audio_commit(self, conn_id: str) -> tuple[list[bytes], RealtimeErrorEvent | None]:
+        """Finish resampling before committing the buffered input audio."""
         st = self._state(conn_id)
-        if not st.audio_buffer_has_data:
-            return self.make_error(
+        resampler = st.input_audio_resampler
+        pending_samples = resampler.pending_output_samples if resampler is not None else 0
+        if (
+            not st.audio_buffer_has_data
+            and len(st.audio_remainder) + pending_samples * BYTES_PER_SAMPLE < CHUNK_SIZE_BYTES
+        ):
+            return [], self.make_error(
                 message="Input audio buffer is empty, nothing to commit.",
                 _type="input_audio_buffer_commit_empty",
             )
+
+        chunks = self.append_pcm(conn_id, resampler.flush(), PIPELINE_SAMPLE_RATE) if resampler is not None else []
+        if not st.audio_buffer_has_data:
+            return chunks, self.make_error(
+                message="Input audio buffer is empty, nothing to commit.",
+                _type="input_audio_buffer_commit_empty",
+            )
+        st.input_audio_resampler = None
+        st.input_audio_resampler_rate = None
         st.audio_buffer_has_data = False
         logger.debug("Audio buffer committed")
-        return None
+        return chunks, None
 
     # ── Pipeline event handlers ────────────────────
 
@@ -319,12 +365,17 @@ class AudioHandler(RealtimeBaseHandler):
             response.discard_tool_followup_prefetch(conn_id)
             st.generation_done_tool_calls.clear()
             st.completed_tool_response_keys.clear()
-        is_reopen = bool(event.reopened and event.turn_id is not None and event.turn_id == st.speculative_turn_id)
+        is_reopen = bool(event.reopened and event.turn_id is not None)
         preserve_active_response = st.in_response
-        previous_input_item_id = (
-            st.input_item_by_turn_revision.get((event.turn_id, st.speculative_turn_revision))
-            if is_reopen and event.turn_id is not None
-            else None
+        # Reopen ownership comes from the protocol item's turn mapping, not a
+        # second mutable copy of the tracker's current revision.
+        previous_input_item_id = next(
+            (
+                item_id
+                for (turn_id, _revision), item_id in st.input_item_by_turn_revision.items()
+                if is_reopen and turn_id == event.turn_id
+            ),
+            None,
         )
         previous_input_item = st.input_items.get(previous_input_item_id) if previous_input_item_id is not None else None
         if previous_input_item_id is not None and previous_input_item is not None:
@@ -345,8 +396,6 @@ class AudioHandler(RealtimeBaseHandler):
             )
         if not is_reopen:
             st.response_usage.turns += 1
-        st.speculative_turn_id = event.turn_id
-        st.speculative_turn_revision = event.turn_revision
         # A reopened revision is still the same externally open speech item.
         # Keep cancellation and revision bookkeeping above, but do not reset
         # a generic client's audio onset with another speech_started event.

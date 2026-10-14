@@ -9,6 +9,7 @@ from openai.types.realtime import RealtimeSessionCreateRequest
 from openai.types.realtime.session_update_event import SessionUpdateEvent
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.pipeline.messages import GenerateResponseRequest
 
 
 def _parse_session(**session_fields) -> RealtimeSessionCreateRequest:
@@ -24,6 +25,24 @@ def _parse_session(**session_fields) -> RealtimeSessionCreateRequest:
 
 
 class TestApplySessionUpdate:
+    def test_selected_language_changes_without_a_turn_snapshot(self):
+        cfg = RuntimeConfig()
+        cfg.apply_session_update(_parse_session(audio={"input": {"transcription": {"language": "es"}}}))
+        assert cfg.selected_language == "es"
+
+        cfg.apply_session_update(_parse_session(audio={"input": {"transcription": {"language": "de"}}}))
+
+        assert cfg.selected_language == "de"
+
+    def test_pending_response_reads_current_selection(self):
+        cfg = RuntimeConfig()
+        cfg.apply_session_update(_parse_session(audio={"input": {"transcription": {"language": "es"}}}))
+        request = GenerateResponseRequest(runtime_config=cfg)
+
+        cfg.apply_session_update(_parse_session(audio={"input": {"transcription": {"language": "de"}}}))
+
+        assert request.runtime_config.selected_language == "de"
+
     def test_partial_update_preserves_untouched_fields(self):
         cfg = RuntimeConfig()
         cfg.apply_session_update(
