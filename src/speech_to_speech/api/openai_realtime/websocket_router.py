@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from queue import Empty, Queue
 from threading import Event as ThreadingEvent
-from typing import Any, Callable, TypeVar
+from typing import Any, Awaitable, Callable, TypeVar
 
 import numpy as np
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
@@ -86,6 +86,8 @@ SESSION_END_DRAIN_TIMEOUT_S = 10.0
 # the pool; a dead handler keeps it quarantined forever, visible in /v1/pool
 # as "stuck".
 SESSION_END_QUARANTINE_TIMEOUT_S = 180.0
+# How long a model switch requested during a turn waits for that turn to finish.
+ROUTING_UPDATE_TIMEOUT_S = 60.0
 QItem = TypeVar("QItem")
 
 
@@ -353,6 +355,9 @@ def _release_session(unit: PipelineUnit, session_id: str) -> None:
         # Already released (e.g. duplicate close callbacks racing).
         return
     old_session.released_at = time.monotonic()
+    if old_session.pending_routing_update is not None:
+        old_session.pending_routing_update[0].cancel()
+        old_session.pending_routing_update = None
     # The send loop can be parked on output from an unclaimed internal
     # prefetch. Invalidate that response while its connection state is still
     # registered, and drop the per-session held item so SESSION_END can drain.
@@ -474,9 +479,24 @@ async def _dispatch_client_event(
                 proposed = SessionRouting.model_validate(routing_update["routing"])
                 if proposed.routes.llm.protocol != _unit_llm_protocol(unit):
                     raise ValueError("The selected LLM protocol does not match this CPU adapter.")
-                await _drain_for_routing_update(unit, session_id)
             except (ValueError, KeyError, TypeError) as exc:
                 await send_correlated([service.make_error(str(exc), "invalid_request_error")])
+                return
+            state = unit.session
+            assert state is not None
+            if state.pending_routing_update is not None:
+                superseded, superseded_send = state.pending_routing_update
+                state.pending_routing_update = None
+                superseded.cancel()
+                await superseded_send(
+                    [service.make_error("Superseded by a later model update.", "invalid_request_error")]
+                )
+            if not await _drain_for_routing_update(unit, session_id):
+                # Client events keep flowing; the switch applies at the next drained turn boundary.
+                task = asyncio.create_task(
+                    _apply_routing_update_when_drained(unit, state, event, proposed, send_correlated)
+                )
+                state.pending_routing_update = (task, send_correlated)
                 return
         err = service.handle_session_update(session_id, event, routing=proposed)
         if err:
@@ -540,27 +560,58 @@ def _unit_llm_protocol(unit: PipelineUnit) -> str:
     raise ValueError("Session routing requires a remote LLM adapter.")
 
 
-async def _drain_for_routing_update(unit: PipelineUnit, session_id: str) -> None:
-    def require_idle():
-        state = unit.service._state(session_id)
-        if (
-            state.in_response
-            or state.response_pending
-            or state.input_items
-            or state.runtime_config.chat.has_pending_tool_calls()
-        ):
-            raise ValueError("Finish or cancel the pending turn and wait for cleanup before changing models.")
+async def _drain_for_routing_update(unit: PipelineUnit, session_id: str) -> bool:
+    """Whether every earlier piece of session work has finished.
 
-    require_idle()
+    A barrier passed through the handler chain proves earlier input was
+    processed. No await follows the final checks, so a caller that applies the
+    switch right away does so before any new client event or pipeline output.
+    """
+    if unit.service.session.is_busy(session_id):
+        return False
     reached = ThreadingEvent()
     unit.input_queue.put(PipelineControlMessage(ControlKind.ROUTING_BARRIER, session_id=session_id, reached=reached))
     if not await asyncio.to_thread(reached.wait, 0.25):
-        raise ValueError("Pipeline work is still draining; retry the model update after cleanup.")
-    require_idle()
-    if not unit.text_output_queue.empty() or not unit.text_prompt_queue.empty():
-        raise ValueError("Pipeline events are still pending; retry the model update after cleanup.")
-    if any(handler.has_pending_session_work() for handler in unit.handlers):
-        raise ValueError("Session work is still pending; finish the turn and wait for cleanup before changing models.")
+        return False
+    return not (
+        unit.service.session.is_busy(session_id)
+        # Audio received while the barrier travelled may start a turn.
+        or not unit.input_queue.empty()
+        or not unit.text_output_queue.empty()
+        or not unit.text_prompt_queue.empty()
+        or any(handler.has_pending_session_work() for handler in unit.handlers)
+    )
+
+
+async def _apply_routing_update_when_drained(
+    unit: PipelineUnit,
+    state: SessionState,
+    event: SessionUpdateEvent,
+    routing: Any,
+    send: Callable[[list[Any]], Awaitable[None]],
+) -> None:
+    """Apply a model switch requested during a turn once that turn has finished."""
+    session_id = state.session_id
+    deadline = time.monotonic() + ROUTING_UPDATE_TIMEOUT_S
+    try:
+        while True:
+            await asyncio.sleep(0.05)
+            drained = await _drain_for_routing_update(unit, session_id)
+            if drained or time.monotonic() >= deadline:
+                # Settle before the send await, so a later update cannot supersede this one.
+                state.pending_routing_update = None
+                if drained:
+                    err = unit.service.handle_session_update(session_id, event, routing=routing)
+                    await send([err or unit.service.build_session_updated(session_id)])
+                else:
+                    message = "The current turn did not finish in time to change models."
+                    await send([unit.service.make_error(message, "invalid_request_error")])
+                return
+    except Exception as exc:
+        log_exception(logger, f"Pending model update failed (session {session_id})", exc)
+    finally:
+        if state.pending_routing_update is not None and state.pending_routing_update[0] is asyncio.current_task():
+            state.pending_routing_update = None
 
 
 def create_app(

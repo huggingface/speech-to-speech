@@ -109,20 +109,14 @@ def test_busy_combined_update_is_atomic(busy):
     assert state.runtime_config is before
 
 
-def test_smaller_context_and_unresolved_tools_are_rejected_without_changes():
-    from openai.types.realtime import RealtimeConversationItemFunctionCall
-
+def test_smaller_context_window_does_not_block_a_switch():
     service = RealtimeService(text_prompt_queue=Queue(), should_listen=Event())
-    sid = service.register(routing=route())
-    state = service._state(sid)
-    before = state.runtime_config
-    assert service.handle_session_update(sid, event(model="second"), routing=route("second", context=8192)) is not None
-    assert state.runtime_config is before
-    before.chat.add_item(
-        RealtimeConversationItemFunctionCall(type="function_call", name="look", call_id="call_pending", arguments="{}")
-    )
-    assert service.handle_session_update(sid, event(model="second"), routing=route("second")) is not None
-    assert state.runtime_config is before
+    sid = service.register(routing=route(context=1_000_000))
+    service._state(sid).runtime_config.chat.add_item(make_user_message("Remember the blue bicycle."))
+    assert service.handle_session_update(sid, event(model="second"), routing=route("second", context=512_000)) is None
+    cfg = service._state(sid).runtime_config
+    assert cfg.routing.routes.llm.model == "second"
+    assert "blue bicycle" in str(cfg.chat.to_transformers_chat())
 
 
 def test_public_models_cannot_change_or_fake_the_trusted_selection():
@@ -400,7 +394,7 @@ def running_unit():
         assert not worker.is_alive()
 
 
-def send_switch(ws, selected, *, update_id="update", **session):
+def send_switch(ws, selected, *, update_id="update", receive=True, **session):
     import json
 
     from openai.resources.realtime.realtime import RealtimeConnection
@@ -417,7 +411,15 @@ def send_switch(ws, selected, *, update_id="update", **session):
     RealtimeConnection(connection=AdmissionProxy()).session.update(
         session={"type": "realtime", **session}, event_id="client-update"
     )
-    return ws.receive_json()
+    return receive_settlement(ws) if receive else None
+
+
+def receive_settlement(ws):
+    """Skip other session events until a routed update is acknowledged."""
+    while True:
+        received = ws.receive_json()
+        if "_session_routing" in received:
+            return received
 
 
 @pytest.mark.parametrize("changed_stages", [("stt",), ("llm",), ("tts",), ("stt", "llm", "tts")])
@@ -515,7 +517,9 @@ def test_websocket_switch_routes_next_spoken_turn_through_selected_models(runnin
                     assert "blue bicycle" in str(create.call_args.kwargs["messages"])
 
 
-def test_cancelled_generation_must_drain_before_switching(running_unit):
+def test_switch_during_cancelled_generation_applies_after_cleanup(running_unit):
+    from time import sleep
+
     from starlette.testclient import TestClient
 
     from speech_to_speech.api.openai_realtime.websocket_router import create_app
@@ -535,7 +539,7 @@ def test_cancelled_generation_must_drain_before_switching(running_unit):
             with client.websocket_connect(
                 "/v1/realtime", headers={"X-Speech-Session-Routing": route().model_dump_json()}
             ) as ws:
-                ws.receive_json()
+                sid = ws.receive_json()["session"]["id"]
                 ws.send_json(
                     {
                         "type": "conversation.item.create",
@@ -552,17 +556,21 @@ def test_cancelled_generation_must_drain_before_switching(running_unit):
                 assert entered.wait(1)
                 ws.send_json({"type": "response.cancel"})
                 assert ws.receive_json()["type"] == "response.done"
-                rejected = send_switch(ws, route("second"), model="second", instructions="must not apply")
-                assert rejected["type"] == "error"
-                assert rejected["error"]["event_id"] == "client-update"
-                assert unit.service._state(unit.session.session_id).runtime_config.session.model == "first"
+                send_switch(ws, route("second"), receive=False, model="second", instructions="applies later")
+                sleep(0.3)
+                assert unit.service._state(sid).runtime_config.session.model == "first"
+
                 release.set()
+                updated = receive_settlement(ws)
+                assert updated["type"] == "session.updated", updated
+                assert updated["session"]["model"] == "second"
+                assert updated["session"]["instructions"] == "applies later"
     finally:
         release.set()
 
 
-def test_cancelled_speech_synthesis_must_drain_before_switching(running_unit, monkeypatch):
-    from time import monotonic, sleep
+def test_switch_during_cancelled_speech_synthesis_applies_after_cleanup(running_unit, monkeypatch):
+    from time import sleep
 
     import numpy as np
     from starlette.testclient import TestClient
@@ -594,35 +602,31 @@ def test_cancelled_speech_synthesis_must_drain_before_switching(running_unit, mo
                 before = unit.service._state(sid).runtime_config
                 unit.input_queue.put(VADAudio(audio=np.zeros(160, dtype=np.float32), runtime_config=before))
                 assert entered.wait(1)
-                assert ws.receive_json()["type"] == "conversation.item.input_audio_transcription.completed"
                 ws.send_json({"type": "response.cancel"})
-                rejected = send_switch(ws, destination, models=destination.models())
-                assert rejected["type"] == "error", rejected
-                assert rejected["error"]["event_id"] == "client-update"
-                assert "Pipeline work is still draining" in rejected["error"]["message"]
+                send_switch(ws, destination, receive=False, models=destination.models())
+                sleep(0.3)
                 assert unit.service._state(sid).runtime_config is before
 
                 release.set()
-                deadline = monotonic() + 2
-                while unit.handlers[-1]._active_operation is not None and monotonic() < deadline:
-                    sleep(0.01)
-                assert unit.handlers[-1]._active_operation is None
-                updated = send_switch(ws, destination, models=destination.models())
+                updated = receive_settlement(ws)
                 assert updated["type"] == "session.updated", updated
                 assert updated["session"]["models"] == destination.models()
     finally:
         release.set()
 
 
-def test_background_final_stt_must_drain_before_switching(running_unit, monkeypatch):
+def test_switch_during_background_final_stt_applies_after_the_turn(running_unit, monkeypatch):
+    from time import sleep
+
     import numpy as np
     from starlette.testclient import TestClient
 
     from speech_to_speech.api.openai_realtime.websocket_router import create_app
     from speech_to_speech.pipeline.messages import VADAudio
     from speech_to_speech.STT.openai_compatible_handler import HttpTranscriptionResult
+    from speech_to_speech.TTS.openai_compatible_handler import HttpSpeechOperation
 
-    unit, stop, _ = running_unit
+    unit, stop, create = running_unit
     entered, release = Event(), Event()
 
     class BlockingTranscription:
@@ -635,28 +639,69 @@ def test_background_final_stt_must_drain_before_switching(running_unit, monkeypa
             release.set()
 
     monkeypatch.setattr(unit.handlers[0], "_make_operation", lambda *args, **kwargs: BlockingTranscription())
-    initial = route()
+    monkeypatch.setattr(
+        HttpSpeechOperation, "iter_bytes", lambda operation, cancel_check: iter([np.zeros(2400, dtype="<i2").tobytes()])
+    )
     try:
         with TestClient(create_app([unit], stop, session_routing_enabled=True)) as client:
             with client.websocket_connect(
-                "/v1/realtime", headers={"X-Speech-Session-Routing": initial.model_dump_json()}
+                "/v1/realtime", headers={"X-Speech-Session-Routing": route().model_dump_json()}
             ) as ws:
-                ws.receive_json()
-                before = unit.service._state(unit.session.session_id).runtime_config
+                sid = ws.receive_json()["session"]["id"]
+                before = unit.service._state(sid).runtime_config
                 unit.input_queue.put(VADAudio(audio=np.zeros(160, dtype=np.float32), runtime_config=before))
                 assert entered.wait(1)
-                rejected = send_switch(ws, route("second"), model="second", instructions="must not apply")
-                assert rejected["type"] == "error"
-                assert rejected["error"]["event_id"] == "client-update"
-                assert unit.service._state(unit.session.session_id).runtime_config is before
+                send_switch(ws, route("second"), receive=False, model="second")
+                sleep(0.3)
+                assert unit.service._state(sid).runtime_config is before
+
+                # The spoken turn completes with the old routes; the switch follows it.
+                release.set()
+                updated = receive_settlement(ws)
+                assert updated["type"] == "session.updated", updated
+                assert updated["session"]["model"] == "second"
+                assert create.call_args.kwargs["model"] == "first"
     finally:
         release.set()
 
 
-def test_switch_asks_handler_to_report_pending_work(running_unit):
+def test_pending_switch_waits_while_the_client_resolves_tool_calls(running_unit):
+    from time import sleep
+
+    from openai.types.realtime import RealtimeConversationItemFunctionCall
     from starlette.testclient import TestClient
 
     from speech_to_speech.api.openai_realtime.websocket_router import create_app
+
+    unit, stop, _ = running_unit
+    with TestClient(create_app([unit], stop, session_routing_enabled=True)) as client:
+        with client.websocket_connect(
+            "/v1/realtime", headers={"X-Speech-Session-Routing": route().model_dump_json()}
+        ) as ws:
+            sid = ws.receive_json()["session"]["id"]
+            before = unit.service._state(sid).runtime_config
+            before.chat.add_item(
+                RealtimeConversationItemFunctionCall(
+                    type="function_call", name="look", call_id="call_pending", arguments="{}"
+                )
+            )
+            send_switch(ws, route("second"), receive=False, model="second")
+            sleep(0.3)
+            assert unit.service._state(sid).runtime_config is before
+
+            # Client events keep flowing while the switch waits.
+            ws.send_json(
+                {
+                    "type": "conversation.item.create",
+                    "item": {"type": "function_call_output", "call_id": "call_pending", "output": "done"},
+                }
+            )
+            updated = receive_settlement(ws)
+            assert updated["type"] == "session.updated", updated
+            assert updated["session"]["model"] == "second"
+
+
+def busy_unit(running_unit):
     from speech_to_speech.baseHandler import BaseHandler
 
     class BackgroundHandler(BaseHandler):
@@ -668,14 +713,67 @@ def test_switch_asks_handler_to_report_pending_work(running_unit):
     unit, stop, _ = running_unit
     handler = BackgroundHandler(stop, Queue(), Queue())
     unit.handlers.append(handler)
+    return unit, stop, handler
+
+
+def test_switch_waits_for_handler_reported_work(running_unit):
+    from time import sleep
+
+    from starlette.testclient import TestClient
+
+    from speech_to_speech.api.openai_realtime.websocket_router import create_app
+
+    unit, stop, handler = busy_unit(running_unit)
     with TestClient(create_app([unit], stop, session_routing_enabled=True)) as client:
         with client.websocket_connect(
             "/v1/realtime", headers={"X-Speech-Session-Routing": route().model_dump_json()}
         ) as ws:
             ws.receive_json()
             before = unit.service._state(unit.session.session_id).runtime_config
-            rejected = send_switch(ws, route("second"), model="second")
-            assert rejected["type"] == "error"
+            send_switch(ws, route("second"), receive=False, model="second")
+            sleep(0.3)
             assert unit.service._state(unit.session.session_id).runtime_config is before
             handler.busy = False
-            assert send_switch(ws, route("second"), model="second")["type"] == "session.updated"
+            assert receive_settlement(ws)["type"] == "session.updated"
+
+
+def test_later_switch_supersedes_a_pending_one(running_unit):
+    from starlette.testclient import TestClient
+
+    from speech_to_speech.api.openai_realtime.websocket_router import create_app
+
+    unit, stop, handler = busy_unit(running_unit)
+    with TestClient(create_app([unit], stop, session_routing_enabled=True)) as client:
+        with client.websocket_connect(
+            "/v1/realtime", headers={"X-Speech-Session-Routing": route().model_dump_json()}
+        ) as ws:
+            ws.receive_json()
+            send_switch(ws, route("second"), update_id="earlier", receive=False, model="second")
+            superseded = send_switch(ws, route("third"), update_id="later", model="third")
+            assert superseded["type"] == "error"
+            assert superseded["_session_routing"] == "earlier"
+            assert superseded["error"]["event_id"] == "client-update"
+            handler.busy = False
+            updated = receive_settlement(ws)
+            assert updated["_session_routing"] == "later"
+            assert updated["session"]["model"] == "third"
+
+
+def test_pending_switch_times_out_without_changes(running_unit, monkeypatch):
+    from starlette.testclient import TestClient
+
+    from speech_to_speech.api.openai_realtime import websocket_router
+
+    monkeypatch.setattr(websocket_router, "ROUTING_UPDATE_TIMEOUT_S", 0.2)
+    unit, stop, _ = busy_unit(running_unit)
+    with TestClient(websocket_router.create_app([unit], stop, session_routing_enabled=True)) as client:
+        with client.websocket_connect(
+            "/v1/realtime", headers={"X-Speech-Session-Routing": route().model_dump_json()}
+        ) as ws:
+            ws.receive_json()
+            before = unit.service._state(unit.session.session_id).runtime_config
+            rejected = send_switch(ws, route("second"), model="second", instructions="must not apply")
+            assert rejected["type"] == "error"
+            assert rejected["error"]["event_id"] == "client-update"
+            assert "did not finish in time" in rejected["error"]["message"]
+            assert unit.service._state(unit.session.session_id).runtime_config is before

@@ -118,21 +118,29 @@ requests and public acknowledgements still use the selected model alias.
 The corresponding `session.updated` or `error` carries the private
 `_session_routing` update ID. The proxy settles the reservation and strips that
 field before forwarding the event. It holds the old/new pool union until this
-acknowledgement and blocks subsequent client events while settlement is pending.
-On an uncertain/lost handoff, the proxy must close and release the allocation.
+acknowledgement. The acknowledgement can arrive after other events, so the proxy
+must keep forwarding client events while settlement is pending. A later routed
+update supersedes a pending one, which settles with an error. On an
+uncertain/lost handoff, the proxy must close and release the allocation.
 
-Updates require an idle turn boundary. The dispatcher rejects active/pending
-responses and unresolved tools, then passes a barrier through the handler chain
-to check that cancellation cleanup and earlier audio have finished. Progressive
-STT, hidden prefetch and compaction must also finish. A rejected combined update
-changes no session fields. A successful update replaces the configuration as a
-whole while retaining the session ID, conversation ID and Chat. Old provider
-compaction callbacks are detached; each future request receives the selected
-model/provider plus the original allocator affinity ID.
+A switch takes effect at an idle turn boundary. When one arrives during a turn
+(an active or pending response, unresolved tool call, speech in progress,
+cancellation cleanup, progressive STT, hidden prefetch or compaction), it waits
+for that work to finish while other client events are processed normally, then
+applies and sends `session.updated`. The server checks idleness by passing a
+barrier through the handler chain. A switch that cannot apply within 60 seconds
+settles with an error. A pending switch applies its other session fields when
+it takes effect, after any plain updates sent while it was pending. A rejected
+combined update changes no session fields. A successful update replaces the
+configuration as a whole while retaining the session ID, conversation ID and
+Chat. Old provider compaction callbacks are detached; each future request
+receives the selected model/provider plus the original allocator affinity ID.
 
 The initial compatibility boundary is deliberately limited: the same LLM adapter
-protocol, full-context continuation, an equal or larger declared context window,
-and tool capability when the session configures tools. Retained history never
+protocol, full-context continuation, and tool capability when the session
+configures tools. The declared context window is informational: if retained
+history exceeds the new model's window, that provider reports it on the next
+turn, as it would for a fixed model. Retained history never
 blocks a switch. On an LLM change, provider-local reasoning items are dropped,
 and retained images or audio are dropped when the destination does not declare
 them (audio becomes the usual history placeholder). Messages and tool calls and

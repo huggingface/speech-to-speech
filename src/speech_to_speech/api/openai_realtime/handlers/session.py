@@ -117,13 +117,8 @@ class SessionHandler(RealtimeBaseHandler):
                 or routing.id != cfg.routing.id
             ):
                 raise ValueError("Invalid session routing update.")
-            if (
-                state.in_response
-                or state.response_pending
-                or state.input_items
-                or state.tool_followup_prefetch_request is not None
-            ):
-                raise ValueError("Finish or cancel the pending turn and wait for cleanup before changing models.")
+            if self.is_busy(conn_id):
+                raise ValueError("Wait for the current turn to finish before changing models.")
             candidate = cfg.model_copy(update={"session": cfg.session.model_copy(deep=True), "routing": routing})
             candidate.apply_session_update(event.session)
             candidate.session = candidate.session  # Reestablish the optional audio structure after a clear.
@@ -143,14 +138,11 @@ class SessionHandler(RealtimeBaseHandler):
             candidate.session.audio.output.voice = voice
             old_llm, new_llm = cfg.routing.routes.llm, routing.routes.llm
             llm_changed = old_llm != new_llm
-            if not cfg.chat.prepare_route_change(
+            cfg.chat.prepare_route_change(
                 drop_reasoning=llm_changed,
                 drop_images=llm_changed and not new_llm.capabilities.images,
                 drop_audio=llm_changed and not new_llm.capabilities.audio_input,
-            ):
-                raise ValueError(
-                    "Resolve pending tools or wait for generation/compaction cleanup before changing models."
-                )
+            )
             # The WebSocket dispatcher has drained serial work. No await occurs
             # between validation and replacement; queued new requests see this
             # complete configuration and the same retained Chat.
@@ -174,10 +166,21 @@ class SessionHandler(RealtimeBaseHandler):
             raise ValueError("The selected LLM does not support the session's tools.")
         if new == old:
             return
-        if caps.context_window is None or caps.continuation != "full_context":
-            raise ValueError("The selected LLM must declare its context window and support full retained context.")
-        if new.protocol != old.protocol or caps.context_window < (old.capabilities.context_window or 0):
-            raise ValueError("The destination must use the same protocol and an equal or larger context window.")
+        if caps.continuation != "full_context":
+            raise ValueError("The selected LLM must support full retained context.")
+        if new.protocol != old.protocol:
+            raise ValueError("The selected LLM must use this session's LLM protocol.")
+
+    def is_busy(self, conn_id: str) -> bool:
+        """Whether the session has a turn, tool call or history update in progress."""
+        state = self._state(conn_id)
+        return bool(
+            state.in_response
+            or state.response_pending
+            or state.input_items
+            or state.tool_followup_prefetch_request is not None
+            or state.runtime_config.chat.has_pending_work()
+        )
 
     def build_session_created(self, conn_id: str) -> SessionCreatedEvent:
         """Build a SessionCreatedEvent populated with the current config."""
