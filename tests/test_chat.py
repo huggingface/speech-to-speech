@@ -334,12 +334,10 @@ class TestAppendToolOutput:
             "function_call_output",
             "message",
         ]
-        assert [item["role"] for item in chat.to_transformers_chat()] == [
-            "assistant",
-            "assistant",
-            "tool",
-            "assistant",
-        ]
+        transformers_chat = chat.to_transformers_chat()
+        assert [item["role"] for item in transformers_chat] == ["assistant", "tool", "assistant"]
+        assert transformers_chat[0]["content"] == "before"
+        assert [call["id"] for call in transformers_chat[0]["tool_calls"]] == ["call_c1"]
 
     def test_reinjection_path(self):
         chat = Chat(size=1)
@@ -971,6 +969,42 @@ class TestToTransformersChat:
         )
         rendered = template.render(messages=chat.to_transformers_chat())
         assert "assistant:\n" in rendered
+
+    def test_text_then_call_is_one_assistant_turn(self):
+        """Speech and the call it led into stay one assistant message.
+
+        As two messages, the text ends the assistant turn in chat templates, and
+        models reading that history answer later requests with text alone.
+        """
+        chat = Chat(size=10)
+        chat.add_item(_user("Set a timer for rice"))
+        chat.add_item(_assistant("I'll set that."))
+        chat.add_item(_fc("c1", "set_timer", '{"minutes": 20}'))
+        chat.add_item(_fco("c1", "set"))
+        chat.add_item(_assistant("Your rice timer is running."))
+
+        result = chat.to_transformers_chat()
+
+        assert [m["role"] for m in result] == ["user", "assistant", "tool", "assistant"]
+        assert result[1]["content"] == "I'll set that."
+        assert [call["function"]["name"] for call in result[1]["tool_calls"]] == ["set_timer"]
+        assert result[2]["tool_call_id"] == "call_c1"
+        assert result[3] == {"role": "assistant", "content": "Your rice timer is running."}
+
+    def test_call_after_a_tool_result_starts_a_new_assistant_message(self):
+        """Only text directly before a call joins it; a call after a result is a new message."""
+        chat = Chat(size=10)
+        chat.add_item(_user("Look it up twice"))
+        chat.add_item(_fc("c1", "lookup"))
+        chat.add_item(_fco("c1", "first"))
+        chat.add_item(_fc("c2", "lookup"))
+        chat.add_item(_fco("c2", "second"))
+
+        result = chat.to_transformers_chat()
+
+        assert [m["role"] for m in result] == ["user", "assistant", "tool", "assistant", "tool"]
+        assert [call["id"] for call in result[1]["tool_calls"]] == ["call_c1"]
+        assert [call["id"] for call in result[3]["tool_calls"]] == ["call_c2"]
 
 
 # ===================================================================
