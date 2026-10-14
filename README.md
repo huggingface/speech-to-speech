@@ -39,11 +39,7 @@ pip install speech-to-speech
 speech-to-speech local
 ```
 
-Then talk: speak, pause, and the assistant answers through your speakers. Stop with `Ctrl+C`. The first run downloads the models, so give it a few minutes. Use headphones or enable echo cancellation below so the assistant does not hear itself.
-
-If speaker feedback interrupts replies, install the `aec` extra with `pip install "speech-to-speech[aec]"` and add `--echo-cancellation` to your `speech-to-speech local` or `talk` command. The client then removes its own playback from the microphone, so you can still interrupt the assistant by voice. Only enable it with speakers; headphones or a headset don't need it, and it costs extra CPU. Without the extra, use `--local_audio_block_mic_during_playback` instead. It pauses microphone capture during playback, so you cannot interrupt the assistant while it speaks, and it cannot be combined with `--echo-cancellation`.
-
-See [echo cancellation](docs/echo-cancellation.md) for requirements, limits and CPU cost.
+Then talk: speak, pause, and the assistant answers through your speakers. Stop with `Ctrl+C`. The first run downloads the models, so give it a few minutes. On speakers, add `--echo-cancellation` so the assistant does not hear itself and you can still interrupt it by voice; headphones don't need it. See [echo cancellation](docs/echo-cancellation.md) for limits and CPU cost.
 
 On Ubuntu, first install the audio libraries with `sudo apt-get install libportaudio2 libsndfile1`. The default Linux Qwen3-TTS wheel targets CUDA 12.8 and Ubuntu 24.04; see the [CUDA note](#cuda-note-for-qwen3-tts) for other systems. On Windows, activate the environment with `.venv\Scripts\Activate.ps1`.
 
@@ -172,7 +168,6 @@ pip install "speech-to-speech[paraformer]"      # Paraformer STT through FunASR
 pip install "speech-to-speech[fireredvad]"      # FireRed streaming VAD
 pip install "speech-to-speech[nemo]"            # Parakeet Unified, Nemotron, and Orukeet STT through NeMo
 pip install "speech-to-speech[mlx-lm]"          # mlx-vlm support for vision models on macOS
-pip install "speech-to-speech[aec]"             # Echo cancellation for the packaged mic/speaker client
 ```
 
 Deprecated implementations, including MeloTTS, live in [`archive/`](./archive) and are no longer wired into the CLI.

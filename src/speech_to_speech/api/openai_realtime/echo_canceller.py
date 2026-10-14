@@ -19,6 +19,8 @@ class EchoCanceller:
     Only the microphone callback calls the native processor. The speaker
     callback feeds a bounded reference queue protected by the same lock.
     Missing references become silence; incomplete capture frames carry over.
+    The queue is discarded on the first capture and after lost microphone
+    audio, because a reference that trails its echo cannot be cancelled.
     If the native processor fails, the canceller logs once and passes raw
     microphone audio from then on, so the audio callback keeps running.
     """
@@ -29,12 +31,7 @@ class EchoCanceller:
                 raise ValueError(f"Echo cancellation supports {_SUPPORTED_RATES} Hz, not {rate} Hz")
         if send_rate != recv_rate:
             raise ValueError("Echo cancellation requires matching --send-rate and --recv-rate")
-        try:
-            from pywebrtc_audio import AudioProcessor
-        except ImportError as exc:
-            raise ImportError(
-                "Echo cancellation requires the 'aec' extra: pip install 'speech-to-speech[aec]'"
-            ) from exc
+        from pywebrtc_audio import AudioProcessor
 
         self._apm = AudioProcessor(sample_rate=send_rate, echo_cancellation=True)
         self._frame_bytes = send_rate // 100 * 2
@@ -44,6 +41,7 @@ class EchoCanceller:
         self._lock = Lock()
         self._output_delay_s = 0.0
         self._failed = False
+        self._capturing = False
 
     def render(self, audio: bytes, output_delay_s: float) -> None:
         """Queue audio about to play, with its time until it reaches the speaker."""
@@ -55,11 +53,18 @@ class EchoCanceller:
             while len(self._render) > self._render_limit:
                 del self._render[: self._frame_bytes]
 
-    def capture(self, audio: bytes, input_delay_s: float) -> bytes:
-        """Return microphone audio with echo removed, in whole 10 ms frames."""
+    def capture(self, audio: bytes, input_delay_s: float, *, lost_input: bool = False) -> bytes:
+        """Return microphone audio with echo removed, in whole 10 ms frames.
+
+        Set ``lost_input`` when microphone samples were dropped before ``audio``.
+        """
         with self._lock:
             if self._failed:
                 return audio
+            if lost_input or not self._capturing:
+                self._capturing = True
+                self._capture.clear()
+                self._render.clear()
             try:
                 return self._process(audio, input_delay_s)
             except Exception:

@@ -1,19 +1,19 @@
 # Echo cancellation
 
 `--echo-cancellation` makes the packaged `talk` and `local` clients remove
-their own speaker playback from the microphone. See the
-[README](../README.md) for setup. It stays off by default.
+their own speaker playback from the microphone, so you can interrupt the
+assistant by voice without headphones. It stays off by default; headphones or
+a headset don't need it.
 
 ## How it works
 
-The `aec` extra installs `pywebrtc-audio`, which wraps WebRTC's echo
-canceller (AEC3). Noise suppression and gain control stay off. The binding
-applies its high-pass filter whenever echo cancellation is on.
+The client uses `pywebrtc-audio`, which wraps WebRTC's echo canceller (AEC3).
+Noise suppression and gain control stay off. The binding applies its
+high-pass filter whenever echo cancellation is on.
 
-The speaker callback queues each block it plays. The microphone callback
-pairs that audio with its own in 10 ms frames and calls the canceller. The
-queue holds at most 500 ms of playback; when it runs short, the canceller
-treats the missing playback as silence.
+`--echo-cancellation` cannot be combined with
+`--local_audio_block_mic_during_playback`, which pauses the microphone during
+playback and so disables voice interruptions.
 
 ## Limits
 
@@ -43,7 +43,7 @@ To measure the canceller's processing cost on your machine from a source
 checkout:
 
 ```bash
-uv sync --python 3.11 --extra aec
+uv sync --python 3.11
 PYTHONPATH=src .venv/bin/python scripts/benchmark_echo_cancellation.py --seconds 10 --repeats 3 --paced
 ```
 

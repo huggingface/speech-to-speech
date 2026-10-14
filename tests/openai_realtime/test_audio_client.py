@@ -274,19 +274,23 @@ def test_playback_buffer_starts_immediately_by_default():
     assert playback.buffered_bytes == 0
 
 
-@pytest.mark.parametrize("mode", ["echo", "overlap", "no_playback"])
-def test_echo_canceller_removes_played_audio_from_microphone_blocks(mode):
-    np = pytest.importorskip("numpy")
-    pytest.importorskip("pywebrtc_audio")
+def _reference_speech(np, rate):
     import soundfile
     import soxr
-    from scipy.signal import correlate, correlation_lags
 
-    rate = 16000
     speech, source_rate = soundfile.read(
         Path(__file__).parents[2] / "src/speech_to_speech/TTS/ref_audio.wav", dtype="float32"
     )
-    played = (soxr.resample(speech.mean(axis=1), source_rate, rate)[: 12 * rate] * 12000).astype(np.int16)
+    return (soxr.resample(speech.mean(axis=1), source_rate, rate)[: 12 * rate] * 12000).astype(np.int16)
+
+
+@pytest.mark.parametrize("mode", ["echo", "overlap", "no_playback"])
+def test_echo_canceller_removes_played_audio_from_microphone_blocks(mode):
+    np = pytest.importorskip("numpy")
+    from scipy.signal import correlate, correlation_lags
+
+    rate = 16000
+    played = _reference_speech(np, rate)
     block = 1024  # Not a whole number of 10 ms frames.
     echo = np.zeros_like(played)
     echo[320:] = (played[:-320] * 0.3).astype(np.int16)
@@ -299,9 +303,12 @@ def test_echo_canceller_removes_played_audio_from_microphone_blocks(mode):
     microphone = (echo.astype(np.int32) + near).astype(np.int16)
     canceller = EchoCanceller(rate, rate)
     cleaned = bytearray()
+    if mode != "no_playback":
+        canceller.render(played[:block].tobytes(), output_delay_s=0.01)
     for start in range(0, len(played), block):
         if mode != "no_playback":
-            canceller.render(played[start : start + block].tobytes(), output_delay_s=0.01)
+            # The speaker callback queues the next block before the microphone delivers this one.
+            canceller.render(played[start + block : start + 2 * block].tobytes(), output_delay_s=0.01)
         cleaned += canceller.capture(microphone[start : start + block].tobytes(), input_delay_s=0.01)
 
     assert len(cleaned) == len(played) // (rate // 100) * (rate // 100) * 2
@@ -322,6 +329,36 @@ def test_echo_canceller_removes_played_audio_from_microphone_blocks(mode):
         assert reduction_db > 30
 
 
+@pytest.mark.parametrize("case", ["late_microphone_start", "lost_microphone_block"])
+def test_echo_canceller_realigns_after_microphone_discontinuity(case):
+    np = pytest.importorskip("numpy")
+
+    rate, block = 16000, 1024
+    played = _reference_speech(np, rate)
+    echo = np.zeros_like(played)
+    echo[320:] = (played[:-320] * 0.3).astype(np.int16)
+    # Silence the speaker played before the first microphone callback.
+    skew = 5 * block if case == "late_microphone_start" else 0
+    speaker = np.concatenate([np.zeros(skew, dtype=np.int16), played])
+    lost = 4 * rate // block if case == "lost_microphone_block" else -2
+    canceller = EchoCanceller(rate, rate)
+    for start in range(0, skew + block, block):
+        canceller.render(speaker[start : start + block].tobytes(), output_delay_s=0.01)
+    cleaned = bytearray()
+    for index, start in enumerate(range(0, len(played), block)):
+        canceller.render(speaker[start + skew + block : start + skew + 2 * block].tobytes(), output_delay_s=0.01)
+        if index == lost:
+            continue
+        cleaned += canceller.capture(
+            echo[start : start + block].tobytes(), input_delay_s=0.01, lost_input=index == lost + 1
+        )
+
+    output = np.frombuffer(bytes(cleaned), dtype=np.int16).astype(float)
+    tail = 4 * rate
+    reduction_db = 10 * np.log10(np.mean(echo[-tail:].astype(float) ** 2) / (np.mean(output[-tail:] ** 2) + 1e-9))
+    assert reduction_db > 30
+
+
 def test_echo_canceller_rejects_unsupported_rates():
     with pytest.raises(ValueError, match="22050 Hz"):
         EchoCanceller(22050, 16000)
@@ -330,8 +367,6 @@ def test_echo_canceller_rejects_unsupported_rates():
 
 
 def test_echo_canceller_passes_raw_audio_after_processor_failure(caplog):
-    pytest.importorskip("pywebrtc_audio")
-
     def fail(_near, _far):
         raise RuntimeError("native failure")
 

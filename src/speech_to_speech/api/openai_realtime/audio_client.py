@@ -952,7 +952,11 @@ async def _run_audio_session(
             return
         chunk = bytes(indata)
         if echo_canceller is not None:
-            chunk = echo_canceller.capture(chunk, time_info.currentTime - time_info.inputBufferAdcTime)
+            chunk = echo_canceller.capture(
+                chunk,
+                time_info.currentTime - time_info.inputBufferAdcTime,
+                lost_input=bool(status and status.input_overflow),
+            )
             if not chunk:
                 return
         try:
