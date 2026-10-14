@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 import numpy as np
 
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.openai_compatible_handler import (
@@ -119,6 +120,7 @@ class MiniMaxTTSHandler(OpenAICompatibleTTSHandler):
         *,
         text: str,
         voice: str | dict[str, str],
+        runtime_config: RuntimeConfig | None = None,
         language: str | None = None,
         use_setup_language: bool = True,
     ) -> HttpSpeechOperation:
