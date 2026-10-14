@@ -65,6 +65,7 @@ It listens at `ws://127.0.0.1:8765/v1/realtime`. Connect with:
 
 - the packaged audio client: `speech-to-speech talk --url ws://127.0.0.1:8765/v1/realtime`
 - the [browser demo](./demo/README.md#quick-start-local)
+- the optional [Open WebUI local example](./demo/openwebui/README.md), for saved text/voice chat with typed context updates during a call
 - any client using the core OpenAI Realtime events; the OpenAI Agents SDK is tested over both transports (see [Realtime API](#realtime-api))
 - [LiveKit Agents](./demo/livekit/README.md), as the agent's realtime model
 
