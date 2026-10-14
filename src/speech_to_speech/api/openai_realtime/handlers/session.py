@@ -133,14 +133,21 @@ class SessionHandler(RealtimeBaseHandler):
             voice = candidate.session.audio.output.voice
             audio = event.session.audio
             explicit_voice = audio is not None and audio.output is not None and "voice" in audio.output.model_fields_set
-            if old_tts != new_tts and not explicit_voice:
+            supported_voices = [new_tts.voice, *new_tts.voices]
+            if old_tts != new_tts and not explicit_voice and voice not in supported_voices:
                 voice = new_tts.voice
-            if voice not in [new_tts.voice, *new_tts.voices]:
+            if voice not in supported_voices:
                 raise ValueError("The selected TTS model does not support this voice.")
             candidate.apply_routing_defaults()
             assert candidate.session.audio is not None and candidate.session.audio.output is not None
             candidate.session.audio.output.voice = voice
-            if not cfg.chat.prepare_route_change():
+            old_llm, new_llm = cfg.routing.routes.llm, routing.routes.llm
+            llm_changed = old_llm != new_llm
+            if not cfg.chat.prepare_route_change(
+                drop_reasoning=llm_changed,
+                drop_images=llm_changed and not new_llm.capabilities.images,
+                drop_audio=llm_changed and not new_llm.capabilities.audio_input,
+            ):
                 raise ValueError(
                     "Resolve pending tools or wait for generation/compaction cleanup before changing models."
                 )
@@ -171,25 +178,6 @@ class SessionHandler(RealtimeBaseHandler):
             raise ValueError("The selected LLM must declare its context window and support full retained context.")
         if new.protocol != old.protocol or caps.context_window < (old.capabilities.context_window or 0):
             raise ValueError("The destination must use the same protocol and an equal or larger context window.")
-        snapshot = candidate.chat.copy(deep=True)
-
-        def validate(value):
-            if isinstance(value, dict):
-                kind = value.get("type")
-                if kind in {"input_image", "image_url"} and not caps.images:
-                    raise ValueError("The selected LLM does not support retained images.")
-                if kind == "input_audio" and (not caps.audio_input or new.protocol != "chat_completions"):
-                    raise ValueError("The selected LLM cannot preserve the retained audio input.")
-                if kind in {"function_call", "function_call_output"} and not caps.tools:
-                    raise ValueError("The selected LLM does not support retained tool history.")
-                for item in value.values():
-                    validate(item)
-            elif isinstance(value, list):
-                for item in value:
-                    validate(item)
-
-        for item in snapshot.buffer:
-            validate(item.model_dump(mode="json"))
 
     def build_session_created(self, conn_id: str) -> SessionCreatedEvent:
         """Build a SessionCreatedEvent populated with the current config."""

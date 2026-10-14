@@ -474,13 +474,24 @@ class Chat:
         with self._lock:
             return bool(self._pending_tool_calls)
 
-    def prepare_route_change(self) -> bool:
-        """At a drained turn boundary, detach the old provider's deferred compactor."""
+    def prepare_route_change(self, *, drop_reasoning: bool, drop_images: bool, drop_audio: bool) -> bool:
+        """At a drained turn boundary, adapt retained history to a new LLM route.
+
+        Detaches the old provider's deferred compactor and drops what the
+        destination cannot use: provider-local reasoning items, images, or audio
+        (replaced with the history placeholder). Everything else is kept.
+        """
         with self._lock:
             if self._pending_tool_calls or self._provisional_generations or self._compact_in_flight:
                 return False
             self._deferred_compactor = None
-            return True
+            if drop_reasoning:
+                self.buffer = [item for item in self.buffer if not isinstance(item, ResponseReasoningItem)]
+        if drop_images:
+            self.strip_images()
+        if drop_audio:
+            self.compact_audio_history(0)
+        return True
 
     def trim_if_needed(self, compactor: CompactFn | None = None) -> None:
         """Enforce the size limit after a generation completes. Fires when

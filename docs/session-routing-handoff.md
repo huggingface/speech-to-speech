@@ -132,8 +132,13 @@ model/provider plus the original allocator affinity ID.
 
 The initial compatibility boundary is deliberately limited: the same LLM adapter
 protocol, full-context continuation, an equal or larger declared context window,
-and capabilities for configured tools and retained images/audio/tool history.
-Unsupported voice choices fail during a routed update. No tokenizer conversion,
+and tool capability when the session configures tools. Retained history never
+blocks a switch. On an LLM change, provider-local reasoning items are dropped,
+and retained images or audio are dropped when the destination does not declare
+them (audio becomes the usual history placeholder). Messages and tool calls and
+results carry over. A TTS change keeps the current voice when the new route
+supports it and otherwise uses the route's default voice; an explicitly
+requested unsupported voice fails the update. No tokenizer conversion,
 backend-local continuation migration, in-flight generation migration or arbitrary
 local model loading is implemented.
 
@@ -141,8 +146,8 @@ This extends [#547](https://github.com/huggingface/speech-to-speech/issues/547).
 OpenAI's hosted Realtime API does not allow model changes through `session.update`
 ([official reference](https://developers.openai.com/api/reference/resources/realtime/client-events#session.update)).
 The hosted API also permits a voice change only before the session has produced
-audio. This opt-in routing extension can select a TTS route with a different
-default voice after earlier audio, so clients must not assume hosted Realtime
+audio. This opt-in routing extension can change the voice after earlier audio
+when the new TTS route does not support the current one, so clients must not assume hosted Realtime
 voice-change behavior on these connections.
 The optional `models` field may require a client's raw-event/extra-fields support;
 the LLM-only `model` spelling uses the existing event shape. Clients that do not

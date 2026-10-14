@@ -162,7 +162,7 @@ def test_bad_voice_update_is_atomic():
     assert error is not None
     assert service._state(sid).runtime_config is before
     assert service.handle_session_update(sid, event(models={"tts": "tts-alternative"}), routing=with_tts) is None
-    assert service.build_session_updated(sid).session.audio.output.voice == "alloy"
+    assert service.build_session_updated(sid).session.audio.output.voice == "aiden"
 
 
 def test_stt_switch_does_not_require_unchanged_llm_capabilities():
@@ -271,36 +271,76 @@ def test_managed_voice_update_fails_before_changing_any_session_setting():
     assert service._state(fixed_route).runtime_config.session.audio.output.voice == "missing"
 
 
-def test_media_and_completed_tool_history_require_destination_capabilities():
+def test_llm_switch_keeps_history_and_drops_what_the_destination_cannot_use():
     from openai.types.realtime import RealtimeConversationItemFunctionCall, RealtimeConversationItemFunctionCallOutput
+    from openai.types.responses import ResponseReasoningItem
 
-    from speech_to_speech.LLM.chat import UserContent, make_user_audio_message
+    from speech_to_speech.api.openai_realtime.session_routing import TranscriptionRoute
+    from speech_to_speech.LLM.chat import AUDIO_INPUT_HISTORY_PLACEHOLDER, UserContent, make_user_audio_message
 
-    image_message = make_user_message("")
-    image_message.content = [UserContent(type="input_image", image_url="https://example.com/image.png")]
-
-    for item, selected in [
-        (image_message, route("second", images=False)),
-        (make_user_audio_message("AA=="), route("second", audio=False)),
-    ]:
-        service = RealtimeService(text_prompt_queue=Queue(), should_listen=Event())
-        sid = service.register(routing=route())
-        cfg = service._state(sid).runtime_config
-        cfg.chat.add_item(item)
-        assert service.handle_session_update(sid, event(model="second"), routing=selected) is not None
-        assert service._state(sid).runtime_config is cfg
+    image_message = make_user_message("Look at this.")
+    image_message.content.append(UserContent(type="input_image", image_url="https://example.com/image.png"))
+    initial = route(images=False, audio=False)
     service = RealtimeService(text_prompt_queue=Queue(), should_listen=Event())
-    sid = service.register(routing=route())
+    sid = service.register(routing=initial)
+    chat = service._state(sid).runtime_config.chat
+    for item in (
+        image_message,
+        make_user_audio_message("AA=="),
+        ResponseReasoningItem(id="rs_first", type="reasoning", summary=[], encrypted_content="first-provider"),
+        RealtimeConversationItemFunctionCall(type="function_call", name="look", call_id="call_done", arguments="{}"),
+        RealtimeConversationItemFunctionCallOutput(type="function_call_output", call_id="call_done", output="result"),
+    ):
+        chat.add_item(item)
+    retained = [item.model_copy(deep=True) for item in chat.buffer]
+
+    # A speech-only switch leaves the LLM's retained history untouched.
+    stt_only = initial.model_copy(
+        update={
+            "routes": initial.routes.model_copy(
+                update={"stt": TranscriptionRoute(model="asr-second", provider="hf", protocol="transcriptions")}
+            )
+        }
+    )
+    assert service.handle_session_update(sid, event(models={"stt": "asr-second"}), routing=stt_only) is None
+    assert chat.buffer == retained
+
+    selected = route("second", images=False, audio=False, tools=False)
+    assert service.handle_session_update(sid, event(model="second"), routing=selected) is None
     cfg = service._state(sid).runtime_config
-    cfg.chat.add_item(
-        RealtimeConversationItemFunctionCall(type="function_call", name="look", call_id="call_done", arguments="{}")
-    )
-    cfg.chat.add_item(
-        RealtimeConversationItemFunctionCallOutput(type="function_call_output", call_id="call_done", output="result")
-    )
-    assert not cfg.chat.has_pending_tool_calls()
-    assert service.handle_session_update(sid, event(model="second"), routing=route("second", tools=False)) is not None
-    assert service._state(sid).runtime_config is cfg
+    assert cfg.chat is chat
+    assert cfg.routing.routes.llm.model == "second"
+    assert not any(isinstance(item, ResponseReasoningItem) for item in chat.buffer)
+    parts = [part for item in chat.buffer if item.type == "message" for part in item.content]
+    assert [(part.type, part.text) for part in parts] == [
+        ("input_text", "Look at this."),
+        ("input_text", AUDIO_INPUT_HISTORY_PLACEHOLDER),
+    ]
+    assert [item.type for item in chat.buffer if item.type != "message"] == ["function_call", "function_call_output"]
+    assert "call_done" in str(chat.to_transformers_chat())
+
+
+def test_tts_switch_keeps_a_supported_voice_and_otherwise_uses_the_route_default():
+    from speech_to_speech.api.openai_realtime.session_routing import SpeechRoute
+
+    for voices, expected in ((["aiden", "alloy"], "aiden"), ([], "alloy")):
+        initial = route()
+        selected = initial.model_copy(
+            update={
+                "routes": initial.routes.model_copy(
+                    update={
+                        "tts": SpeechRoute(
+                            model="tts-alternative", provider="hf", protocol="speech", voice="alloy", voices=voices
+                        )
+                    }
+                )
+            }
+        )
+        service = RealtimeService(text_prompt_queue=Queue(), should_listen=Event())
+        sid = service.register(routing=initial)
+        assert service.build_session_updated(sid).session.audio.output.voice == "aiden"
+        assert service.handle_session_update(sid, event(models={"tts": "tts-alternative"}), routing=selected) is None
+        assert service.build_session_updated(sid).session.audio.output.voice == expected
 
 
 @pytest.fixture
@@ -465,7 +505,8 @@ def test_websocket_switch_routes_next_spoken_turn_through_selected_models(runnin
                     "X-Speech-Session-Id": "allocated-session",
                 }
                 assert speech_requests[-1].payload["model"] == f"tts-{expected['tts']}"
-                assert speech_requests[-1].payload["voice"] == ("aiden" if expected["tts"] == "first" else "alloy")
+                # Both TTS routes support the session's voice, so a switch keeps it.
+                assert speech_requests[-1].payload["voice"] == "aiden"
                 assert speech_requests[-1].extra_headers == {
                     "X-Speech-Provider": f"{expected['tts']}-provider",
                     "X-Speech-Session-Id": "allocated-session",
