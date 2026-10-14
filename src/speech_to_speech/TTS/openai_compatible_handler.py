@@ -23,6 +23,7 @@ from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.turn_latency import record_response_e2e, record_response_tts_ttfa
 
 logger = logging.getLogger(__name__)
 
@@ -511,10 +512,11 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         def record_first_provider_audio() -> None:
             if cancel_check():
                 return
-            store = getattr(self, "turn_latency_store", None)
-            tracker = store.get_response(tts_input.response_key) if store else None
-            if tracker is not None:
-                tracker.record_tts_ttfa(perf_counter() - started_at_s)
+            record_response_tts_ttfa(
+                getattr(self, "turn_latency_store", None),
+                tts_input.response_key,
+                perf_counter() - started_at_s,
+            )
 
         try:
             voice = self._resolve_voice(tts_input.runtime_config, tts_input.response)
@@ -812,9 +814,9 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         if tts_input.speech_stopped_at_s is not None:
             latency_s = max(0.0, perf_counter() - tts_input.speech_stopped_at_s)
             store = getattr(self, "turn_latency_store", None)
-            tracker = store.get_response(tts_input.response_key) if store else None
-            if tracker is not None:
-                tracker.record_e2e(latency_s)
+            recorded = record_response_e2e(store, tts_input.response_key, latency_s)
+            if store is not None and not recorded:
+                return
             logger.info(
                 "Last speech detected to first speech out: %.3fs (turn=%s rev=%s)",
                 latency_s,

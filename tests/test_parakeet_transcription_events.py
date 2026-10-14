@@ -474,3 +474,63 @@ def test_on_session_end_resets_streaming_state():
     assert handler.processing_final is False
     assert handler.last_language is None
     assert reset_calls == [True]
+
+
+@pytest.mark.parametrize("outcome", ["timeout", "empty", "partial", "error"])
+def test_superseded_progressive_attempt_cleans_recreated_latency(monkeypatch, outcome):
+    from queue import Queue
+    from threading import Lock
+
+    import speech_to_speech.utils.mlx_lock as mlx_lock
+    from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+    from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
+    from speech_to_speech.VAD.vad_handler import VADHandler
+    from tests.turns import reopen
+
+    revisions = SpeculativeTurnTracker()
+    turn_id, revision = revisions.start_turn()
+    store = TurnLatencyStore()
+    current = store.get_or_create_for_turn(turn_id, revision + 1)
+    handler = object.__new__(ParakeetTDTSTTHandler)
+    handler.backend = "mlx"
+    handler.enable_live_transcription = True
+    handler.processing_final = False
+    handler.speculative_turns = revisions
+    handler.turn_latency_store = store
+    handler.queue_in = Queue()
+    old = VADAudio(audio=np.zeros(1600, dtype=np.float32), mode="progressive", turn_id=turn_id, turn_revision=revision)
+    assert handler.should_process_input(old)
+    handler.queue_in.put(old.model_copy(update={"mode": "final"}))
+    store.get_or_create_for_turn(turn_id, revision)
+
+    vad = object.__new__(VADHandler)
+    vad.speculative_turns = revisions
+    vad.turn_latency_store = store
+    vad.queue_out = handler.queue_in
+
+    def supersede_before_tracker_binding(*args):
+        assert reopen(revisions, turn_id, revision) == revision + 1
+        vad.before_emit_output(old.model_copy(update={"turn_revision": revision + 1}))
+        assert store.pending_for_turn(turn_id, revision) is None
+
+    monkeypatch.setattr(handler, "_prepare_live_transcription_turn", supersede_before_tracker_binding)
+
+    def transcribe(audio):
+        if outcome == "error":
+            raise RuntimeError("controlled progressive failure")
+        return "old partial" if outcome == "partial" else ""
+
+    monkeypatch.setattr(handler, "_show_progressive_transcription", transcribe)
+    lock = Lock()
+    monkeypatch.setattr(mlx_lock, "_mlx_lock", lock)
+    if outcome == "timeout":
+        lock.acquire()
+    try:
+        outputs = list(handler.process(old))
+    finally:
+        if lock.locked():
+            lock.release()
+
+    for output in outputs:
+        assert not handler.should_emit_output(output)
+    assert store._pending_turn == {(turn_id, revision + 1): current}

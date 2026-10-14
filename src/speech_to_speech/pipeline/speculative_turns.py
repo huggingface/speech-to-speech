@@ -192,35 +192,6 @@ class SpeculativeTurnTracker:
             self._condition.notify_all()
             return self._current.turn_id, self._current.revision
 
-    def observe(self, turn_id: str | None, revision: int | None) -> None:
-        """Compatibility adapter for revisions created outside the tracker.
-
-        New conversation turns must use :meth:`start_turn`. Existing call sites
-        may still report a newer revision for the current turn.
-        """
-        if turn_id is None or revision is None:
-            return
-        with self._condition:
-            if self._current is None:
-                self._sequence += 1
-                self._current = _TurnReference(self._sequence, turn_id, revision)
-                self._phase = TurnPhase.LISTENING
-            elif (
-                self._current.turn_id == turn_id
-                and revision > self._current.revision
-                and not self._blocks_reopen_locked(turn_id, self._current.revision)
-            ):
-                self._current = _TurnReference(self._current.sequence, turn_id, revision)
-                self._closed_current = None
-                self._phase = TurnPhase.LISTENING
-                self._pending_reopen = None
-                self._reopen_grace = None
-                self._processing_deadline = None
-            else:
-                return
-            logger.debug("Observed speculative turn %s revision %d", turn_id, revision)
-            self._condition.notify_all()
-
     def is_latest(self, turn_id: str | None, revision: int | None) -> bool:
         if turn_id is None or revision is None:
             return True

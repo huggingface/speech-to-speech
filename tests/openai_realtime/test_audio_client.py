@@ -22,6 +22,11 @@ from speech_to_speech.api.openai_realtime.audio_client import (
     normalize_realtime_url,
     run_realtime_audio_client,
 )
+from speech_to_speech.api.openai_realtime.tool_followup import (
+    TOOL_FOLLOWUP_COVERED,
+    TOOL_FOLLOWUP_METADATA_KEY,
+    TOOL_INPUT_METADATA_KEY,
+)
 
 TOOL_DEFINITION = {
     "type": "function",
@@ -91,10 +96,10 @@ def function_call(call_id, *, name="lookup", arguments="{}"):
     )
 
 
-def response_done(response_id="response_1", status="completed", output=()):
+def response_done(response_id="response_1", status="completed", output=(), metadata=None):
     return SimpleNamespace(
         type="response.done",
-        response=SimpleNamespace(id=response_id, status=status, output=list(output)),
+        response=SimpleNamespace(id=response_id, status=status, output=list(output), metadata=metadata),
     )
 
 
@@ -1100,6 +1105,62 @@ async def test_audio_client_waits_for_an_active_response_before_tool_follow_up()
     await coordinator.close()
 
 
+@pytest.mark.parametrize(
+    "turn_end",
+    ["answered", "missed_output", "empty_answer", "cancelled_answer", "refused_before_output", "refused_after_output"],
+)
+async def test_audio_client_holds_tool_follow_up_until_user_turn_ends(turn_end):
+    release = asyncio.Event()
+
+    async def executor(_name, _arguments):
+        await release.wait()
+        return "result"
+
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(
+        conn,
+        RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor),
+    )
+    coordinator.handle_event(response_created("response_1"))
+    coordinator.handle_event(response_done(output=[function_call("call_1")]))
+    coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.speech_started", item_id="item_2"))
+
+    def refuse():
+        # The model refuses a question asked while the call has no output.
+        # The turn stays open, and speech can resume without another start.
+        coordinator.handle_event(response_created("response_refused"))
+        coordinator.handle_event(response_done("response_refused", status="failed"))
+
+    if turn_end == "refused_before_output":
+        refuse()
+    release.set()
+    # The output reaches the conversation, but nothing talks over the user.
+    await wait_until(lambda: len(conn.sent) == 1)
+    if turn_end == "refused_after_output":
+        refuse()
+    coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.committed", item_id="item_1"))
+    await asyncio.sleep(0.01)
+    assert [event["type"] for event in conn.sent] == ["conversation.item.create"]
+
+    # The user item commits once the turn cannot reopen.
+    coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.committed", item_id="item_2"))
+    if turn_end in {"answered", "missed_output", "empty_answer", "cancelled_answer"}:
+        output = [SimpleNamespace(type="message")] if turn_end != "empty_answer" else []
+        coordinator.handle_event(response_created("response_2"))
+        coordinator.handle_event(
+            response_done(
+                "response_2",
+                output=output,
+                status="cancelled" if turn_end == "cancelled_answer" else "completed",
+                metadata={TOOL_INPUT_METADATA_KEY: '["call_1"]'} if turn_end != "missed_output" else None,
+            )
+        )
+    await asyncio.sleep(0.01)
+    # Only an answer the user heard makes the follow-up unnecessary.
+    assert [event["type"] for event in conn.sent][1:] == ([] if turn_end == "answered" else ["response.create"])
+    await coordinator.close()
+
+
 async def test_audio_client_one_follow_up_covers_all_queued_tool_outputs():
     conn = RecordingConnection()
     coordinator = _ToolCallCoordinator(
@@ -1122,7 +1183,7 @@ async def test_audio_client_one_follow_up_covers_all_queued_tool_outputs():
         "conversation.item.create",
         "response.create",
     ]
-    assert coordinator._queued_follow_ups == 2
+    assert len(coordinator._queued_tool_results) == 2
     create_event = conn.sent[-1]
 
     coordinator.handle_event(
@@ -1131,12 +1192,60 @@ async def test_audio_client_one_follow_up_covers_all_queued_tool_outputs():
             metadata={"s2s_local_tool_create_id": create_event["event_id"]},
         )
     )
-    assert coordinator._queued_follow_ups == 0
+    assert len(coordinator._queued_tool_results) == 0
 
     coordinator.handle_event(response_done("response_tool_1"))
     await asyncio.sleep(0.05)
     assert len(conn.sent) == 3
     await coordinator.close()
+
+
+@pytest.mark.parametrize("settlement", ["accepted", "covered"])
+async def test_audio_client_tool_follow_up_preserves_batch_beyond_metadata_limit(settlement):
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(
+        conn, RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=done_tool_executor)
+    )
+    call_ids = {f"call_{index:02d}_" + "x" * 24 for index in range(20)}
+    try:
+        coordinator.handle_event(response_done(output=[function_call(call_id) for call_id in sorted(call_ids)]))
+        await wait_until(lambda: len(conn.sent) == len(call_ids) + 1)
+        create = conn.sent[-1]
+        marker = create["response"]["metadata"][TOOL_FOLLOWUP_METADATA_KEY]
+        marked_ids = set(json.loads(marker))
+        assert len(marker) <= 512
+        assert marked_ids < call_ids
+        assert {event["item"]["call_id"] for event in conn.sent[:-1]} == call_ids
+
+        if settlement == "covered":
+            # Only the IDs that fit in the marker have already been answered.
+            coordinator.handle_event(
+                SimpleNamespace(
+                    type="error",
+                    error=SimpleNamespace(type=TOOL_FOLLOWUP_COVERED, code=None, event_id=create["event_id"]),
+                )
+            )
+            await wait_until(lambda: len(conn.sent) == len(call_ids) + 2)
+            create = conn.sent[-1]
+            assert set(json.loads(create["response"]["metadata"][TOOL_FOLLOWUP_METADATA_KEY])) == (
+                call_ids - marked_ids
+            )
+
+        # A server without the acknowledgement extension echoes request metadata.
+        # Acceptance covers every submitted result, even if the marker is partial.
+        coordinator.handle_event(response_created("response_tool", metadata=create["response"]["metadata"]))
+        assert not coordinator._queued_tool_results
+        coordinator.handle_event(
+            response_done(
+                "response_tool",
+                output=[SimpleNamespace(type="message")],
+                metadata=create["response"]["metadata"],
+            )
+        )
+        await asyncio.sleep(0.01)
+        assert len(conn.sent) == len(call_ids) + (2 if settlement == "covered" else 1)
+    finally:
+        await coordinator.close()
 
 
 async def test_audio_client_waits_for_all_tool_flushes_before_follow_up():
@@ -1177,7 +1286,8 @@ async def test_audio_client_waits_for_all_tool_flushes_before_follow_up():
     await coordinator.close()
 
 
-async def test_audio_client_waits_for_response_lifecycle_after_follow_up_collision():
+@pytest.mark.parametrize("user_turn", [False, True])
+async def test_audio_client_waits_for_response_lifecycle_after_follow_up_collision(user_turn):
     conn = RecordingConnection()
     coordinator = _ToolCallCoordinator(
         conn,
@@ -1186,6 +1296,8 @@ async def test_audio_client_waits_for_response_lifecycle_after_follow_up_collisi
     coordinator.handle_event(response_done(output=[function_call("call_1")]))
     await wait_until(lambda: len(conn.sent) == 2)
     create_id = conn.sent[-1]["event_id"]
+    if user_turn:
+        coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.speech_started", item_id="item_2"))
 
     coordinator.handle_event(
         SimpleNamespace(
@@ -1199,12 +1311,47 @@ async def test_audio_client_waits_for_response_lifecycle_after_follow_up_collisi
     )
     await asyncio.sleep(0.01)
     assert len(conn.sent) == 2
-    assert coordinator._queued_follow_ups == 1
+    assert len(coordinator._queued_tool_results) == 1
 
+    if user_turn:
+        coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.committed", item_id="item_2"))
     coordinator.handle_event(response_created("response_implicit"))
-    coordinator.handle_event(response_done("response_implicit"))
-    await wait_until(lambda: len(conn.sent) == 3)
-    assert conn.sent[-1]["type"] == "response.create"
+    coordinator.handle_event(
+        response_done(
+            "response_implicit",
+            output=[SimpleNamespace(type="message")],
+            metadata={TOOL_INPUT_METADATA_KEY: '["call_1"]'} if user_turn else None,
+        )
+    )
+    if user_turn:
+        # The answer to the turn started after the output, so it used it.
+        await asyncio.sleep(0.01)
+        assert len(conn.sent) == 2
+    else:
+        await wait_until(lambda: len(conn.sent) == 3)
+        assert conn.sent[-1]["type"] == "response.create"
+    await coordinator.close()
+
+
+@pytest.mark.parametrize("rejection", ["tool_followup_already_answered", "tool_followup_user_turn_open"])
+async def test_audio_client_handles_tool_followup_settlement(rejection):
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(
+        conn, RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=done_tool_executor)
+    )
+    coordinator.handle_event(response_done(output=[function_call("call_1")]))
+    await wait_until(lambda: len(conn.sent) == 2)
+    create_id = conn.sent[-1]["event_id"]
+    coordinator.handle_event(
+        SimpleNamespace(type="error", error=SimpleNamespace(type=rejection, code=None, event_id=create_id))
+    )
+    await asyncio.sleep(0.01)
+    assert len(conn.sent) == 2
+    if rejection == "tool_followup_user_turn_open":
+        coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.committed", item_id="item_2"))
+        await wait_until(lambda: len(conn.sent) == 3)
+    else:
+        assert len(coordinator._queued_tool_results) == 0
     await coordinator.close()
 
 

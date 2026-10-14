@@ -1,0 +1,1 @@
+livekit-agents[openai]==1.8.5
