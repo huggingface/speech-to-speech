@@ -5,6 +5,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator, Iterator
+from contextlib import nullcontext
 from queue import Empty, Full, Queue
 from threading import BoundedSemaphore, Lock, Thread, current_thread
 from threading import Event as ThreadingEvent
@@ -37,6 +38,7 @@ from speech_to_speech.LLM.chat import (
     make_user_audio_message,
 )
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
+from speech_to_speech.LLM.shared_client import SharedOpenAIClient
 from speech_to_speech.LLM.text_prompt import build_text_system_prompt
 from speech_to_speech.LLM.utils import (
     language_name_for_prompt,
@@ -201,6 +203,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         audio_temperature: float = 0.0,
         audio_content_type: Literal["input_audio", "audio_url"] = "input_audio",
         audio_history_turns: int = 1,
+        client_resource: SharedOpenAIClient | None = None,
         **_kwargs: Any,
     ) -> None:
         self.cancel_scope = cancel_scope
@@ -231,12 +234,24 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             and self._is_local_base_url(base_url)
         ):
             api_key = "none"
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client_resource = client_resource
+        self.client = (
+            client_resource.client if client_resource is not None else OpenAI(api_key=api_key, base_url=base_url)
+        )
         self._extra_body = self._build_extra_body(base_url, disable_thinking, reasoning_effort)
         self._prefetch_worker_slots = BoundedSemaphore(PREFETCH_PROVIDER_WORKER_LIMIT)
         self._prefetch_workers_lock = Lock()
         self._prefetch_workers: set[Thread] = set()
-        self.compactor = build_compactor(self._build_compaction_generate_fn()) if compact_history else None
+        self.compactor = None
+        if compact_history:
+            generate = self._build_compaction_generate_fn()
+
+            def leased_generate(system: str, user: str) -> str:
+                resource = self.client_resource
+                with resource.borrow() if resource is not None else nullcontext():
+                    return generate(system, user)
+
+            self.compactor = build_compactor(leased_generate)
         self.warmup()
 
     @staticmethod
@@ -362,6 +377,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
     _audio_to_wav_base64 = staticmethod(audio_to_wav_base64)
 
     def cleanup(self) -> None:
+        # The runtime closes a shared client after all workers and leases finish.
+        if getattr(self, "client_resource", None) is not None:
+            return
         client = getattr(self, "client", None)
         if client is not None:
             del self.client
@@ -395,23 +413,37 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         if not self._prefetch_worker_slots.acquire(timeout=PREFETCH_WORKER_ACQUIRE_TIMEOUT_S):
             return None
 
+        # Reserve the client before starting the thread. Cleanup must also
+        # account for an accepted worker that has not been scheduled yet.
+        resource = getattr(self, "client_resource", None)
+        lease = resource.borrow() if resource is not None else nullcontext()
+        try:
+            lease.__enter__()
+        except BaseException:
+            self._prefetch_worker_slots.release()
+            raise
+
         def run() -> None:
             try:
                 target()
             finally:
+                lease.__exit__(None, None, None)
                 worker = current_thread()
                 with self._prefetch_workers_lock:
                     self._prefetch_workers.discard(worker)
                 self._prefetch_worker_slots.release()
 
-        worker = Thread(target=run, name=name, daemon=True)
-        with self._prefetch_workers_lock:
-            self._prefetch_workers.add(worker)
+        worker = None
         try:
+            worker = Thread(target=run, name=name, daemon=True)
+            with self._prefetch_workers_lock:
+                self._prefetch_workers.add(worker)
             worker.start()
         except BaseException:
-            with self._prefetch_workers_lock:
-                self._prefetch_workers.discard(worker)
+            if worker is not None:
+                with self._prefetch_workers_lock:
+                    self._prefetch_workers.discard(worker)
+            lease.__exit__(None, None, None)
             self._prefetch_worker_slots.release()
             raise
         return worker
