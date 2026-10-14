@@ -145,7 +145,8 @@ def _validate_package_defaults() -> None:
     assert qwen3_args.qwen3_tts_mlx_quantization == "6bit"
     assert vad_args.thresh == 0.6
     assert vad_args.min_silence_ms == 64
-    assert vad_args.min_speech_ms == 384
+    assert vad_args.min_speech_ms == 192
+    assert vad_args.barge_in_ms == 384
     assert vad_args.min_speech_continuation_ms == 192
     assert vad_args.realtime_processing_pause == 0.5
     assert vad_args.smart_turn is True
