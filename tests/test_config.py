@@ -78,6 +78,7 @@ def test_invalid_selection(document, names):
         lambda d: d["pipelines"]["primary"].update(num_pipelines=True),
         lambda d: d["pipelines"]["primary"].update(options={"log_level": "info"}),
         lambda d: d.update(runtime={"client": {"tool_executor": "foo"}}),
+        lambda d: d.update(runtime={"client": {"vad_threshold": 1.5}}),
     ],
 )
 def test_invalid_schema(document, change):
@@ -467,6 +468,8 @@ def test_explicit_scope_inventory():
         "voice",
         "print_json",
         "block_mic_during_playback",
+        "vad_threshold",
+        "interrupt_response",
         "log_transcripts",
         "connection_retry_timeout_s",
         "tools",
