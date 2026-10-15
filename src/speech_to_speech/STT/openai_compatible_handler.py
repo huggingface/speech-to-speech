@@ -545,7 +545,12 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         text = ""
 
         def cjk(character: str) -> bool:
-            return "\u3000" <= character <= "\u30ff" or "\u3400" <= character <= "\u9fff"
+            # Includes fullwidth punctuation such as "\uff0c", which often precedes a quiet cut.
+            return (
+                "\u3000" <= character <= "\u30ff"
+                or "\u3400" <= character <= "\u9fff"
+                or "\uff00" <= character <= "\uffef"
+            )
 
         for result in results:
             part = result.text.strip()

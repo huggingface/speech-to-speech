@@ -44,6 +44,9 @@ whole-turn uploads. Choose a cap below your service's duration and upload limits
 For example, vLLM 0.28.0 defaults to a 600-second decode limit and a 25 MiB
 upload limit; a two-minute mono PCM16 WAV at 16 kHz is about 3.66 MiB.
 These are service limits, not an intrinsic ten-minute Qwen model limit.
+vLLM 0.28.0 also splits Qwen3-ASR audio longer than 30 seconds internally, so
+on vLLM the cap bounds request size and repeated work; it does not set the
+recognition chunk length.
 
 While the user speaks, VAD supplies an internal snapshot after each additional
 window of audio, even when live captions are disabled. STT transcribes completed
@@ -68,36 +71,6 @@ completed windows. VAD still retains cumulative audio for turn handling,
 Smart Turn, and optional speaker metadata; total turn memory is not capped.
 Inference capacity, server-side cancellation, and streaming transports are
 unchanged. A server that falls behind can still leave multiple windows to finish.
-
-#### Window-quality experiment
-
-A local pilot used Qwen3-ASR-1.7B BF16 with MLX Audio 0.4.7, greedy English
-decoding, independent requests without carried text, and no internal model
-chunking. Three speakers from
-[LibriSpeech-Long](https://github.com/google-deepmind/librispeech-long) supplied
-19 minutes 27 seconds of speech and 3,046 normalized reference words. The longest
-input joined consecutive chapter blocks into 11 minutes 41 seconds. WER used
-Whisper's English normalizer and spelling map, checked with jiwer 4.0.0.
-
-| Policy | Pooled word error rate | Word edits |
-| --- | ---: | ---: |
-| Fixed 30 s | 0.89% | 27 |
-| Fixed 60 s | 0.69% | 21 |
-| Fixed 120 s | 0.66% | 20 |
-| Fixed 240 s | 0.59% | 18 |
-| Uncut | 0.59% | 18 |
-| Up to 120 s, quiet-point cuts | 0.53% | 16 |
-
-The quiet-cut policy helped two speakers and did not help the harder recording.
-The difference from uncut was only two words. This supports 120 seconds as a
-starting point, not a universal optimum or an accuracy guarantee. These were
-serial local MLX recognition measurements, not vLLM concurrency or live
-end-of-turn latency measurements. Model revision:
-`mlx-community/Qwen3-ASR-1.7B-bf16@e1f6c266914abc5a46e8756e02580f834a6cf8a7`.
-Dataset mirror revision:
-`ilyakam/librispeech-long@a5bb3ef1a678743ef6c6d1014f8f731d8c56c5e7`.
-Test IDs: `1089-134686-0000` through `0002` joined in order,
-`1188-133604-0000`, and test-other `1688-142285-0000`.
 
 ## OpenAI-hosted transcription
 
