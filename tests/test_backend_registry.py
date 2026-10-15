@@ -403,14 +403,19 @@ def test_test_backend_only_needs_config_factory_and_registry_entry():
     assert calls[0][1] is selection.config
 
 
-def test_openai_tts_backend_constructs_through_registry(monkeypatch):
+@pytest.mark.parametrize("backend", ["openai", "drama3"])
+def test_openai_tts_backend_constructs_through_registry(monkeypatch, backend):
+    from speech_to_speech.TTS.drama3_handler import Drama3TTSHandler
     from speech_to_speech.TTS.openai_compatible_handler import OpenAICompatibleTTSHandler
 
     monkeypatch.setattr(OpenAICompatibleTTSHandler, "warmup", lambda self: None)
-    args = parse_arguments(["--tts", "openai"])
-    tts = create_backend_handler(args.tts_backend, _context())
+    args = parse_arguments(["--tts", backend])
+    context = _context()
+    tts = create_backend_handler(args.tts_backend, context)
 
-    assert isinstance(tts, OpenAICompatibleTTSHandler)
+    assert type(tts) is (Drama3TTSHandler if backend == "drama3" else OpenAICompatibleTTSHandler)
+    assert tts.cancel_scope is context.cancel_scope
+    assert tts.speculative_turns is context.speculative_turns
 
 
 def test_openai_tts_factory_receives_assistant_language_opt_in(monkeypatch):
