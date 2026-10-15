@@ -35,6 +35,43 @@ speech-to-speech local \
   --openai_stt_model Qwen/Qwen3-ASR-1.7B
 ```
 
+### Bounded long turns (opt-in)
+
+Add `--openai_stt_max_window_s 120` to limit every transcription upload to
+two minutes of audio. The same setting is available in a configured STT block.
+The value must be finite and at least one second; leaving it unset preserves
+whole-turn uploads. Choose a cap below your service's duration and upload limits.
+For example, vLLM 0.28.0 defaults to a 600-second decode limit and a 25 MiB
+upload limit; a two-minute mono PCM16 WAV at 16 kHz is about 3.66 MiB.
+These are service limits, not an intrinsic ten-minute Qwen model limit.
+vLLM 0.28.0 also splits Qwen3-ASR audio longer than 30 seconds internally, so
+on vLLM the cap bounds request size and repeated work; it does not set the
+recognition chunk length.
+
+While the user speaks, VAD supplies an internal snapshot after each additional
+window of audio, even when live captions are disabled. STT transcribes completed
+windows and retains their text. Cuts use the midpoint of the quietest 100 ms
+frame in the five seconds before the cap (a shorter search for very small caps).
+Windows do not overlap or discard samples. If speech has no quiet pause, the
+cut still stays within the cap; low energy does not guarantee a word boundary.
+Words crossing a cut can still be misrecognized.
+
+Only the outstanding tail is transcribed at the conversational boundary. The
+complete transcript follows the existing VAD/Smart Turn and response-admission
+path; an internal cut never starts an assistant response. Reopened revisions
+reuse completed windows and revise the tail. Explicitly changed audio or a
+changed language hint invalidates the cached prefix, which is recomputed through
+bounded requests. Session end clears the cache and fences late completions.
+HTTP failure produces a transcription failure, never a successful truncated prefix.
+
+`--enable_live_transcription` continues to control captions and repeated tail
+hypotheses. Without it, internal processing publishes no partial transcripts.
+This option bounds HTTP request size and avoids re-transcribing unchanged,
+completed windows. VAD still retains cumulative audio for turn handling,
+Smart Turn, and optional speaker metadata; total turn memory is not capped.
+Inference capacity, server-side cancellation, and streaming transports are
+unchanged. A server that falls behind can still leave multiple windows to finish.
+
 ## OpenAI-hosted transcription
 
 The same backend can call OpenAI's hosted

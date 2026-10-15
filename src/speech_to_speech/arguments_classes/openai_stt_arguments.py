@@ -36,3 +36,11 @@ class OpenAICompatibleSTTHandlerArguments:
         default=60.0,
         metadata={"help": "HTTP request timeout in seconds."},
     )
+    openai_stt_max_window_s: Optional[float] = field(
+        default=None,
+        metadata={
+            "help": "Opt-in maximum audio duration per HTTP request (seconds, at least 1). "
+            "Use 120 for long Qwen/vLLM turns. Completed windows are retained across reopenings; "
+            "cuts search backward up to five seconds for a quiet point. Unset preserves whole-turn uploads."
+        },
+    )
