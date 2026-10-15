@@ -479,6 +479,9 @@ def _build_handlers(
         resource_ledger.append(stt_handler)
     if stt_backend.spec.capabilities.streams_audio_chunks:
         vad.streaming_stt_sink = stt_handler
+    if stt_backend.name == "openai" and stt_backend.config.get("max_window_s") is not None:
+        vad.transcription_window_samples = int(stt_backend.config["max_window_s"] * vad.sample_rate)
+        stt_handler.window_partials_enabled = module_kwargs.enable_live_transcription
     speech_input_handlers = [stt_handler]
     if needs_notifier:
         transcription_notifier = TranscriptionNotifier(

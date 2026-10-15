@@ -451,6 +451,49 @@ def test_openai_stt_backend_constructs_through_registry(monkeypatch):
     assert isinstance(stt, OpenAICompatibleSTTHandler)
 
 
+@pytest.mark.parametrize("live", [False, True])
+def test_windowed_http_stt_configuration_reaches_handler_and_vad(monkeypatch, live):
+    from speech_to_speech.STT.openai_compatible_handler import OpenAICompatibleSTTHandler
+
+    class DummyHandler:
+        def __init__(self, *_args, **kwargs):
+            self.__dict__.update(kwargs.get("setup_kwargs", {}))
+
+    monkeypatch.setattr(OpenAICompatibleSTTHandler, "warmup", lambda self: None)
+    monkeypatch.setattr(s2s_pipeline, "VADHandler", DummyHandler)
+    monkeypatch.setattr(s2s_pipeline, "TranscriptionNotifier", DummyHandler)
+    monkeypatch.setattr("speech_to_speech.LLM.lm_output_processor.LMOutputProcessor", DummyHandler)
+    args = parse_arguments(["--stt", "openai", "--openai_stt_max_window_s", "120"])
+    args.module_kwargs.enable_live_transcription = live
+    other = BackendSpec("dummy", "llm", FakeArguments, lambda *_args: object())
+    selection = BackendSelection(other, other.normalize(FakeArguments()))
+    handlers = s2s_pipeline._build_handlers(
+        stop_event=Event(),
+        should_listen=Event(),
+        recv_audio_chunks_queue=Queue(),
+        spoken_prompt_queue=Queue(),
+        stt_output_queue=Queue(),
+        text_prompt_queue=Queue(),
+        lm_response_queue=Queue(),
+        lm_processed_queue=Queue(),
+        send_audio_chunks_queue=Queue(),
+        text_output_queue=Queue(),
+        module_kwargs=args.module_kwargs,
+        vad_handler_kwargs=VADHandlerArguments(enable_realtime_transcription=live),
+        stt_backend=args.stt_backend,
+        llm_backend=selection,
+        tts_backend=selection,
+        speculative_turns=SpeculativeTurnTracker(),
+        cancel_scope=CancelScope(),
+        pipeline_index=0,
+    )
+    assert handlers[0].transcription_window_samples == 120 * 16000
+    assert handlers[0].enable_realtime_transcription == live
+    stt = next(h for h in handlers if isinstance(h, OpenAICompatibleSTTHandler))
+    assert stt.max_window_s == 120
+    assert stt.window_partials_enabled == live
+
+
 @pytest.mark.parametrize(
     ("backend_name", "expected_type", "expected_rate"),
     [
