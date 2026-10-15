@@ -5,7 +5,7 @@ import signal
 import sys
 from contextlib import contextmanager
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 from types import SimpleNamespace
 
 import pytest
@@ -1664,6 +1664,35 @@ def test_audio_worker_can_stop_before_opening_devices():
     assert worker._process.exitcode == 0
 
 
+def _produce_microphone_audio(mic_queue):
+    for _ in range(128):
+        mic_queue.put_nowait(bytes(16384))
+    Event().wait(15)
+
+
+def test_audio_worker_death_unblocks_microphone_reader():
+    worker = audio_client_module._AudioWorker(RealtimeAudioClientConfig(echo_cancellation=True))
+    worker._process = audio_client_module.multiprocessing.get_context("spawn").Process(
+        target=_produce_microphone_audio, args=(worker.mic_queue,)
+    )
+
+    def drain():
+        try:
+            while True:
+                worker.mic_queue.get(timeout=0.1)
+        except (EOFError, OSError):
+            pass
+
+    with worker:
+        assert worker.mic_queue.get(timeout=10) == bytes(16384)
+        worker._process.terminate()
+        worker._process.join(timeout=5)
+        reader = Thread(target=drain, daemon=True)
+        reader.start()
+        reader.join(timeout=2)
+        assert not reader.is_alive()
+
+
 async def test_open_input_stream_is_closed_when_output_construction_fails(monkeypatch):
     events = []
 
@@ -1690,13 +1719,17 @@ async def test_open_input_stream_is_closed_when_output_construction_fails(monkey
     assert events == ["input.close"]
 
 
-async def test_audio_client_startup_and_shutdown_use_public_realtime_connection(monkeypatch):
+@pytest.mark.parametrize("startup_failure", [False, True])
+async def test_audio_client_startup_and_shutdown_use_public_realtime_connection(monkeypatch, startup_failure):
     sent = []
     audio_session_calls = []
 
     class FakeConnection:
         async def send(self, event):
             sent.append(event)
+
+        async def recv(self):
+            await asyncio.Future()
 
     class FakeConnectContext:
         async def __aenter__(self):
@@ -1721,17 +1754,19 @@ async def test_audio_client_startup_and_shutdown_use_public_realtime_connection(
         received_stop_event.set()
 
     monkeypatch.setattr(audio_client_module, "_make_client", lambda _config: fake_client)
-    monkeypatch.setattr(audio_client_module, "_run_audio_session", fake_audio_session)
-    config = RealtimeAudioClientConfig()
+    if not startup_failure:
+        monkeypatch.setattr(audio_client_module, "_run_audio_session", fake_audio_session)
+    config = RealtimeAudioClientConfig(echo_cancellation=startup_failure, input_device=-9999)
 
-    await audio_client_module.listen_and_play_realtime(
-        config,
-        stop_event=stop_event,
-    )
+    if startup_failure:
+        with pytest.raises(RuntimeError):
+            await asyncio.wait_for(audio_client_module.listen_and_play_realtime(config, stop_event=stop_event), 15)
+    else:
+        await audio_client_module.listen_and_play_realtime(config, stop_event=stop_event)
+        assert len(audio_session_calls) == 1
+        assert audio_session_calls[0][2] is stop_event
 
     assert sent == [build_session_update(config)]
-    assert len(audio_session_calls) == 1
-    assert audio_session_calls[0][2] is stop_event
     assert fake_client.closed is True
 
 

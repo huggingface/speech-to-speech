@@ -35,18 +35,6 @@ playback and so disables voice interruptions.
   along with the echo. Devices, volume, room acoustics and load affect how
   well cancellation works.
 
-## CPU cost
-
-On a Ryzen 9950X Linux workstation, the client used 1.6% of one core while
-idle without cancellation and 2.7% with it. During fixed recorded playback,
-the figures were 1.9% and 3.1%. These means cover three twelve-second windows
-per mode with the default 1024-sample blocks and a simulated room.
-
-The measurements include the client and its audio process. Cancellation added
-about 60 MiB of private memory. They exclude model inference and the shared
-audio service, and do not predict laptop costs or cancellation quality in a
-physical room.
-
 ## Benchmark
 
 To measure the canceller's processing cost on your machine from a source
@@ -58,7 +46,8 @@ PYTHONPATH=src .venv/bin/python scripts/benchmark_echo_cancellation.py --seconds
 ```
 
 The script prints CPU time and echo reduction as JSON lines, with and without
-cancellation. It excludes audio drivers, networking and model inference.
+cancellation. It excludes audio drivers, process communication, networking
+and model inference.
 `--paced` feeds audio at real-time speed; leave it out to run as fast as
 possible. The script uses random noise as playback, so it measures CPU cost,
 not how well the canceller keeps speech.

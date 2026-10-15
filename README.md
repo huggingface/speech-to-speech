@@ -39,7 +39,7 @@ pip install speech-to-speech
 speech-to-speech local
 ```
 
-Then talk: speak, pause, and the assistant answers through your speakers. Stop with `Ctrl+C`. The first run downloads the models, so give it a few minutes. On speakers, add `--echo-cancellation` so the assistant does not hear itself and you can still interrupt it by voice; headphones don't need it. See [echo cancellation](docs/echo-cancellation.md) for limits and CPU cost.
+Then talk: speak, pause, and the assistant answers through your speakers. Stop with `Ctrl+C`. The first run downloads the models, so give it a few minutes. On speakers, add `--echo-cancellation` so the assistant does not hear itself and you can still interrupt it by voice; headphones don't need it. See [echo cancellation](docs/echo-cancellation.md) for requirements and limits.
 
 On Ubuntu, first install the audio libraries with `sudo apt-get install libportaudio2 libsndfile1`. The default Linux Qwen3-TTS wheel targets CUDA 12.8 and Ubuntu 24.04; see the [CUDA note](#cuda-note-for-qwen3-tts) for other systems. On Windows, activate the environment with `.venv\Scripts\Activate.ps1`.
 

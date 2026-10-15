@@ -16,13 +16,13 @@ import multiprocessing
 import signal
 import time
 from collections.abc import Awaitable, Callable, Iterator, Mapping
-from contextlib import ExitStack, contextmanager
+from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, field
 from importlib import import_module
 from ipaddress import ip_address
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
-from typing import Any, Optional
+from typing import Any, NoReturn, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from jsonschema import SchemaError, ValidationError
@@ -371,7 +371,7 @@ class _FriendlyEventRenderer:
 def handle_server_event(
     event: Any,
     *,
-    playback: PlaybackBuffer,
+    playback: PlaybackBuffer | _PlaybackCommands,
     renderer: _FriendlyEventRenderer,
     print_json: bool,
 ) -> None:
@@ -1016,14 +1016,11 @@ def _open_audio_streams(config: RealtimeAudioClientConfig, playback: PlaybackBuf
                 logger.exception("Failed to close local audio stream")
 
 
-class _PlaybackCommands(PlaybackBuffer):
+class _PlaybackCommands:
     """Forward playback changes to the process that owns the audio device."""
 
-    def __init__(self, recv_rate: int, commands: Any, buffered: Any, active: Any) -> None:
-        super().__init__(recv_rate)
+    def __init__(self, commands: Any) -> None:
         self._commands = commands
-        self._buffered = buffered
-        self._active = active
 
     def append(self, audio: bytes) -> None:
         if audio:
@@ -1035,25 +1032,6 @@ class _PlaybackCommands(PlaybackBuffer):
     def finish(self) -> None:
         self._commands.put_nowait(("finish", b""))
 
-    def is_active(self) -> bool:
-        return bool(self._active.value)
-
-    @property
-    def buffered_bytes(self) -> int:
-        return int(self._buffered.value)
-
-
-class _WorkerPlaybackBuffer(PlaybackBuffer):
-    def __init__(self, config: RealtimeAudioClientConfig, buffered: Any, active: Any) -> None:
-        super().__init__(config.recv_rate, config.playback_buffer_ms)
-        self._buffered = buffered
-        self._active = active
-
-    def write(self, outdata: Any) -> None:
-        super().write(outdata)
-        self._buffered.value = self.buffered_bytes
-        self._active.value = self.is_active()
-
 
 def _run_audio_worker(
     config: RealtimeAudioClientConfig,
@@ -1061,8 +1039,6 @@ def _run_audio_worker(
     commands: Any,
     stop_event: Any,
     errors: Any,
-    buffered: Any,
-    active: Any,
 ) -> None:
     # The parent handles Ctrl-C and requests orderly stream shutdown.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -1070,7 +1046,7 @@ def _run_audio_worker(
         mic_queue.cancel_join_thread()
         errors.close()
         return
-    playback = _WorkerPlaybackBuffer(config, buffered, active)
+    playback = PlaybackBuffer(config.recv_rate, config.playback_buffer_ms)
 
     def receive_playback() -> None:
         while not stop_event.is_set():
@@ -1084,8 +1060,6 @@ def _run_audio_worker(
                 playback.clear()
             elif command == "finish":
                 playback.finish()
-            buffered.value = playback.buffered_bytes
-            active.value = playback.is_active()
 
     receiver = Thread(target=receive_playback, daemon=True)
     receiver.start()
@@ -1114,9 +1088,7 @@ class _AudioWorker:
         self.mic_queue = context.Queue(maxsize=128)
         self._commands = context.Queue()
         self._stop = context.Event()
-        buffered = context.RawValue("q", 0)
-        active = context.RawValue("b", 0)
-        self.playback = _PlaybackCommands(config.recv_rate, self._commands, buffered, active)
+        self.playback = _PlaybackCommands(self._commands)
         self._errors, self._error_sender = context.Pipe(duplex=False)
         # Keep executors and their state in the parent; the worker only needs
         # hardware settings and audio, not models, tools or network credentials.
@@ -1131,7 +1103,7 @@ class _AudioWorker:
         )
         self._process = context.Process(
             target=_run_audio_worker,
-            args=(worker_config, self.mic_queue, self._commands, self._stop, self._error_sender, buffered, active),
+            args=(worker_config, self.mic_queue, self._commands, self._stop, self._error_sender),
             name="realtime-audio",
         )
 
@@ -1141,10 +1113,13 @@ class _AudioWorker:
         except Exception:
             self.__exit__(None, None, None)
             raise
+        # Only the child writes microphone PCM. Keeping this duplicate open would
+        # leave a read of a partial queue message blocked if the child dies.
+        self.mic_queue._writer.close()  # type: ignore[attr-defined]
         self._error_sender.close()
         return self
 
-    async def wait_for_failure(self) -> None:
+    async def wait_for_failure(self) -> NoReturn:
         while self._process.is_alive():
             await asyncio.sleep(0.1)
         message = "Audio process stopped unexpectedly"
@@ -1178,7 +1153,14 @@ async def _run_audio_session(
 ) -> None:
     worker = _AudioWorker(config) if config.echo_cancellation else None
     mic_queue: Any = worker.mic_queue if worker is not None else Queue(maxsize=128)
-    playback = worker.playback if worker is not None else PlaybackBuffer(config.recv_rate, config.playback_buffer_ms)
+    playback: PlaybackBuffer | _PlaybackCommands
+    audio_context: AbstractContextManager[Any]
+    if worker is None:
+        playback = PlaybackBuffer(config.recv_rate, config.playback_buffer_ms)
+        audio_context = _open_audio_streams(config, playback, mic_queue)
+    else:
+        playback = worker.playback
+        audio_context = worker
     renderer = _FriendlyEventRenderer()
     tool_calls = _ToolCallCoordinator(conn, config)
 
@@ -1188,6 +1170,10 @@ async def _run_audio_session(
                 chunk = await asyncio.to_thread(mic_queue.get, True, 0.1)
             except Empty:
                 continue
+            except (EOFError, OSError):
+                if worker is None:
+                    raise
+                await worker.wait_for_failure()
             await conn.send(
                 {
                     "type": "input_audio_buffer.append",
@@ -1209,7 +1195,7 @@ async def _run_audio_session(
     streams = ExitStack()
     tasks: set[asyncio.Task[Any]] = set()
     try:
-        streams.enter_context(worker if worker is not None else _open_audio_streams(config, playback, mic_queue))
+        streams.enter_context(audio_context)
         tasks = {
             asyncio.create_task(send_audio()),
             asyncio.create_task(receive_events()),
@@ -1221,12 +1207,14 @@ async def _run_audio_session(
             tasks.add(asyncio.create_task(worker.wait_for_failure()))
 
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        stop_event.set()
         for task in done:
             if not task.cancelled() and task.exception() is not None:
                 raise task.exception()  # type: ignore[misc]
-    finally:
         stop_event.set()
+    except asyncio.CancelledError:
+        stop_event.set()
+        raise
+    finally:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
