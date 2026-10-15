@@ -1087,6 +1087,8 @@ class _AudioWorker:
         context = multiprocessing.get_context("spawn")
         self.mic_queue = context.Queue(maxsize=128)
         self._commands = context.Queue()
+        # Pending playback can be discarded when the worker exits.
+        self._commands._ignore_epipe = True  # type: ignore[attr-defined]
         self._stop = context.Event()
         self.playback = _PlaybackCommands(self._commands)
         self._errors, self._error_sender = context.Pipe(duplex=False)
@@ -1116,6 +1118,9 @@ class _AudioWorker:
         # Only the child writes microphone PCM. Keeping this duplicate open would
         # leave a read of a partial queue message blocked if the child dies.
         self.mic_queue._writer.close()  # type: ignore[attr-defined]
+        # Only the child reads playback. Close our duplicate so its exit also
+        # releases the queue feeder when it is blocked writing pending audio.
+        self._commands._reader.close()  # type: ignore[attr-defined]
         self._error_sender.close()
         return self
 

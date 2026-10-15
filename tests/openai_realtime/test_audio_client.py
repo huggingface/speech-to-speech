@@ -1660,8 +1660,11 @@ def test_audio_worker_can_stop_before_opening_devices():
     worker = audio_client_module._AudioWorker(RealtimeAudioClientConfig(echo_cancellation=True, input_device=-9999))
     worker._stop.set()
     with worker:
-        pass
+        worker.playback.append(bytes(1024 * 1024))
+        worker.playback.clear()
     assert worker._process.exitcode == 0
+    worker._commands._thread.join(timeout=2)
+    assert not worker._commands._thread.is_alive()
 
 
 def _produce_microphone_audio(mic_queue):

@@ -31,7 +31,7 @@ class EchoCanceller:
             raise ValueError("Echo cancellation requires matching --send-rate and --recv-rate")
         from pywebrtc_audio import AudioProcessor
 
-        self._apm = AudioProcessor(sample_rate=send_rate, echo_cancellation=True)
+        self._apm = AudioProcessor(sample_rate=send_rate, echo_cancellation=True, stream_delay_ms=0)
         self._rate = send_rate
         self._frame_bytes = send_rate // 100 * 2
         self._capture = bytearray()
@@ -104,7 +104,6 @@ class EchoCanceller:
         # References already share capture's physical time axis; AEC3 estimates
         # the remaining acoustic delay. Process whole frames in one native call
         # so another Python thread cannot take the GIL between every 10 ms frame.
-        self._apm.stream_delay_ms = 0
         near = np.frombuffer(bytes(self._capture[:size]), dtype=np.int16)
         cleaned = self._apm.process(near, reference).tobytes()
         del self._capture[:size]
