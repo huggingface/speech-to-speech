@@ -145,6 +145,21 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
         default=defaults.block_mic_during_playback,
     )
     parser.add_argument(
+        "--vad-threshold",
+        type=float,
+        default=defaults.vad_threshold,
+        help="session.audio.input.turn_detection.threshold, from 0 to 1. Defaults to the server's VAD threshold.",
+    )
+    parser.add_argument(
+        "--interrupt-response",
+        action=argparse.BooleanOptionalAction,
+        default=defaults.interrupt_response,
+        help=(
+            "Let user speech cancel the active response and clear queued playback. "
+            "With --no-interrupt-response the microphone stays open and speech is still transcribed."
+        ),
+    )
+    parser.add_argument(
         "--log-transcripts",
         "--log_transcripts",
         dest="log_transcripts",
@@ -179,6 +194,8 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
         voice=namespace.voice,
         print_json=namespace.print_json,
         block_mic_during_playback=namespace.block_mic_during_playback,
+        vad_threshold=namespace.vad_threshold,
+        interrupt_response=namespace.interrupt_response,
         log_transcripts=namespace.log_transcripts,
         connection_retry_timeout_s=namespace.connection_retry_timeout_s,
         tools=tools,
