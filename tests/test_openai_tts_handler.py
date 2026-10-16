@@ -32,6 +32,7 @@ from speech_to_speech.pipeline.messages import (
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS import openai_compatible_handler as tts_module
+from speech_to_speech.TTS.drama3_handler import Drama3TTSHandler
 from speech_to_speech.TTS.openai_compatible_handler import (
     HttpSpeechOperation,
     OpenAICompatibleTTSHandler,
@@ -96,18 +97,19 @@ def _reset_fake_speech_operation() -> None:
 def _openai_tts_handler(
     monkeypatch,
     *,
+    backend: str = "openai",
     cancel_scope: CancelScope | None = None,
     speculative_turns: SpeculativeTurnTracker | None = None,
 ) -> OpenAICompatibleTTSHandler:
     _reset_fake_speech_operation()
     monkeypatch.setattr(tts_module, "HttpSpeechOperation", _FakeSpeechOperation)
-    handler = OpenAICompatibleTTSHandler(
+    handler_class = Drama3TTSHandler if backend == "drama3" else OpenAICompatibleTTSHandler
+    handler = handler_class(
         Event(),
         queue_in=Queue(),
         queue_out=Queue(),
         setup_args=(Event(),),
         setup_kwargs={
-            "sample_rate": 24000,
             "blocksize": 512,
             "cancel_scope": cancel_scope,
             "speculative_turns": speculative_turns,
@@ -510,23 +512,22 @@ def test_pending_response_uses_selection_at_response_create(monkeypatch):
     ]
 
 
-def test_openai_tts_streaming_resampler_is_chunk_invariant_and_anti_aliased():
-    sample_rate = 24000
+@pytest.mark.parametrize(("backend", "sample_rate"), [("openai", 24000), ("drama3", 44100)])
+def test_openai_tts_streaming_resampler_is_chunk_invariant_and_anti_aliased(monkeypatch, backend, sample_rate):
+    handler = _openai_tts_handler(monkeypatch, backend=backend)
     duration_s = 0.2
     timeline = np.arange(int(sample_rate * duration_s)) / sample_rate
     passband = np.round(16000 * np.sin(2 * np.pi * 1000 * timeline)).astype(np.int16)
     stopband = np.round(16000 * np.sin(2 * np.pi * 10000 * timeline)).astype(np.int16)
 
     def resample(samples, chunk_sizes):
-        resampler = tts_module._StreamingFIRResampler(sample_rate, 16000)
-        output = []
+        chunks = []
         offset = 0
         for chunk_size in chunk_sizes:
-            output.append(resampler.push(samples[offset : offset + chunk_size]))
+            chunks.append(samples[offset : offset + chunk_size])
             offset += chunk_size
-        output.append(resampler.push(samples[offset:]))
-        output.append(resampler.push(np.empty(0, dtype=np.int16), final=True))
-        return np.concatenate(output)
+        chunks.append(samples[offset:])
+        return np.concatenate(list(handler._resample_to_blocks(iter(chunks), sample_rate)))
 
     passband_streamed = resample(passband, [1, 301, 17, 1024, 3])
     passband_single = resample(passband, [])
@@ -1025,9 +1026,10 @@ def test_openai_tts_reopened_during_startup_suppresses_old_revision(monkeypatch)
     assert _FakeSpeechOperation.instances[0].cancelled is True
 
 
-def test_openai_tts_cancellation_stops_publication_and_closes_operation(monkeypatch):
+@pytest.mark.parametrize("backend", ["openai", "drama3"])
+def test_openai_tts_cancellation_stops_publication_and_closes_operation(monkeypatch, backend):
     cancel_scope = CancelScope()
-    handler = _openai_tts_handler(monkeypatch, cancel_scope=cancel_scope)
+    handler = _openai_tts_handler(monkeypatch, backend=backend, cancel_scope=cancel_scope)
 
     generation = handler.process(TTSInput(text="Hello", cancel_generation=cancel_scope.generation))
     first = next(generation)
@@ -1038,8 +1040,9 @@ def test_openai_tts_cancellation_stops_publication_and_closes_operation(monkeypa
     assert _FakeSpeechOperation.instances[0].cancelled is True
 
 
-def test_openai_tts_session_teardown_stops_publication_and_closes_operation(monkeypatch):
-    handler = _openai_tts_handler(monkeypatch)
+@pytest.mark.parametrize("backend", ["openai", "drama3"])
+def test_openai_tts_session_teardown_stops_publication_and_closes_operation(monkeypatch, backend):
+    handler = _openai_tts_handler(monkeypatch, backend=backend)
     generation = handler.process(TTSInput(text="Hello"))
     first = next(generation)
     operation = _FakeSpeechOperation.instances[0]
