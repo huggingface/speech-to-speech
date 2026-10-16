@@ -4,6 +4,7 @@ import logging
 from math import gcd
 from pathlib import Path
 from threading import Event
+from time import perf_counter
 from typing import Any, Iterator
 
 import numpy as np
@@ -15,6 +16,7 @@ from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.turn_latency import record_response_e2e, record_response_tts_ttfa
 from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
 
 logger = logging.getLogger(__name__)
@@ -165,6 +167,8 @@ class OmniVoiceTTSHandler(BaseHandler[TTSIn, TTSOut]):
             generation_kwargs["instruct"] = self.instruct
 
         console.print(f"[green]ASSISTANT: {text}")
+        # Synthesis start: after speculative gate / prompt selection, before provider work.
+        started_at_s = perf_counter()
         audios = self.model.generate(**generation_kwargs)
 
         # OmniVoice generation is blocking. If the user interrupted while it ran,
@@ -176,6 +180,16 @@ class OmniVoiceTTSHandler(BaseHandler[TTSIn, TTSOut]):
             return
 
         audio = np.asarray(audios[0], dtype=np.float32).reshape(-1)
+        if audio.size == 0:
+            return
+
+        store = getattr(self, "turn_latency_store", None)
+        response_key = getattr(tts_input, "response_key", None)
+        speech_stopped_at_s = getattr(tts_input, "speech_stopped_at_s", None)
+
+        # Full waveform is available before resample / block assembly.
+        record_response_tts_ttfa(store, response_key, perf_counter() - started_at_s)
+
         source_sample_rate = int(getattr(self.model, "sampling_rate", 24000))
         if source_sample_rate != PIPELINE_SAMPLE_RATE:
             divisor = gcd(source_sample_rate, PIPELINE_SAMPLE_RATE)
@@ -186,16 +200,30 @@ class OmniVoiceTTSHandler(BaseHandler[TTSIn, TTSOut]):
             )
 
         audio_int16 = np.clip(audio * 32768, -32768, 32767).astype(np.int16)
+        first_yielded = True
+
+        def emit(block: np.ndarray) -> Iterator[TTSOut]:
+            nonlocal first_yielded
+            if first_yielded:
+                if speech_stopped_at_s is not None:
+                    record_response_e2e(
+                        store,
+                        response_key,
+                        max(0.0, perf_counter() - speech_stopped_at_s),
+                    )
+                first_yielded = False
+            yield block
+
         full_block_samples = (len(audio_int16) // self.blocksize) * self.blocksize
         for offset in range(0, full_block_samples, self.blocksize):
             if self._is_cancelled(cancel_generation):
                 logger.info("OmniVoice TTS output cancelled (interruption)")
                 return
-            yield audio_int16[offset : offset + self.blocksize]
+            yield from emit(audio_int16[offset : offset + self.blocksize])
 
         if full_block_samples < len(audio_int16):
             if self._is_cancelled(cancel_generation):
                 logger.info("OmniVoice TTS output cancelled (interruption)")
                 return
             tail = audio_int16[full_block_samples:]
-            yield np.pad(tail, (0, self.blocksize - len(tail)))
+            yield from emit(np.pad(tail, (0, self.blocksize - len(tail))))
