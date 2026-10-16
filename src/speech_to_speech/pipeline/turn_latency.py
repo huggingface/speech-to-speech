@@ -6,7 +6,6 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from threading import Lock
-from time import perf_counter
 from typing import Literal
 
 TurnLatencyStatus = Literal["completed", "cancelled", "failed", "incomplete"]
@@ -419,44 +418,3 @@ def record_response_e2e(
     """Publish eligible speech E2E; return whether a first sample was recorded."""
     tracker = store.get_response(response_key) if store is not None else None
     return tracker.record_e2e(seconds) if tracker is not None else False
-
-
-@dataclass
-class ResponseTtsLatency:
-    """Call-site glue for TTS handlers that share the #705 store helpers.
-
-    Binds ``turn_latency_store`` / ``response_key`` / ``speech_stopped_at_s`` once,
-    then records provider TTFA and first-yield E2E without repeating the getattr
-    and first-write bookkeeping in each backend.
-    """
-
-    store: TurnLatencyStore | None
-    response_key: str | None
-    speech_stopped_at_s: float | None
-    _first_yield_seen: bool = False
-
-    @classmethod
-    def from_handler(cls, handler: object, tts_input: object) -> ResponseTtsLatency:
-        return cls(
-            store=getattr(handler, "turn_latency_store", None),
-            response_key=getattr(tts_input, "response_key", None),
-            speech_stopped_at_s=getattr(tts_input, "speech_stopped_at_s", None),
-        )
-
-    def record_ttfa(self, seconds: float) -> None:
-        record_response_tts_ttfa(self.store, self.response_key, seconds)
-
-    def record_ttfa_since(self, started_at_s: float, *, now_s: float | None = None) -> None:
-        self.record_ttfa((perf_counter() if now_s is None else now_s) - started_at_s)
-
-    def record_e2e_on_first_yield(self, *, now_s: float | None = None) -> bool:
-        if self._first_yield_seen:
-            return False
-        self._first_yield_seen = True
-        if self.speech_stopped_at_s is None:
-            return False
-        return record_response_e2e(
-            self.store,
-            self.response_key,
-            max(0.0, (perf_counter() if now_s is None else now_s) - self.speech_stopped_at_s),
-        )

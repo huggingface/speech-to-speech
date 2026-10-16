@@ -4,13 +4,10 @@ import sys
 from threading import Lock, RLock
 from types import SimpleNamespace
 
-import pytest
-
 import speech_to_speech.pipeline.speculative_turns as speculative_module
 import speech_to_speech.utils.mlx_lock as mlx_lock
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.turn_latency import (
-    ResponseTtsLatency,
     TurnLatencyStore,
     TurnLatencyTracker,
     bind_active_turn_latency_tracker,
@@ -117,34 +114,6 @@ def test_record_response_helpers_lookup_existing_tracker_only() -> None:
     record_response_e2e(store, "resp_1", 9.0)
     assert tracker.tts_ttfa_s == 0.12
     assert tracker.e2e_s == 2.4
-
-
-def test_response_tts_latency_binds_handler_and_records_once() -> None:
-    store = TurnLatencyStore()
-    tracker = store.get_or_create_response("resp_1", turn_id="turn_1", turn_revision=0)
-    handler = SimpleNamespace(turn_latency_store=store)
-    tts_input = SimpleNamespace(response_key="resp_1", speech_stopped_at_s=10.0)
-
-    latency = ResponseTtsLatency.from_handler(handler, tts_input)
-    latency.record_ttfa_since(10.5, now_s=10.62)
-    assert latency.record_e2e_on_first_yield(now_s=12.4) is True
-    assert latency.record_e2e_on_first_yield(now_s=99.0) is False
-    latency.record_ttfa_since(10.5, now_s=99.0)
-
-    assert tracker.tts_ttfa_s == pytest.approx(0.12)
-    assert tracker.e2e_s == pytest.approx(2.4)
-
-
-def test_response_tts_latency_skips_e2e_without_speech_stop() -> None:
-    store = TurnLatencyStore()
-    tracker = store.get_or_create_response("resp_1")
-    latency = ResponseTtsLatency.from_handler(
-        SimpleNamespace(turn_latency_store=store),
-        SimpleNamespace(response_key="resp_1", speech_stopped_at_s=None),
-    )
-
-    assert latency.record_e2e_on_first_yield(now_s=1.0) is False
-    assert tracker.e2e_s is None
 
 
 def test_turn_latency_store_pending_turn_merges_into_response() -> None:
