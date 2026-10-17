@@ -846,3 +846,26 @@ def test_parse_arguments_preserves_kitten_backend_options():
 def test_parse_arguments_rejects_unsupported_kitten_device():
     with pytest.raises(SystemExit):
         parse_arguments(["--tts", "kitten", "--kitten_device", "cuda"])
+
+
+def test_responses_api_request_timeout_s_default():
+    args = ResponsesApiLanguageModelHandlerArguments()
+    assert args.responses_api_request_timeout_s == 20.0
+
+
+def test_parse_arguments_maps_request_timeout_for_chat_completions():
+    args = parse_arguments(
+        ["--llm_backend", "chat-completions", "--responses_api_request_timeout_s", "90"]
+    )
+
+    assert args.llm_backend.name == "chat-completions"
+    assert args.llm_backend.config["request_timeout_s"] == 90.0
+
+
+def test_parse_arguments_maps_request_timeout_for_responses_api():
+    args = parse_arguments(
+        ["--llm_backend", "responses-api", "--responses_api_request_timeout_s", "90"]
+    )
+
+    assert args.llm_backend.name == "responses-api"
+    assert args.llm_backend.config["request_timeout_s"] == 90.0
