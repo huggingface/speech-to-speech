@@ -285,10 +285,50 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
             audio_cfg = runtime_config.session.audio
             audio_output = audio_cfg.output if audio_cfg is not None else None
             voice = str(audio_output.voice) if audio_output is not None and audio_output.voice else None
+        voice = self._resolve_requested_voice(voice)
         if self.backend == "mlx":
             yield from self._process_mlx(text, language_code, pinned_voice=voice, tts_input=tts_input)
         else:
             yield from self._process_kokoro(text, language_code, pinned_voice=voice, tts_input=tts_input)
+
+
+    # Realtime clients validate ``audio.output.voice`` against OpenAI's own
+    # allowlist, so they can only ever send names like "alloy". Kokoro ships
+    # af_alloy / af_nova / ... Map the ones that have a clear counterpart and
+    # fall back to the configured voice for anything else, rather than letting
+    # a 404 on voices/<name>.pt abort synthesis and emit no audio at all.
+    _OPENAI_VOICE_ALIASES = {
+        "alloy": "af_alloy",
+        "nova": "af_nova",
+        "shimmer": "af_sky",
+        "coral": "af_heart",
+        "sage": "af_sarah",
+        "echo": "am_echo",
+        "ash": "am_adam",
+        "ballad": "bm_fable",
+        "verse": "am_michael",
+        "marin": "af_bella",
+        "cedar": "bm_george",
+    }
+
+    def _resolve_requested_voice(self, voice: Optional[str]) -> Optional[str]:
+        """Map a requested voice onto a Kokoro voice id.
+
+        Returns ``voice`` unchanged when it already looks like a Kokoro id
+        (``af_heart``, ``bm_fable``, ...), a mapped id for a known OpenAI
+        Realtime voice name, and the currently configured voice otherwise.
+        """
+        if not voice:
+            return voice
+        alias = self._OPENAI_VOICE_ALIASES.get(voice)
+        if alias is not None:
+            return alias
+        if len(voice) > 3 and voice[2] == "_":
+            return voice
+        logger.warning(
+            "Unknown Kokoro voice %r; falling back to %r", voice, self.voice
+        )
+        return self.voice
 
     def _record_tts_ttfa(self, tts_input: TTSInput | None, started_at_s: float, first_audio_at_s: float) -> None:
         if tts_input is None:
