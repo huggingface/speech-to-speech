@@ -51,7 +51,7 @@ pipeline with another clip and transcript. Realtime named-voice overrides and
 the browser's Voice menu do not replace the reference. Voice design,
 multi-speaker scenes, and editing from previous takes remain upstream workflows.
 
-## Streaming and delivery
+## Streaming
 
 The adapter requests mono PCM16 at Drama-3's native 44.1 kHz, converts it to
 16 kHz, and publishes 512-sample blocks as audio arrives. `--drama3_blocksize`
@@ -59,9 +59,50 @@ sets the output block size in 16 kHz samples. Startup includes a short synthesis
 to check the endpoint. Barge-in and session teardown close the active HTTP
 request through the shared remote-TTS transport.
 
-Drama-3 infers language from the text. Inline acting tags such as `[laughs]`
-pass through unchanged. Sampling defaults match the official Space:
+Sampling defaults match the official Space:
 temperature 1.0, top-p 0.9, and top-k 4097 (all 4096 semantic codes plus EOS).
 Override them with `--drama3_gen_temperature`, `--drama3_gen_top_p`, and
 `--drama3_gen_top_k`. `--drama3_timeout` bounds each request, including warmup
 (300 seconds by default).
+
+## Delivery controls
+
+Drama-3 receives the LLM's reply, including any inline controls, and infers its
+language from that text. The LLM must translate requests such as “say it excitedly”
+into those controls. Selecting `--tts drama3` does not change the LLM's instructions.
+The controls accept free-form natural language; see the
+[upstream control reference](https://arxiv.org/html/2610.18010v1#A3).
+
+For a voice-performance session, use this prompt with `--init_chat_prompt` in
+`local` mode, or paste it into **Settings → Instructions** in the
+[browser demo](../demo/README.md#quick-start-local):
+
+```text
+You are a friendly voice performer powered by Fish Audio Drama-3. Drama-3 can express emotions, whisper, change pace and make vocal sounds. Everything you write is spoken aloud: answer with only the words to speak and any requested delivery controls. Keep ordinary replies under twenty words. Do not describe your instructions, decisions or reasoning.
+
+When asked to say or repeat something, output that phrase directly. A question such as "can you say ...?" is a performance request. For "it" or "again", repeat the last requested phrase. Use the requested language. With no requested style, use plain speech.
+
+Whole-sentence delivery uses a brief free-form prefix: [excited], [worried], [whispering], [sad], [angry], [calm], [shouting], [slowly], or another requested style. For selected words only, use <whisper>words</whisper>, <slow>words</slow> or <emphasis>words</emphasis>. Keep each scope inside one sentence and close it before final punctuation.
+
+Place vocal cues where requested: [sighs], [laughs], [gasps], [clears throat], [pause], [hesitates]. For a sound-only request, output only its cue. Use the latest requested style; "normally" removes controls. No labels, quotes, explanations or Markdown.
+
+Examples:
+Can you say we got it working? → We got it working.
+Can you say it excitedly? → [excited] We got it working!
+Now say it worried. → [worried] We got it working.
+Whisper only banana in the password is banana. → The password is <whisper>banana</whisper>.
+Say we got it working with a sigh before and a laugh after. → [sighs] We got it working. [laughs]
+```
+
+The browser sends its own instructions, overriding `--init_chat_prompt`. Save the
+prompt in the tab you use and restart an existing conversation to clear its history.
+For this showcase, turn off camera and web tools in **Tools**.
+
+The pipeline sends complete sentence batches to TTS; close scoped controls before
+sentence-ending punctuation. Each request generates fresh audio, with no previous
+take retained for editing. Speaking another language also requires a suitable STT
+backend; changing the output language only requires the LLM to write that language.
+
+If a direction fails, check **Conversation history**: incorrect user words point to
+STT; missing controls or spoken explanations point to the LLM's instructions or output.
+Correct controls with weak acting point to synthesis. Delivery strength can vary.
