@@ -56,9 +56,11 @@ except (ImportError, ModuleNotFoundError) as e:
 
 
 class VADHandler(BaseHandler[VADIn, VADOut]):
-    """
-    Handles voice activity detection. When voice activity is detected, audio will be accumulated until the end of speech is detected and then passed
-    to the following part.
+    """Accumulate speech and emit its audio when the detected segment ends.
+
+    Downstream consumers can also request cumulative progressive snapshots while
+    speech continues. Their cadence is independent of live transcription; taking
+    a snapshot neither splits the buffer nor ends the conversational turn.
     """
 
     def setup(
@@ -193,6 +195,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._log_progressive_yields = 0
         self._speech_started_emitted = False
         self._speculative_audio_prefix: np.ndarray | None = None
+        # Optional cadence in input samples for cumulative progressive snapshots.
+        # Consumers own slicing/caching; this does not enable live transcription.
         self.transcription_window_samples: int | None = None
         self._last_window_snapshot_samples = 0
         self._window_check_after_samples = 0
@@ -661,8 +665,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             self._log_progressive_yields = 0
             self._last_log_time = now
 
-        # Live transcription controls whether progressive STT work is emitted
-        # before the final segment.
+        # Progressive snapshots can serve live transcription or other downstream
+        # processing while speech continues; neither path forces a turn boundary.
         yield from self._process_realtime(vad_output, runtime_config, received_at_s, decision_at_s)
 
     def _process_realtime(
@@ -672,7 +676,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         received_at_s: float | None = None,
         decision_at_s: float | None = None,
     ) -> Iterator[VADOut]:
-        """Process with real-time progressive audio release."""
+        """Emit cumulative progressive snapshots and handle detected speech ends."""
         window_samples = getattr(self, "transcription_window_samples", None)
         # Within a segment the turn grows by at most the audio received, so
         # window-only checks skip recounting the whole buffer until one can be due.

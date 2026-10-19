@@ -48,9 +48,12 @@ vLLM 0.28.0 also splits Qwen3-ASR audio longer than 30 seconds internally, so
 on vLLM the cap bounds request size and repeated work; it does not set the
 recognition chunk length.
 
-While the user speaks, VAD supplies an internal snapshot after each additional
-window of audio, even when live captions are disabled. STT transcribes completed
-windows and retains their text. Cuts use the midpoint of the quietest 100 ms
+The pipeline enables VAD's backend-independent
+[progressive audio snapshots](../src/speech_to_speech/VAD/README.md#progressive-audio-snapshots)
+at the configured window cadence, even when live captions are disabled. VAD keeps
+capturing and supplies cumulative audio; it does not cut the speech into segments.
+The STT handler splits those snapshots into bounded uploads, transcribes completed
+windows, and retains their text. Cuts use the midpoint of the quietest 100 ms
 frame in the five seconds before the cap (a shorter search for very small caps).
 Windows do not overlap or discard samples. If speech has no quiet pause, the
 cut still stays within the cap; low energy does not guarantee a word boundary.
