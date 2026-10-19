@@ -7,7 +7,7 @@ name = "speech-to-speech"
 version = "1.0.0"
 description = "Low-latency speech-to-speech pipeline"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [
@@ -18,9 +18,10 @@ classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Multimedia :: Sound/Audio :: Speech",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
@@ -97,7 +98,6 @@ omnivoice = [
 paraformer = [
     "funasr>=1.2.7",
     "modelscope>=1.17.1",
-    "onnxruntime<1.24; python_version < '3.11'",
 ]
 sensevoice = [
     "funasr>=1.1.6",
@@ -157,7 +157,7 @@ select = ["E", "F", "I", "W"]
 ignore = ["E501"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 ignore_missing_imports = true
 warn_unused_configs = true
 check_untyped_defs = false
