@@ -704,3 +704,55 @@ def test_local_generation_does_not_emit_calls_with_malformed_arguments(modality,
     assert not any(chunk.tools for chunk in chunks)
     assert "".join(chunk.text for chunk in chunks).replace(" ", "") == "Before.After."
     assert not chat.has_pending_tool_calls()
+
+
+@pytest.mark.parametrize("modality", ["audio", "text"])
+@pytest.mark.parametrize("split", [False, True])
+@pytest.mark.parametrize("tool_choice", ["auto", "none"])
+@pytest.mark.parametrize(
+    "query,string_arguments",
+    [
+        ("Check “left” please.", False),
+        ("Show “</tool_call>” literally.", False),
+        ("thumbs up 👍", False),
+        ("Show “</tool_call>” literally. 👍", True),
+    ],
+)
+def test_local_generation_extracts_native_json_before_speech_filtering(
+    modality, split, tool_choice, query, string_arguments
+):
+    arguments = {"query": query}
+    if string_arguments:
+        arguments = json.dumps(arguments, ensure_ascii=False)
+    block = "<tool_call>" + json.dumps({"name": "dance", "arguments": arguments}, ensure_ascii=False) + "</tool_call>"
+    outputs, chat = _generate_local_tool_response(
+        "Before. " + block + " After.", modality=modality, split=split, tool_choice=tool_choice
+    )
+
+    chunks = [output for output in outputs if isinstance(output, LLMResponseChunk)]
+    tools = [tool for chunk in chunks for tool in chunk.tools]
+    assert "".join(chunk.text for chunk in chunks).replace(" ", "") == "Before.After."
+    if tool_choice == "none":
+        assert tools == []
+        assert not chat.has_pending_tool_calls()
+    else:
+        assert len(tools) == 1
+        assert json.loads(tools[0].arguments) == {"query": query}
+        assert [item.type for item in chat.buffer[1:]] == ["message", "function_call", "message"]
+        assert json.loads(chat.buffer[2].arguments) == {"query": query}
+
+
+@pytest.mark.parametrize("modality", ["audio", "text"])
+@pytest.mark.parametrize("split", [False, True])
+def test_local_generation_filters_prose_before_tools_batches_and_final_flush(modality, split):
+    before = "“Before” 👍. "
+    after = " “First” 👍. “Second” 👍. “Third” 👍. “Last” 👍."
+    block = '<tool_call>{"name":"dance","arguments":{}}</tool_call>'
+    outputs, _chat = _generate_local_tool_response(before + block + after, modality=modality, split=split)
+
+    chunks = [output for output in outputs if isinstance(output, LLMResponseChunk) and output.text]
+    if modality == "text":
+        assert "".join(chunk.text for chunk in chunks) == before + after
+    else:
+        assert len(chunks) == 3
+        assert "".join(chunk.text for chunk in chunks).replace(" ", "") == '"Before"."First"."Second"."Third"."Last".'

@@ -380,6 +380,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if text_only and before:
                 chunks.append(text_chunk(before))
             elif before.strip():
+                before = remove_unspeechable(before)
                 for s in sent_tokenize_preserving_markdown_code(before, sent_tokenize):
                     ctx.sentence_batch.append(remove_markdown(s))
             if ctx.sentence_batch:
@@ -441,6 +442,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             return chunks, tools, pending_marker
 
         if printable_text:
+            printable_text = remove_unspeechable(printable_text)
             trailing_whitespace = printable_text[len(printable_text.rstrip()) :]
             sentences = sent_tokenize_preserving_markdown_code(printable_text, sent_tokenize)
             if len(sentences) > 1:
@@ -520,8 +522,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         response: RealtimeResponseCreateParams | None = None,
     ) -> Iterator[LLMResponseChunk]:
         """Consume *token_iter*, accumulate text in *ctx*, yield sentence chunks."""
-        # Text-only output keeps every character; only audio strips TTS-unfriendly
-        # symbols via remove_unspeechable.
+        # Keep the parsing buffer raw: speech filtering can invalidate JSON or
+        # change tool arguments. _process_printable_text filters audio prose only.
         wants_audio = response_wants_audio(response)
         while True:
             try:
@@ -544,7 +546,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             ctx.raw_generated_text += raw_text
             clean = raw_text if not wants_audio else remove_unspeechable(raw_text)
             ctx.generated_text += clean
-            ctx.printable_text += clean
+            ctx.printable_text += raw_text
             chunks, ctx.tools, ctx.printable_text = self._process_printable_text(
                 ctx.printable_text,
                 language_code,
