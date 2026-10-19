@@ -47,6 +47,7 @@ from speech_to_speech.LLM.tool_call.function_call import (
     JSON_TOOL_CALL_END,
     JSON_TOOL_CALL_ENTER,
     extract_function_calls_from_text,
+    find_json_tool_call_end,
     parse_json_tool_call_block,
 )
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
@@ -287,12 +288,11 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         *,
         language_name: str | None = None,
     ) -> None:
-        if not instructions and not language_name:
-            return
-
         raw_tools = raw_tools or []
 
         function_tools = [FunctionTool(**t.model_dump()) for t in raw_tools if t.type == "function"]
+        if not instructions and not language_name and not function_tools:
+            return
 
         build_system_prompt = build_voice_system_prompt if wants_audio else build_text_system_prompt
 
@@ -385,14 +385,18 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if ctx.sentence_batch:
                 chunks.append(text_chunk(" ".join(ctx.sentence_batch)))
                 ctx.sentence_batch = []
-            if end not in code_and_after or (kind == "code" and not ctx.block_regex):
+            if kind == "json":
+                block_end = find_json_tool_call_end(code_and_after)
+            else:
+                block_end = code_and_after.index(end) + len(end) if ctx.block_regex and end in code_and_after else None
+            if block_end is None:
                 # Preserve the incomplete block until more streamed text arrives.
                 return chunks, tools, code_and_after
 
-            block_end = code_and_after.index(end) + len(end)
             complete_block = code_and_after[:block_end]
             printable_text = code_and_after[block_end:]
             if kind == "code":
+                assert ctx.block_regex is not None
                 _, func_calls = extract_function_calls_from_text(complete_block, ctx.block_regex)
             else:
                 func_calls = parse_json_tool_call_block(complete_block)
@@ -554,6 +558,18 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 logger.info("LLM generation cancelled (stale speculative turn)")
                 break
             yield from chunks
+
+        if ctx.enter_code and ctx.end_code and not ctx.interrupted:
+            # Pending tool syntax must not reach either the sentence-batch flush
+            # below or process()'s final text chunk when generation ends early.
+            for marker in (ctx.enter_code, JSON_TOOL_CALL_ENTER):
+                if ctx.printable_text.startswith(marker):
+                    ctx.printable_text = ""
+                    break
+                for length in range(min(len(marker) - 1, len(ctx.printable_text)), 0, -1):
+                    if ctx.printable_text.endswith(marker[:length]):
+                        ctx.printable_text = ctx.printable_text[:-length]
+                        break
 
         if ctx.sentence_batch and not ctx.interrupted:
             if ctx.printable_text.strip():

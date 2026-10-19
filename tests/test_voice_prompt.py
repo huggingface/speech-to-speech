@@ -2,11 +2,13 @@ import json
 from threading import Event
 from types import MethodType, SimpleNamespace
 
+import pytest
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemAssistantMessage,
     RealtimeConversationItemFunctionCall,
     RealtimeConversationItemFunctionCallOutput,
 )
+from openai.types.realtime.realtime_function_tool import RealtimeFunctionTool
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.responses import ResponseFunctionToolCall
 
@@ -611,3 +613,94 @@ def test_tool_blocks_are_stripped_but_not_run_when_tool_choice_is_none():
     assert tools == []
     spoken = " ".join(c.text for c in chunks if c.text) + remaining
     assert "tool_call" not in spoken and "step_forward" not in spoken
+
+
+def _generate_local_tool_response(text, *, modality, tool_choice="auto", instructions="Be concise.", split=False):
+    handler = _local_handler_with_chunks([])
+    handler.stop_event = Event()
+    handler.stream_batch_sentences = 3
+
+    def generate(self, chat, language, generation, ctx, config, response):
+        tokens = iter(text) if split else iter([text])
+        yield from self._stream_tokens(tokens, generation, language, ctx, config, response)
+
+    handler._generate = MethodType(generate, handler)
+    config = RuntimeConfig()
+    config.chat.add_item(make_user_message("Go."))
+    config.session.instructions = instructions
+    config.session.tools = [
+        RealtimeFunctionTool(
+            type="function",
+            name="dance",
+            parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+        )
+    ]
+    request = GenerateResponseRequest(
+        runtime_config=config,
+        response=RealtimeResponseCreateParams(output_modalities=[modality], tool_choice=tool_choice),
+    )
+    return list(drive_llm(handler, request)), config.chat
+
+
+@pytest.mark.parametrize("modality", ["audio", "text"])
+@pytest.mark.parametrize("tool_choice", ["auto", "none"])
+@pytest.mark.parametrize("split", [False, True])
+@pytest.mark.parametrize(
+    "tail",
+    [
+        '<tool_call>{"name":"dance","arguments":{}',
+        '<tool_call>{"name":"dance","arguments":{"query":"unfinished </tool_call>',
+        "<tool_ca",
+        "<co",
+        "<code>dance(",
+    ],
+)
+def test_local_generation_discards_unfinished_tool_markup(modality, tool_choice, split, tail):
+    outputs, chat = _generate_local_tool_response(
+        "Sure. " + tail, modality=modality, tool_choice=tool_choice, split=split
+    )
+
+    assert "".join(output.text for output in outputs if isinstance(output, LLMResponseChunk)).strip() == "Sure."
+    assert not any(output.tools for output in outputs if isinstance(output, LLMResponseChunk))
+    assert chat.buffer[-1].content[0].text.strip() == "Sure."
+
+
+@pytest.mark.parametrize("modality", ["audio", "text"])
+@pytest.mark.parametrize("instructions", [None, ""])
+@pytest.mark.parametrize("block", ['<tool_call>{"name":"dance","arguments":{}}</tool_call>', "<code>dance()</code>"])
+def test_local_generation_strips_disabled_tools_with_empty_instructions(modality, instructions, block):
+    outputs, chat = _generate_local_tool_response(
+        "Sure. " + block + " Done.", modality=modality, tool_choice="none", instructions=instructions
+    )
+
+    chunks = [output for output in outputs if isinstance(output, LLMResponseChunk)]
+    assert [chunk.text.strip() for chunk in chunks if chunk.text.strip()] == ["Sure.", "Done."]
+    assert not any(chunk.tools for chunk in chunks)
+    assert not chat.has_pending_tool_calls()
+
+
+@pytest.mark.parametrize("modality", ["audio", "text"])
+@pytest.mark.parametrize("split", [False, True])
+@pytest.mark.parametrize("query", ["Explain </tool_call> please.", 'A \\"quoted\\" </tool_call> and a backslash \\'])
+def test_local_generation_preserves_closing_tags_in_json_arguments(modality, split, query):
+    block = "<tool_call>" + json.dumps({"name": "dance", "arguments": {"query": query}}) + "</tool_call>"
+    outputs, chat = _generate_local_tool_response("Before. " + block + " After.", modality=modality, split=split)
+
+    chunks = [output for output in outputs if isinstance(output, LLMResponseChunk)]
+    tools = [tool for chunk in chunks for tool in chunk.tools]
+    assert len(tools) == 1
+    assert json.loads(tools[0].arguments) == {"query": query}
+    assert "".join(chunk.text for chunk in chunks).replace(" ", "") == "Before.After."
+    assert [item.type for item in chat.buffer[1:]] == ["message", "function_call", "message"]
+
+
+@pytest.mark.parametrize("modality", ["audio", "text"])
+@pytest.mark.parametrize("arguments", ["{not json}", [99], None, "", "[]"])
+def test_local_generation_does_not_emit_calls_with_malformed_arguments(modality, arguments):
+    block = "<tool_call>" + json.dumps({"name": "dance", "arguments": arguments}) + "</tool_call>"
+    outputs, chat = _generate_local_tool_response("Before. " + block + " After.", modality=modality)
+
+    chunks = [output for output in outputs if isinstance(output, LLMResponseChunk)]
+    assert not any(chunk.tools for chunk in chunks)
+    assert "".join(chunk.text for chunk in chunks).replace(" ", "") == "Before.After."
+    assert not chat.has_pending_tool_calls()

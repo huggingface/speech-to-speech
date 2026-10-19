@@ -417,3 +417,25 @@ class TestJsonToolCallBlocks:
 
         assert parse_json_tool_call_block("<tool_call>{not json}</tool_call>") == []
         assert parse_json_tool_call_block('<tool_call>{"arguments": {}}</tool_call>') == []
+
+    @pytest.mark.parametrize("arguments", ["{not json}", [99], None, "", "[]", "null", 42])
+    def test_invalid_arguments_do_not_become_empty_calls(self, arguments):
+        from speech_to_speech.LLM.tool_call.function_call import parse_json_tool_call_block
+
+        block = "<tool_call>" + json.dumps({"name": "dance", "arguments": arguments}) + "</tool_call>"
+        assert parse_json_tool_call_block(block) == []
+
+    @pytest.mark.parametrize("arguments", [{}, "{}"])
+    def test_valid_empty_arguments_are_preserved(self, arguments):
+        from speech_to_speech.LLM.tool_call.function_call import parse_json_tool_call_block
+
+        block = "<tool_call>" + json.dumps({"name": "dance", "arguments": arguments}) + "</tool_call>"
+        (call,) = parse_json_tool_call_block(block)
+        assert call.parameters == {}
+
+    def test_invalid_list_item_does_not_drop_valid_sibling(self):
+        from speech_to_speech.LLM.tool_call.function_call import parse_json_tool_call_block
+
+        block = '<tool_call>[{"name":"bad","arguments":"{broken}"},{"name":"dance","arguments":{}}]</tool_call>'
+        calls = parse_json_tool_call_block(block)
+        assert [(call.function_name, call.parameters) for call in calls] == [("dance", {})]

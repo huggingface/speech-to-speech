@@ -274,6 +274,25 @@ JSON_TOOL_CALL_ENTER = "<tool_call>"
 JSON_TOOL_CALL_END = "</tool_call>"
 
 
+def find_json_tool_call_end(block: str) -> int | None:
+    """Return the closing tag's end offset, ignoring tags inside JSON strings."""
+    in_string = False
+    escaped = False
+    for index, char in enumerate(block):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif block.startswith(JSON_TOOL_CALL_END, index):
+            return index + len(JSON_TOOL_CALL_END)
+    return None
+
+
 def parse_json_tool_call_block(block: str) -> List[FunctionToolCall]:
     """Parse one ``<tool_call>{json}</tool_call>`` block into function calls.
 
@@ -299,11 +318,11 @@ def parse_json_tool_call_block(block: str) -> List[FunctionToolCall]:
         args = item.get("arguments", item.get("parameters", {}))
         if isinstance(args, str):
             try:
-                args = json.loads(args) if args.strip() else {}
+                args = json.loads(args)
             except json.JSONDecodeError:
-                args = {}
+                continue
         if not isinstance(args, dict):
-            args = {}
+            continue
         calls.append(FunctionToolCall(function_name=item["name"], parameters=args, original_string=block))
     return calls
 
