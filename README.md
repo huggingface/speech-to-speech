@@ -699,6 +699,8 @@ speech-to-speech local \
 
 The checkpoint must include its matching `config.json`, `tokenizer.json`, q8 `model.q8.gguf`, and voice embeddings. The runtime preview does not include weights or select a checkpoint automatically. Use `--phonon_tts_voice VOICE_NAME` to select a voice from your checkpoint; omitting it uses the checkpoint's default. Keep private checkpoints outside the repository.
 
+Use `--phonon_tts_num_threads N` to tune the native CPU thread pool at startup; omitting it preserves the runtime default. On an Apple M3 Pro, try `--phonon_tts_num_threads 4`, which performed better than the twelve-thread default in local testing. The setting is shared by all Phonon pipelines in the process.
+
 Phonon runs on CPU even when STT or the LLM uses a GPU. Native audio is resampled to the pipeline's 16 kHz PCM16 output, and interruption closes the native stream. The preview fixes text normalization at startup; use `en`, `fr`, `de`, `es`, `pt`, or `none`. Session language changes are restricted to that configured language. See the [TTS component guide](./src/speech_to_speech/TTS/README.md#9-phonon---tts-phonon) for installation and checkpoint options.
 
 ## CLI Reference

@@ -35,6 +35,7 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
         language: str = "en",
         quant: str = "q8",
         blocksize: int = 512,
+        num_threads: int | None = None,
         gen_kwargs: dict[str, Any] | None = None,
         cancel_scope: CancelScope | None = None,
         speculative_turns: SpeculativeTurnTracker | None = None,
@@ -45,13 +46,19 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
             )
         if blocksize <= 0:
             raise ValueError("blocksize must be positive")
+        if num_threads is not None and num_threads <= 0:
+            raise ValueError("num_threads must be positive")
         language = language.strip().lower()
         if language not in PHONON_NORMALIZATION_LANGUAGES:
             raise ValueError(
                 f"Unsupported Phonon normalization language {language!r}; choose en, fr, de, es, pt, or none."
             )
 
-        from ptts import TTS
+        import ptts
+
+        if num_threads is not None:
+            # The native pool is process-wide and is sized before the first model load.
+            ptts.set_num_threads(num_threads)
 
         self.should_listen = should_listen
         self.voice = voice
@@ -62,7 +69,7 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self._failed_responses: set[tuple[int | None, str | None, str | None, int | None]] = set()
         # Published preview wheels run on CPU; global Torch/MLX device flags do
         # not apply to this Rust runtime. Keep it loaded across utterances.
-        self.model = TTS(config=model_name, revision=revision, lang=language, quant=quant, device="cpu")
+        self.model = ptts.TTS(config=model_name, revision=revision, lang=language, quant=quant, device="cpu")
         self._validate_voice(voice)
         logger.info("Loaded Phonon at %s Hz; voices: %s", self.model.sample_rate, ", ".join(self.model.voices))
 

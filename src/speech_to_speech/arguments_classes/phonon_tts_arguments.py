@@ -33,3 +33,9 @@ class PhononTTSHandlerArguments:
         default=512,
         metadata={"help": "Number of 16 kHz PCM16 samples in each output block. Default 512."},
     )
+    phonon_tts_num_threads: int | None = field(
+        default=None,
+        metadata={
+            "help": "Positive CPU thread count for Phonon's process-wide native pool, set before model load. Omit to keep the runtime default."
+        },
+    )

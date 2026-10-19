@@ -236,16 +236,18 @@ def test_omnivoice_tts_backend_is_registered_as_optional():
     assert spec.required_extra == "omnivoice"
 
 
-def test_phonon_cli_and_registry_construct_native_handler(monkeypatch):
+@pytest.mark.parametrize("num_threads", [None, 4])
+def test_phonon_cli_and_registry_construct_native_handler(monkeypatch, num_threads):
     from speech_to_speech.TTS.phonon_tts_handler import PhononTTSHandler
 
     loaded = []
+    thread_counts = []
 
     def load(**kwargs):
         loaded.append(kwargs)
         return SimpleNamespace(sample_rate=24000, voices=["voice-a"])
 
-    monkeypatch.setitem(sys.modules, "ptts", SimpleNamespace(TTS=load))
+    monkeypatch.setitem(sys.modules, "ptts", SimpleNamespace(TTS=load, set_num_threads=thread_counts.append))
     args = parse_arguments(
         [
             "--tts",
@@ -261,6 +263,7 @@ def test_phonon_cli_and_registry_construct_native_handler(monkeypatch):
             "--phonon_tts_blocksize",
             "256",
         ]
+        + (["--phonon_tts_num_threads", str(num_threads)] if num_threads is not None else [])
     )
     assert args.tts_backend.spec.required_extra == "phonon"
     assert args.tts_backend.config == {
@@ -270,11 +273,13 @@ def test_phonon_cli_and_registry_construct_native_handler(monkeypatch):
         "language": "fr",
         "quant": "q8",
         "blocksize": 256,
+        "num_threads": num_threads,
         "gen_kwargs": {},
     }
     handler = create_backend_handler(args.tts_backend, _context())
     assert isinstance(handler, PhononTTSHandler)
     assert loaded == [{"config": "/models/test", "revision": "revision", "lang": "fr", "quant": "q8", "device": "cpu"}]
+    assert thread_counts == ([] if num_threads is None else [num_threads])
 
 
 def test_phonon_missing_dependency_reports_install_extra(monkeypatch):

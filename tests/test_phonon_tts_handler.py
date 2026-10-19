@@ -63,6 +63,8 @@ def make_handler(samples, *, sample_rate=24000, blocksize=512):
         ({}, "requires a checkpoint"),
         ({"model_name": " "}, "requires a checkpoint"),
         ({"model_name": "/models/test", "blocksize": 0}, "blocksize must be positive"),
+        ({"model_name": "/models/test", "num_threads": 0}, "num_threads must be positive"),
+        ({"model_name": "/models/test", "num_threads": -1}, "num_threads must be positive"),
         ({"model_name": "/models/test", "language": "xx"}, "Unsupported Phonon normalization language"),
     ],
 )
@@ -73,26 +75,38 @@ def test_invalid_setup_fails_before_importing_runtime(monkeypatch, kwargs, error
         handler.setup(Event(), **kwargs)
 
 
-def test_setup_loads_once_and_forwards_checkpoint_options(monkeypatch):
+@pytest.mark.parametrize("num_threads", [None, 4])
+def test_setup_loads_once_and_forwards_checkpoint_options(monkeypatch, num_threads):
     loaded = []
+    calls = []
     stream = FakeStream([np.zeros(1000, dtype=np.float32)])
     model = SimpleNamespace(sample_rate=24000, voices=["voice-a"], stream=lambda *a, **kw: stream)
 
     def load(**kwargs):
+        calls.append("load")
         loaded.append(kwargs)
         return model
 
-    monkeypatch.setitem(sys.modules, "ptts", SimpleNamespace(TTS=load))
+    monkeypatch.setitem(
+        sys.modules, "ptts", SimpleNamespace(TTS=load, set_num_threads=lambda count: calls.append(("threads", count)))
+    )
     handler = PhononTTSHandler(
         Event(),
         Queue(),
         Queue(),
         setup_args=(Event(),),
-        setup_kwargs={"model_name": "/models/test", "revision": "revision", "language": " FR ", "voice": "voice-a"},
+        setup_kwargs={
+            "model_name": "/models/test",
+            "revision": "revision",
+            "language": " FR ",
+            "voice": "voice-a",
+            "num_threads": num_threads,
+        },
     )
     list(handler.process(TTSInput(text="Bonjour")))
     list(handler.process(TTSInput(text="Salut")))
     assert loaded == [{"config": "/models/test", "revision": "revision", "lang": "fr", "quant": "q8", "device": "cpu"}]
+    assert calls == (["load"] if num_threads is None else [("threads", num_threads), "load"])
 
 
 def test_resampling_is_independent_of_native_chunk_boundaries():
@@ -237,7 +251,7 @@ def test_supplied_checkpoint_generates_pipeline_audio():
         Queue(),
         Queue(),
         setup_args=(Event(),),
-        setup_kwargs={"model_name": os.environ["PHONON_TEST_CHECKPOINT"]},
+        setup_kwargs={"model_name": os.environ["PHONON_TEST_CHECKPOINT"], "num_threads": 4},
     )
     output = list(handler.process(TTSInput(text="Hello. This is a local speech test.")))
     assert output and all(block.shape == (512,) and block.dtype == np.int16 for block in output)

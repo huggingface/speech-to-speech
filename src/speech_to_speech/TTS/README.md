@@ -295,6 +295,7 @@ speech-to-speech serve \
 - `--phonon_tts_voice VOICE_NAME` selects a registered checkpoint voice. Omitting it uses the upstream default. Realtime session and response voice overrides also accept checkpoint voice names. Raw reference-audio voice cloning is not exposed by this handler.
 - `--phonon_tts_language en|fr|de|es|pt|none` selects text normalization at startup, not a different model. The preview cannot change it per utterance, so session language selections must match it; `auto` keeps the configured normalizer. Checkpoint language coverage is independent of text normalization.
 - `--phonon_tts_blocksize` changes the number of samples per output block; the output rate stays 16 kHz.
+- `--phonon_tts_num_threads N` sets a positive CPU thread count before loading the model. Omit it to keep the runtime default. The native pool is shared process-wide, so this is a startup setting shared by all Phonon pipelines. Try `--phonon_tts_num_threads 4` on an Apple M3 Pro: four threads performed better than the runtime's twelve-thread default in local testing. Tune for your hardware and workload; more threads are not always faster.
 - Interruptions and generator cleanup close the native stream and release its workers. Resampling state is fresh for each utterance, and the model remains loaded across sessions.
 
 For a checkout, install with `pip install -e ".[phonon]"`. An optional real-checkpoint test can be run with `PHONON_TEST_CHECKPOINT=/path/to/checkpoint pytest tests/test_phonon_tts_handler.py`; ordinary tests use a fake runtime and require no weights.
