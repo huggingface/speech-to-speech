@@ -139,12 +139,6 @@ jobs:
             os: ubuntu-latest
           - label: macos-arm64
             os: macos-14
-        # Misaki, a required macOS dependency, declares Python <3.13.
-        exclude:
-          - platform: {label: macos-arm64, os: macos-14}
-            python-version: "3.13"
-          - platform: {label: macos-arm64, os: macos-14}
-            python-version: "3.14"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -170,3 +164,12 @@ jobs:
           unset OPENAI_API_KEY
           # Validate the installed entry point without loading models or calling OpenAI.
           python tests/install_smoke.py
+      - name: Check optional Kokoro installation
+        if: matrix.platform.label == 'macos-arm64' && matrix.python-version == '3.12'
+        shell: bash
+        run: |
+          source .venv-smoke/bin/activate
+          wheel=$(find dist -name 'speech_to_speech-*.whl' -print -quit)
+          python -m pip install "${wheel}[kokoro]"
+          python -m pip check
+          python -c "from mlx_audio.tts.models.kokoro.pipeline import KokoroPipeline; from misaki import en, espeak"

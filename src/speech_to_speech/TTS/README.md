@@ -74,6 +74,15 @@ uses a separate G2P model to convert Persian text to phonemes.
 
 ### 4) Kokoro (`--tts kokoro`)
 
+Install the optional runtime on every platform:
+
+```bash
+pip install "speech-to-speech[kokoro]"
+```
+
+On macOS, use Python 3.11 or 3.12: Kokoro's Misaki phonemizer requires Python
+<3.13. These dependencies are not needed by the default Qwen3-TTS backend.
+
 Primary args prefix: `--kokoro_*`
 
 ```bash

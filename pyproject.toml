@@ -63,10 +63,6 @@ dependencies = [
     "mlx-audio==0.4.7; platform_system == 'Darwin'",
     "mlx-lm==0.31.3; platform_system == 'Darwin'",
     "mlx-metal==0.32.3; platform_system == 'Darwin'",
-    "misaki>=0.9.4; platform_system == 'Darwin'",
-    "espeakng-loader>=0.2.4; platform_system == 'Darwin'",
-    "spacy>=3.8.4; platform_system == 'Darwin'",
-    "phonemizer-fork>=3.3.2; platform_system == 'Darwin'",
 ]
 
 [project.optional-dependencies]
@@ -81,6 +77,10 @@ fireredvad = [
 ]
 kokoro = [
     "kokoro>=0.9.2; platform_system != 'Darwin'",
+    "misaki[en]>=0.9.4; platform_system == 'Darwin'",
+    "espeakng-loader>=0.2.4; platform_system == 'Darwin'",
+    "spacy>=3.8.4; platform_system == 'Darwin'",
+    "phonemizer-fork>=3.3.2; platform_system == 'Darwin'",
 ]
 kitten = [
     "kittenml>=0.9.4,<0.10",

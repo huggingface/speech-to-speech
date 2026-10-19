@@ -30,7 +30,7 @@ This pipeline runs in production as the conversation backend for thousands of [R
 
 ## Quickstart
 
-Use CPython 3.11 or 3.12 (3.11 recommended). Linux also supports 3.13 and 3.14:
+Use CPython 3.11–3.14 (3.11 recommended):
 
 ```bash
 python3 -m venv .venv
@@ -48,15 +48,16 @@ The default installation has the following CI coverage:
 | Platform | Supported CPython versions | Checks |
 |---|---|---|
 | Linux | 3.11, 3.12, 3.13, 3.14 | Full test suite and installed package smoke test |
-| Apple Silicon macOS | 3.11, 3.12 | Installed package smoke test |
+| Apple Silicon macOS | 3.11, 3.12, 3.13, 3.14 | Installed package smoke test |
 
 Optional model backends can have narrower Python requirements. Windows is not
 covered by this compatibility matrix. Python 3.10 is no longer supported following
 its end of life on October 1, 2026.
 
-On macOS, the required Misaki dependency declares Python <3.13, so pip cannot
-install the default package on 3.13 or 3.14. Python 3.15 is not yet supported on
-any platform: ONNX Runtime lacks CPython 3.15 wheels, and the pinned macOS PyTorch
+Kokoro is optional on every platform. On macOS, its Misaki dependency requires
+Python <3.13, so use Python 3.11 or 3.12 with `speech-to-speech[kokoro]`.
+The default Qwen3-TTS backend does not require Misaki. Python 3.15 is not yet
+supported on any platform: ONNX Runtime lacks CPython 3.15 wheels, and the pinned macOS PyTorch
 release also lacks them. Newer Python versions will be added after the default
 dependencies and CI checks pass; the package's `requires-python` lower bound does
 not promise compatibility with future Python releases.
@@ -175,7 +176,7 @@ To use the previous CUDA-graphs implementation instead of GGML, pass `--qwen3_tt
 Optional components are installed with pip extras:
 
 ```bash
-pip install "speech-to-speech[kokoro]"          # Kokoro-82M TTS on non-macOS
+pip install "speech-to-speech[kokoro]"          # Kokoro-82M TTS (macOS: Python 3.11–3.12)
 pip install "speech-to-speech[kitten]"          # KittenTTS
 pip install "speech-to-speech[pocket]"          # Pocket TTS
 pip install "speech-to-speech[chattts]"         # ChatTTS
@@ -229,7 +230,7 @@ This installs the package in editable mode. With the environment activated, use 
 | LLM | [Transformers](https://huggingface.co/models?pipeline_tag=text-generation&sort=trending) (default elsewhere) | supported accelerators / CPU | built-in |
 | LLM | OpenAI-compatible API (`responses-api`, `chat-completions`) | optional hosted providers or self-hosted servers | built-in |
 | TTS | [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) (default) | GGML / CUDA on Linux, mlx-audio on macOS | built-in |
-| TTS | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | CUDA / CPU, Apple Silicon | `kokoro` on non-macOS; built-in on macOS |
+| TTS | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | CUDA / CPU, Apple Silicon | `kokoro` (macOS: Python 3.11–3.12) |
 | TTS | [KittenTTS](https://github.com/KittenML/KittenTTS) | CPU | `kitten` |
 | TTS | [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) | CPU / CUDA | `pocket` |
 | TTS | [ChatTTS](https://github.com/2noise/ChatTTS) | CUDA / CPU | `chattts` |
