@@ -384,8 +384,6 @@ class Chat:
 
         elif isinstance(item, RealtimeConversationItemFunctionCall):
             item.id = _ensure_id(item.id, "fc")
-            if item.call_id is not None and not item.call_id.startswith("call_"):
-                raise ChatItemError(f"ID must start with 'call_', got {item.call_id!r}")
             item.call_id = _ensure_id(item.call_id, "call")
             assert item.call_id is not None
             if ordered_function_call:
@@ -1552,10 +1550,8 @@ def add_supported_item(chat: Chat, item: ConversationItem) -> None:
     """
     # call_id on function_call items must be client-supplied: it is referenced later by
     # function_call_output items, so we cannot silently generate one here.
-    if isinstance(item, RealtimeConversationItemFunctionCall) and (
-        item.call_id is None or not item.call_id.startswith("call_")
-    ):
-        raise ChatItemError("function_call item is missing a call_id. The call_id should start with 'call_'.")
+    if isinstance(item, RealtimeConversationItemFunctionCall) and not item.call_id:
+        raise ChatItemError("function_call item is missing a call_id.")
 
     if isinstance(
         item,
