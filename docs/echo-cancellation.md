@@ -15,6 +15,12 @@ The client uses playback and capture timestamps to align speaker references
 with microphone samples. It processes complete 10 ms frames together in one
 native call; partial frames carry over to the next callback.
 
+On Windows, cancellation uses the default WASAPI input and output devices.
+If you set `--input-device` or `--output-device`, select WASAPI devices; MME
+does not provide capture timestamps. Shared-mode conversion keeps audio at
+16 kHz even when the Windows mixer uses another rate. The `soxr` dependency
+needs the [Microsoft Visual C++ x64 runtime](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
+
 With cancellation enabled, a separate audio process owns the device streams.
 Model and tool code in the parent cannot hold its Python execution lock.
 Networking and tool execution stay in the parent. Python scripts that call the

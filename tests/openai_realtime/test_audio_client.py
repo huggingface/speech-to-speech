@@ -1611,8 +1611,10 @@ def test_audio_stream_clock_mapping_uses_the_shortest_read(monkeypatch):
 
 
 @pytest.mark.parametrize("echo_cancellation", [False, True])
-def test_audio_streams_are_cleaned_up_when_startup_fails(monkeypatch, echo_cancellation):
+@pytest.mark.parametrize("windows", [False, True])
+def test_audio_streams_are_cleaned_up_when_startup_fails(monkeypatch, echo_cancellation, windows):
     events = []
+    stream_options = []
 
     class FakeStream:
         def __init__(self, name, *, fail_start=False):
@@ -1633,11 +1635,26 @@ def test_audio_streams_are_cleaned_up_when_startup_fails(monkeypatch, echo_cance
 
     input_stream = FakeStream("input")
     output_stream = FakeStream("output", fail_start=True)
+
+    def make_stream(stream, **kwargs):
+        stream_options.append(kwargs)
+        return stream
+
+    wasapi_settings = object()
     fake_sounddevice = SimpleNamespace(
-        RawInputStream=lambda **_kwargs: input_stream,
-        RawOutputStream=lambda **_kwargs: output_stream,
+        RawInputStream=lambda **kwargs: make_stream(input_stream, **kwargs),
+        RawOutputStream=lambda **kwargs: make_stream(output_stream, **kwargs),
+        query_hostapis=lambda: [
+            {"name": "MME"},
+            {"name": "Windows WASAPI", "default_input_device": 9, "default_output_device": 8},
+        ],
+        query_devices=lambda device, kind: {"hostapi": 1},
+        WasapiSettings=lambda *, auto_convert: wasapi_settings if auto_convert else None,
     )
     monkeypatch.setitem(sys.modules, "sounddevice", fake_sounddevice)
+    monkeypatch.setattr(
+        audio_client_module, "sys", SimpleNamespace(platform="win32" if windows else "linux"), raising=False
+    )
 
     config = RealtimeAudioClientConfig(playback_buffer_ms=240, echo_cancellation=echo_cancellation)
     with pytest.raises(RuntimeError, match="output start failed"):
@@ -1645,14 +1662,52 @@ def test_audio_streams_are_cleaned_up_when_startup_fails(monkeypatch, echo_cance
             pass
 
     assert events == ["input.start", "output.start", "input.stop", "output.close", "input.close"]
+    if windows and echo_cancellation:
+        assert [options["device"] for options in stream_options] == [9, 8]
+        assert all(options["extra_settings"] is wasapi_settings for options in stream_options)
+    else:
+        assert all(options["device"] is None and "extra_settings" not in options for options in stream_options)
+
+
+@pytest.mark.parametrize("devices", [(9, 8), (1, 8), (9, 3)])
+def test_windows_echo_cancellation_preserves_explicit_wasapi_devices(monkeypatch, devices):
+    monkeypatch.setattr(audio_client_module, "sys", SimpleNamespace(platform="win32"), raising=False)
+    opened = []
+
+    def stream(**kwargs):
+        opened.append(kwargs)
+        return SimpleNamespace(time=0.0, start=lambda: None, stop=lambda: None, close=lambda: None)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sounddevice",
+        SimpleNamespace(
+            query_hostapis=lambda: [{"name": "MME"}, {"name": "Windows WASAPI"}],
+            query_devices=lambda device, kind: {"hostapi": 1 if device in (9, 8) else 0},
+            WasapiSettings=lambda **kwargs: kwargs,
+            RawInputStream=stream,
+            RawOutputStream=stream,
+        ),
+    )
+    config = RealtimeAudioClientConfig(echo_cancellation=True, input_device=devices[0], output_device=devices[1])
+    if devices == (9, 8):
+        with audio_client_module._open_audio_streams(config, PlaybackBuffer(16000), audio_client_module.Queue()):
+            pass
+        assert [options["device"] for options in opened] == [9, 8]
+    else:
+        with pytest.raises(ValueError, match="requires WASAPI input and output"):
+            with audio_client_module._open_audio_streams(config, PlaybackBuffer(16000), audio_client_module.Queue()):
+                pass
+        assert not opened
 
 
 async def test_audio_worker_reports_startup_failure_and_exits():
     config = RealtimeAudioClientConfig(echo_cancellation=True, input_device=-9999)
     worker = audio_client_module._AudioWorker(config)
     with worker:
-        with pytest.raises(RuntimeError):
-            await asyncio.wait_for(worker.wait_for_failure(), timeout=15)
+        for _ in range(2):
+            with pytest.raises(RuntimeError):
+                await asyncio.wait_for(worker.wait_for_failure(), timeout=15)
     assert not worker._process.is_alive()
 
 

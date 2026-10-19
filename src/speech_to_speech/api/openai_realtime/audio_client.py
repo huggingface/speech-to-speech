@@ -14,6 +14,7 @@ import json
 import logging
 import multiprocessing
 import signal
+import sys
 import time
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, ExitStack, contextmanager
@@ -942,6 +943,27 @@ def _stream_clock_offset(stream: Any) -> float:
 def _open_audio_streams(config: RealtimeAudioClientConfig, playback: PlaybackBuffer, mic_queue: Any) -> Iterator[None]:
     import sounddevice as sd
 
+    input_device, output_device = config.input_device, config.output_device
+    stream_options: dict[str, Any] = {}
+    if config.echo_cancellation and sys.platform == "win32":
+        host_apis = sd.query_hostapis()
+        wasapi = next((index for index, api in enumerate(host_apis) if api["name"] == "Windows WASAPI"), None)
+        if wasapi is None:
+            raise ValueError("Echo cancellation on Windows requires WASAPI audio devices")
+        if input_device is None:
+            input_device = host_apis[wasapi]["default_input_device"]
+        if output_device is None:
+            output_device = host_apis[wasapi]["default_output_device"]
+        for device, kind in ((input_device, "input"), (output_device, "output")):
+            if sd.query_devices(device, kind)["hostapi"] != wasapi:
+                raise ValueError(
+                    "Echo cancellation on Windows requires WASAPI input and output devices; "
+                    "leave --input-device and --output-device unset or select WASAPI devices"
+                )
+        # MME has no capture timestamps. WASAPI supplies them, while shared-mode
+        # conversion keeps the device's mix format compatible with 16 kHz PCM.
+        stream_options["extra_settings"] = sd.WasapiSettings(auto_convert=True)
+
     echo_canceller = EchoCanceller(config.send_rate, config.recv_rate) if config.echo_cancellation else None
 
     input_clock_offset = output_clock_offset = 0.0
@@ -981,7 +1003,8 @@ def _open_audio_streams(config: RealtimeAudioClientConfig, playback: PlaybackBuf
             dtype="int16",
             blocksize=config.chunk_size,
             callback=callback_send,
-            device=config.input_device,
+            device=input_device,
+            **stream_options,
         )
         opened_streams.append(input_stream)
         output_stream = sd.RawOutputStream(
@@ -990,7 +1013,8 @@ def _open_audio_streams(config: RealtimeAudioClientConfig, playback: PlaybackBuf
             dtype="int16",
             blocksize=config.chunk_size,
             callback=callback_recv,
-            device=config.output_device,
+            device=output_device,
+            **stream_options,
         )
         opened_streams.append(output_stream)
 
@@ -1128,11 +1152,11 @@ class _AudioWorker:
         while self._process.is_alive():
             await asyncio.sleep(0.1)
         message = "Audio process stopped unexpectedly"
-        if self._errors.poll():
-            try:
+        try:
+            if self._errors.poll():
                 message = self._errors.recv()
-            except EOFError:
-                pass
+        except (EOFError, OSError):
+            pass
         logger.error("Local audio process failed: %s", message)
         raise RuntimeError(message)
 
