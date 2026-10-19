@@ -39,41 +39,22 @@ speech-to-speech local \
 
 Add `--openai_stt_max_window_s 120` to limit every transcription upload to
 two minutes of audio. The same setting is available in a configured STT block.
-The value must be finite and at least one second; leaving it unset preserves
-whole-turn uploads. Choose a cap below your service's duration and upload limits.
-For example, vLLM 0.28.0 defaults to a 600-second decode limit and a 25 MiB
-upload limit; a two-minute mono PCM16 WAV at 16 kHz is about 3.66 MiB.
-These are service limits, not an intrinsic ten-minute Qwen model limit.
-vLLM 0.28.0 also splits Qwen3-ASR audio longer than 30 seconds internally, so
-on vLLM the cap bounds request size and repeated work; it does not set the
-recognition chunk length.
+The value must be finite and at least one second, and should be below your
+server's duration and upload limits. Leaving it unset preserves whole-turn uploads.
 
-The pipeline enables VAD's backend-independent
+The handler uses VAD's
 [progressive audio snapshots](../src/speech_to_speech/VAD/README.md#progressive-audio-snapshots)
-at the configured window cadence, even when live captions are disabled. VAD keeps
-capturing and supplies cumulative audio; it does not cut the speech into segments.
-The STT handler splits those snapshots into bounded uploads, transcribes completed
-windows, and retains their text. Cuts use the midpoint of the quietest 100 ms
-frame in the five seconds before the cap (a shorter search for very small caps).
-Windows do not overlap or discard samples. If speech has no quiet pause, the
-cut still stays within the cap; low energy does not guarantee a word boundary.
-Words crossing a cut can still be misrecognized.
+to transcribe bounded windows while speech continues. Completed text is reused
+across reopened speech; at turn end, remaining audio is transcribed and the full
+transcript assembled. Internal cuts do not trigger an assistant response.
 
-Only the outstanding tail is transcribed at the conversational boundary. The
-complete transcript follows the existing VAD/Smart Turn and response-admission
-path; an internal cut never starts an assistant response. Reopened revisions
-reuse completed windows and revise the tail. Explicitly changed audio or a
-changed language hint invalidates the cached prefix, which is recomputed through
-bounded requests. Session end clears the cache and fences late completions.
-HTTP failure produces a transcription failure, never a successful truncated prefix.
+Cuts use a quiet point up to five seconds before the limit, without overlapping
+or discarding audio. They stay bounded even without silence, but can split words
+and affect recognition.
 
-`--enable_live_transcription` continues to control captions and repeated tail
-hypotheses. Without it, internal processing publishes no partial transcripts.
-This option bounds HTTP request size and avoids re-transcribing unchanged,
-completed windows. VAD still retains cumulative audio for turn handling,
-Smart Turn, and optional speaker metadata; total turn memory is not capped.
-Inference capacity, server-side cancellation, and streaming transports are
-unchanged. A server that falls behind can still leave multiple windows to finish.
+Processing also works with live captions disabled; `--enable_live_transcription`
+controls partial transcript output. VAD still retains turn audio, so this option
+does not bound its memory usage.
 
 ## OpenAI-hosted transcription
 

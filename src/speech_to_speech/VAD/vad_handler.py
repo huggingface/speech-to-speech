@@ -56,12 +56,7 @@ except (ImportError, ModuleNotFoundError) as e:
 
 
 class VADHandler(BaseHandler[VADIn, VADOut]):
-    """Accumulate speech and emit its audio when the detected segment ends.
-
-    Downstream consumers can also request cumulative progressive snapshots while
-    speech continues. Their cadence is independent of live transcription; taking
-    a snapshot neither splits the buffer nor ends the conversational turn.
-    """
+    """Emit speech audio at segment end, with optional cumulative snapshots during capture."""
 
     def setup(
         self,
@@ -195,8 +190,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._log_progressive_yields = 0
         self._speech_started_emitted = False
         self._speculative_audio_prefix: np.ndarray | None = None
-        # Optional cadence in input samples for cumulative progressive snapshots.
-        # Consumers own slicing/caching; this does not enable live transcription.
+        # Optional snapshot cadence in input samples, independent of live transcription.
         self.transcription_window_samples: int | None = None
         self._last_window_snapshot_samples = 0
         self._window_check_after_samples = 0
@@ -665,8 +659,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             self._log_progressive_yields = 0
             self._last_log_time = now
 
-        # Progressive snapshots can serve live transcription or other downstream
-        # processing while speech continues; neither path forces a turn boundary.
+        # Emit requested snapshots or finalize a detected speech segment.
         yield from self._process_realtime(vad_output, runtime_config, received_at_s, decision_at_s)
 
     def _process_realtime(
