@@ -391,12 +391,12 @@ def test_duplicate_diagnostic_and_huge_numeric_type(tmp_path, document):
         validate_config(document)
 
 
-def test_schema_references_paths_and_provider_error_redaction(document, monkeypatch):
+def test_schema_references_paths_and_provider_error_redaction(document, monkeypatch, tmp_path):
     document.data["blocks"]["vad"]["settings"] = {"smart_turn_model_path": "~/model.onnx"}
-    monkeypatch.setenv("HOME", "/tmp/config-home")
-    assert (
-        resolve_config(document).pipelines["primary"].stages["vad"].settings["smart_turn_model_path"]
-        == "/tmp/config-home/model.onnx"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # what Windows reads instead of HOME
+    assert resolve_config(document).pipelines["primary"].stages["vad"].settings["smart_turn_model_path"] == str(
+        tmp_path / "model.onnx"
     )
     document.data["blocks"]["stt"]["backend"] = "mlx-audio-whisper"
     document.data["blocks"]["stt"]["settings"] = {"mlx_audio_whisper_gen_kwargs": {"SECRET_MARKER": object()}}
@@ -426,7 +426,8 @@ def test_config_path_home_expansion_is_safe():
 
 def test_parser_size_and_depth_boundaries(tmp_path):
     path = tmp_path / "config.yml"
-    path.write_text(BASE + "#" * (1024 * 1024 - len(BASE.encode())))
+    # Write bytes so Windows doesn't turn newlines into CRLF and push the file past 1 MiB.
+    path.write_bytes((BASE + "#" * (1024 * 1024 - len(BASE.encode()))).encode())
     validate_config(load_config(path))
     document = write(tmp_path, "x: " + "[" * 31 + "0" + "]" * 31)
     assert "x" in document.data
