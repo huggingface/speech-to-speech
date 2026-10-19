@@ -452,7 +452,7 @@ def test_explicit_scope_inventory():
     }
     assert {"enable_visemes", "stv_model_name", "stv_device"} <= _MODULE_PIPELINE
     assert not _MODULE_PROCESS & _MODULE_PIPELINE
-    assert {f.name for f in fields(RealtimeServerArguments)} == {"host", "port"}
+    assert {f.name for f in fields(RealtimeServerArguments)} == {"host", "port", "session_routing_enabled"}
     assert {f.name for f in fields(RealtimeAudioClientConfig)} == {
         "url",
         "model",

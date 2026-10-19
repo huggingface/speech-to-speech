@@ -16,6 +16,7 @@ from scipy.io import wavfile
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.api.openai_realtime.service import RealtimeService
+from speech_to_speech.api.openai_realtime.session_routing import SessionRouting
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline import language_detection
 from speech_to_speech.pipeline.cancel_scope import CancelScope
@@ -220,8 +221,9 @@ def test_openai_tts_auto_setup_stays_auto_without_assistant_detection(monkeypatc
         (None, "French", "en", "French"),
     ],
 )
+@pytest.mark.parametrize("routed", [False, "canonical", "alias"])
 def test_detected_assistant_language_reaches_openai_tts_payload(
-    monkeypatch, session_language, setup_language, detected_language, expected_language
+    monkeypatch, session_language, setup_language, detected_language, expected_language, routed
 ):
     monkeypatch.setattr(language_detection, "warm_language_detector", lambda: object())
     monkeypatch.setattr(language_detection, "detect_language_from_text", lambda *args, **kwargs: detected_language)
@@ -235,7 +237,27 @@ def test_detected_assistant_language_reaches_openai_tts_payload(
         session = RealtimeSessionCreateRequest(
             type="realtime", audio={"input": {"transcription": {"language": session_language}}}
         )
-    config = RuntimeConfig(session=session)
+    admitted = None
+    if routed:
+        admitted = SessionRouting.model_validate(
+            {
+                "id": "language-session",
+                "pipeline": "routed-qwen",
+                "routes": {
+                    "stt": {"model": "asr", "provider": "hf", "protocol": "transcriptions"},
+                    "llm": {"model": "llm", "provider": "hf", "protocol": "chat_completions"},
+                    "tts": {
+                        "model": "speech-v2" if routed == "alias" else handler.model,
+                        "provider": "hf",
+                        "protocol": "speech",
+                        "voice": "aiden",
+                        **({"model_family": "qwen3-tts"} if routed == "alias" else {}),
+                    },
+                },
+            }
+        )
+        handler.model = "default-tts"
+    config = RuntimeConfig(session=session, routing=admitted)
 
     outputs = list(
         processor.process(
@@ -250,6 +272,60 @@ def test_detected_assistant_language_reaches_openai_tts_payload(
 
     assert _FakeSpeechOperation.instances[0].payload["language"] == expected_language
     assert config.selected_language == session_language  # STT keeps the session selection.
+    if admitted is not None:
+        assert _FakeSpeechOperation.instances[0].payload["model"] == admitted.routes.tts.model
+        assert handler.model == "default-tts"
+
+
+def test_tts_alias_switch_preserves_session_language_in_next_request(monkeypatch):
+    handler = _openai_tts_handler(monkeypatch)
+    initial = SessionRouting.model_validate(
+        {
+            "id": "language-session",
+            "pipeline": "routed-qwen",
+            "updates_enabled": True,
+            "routes": {
+                "stt": {"model": "asr", "provider": "hf", "protocol": "transcriptions"},
+                "llm": {"model": "llm", "provider": "hf", "protocol": "chat_completions"},
+                "tts": {
+                    "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+                    "provider": "hf",
+                    "protocol": "speech",
+                    "voice": "aiden",
+                },
+            },
+        }
+    )
+    service = RealtimeService(text_prompt_queue=Queue())
+    sid = service.register(routing=initial)
+    language_update = SessionUpdateEvent(
+        type="session.update",
+        session=RealtimeSessionCreateRequest(type="realtime", audio={"input": {"transcription": {"language": "es"}}}),
+    )
+    assert service.handle_session_update(sid, language_update) is None
+    before = service._state(sid).runtime_config
+    assert list(handler.process(TTSInput(text="Hola", runtime_config=before, response_key="before")))
+
+    destination_data = initial.model_dump()
+    destination_data["routes"]["tts"].update(model="speech-v2", model_family="qwen3-tts")
+    destination = SessionRouting.model_validate(destination_data)
+    model_update = SessionUpdateEvent.model_validate(
+        {"type": "session.update", "session": {"type": "realtime", "models": {"tts": "speech-v2"}}}
+    )
+    assert service.handle_session_update(sid, model_update, routing=destination) is None
+    after = service._state(sid).runtime_config
+    updated = service.build_session_updated(sid).session.model_dump()
+    assert updated["models"]["tts"] == {"model": "speech-v2", "provider": "hf"}
+    assert after.selected_language == "es"
+    assert after.chat is before.chat
+    assert list(handler.process(TTSInput(text="Hola otra vez", runtime_config=after, response_key="after")))
+
+    assert [operation.payload["model"] for operation in _FakeSpeechOperation.instances] == [
+        initial.routes.tts.model,
+        "speech-v2",
+    ]
+    assert [operation.payload["language"] for operation in _FakeSpeechOperation.instances] == ["Spanish", "Spanish"]
+    assert all("model_family" not in operation.payload for operation in _FakeSpeechOperation.instances)
 
 
 def test_omitted_language_keeps_auto_for_short_first_batch_and_prior_assistant_fallback(monkeypatch):

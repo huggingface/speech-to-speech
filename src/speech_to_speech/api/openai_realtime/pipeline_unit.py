@@ -48,6 +48,8 @@ class SessionState(BaseModel):
     # its handlers may still emit this session's output — until SESSION_END
     # actually drains. Reported as "stuck" by /v1/pool.
     quarantined_at: Optional[float] = None
+    # A model switch requested during a turn, as (task, correlated send), until it applies.
+    pending_routing_update: Optional[tuple[asyncio.Task[None], Any]] = None
 
 
 class PipelineUnit(BaseModel):

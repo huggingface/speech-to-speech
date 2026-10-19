@@ -902,6 +902,14 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             enhanced = enhance(self.enhanced_model, self.df_state, torch.from_numpy(array))
         return enhanced.numpy().squeeze()
 
+    def has_pending_session_work(self) -> bool:
+        return (
+            self.iterator.triggered
+            or self._speech_started_emitted
+            or self._pending_short_segment is not None
+            or (self.speculative_turns is not None and self.speculative_turns.has_speech_candidate())
+        )
+
     def on_session_end(self):
         worker = getattr(self, "diarization_worker", None)
         if worker is not None:

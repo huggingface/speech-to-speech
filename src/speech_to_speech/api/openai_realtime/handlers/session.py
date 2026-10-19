@@ -5,6 +5,7 @@ from typing import Optional
 
 from openai.types.realtime import (
     RealtimeErrorEvent,
+    RealtimeSessionCreateRequest,
     SessionCreatedEvent,
     SessionUpdatedEvent,
     SessionUpdateEvent,
@@ -14,6 +15,8 @@ from openai.types.realtime.realtime_transcription_session_create_request import 
 )
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.api.openai_realtime.session_routing import SessionRouting
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +24,9 @@ logger = logging.getLogger(__name__)
 class SessionHandler(RealtimeBaseHandler):
     """Owns session lifecycle: config updates and lifecycle events."""
 
-    def handle_session_update(self, conn_id: str, event: SessionUpdateEvent) -> Optional[RealtimeErrorEvent]:
+    def handle_session_update(
+        self, conn_id: str, event: SessionUpdateEvent, *, routing: SessionRouting | None = None
+    ) -> Optional[RealtimeErrorEvent]:
         """Apply session config changes.
 
         Only ``RealtimeSessionCreateRequest`` sessions are accepted;
@@ -68,6 +73,28 @@ class SessionHandler(RealtimeBaseHandler):
             logger.info(f"Session model set to: {model}")
 
         cfg = self._state(conn_id).runtime_config
+        if routing is not None:
+            return self._apply_routed_update(conn_id, event, routing)
+        if "models" in s.model_fields_set:
+            return self.make_error("Model selection requires the trusted session proxy.", "invalid_request_error")
+        if cfg.routing is not None and "model" in s.model_fields_set and model != cfg.session.model:
+            return self.make_error(
+                message="The admitted model cannot be changed within this session.",
+                _type="invalid_request_error",
+            )
+        if (
+            cfg.routing is not None
+            and cfg.routing.updates_enabled
+            and s.audio is not None
+            and s.audio.output is not None
+        ):
+            output = s.audio.output
+            if "voice" in output.model_fields_set:
+                tts = cfg.routing.routes.tts
+                if output.voice not in [tts.voice, *tts.voices]:
+                    return self.make_error(
+                        "The selected TTS model does not support this voice.", "invalid_request_error"
+                    )
         current = cfg.session
         if current is None:
             cfg.session = s
@@ -75,6 +102,85 @@ class SessionHandler(RealtimeBaseHandler):
             cfg.apply_session_update(s)
         logger.info("Session configuration updated")
         return None
+
+    def _apply_routed_update(
+        self, conn_id: str, event: SessionUpdateEvent, routing: SessionRouting
+    ) -> Optional[RealtimeErrorEvent]:
+        assert isinstance(event.session, RealtimeSessionCreateRequest)
+        state = self._state(conn_id)
+        cfg = state.runtime_config
+        try:
+            if (
+                cfg.routing is None
+                or not cfg.routing.updates_enabled
+                or not routing.updates_enabled
+                or routing.id != cfg.routing.id
+            ):
+                raise ValueError("Invalid session routing update.")
+            if self.is_busy(conn_id):
+                raise ValueError("Wait for the current turn to finish before changing models.")
+            candidate = cfg.model_copy(update={"session": cfg.session.model_copy(deep=True), "routing": routing})
+            candidate.apply_session_update(event.session)
+            candidate.session = candidate.session  # Reestablish the optional audio structure after a clear.
+            self._validate_routed_settings(cfg, candidate)
+            old_tts, new_tts = cfg.routing.routes.tts, routing.routes.tts
+            assert candidate.session.audio is not None and candidate.session.audio.output is not None
+            voice = candidate.session.audio.output.voice
+            audio = event.session.audio
+            explicit_voice = audio is not None and audio.output is not None and "voice" in audio.output.model_fields_set
+            supported_voices = [new_tts.voice, *new_tts.voices]
+            if old_tts != new_tts and not explicit_voice and voice not in supported_voices:
+                voice = new_tts.voice
+            if voice not in supported_voices:
+                raise ValueError("The selected TTS model does not support this voice.")
+            candidate.apply_routing_defaults()
+            assert candidate.session.audio is not None and candidate.session.audio.output is not None
+            candidate.session.audio.output.voice = voice
+            old_llm, new_llm = cfg.routing.routes.llm, routing.routes.llm
+            llm_changed = old_llm != new_llm
+            cfg.chat.prepare_route_change(
+                drop_reasoning=llm_changed,
+                drop_images=llm_changed and not new_llm.capabilities.images,
+                drop_audio=llm_changed and not new_llm.capabilities.audio_input,
+            )
+            # The WebSocket dispatcher has drained serial work. No await occurs
+            # between validation and replacement; queued new requests see this
+            # complete configuration and the same retained Chat.
+            state.runtime_config = candidate
+        except ValueError as exc:
+            return self.make_error(str(exc), "invalid_request_error")
+        return None
+
+    @staticmethod
+    def _validate_routed_settings(previous: RuntimeConfig, candidate: RuntimeConfig) -> None:
+        assert previous.routing is not None and candidate.routing is not None
+        old, new = previous.routing.routes.llm, candidate.routing.routes.llm
+        caps = new.capabilities
+        # A speech-only switch can also introduce new LLM requirements.
+        # Keep unchanged settings valid when the existing route lacks metadata.
+        if (
+            candidate.session.tools
+            and not caps.tools
+            and (new != old or candidate.session.tools != previous.session.tools)
+        ):
+            raise ValueError("The selected LLM does not support the session's tools.")
+        if new == old:
+            return
+        if caps.continuation != "full_context":
+            raise ValueError("The selected LLM must support full retained context.")
+        if new.protocol != old.protocol:
+            raise ValueError("The selected LLM must use this session's LLM protocol.")
+
+    def is_busy(self, conn_id: str) -> bool:
+        """Whether the session has a turn, tool call or history update in progress."""
+        state = self._state(conn_id)
+        return bool(
+            state.in_response
+            or state.response_pending
+            or state.input_items
+            or state.tool_followup_prefetch_request is not None
+            or state.runtime_config.chat.has_pending_work()
+        )
 
     def build_session_created(self, conn_id: str) -> SessionCreatedEvent:
         """Build a SessionCreatedEvent populated with the current config."""

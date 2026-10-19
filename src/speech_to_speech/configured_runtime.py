@@ -280,7 +280,9 @@ def build_configured_runtime(config: ResolvedConfig, stop_event: Event) -> Confi
     return _build_runtime(_adapt(config), stop_event)
 
 
-def _build_runtime(arguments: dict[str, ParsedArguments], stop_event: Event) -> ConfiguredRuntime:
+def _build_runtime(
+    arguments: dict[str, ParsedArguments], stop_event: Event, *, session_routing_enabled: bool = False
+) -> ConfiguredRuntime:
     from speech_to_speech.s2s_pipeline import _build_pipeline_unit
 
     result = ConfiguredRuntime(stop_event)
@@ -299,6 +301,7 @@ def _build_runtime(arguments: dict[str, ParsedArguments], stop_event: Event) -> 
                     stt_backend=args.stt_backend.copy_for_pipeline(),
                     llm_backend=args.llm_backend.copy_for_pipeline(),
                     tts_backend=args.tts_backend.copy_for_pipeline(),
+                    session_routing_enabled=session_routing_enabled,
                     resource_ledger=result._resources,
                 )
                 result.pools[name].append(unit)
@@ -318,7 +321,8 @@ def build_configured_server(config: ResolvedConfig, stop_event: Event, *, local:
         raise ConfigurationError("Serving requires exactly one selected pipeline definition.")
     client_config = build_configured_client(config, local=True) if local else None
     arguments = _adapt(config)
-    result = _build_runtime(arguments, stop_event)
+    session_routing_enabled = next(iter(arguments.values())).realtime_server_kwargs.session_routing_enabled
+    result = _build_runtime(arguments, stop_event, session_routing_enabled=session_routing_enabled)
     try:
         from speech_to_speech.api.openai_realtime.audio_client import RealtimeAudioClient
         from speech_to_speech.api.openai_realtime.server import RealtimeServer
@@ -331,6 +335,7 @@ def build_configured_server(config: ResolvedConfig, stop_event: Event, *, local:
             pool=next(iter(result.pools.values())),
             host="127.0.0.1" if local else args.realtime_server_kwargs.host,
             port=args.realtime_server_kwargs.port,
+            session_routing_enabled=session_routing_enabled,
             llm_proxy_config=build_llm_proxy_config(args.module_kwargs, args.llm_backend)
             if args.module_kwargs.enable_llm_proxy
             else None,
