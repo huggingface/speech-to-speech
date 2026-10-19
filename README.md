@@ -30,7 +30,7 @@ This pipeline runs in production as the conversation backend for thousands of [R
 
 ## Quickstart
 
-Use CPython 3.11–3.14 (3.11 recommended):
+Use CPython 3.11 or 3.12 (3.11 recommended). Linux also supports 3.13 and 3.14:
 
 ```bash
 python3 -m venv .venv
@@ -43,16 +43,23 @@ Then talk: speak, pause, and the assistant answers through your speakers. Stop w
 
 On Ubuntu, first install the audio libraries with `sudo apt-get install libportaudio2 libsndfile1`. The default Linux Qwen3-TTS wheel targets CUDA 12.8 and Ubuntu 24.04; see the [CUDA note](#cuda-note-for-qwen3-tts) for other systems. On Windows, activate the environment with `.venv\Scripts\Activate.ps1`.
 
-CI runs the test suite on CPython 3.11, 3.12, 3.13, and 3.14 on Linux and
-checks the installed package on each version on Linux and Apple Silicon macOS.
-Optional model backends can have narrower Python requirements; these checks cover
-the default installation. Windows is not covered by this compatibility matrix.
-Python 3.10 is no longer supported following its end of life on October 1, 2026.
+The default installation has the following CI coverage:
 
-Python 3.15 is not yet supported: ONNX Runtime lacks CPython 3.15 wheels, and the
-pinned macOS PyTorch release also lacks them. Newer Python versions will be added
-after the default dependencies and CI checks pass; the package's `requires-python`
-lower bound does not promise compatibility with future Python releases.
+| Platform | Supported CPython versions | Checks |
+|---|---|---|
+| Linux | 3.11, 3.12, 3.13, 3.14 | Full test suite and installed package smoke test |
+| Apple Silicon macOS | 3.11, 3.12 | Installed package smoke test |
+
+Optional model backends can have narrower Python requirements. Windows is not
+covered by this compatibility matrix. Python 3.10 is no longer supported following
+its end of life on October 1, 2026.
+
+On macOS, the required Misaki dependency declares Python <3.13, so pip cannot
+install the default package on 3.13 or 3.14. Python 3.15 is not yet supported on
+any platform: ONNX Runtime lacks CPython 3.15 wheels, and the pinned macOS PyTorch
+release also lacks them. Newer Python versions will be added after the default
+dependencies and CI checks pass; the package's `requires-python` lower bound does
+not promise compatibility with future Python releases.
 
 The command picks local models for your platform:
 
