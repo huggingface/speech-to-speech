@@ -20,6 +20,7 @@ Runtime-supported values in `s2s_pipeline.py`:
 - `omnivoice` → `omnivoice_handler.py`
 - `qwen3` → `qwen3_tts_handler.py`
 - `openai` → `openai_compatible_handler.py`
+- `drama3` → `drama3_handler.py`
 - `supertonic` → `supertonic_tts_handler.py`
 - `minimax` → `minimax_tts_handler.py`
 
