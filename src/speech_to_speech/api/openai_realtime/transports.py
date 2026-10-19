@@ -57,7 +57,7 @@ class SessionTransport(ABC):
     async def close(self) -> None: ...
 
 
-async def send_ws_event(ws: WebSocket, event: ServerEvent) -> None:
+async def send_ws_event(ws: WebSocket, event: ServerEvent, *, raise_errors: bool = False) -> None:
     # Skip cleanly when the ws is already closing/closed — happens during Ctrl-C
     # shutdown, where the lifespan starts closing sockets while the route handler
     # or send loop is still in flight pushing events.
@@ -75,8 +75,12 @@ async def send_ws_event(ws: WebSocket, event: ServerEvent) -> None:
         if "websocket.close" in msg or "websocket.disconnect" in msg or "response already completed" in msg:
             logger.debug(f"Skipped event: ws already closed ({msg})")
         else:
+            if raise_errors:
+                raise
             logger.error(f"Failed to send event to client: {e}")
     except Exception as e:  # noqa: BLE001
+        if raise_errors:
+            raise
         logger.error(f"Failed to send event to client: {e}")
 
 
@@ -85,14 +89,15 @@ class WebSocketTransport(SessionTransport):
 
     kind = "websocket"
 
-    def __init__(self, websocket: WebSocket) -> None:
+    def __init__(self, websocket: WebSocket, *, raise_errors: bool = False) -> None:
         self.websocket = websocket
+        self._raise_errors = raise_errors
         self._send_lock = asyncio.Lock()
 
     async def send_events(self, events: list[ServerEvent]) -> None:
         async with self._send_lock:
             for event in events:
-                await send_ws_event(self.websocket, event)
+                await send_ws_event(self.websocket, event, raise_errors=self._raise_errors)
 
     async def send_audio_chunk(
         self,

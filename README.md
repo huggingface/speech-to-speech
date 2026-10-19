@@ -145,8 +145,13 @@ speech-to-speech serve -f example_configs/mac.yaml --name mac
 
 `local` runs one selected pipeline with the packaged loopback audio client.
 `talk -f example_configs/mac.yaml` uses only the file's client settings.
-Configured server startup currently supports one named definition per invocation; its
-`num_pipelines` controls the number of isolated instances.
+Configured `serve` starts all named definitions when `--name` is omitted. Repeat
+`--name` to select several definitions. Each definition's `num_pipelines` controls
+its isolated instance count behind one listener. Clients select a definition at
+`/v1/pipelines/{name}/realtime`; an exhausted definition never borrows another's capacity.
+See the [concurrent example](./example_configs/multi.yaml) and
+[routing guide](./docs/configuration.md#serve-several-named-pipelines).
+Use `talk -f FILE --name NAME` to connect the packaged client to a named route.
 Existing Python interfaces, CLI commands, and flat JSON configuration remain available.
 
 ### CUDA Note for Qwen3-TTS

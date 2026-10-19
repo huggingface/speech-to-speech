@@ -1,7 +1,7 @@
 # YAML configuration
 
 Use a YAML file to define reusable VAD, STT, LLM, and TTS blocks, connect them
-into named pipelines, and start a selected pipeline from the CLI or Python.
+into named pipelines, and start selected pipelines from the CLI or Python.
 
 The default conversation needs no file: `speech-to-speech local` is enough. Unlike the CLI, YAML does not pick backends by platform, so name them explicitly.
 
@@ -79,22 +79,88 @@ speech-to-speech serve -f example_configs/mac.yaml --name mac
 speech-to-speech talk -f example_configs/mac.yaml
 ```
 
-`-f` and `--file` are equivalent. `serve` and `local` require exactly one
-selected definition; omit `--name` only if the file contains one pipeline.
-Its `num_pipelines` controls instance count. Serving different named definitions
-concurrently is separate work in [#681](https://github.com/huggingface/speech-to-speech/issues/681).
+`-f` and `--file` are equivalent. `serve` activates all definitions when names
+are omitted; repeat `--name` to select several distinct definitions. Each
+definition's `num_pipelines` controls its instance count. `local` requires one
+selected definition; specify its name when the file contains several pipelines.
 
 `local` starts the server and one microphone/speaker client over loopback. Its
 client URL follows the server port; an explicit non-loopback host or conflicting
 client URL fails.
 
 `talk` reads `runtime.client` and process logging settings. It does not start
-pipeline handlers or require server/block environment values, and rejects
-`--name`. With this example, it connects to an already running local server.
+pipeline handlers or require server/block environment values. An optional single
+`--name` selects a named route declared in the file. It changes the URL, not the
+client's model. With this example, omitted names connect to the local server's
+unqualified route.
 File mode accepts file selection, pipeline names, and help; put other
 settings in YAML rather than mixing in legacy flags. Duplicate file options or
 names and unknown names fail. Existing CLI flags and flat JSON input still work
 outside file mode.
+
+## Serve several named pipelines
+
+The [concurrent example](../example_configs/multi.yaml) defines `primary` with
+two instances and `secondary` with one. It uses OpenAI-compatible STT and TTS
+servers plus separate LLM connection settings. Start those providers first and
+set the example's LLM URL, model, and key environment values. Shared blocks
+produce independent handler instances and session state. Reusing a block does
+not enable model-weight sharing.
+
+```bash
+speech-to-speech serve -f example_configs/multi.yaml
+speech-to-speech serve -f example_configs/multi.yaml --name primary --name secondary
+speech-to-speech talk -f example_configs/multi.yaml --name primary
+```
+
+All selected definitions share `runtime.server.host` and `runtime.server.port`.
+Names are case-sensitive selectors, not authentication credentials.
+Existing access-control behavior still applies.
+
+| Operation | Named endpoint |
+|---|---|
+| WebSocket | `/v1/pipelines/{name}/realtime` |
+| WebRTC offer | `/v1/pipelines/{name}/realtime/calls` |
+| WebRTC hangup | `/v1/pipelines/{name}/realtime/calls/{call_id}` |
+| Responses proxy | `/v1/pipelines/{name}/responses` |
+| Chat-completions proxy | `/v1/pipelines/{name}/chat/completions` |
+
+The packaged client also accepts a named endpoint through legacy `talk --url`.
+File-mode `talk --name` preserves the URL's scheme, authority, and base-path prefix.
+An already named URL must agree with the selected name.
+
+Existing unqualified creation and proxy endpoints remain aliases when exactly
+one definition is active. With several, they reject ambiguity rather than select
+by declaration order or model name. Unqualified WebRTC hangup remains valid by
+call ID; named hangup must match the call's original definition. Named offers
+return named `Location` headers.
+
+A session keeps its definition and instance until release. Exhausting one
+definition never uses another's capacity. Admission is immediate, with no queue.
+
+| Condition | Error type | HTTP status |
+|---|---|---|
+| Unknown or inactive definition | `unknown_pipeline` | 404 |
+| Ambiguous unqualified request | `pipeline_selection_required` | 400 |
+| No healthy started instance | `pipeline_unavailable` | 503 |
+| Instances occupied, draining, or quarantined | `session_limit_reached` | 503 |
+
+WebSocket admission errors use the existing error event and close code 1008.
+Proxy calls use the selected definition's LLM settings without consuming speech
+capacity. Disabled proxies and unsupported operations retain their 501 response.
+
+`/v1/pool` retains aggregate `size`, `in_use`, and unit occupancy states. Configured
+mode adds `available`, named `pipelines` summaries, and unit identity and health.
+Failed health can overlap active or draining occupancy; availability requires a
+healthy ready unit without a reserved session or stop request.
+`/v1/usage` retains aggregate counters and adds named summaries. Single-definition
+aliases share counters, and named summaries do not add another copy to aggregate usage.
+
+Construction and initial startup are all-or-nothing. After readiness, a failed
+worker disables its instance while healthy instances continue serving. Failed
+instances cannot recover through disconnect or a late drain marker. Healthy
+quarantined instances recover only after `SESSION_END` proves their chain drained.
+Caller cancellation or listener failure stops the whole runtime.
 
 ## Values, paths, and validation
 
@@ -147,6 +213,8 @@ resolved = resolve_config(document, names=["mac"])
 runtime = build_configured_server(resolved, Event())
 try:
     runtime.start()
+    if not runtime.wait_ready(timeout=30):
+        raise RuntimeError("Configured runtime did not become ready before the timeout")
     runtime.wait()
 finally:
     runtime.stop()
@@ -158,7 +226,8 @@ finally:
 | `validate_config(document)` | Check all definitions without reading environment values or starting resources |
 | `resolve_config(document, names=None, environ=None, include_client=False, client_only=False)` | Validate and return independent settings; omitted names select all pipelines and omitted `environ` uses a snapshot of `os.environ` |
 | `build_configured_runtime(resolved, stop_event)` | Construct named worker pools without a listener |
-| `build_configured_server(resolved, stop_event, local=False)` | Construct a server for one definition; `local=True` adds the loopback client |
+| `build_configured_server(resolved, stop_event, local=False)` | Construct one listener for selected named definitions; `local=True` requires one definition and adds the loopback client |
+| `runtime.wait_ready(timeout=None)` | Wait for actual listener startup and healthy instances in every selected definition; return `False` on timeout |
 
 Use `include_client=True` when resolving client settings for local startup.
 For client-only resolution, use `client_only=True` without pipeline names.
@@ -166,5 +235,10 @@ Returned settings contain secrets, so do not log or serialize them without redac
 
 Loading, validation, and resolution do not construct handlers or start resources.
 Construction can initialize models and providers; `start()` launches managed
-workers but does not establish listener readiness. Library lifecycle methods
-install no signal handlers. Always call `stop()`; a stopped or failed runtime cannot restart.
+workers asynchronously. Use `wait_ready()` or the `ready` event to observe
+listener readiness. Worker-only runtimes omit the listener requirement.
+Readiness clears during shutdown or when a selected definition loses all healthy
+instances; other definitions can keep serving. Library lifecycle methods install
+no signal handlers. Always call `stop()`; a stopped or failed runtime cannot restart.
+Shutdown closes sessions and joins threads within its bounded deadline. A stuck
+worker leaves the runtime stopping and reports a failure instead of claiming cleanup completed.

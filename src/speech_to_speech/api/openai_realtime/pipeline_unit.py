@@ -1,7 +1,7 @@
 import asyncio
 from queue import Queue
-from threading import Event
-from typing import Any, Optional
+from threading import Event, RLock
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -74,3 +74,30 @@ class PipelineUnit(BaseModel):
     handlers: list[Any]
 
     session: Optional[SessionState] = None
+    pipeline_name: str | None = None
+    instance_index: int | None = None
+    stop_event: Event | None = None
+    lifecycle_state: Literal["constructed", "ready", "failed", "stopped"] = "ready"
+    lock: Any = Field(default_factory=RLock, exclude=True, repr=False)
+    on_failure: Any = Field(default=None, exclude=True, repr=False)
+
+    @property
+    def healthy(self) -> bool:
+        with self.lock:
+            return self.lifecycle_state == "ready" and (self.stop_event is None or not self.stop_event.is_set())
+
+    @property
+    def available(self) -> bool:
+        with self.lock:
+            return self.healthy and self.session is None
+
+    def mark_failed(self) -> None:
+        with self.lock:
+            if self.lifecycle_state in {"failed", "stopped"}:
+                return
+            self.lifecycle_state = "failed"
+            if self.stop_event is not None:
+                self.stop_event.set()
+            callback = self.on_failure
+        if callback is not None:
+            callback(self)

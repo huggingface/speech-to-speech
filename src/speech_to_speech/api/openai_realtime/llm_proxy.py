@@ -135,7 +135,13 @@ def _upstream_unreachable(error: httpx.HTTPError) -> Response:
     return _error_response(502, f"Upstream request failed: {type(error).__name__}", "upstream_unreachable")
 
 
-def mount_llm_proxy(app: FastAPI, config: LLMProxyConfig | None) -> LLMProxyUsage:
+def mount_llm_proxy(
+    app: FastAPI,
+    config: LLMProxyConfig | None,
+    *,
+    route_prefix: str = "/v1",
+    usage: LLMProxyUsage | None = None,
+) -> LLMProxyUsage:
     """Mount the proxy paths on *app* according to *config*.
 
     Both known paths always answer: the path matching an enabled remote
@@ -144,9 +150,12 @@ def mount_llm_proxy(app: FastAPI, config: LLMProxyConfig | None) -> LLMProxyUsag
 
     Returns the usage counters the passthrough records into, for the usage
     endpoint to surface (all zeros when the proxy is unavailable).
+    A supplied counter permits shared accounting for route aliases.
+    The route prefix changes client paths and leaves provider paths unchanged.
     """
     config = config or LLMProxyConfig()
-    usage = LLMProxyUsage()
+    usage = usage if usage is not None else LLMProxyUsage()
+    paths = {backend: route_prefix.rstrip("/") + path.removeprefix("/v1") for backend, path in _PATHS.items()}
 
     if not config.enabled:
         reason = "The LLM proxy is disabled. Start the server with --enable_llm_proxy to enable it."
@@ -159,15 +168,15 @@ def mount_llm_proxy(app: FastAPI, config: LLMProxyConfig | None) -> LLMProxyUsag
         reason = None
 
     if reason is not None:
-        for path in _PATHS.values():
+        for path in paths.values():
             _mount_unavailable(app, path, reason)
         return usage
 
     assert config.llm_backend is not None
-    serving_path = _PATHS[config.llm_backend]
-    for path in _PATHS.values():
+    serving_path = paths[config.llm_backend]
+    for path in paths.values():
         if path == serving_path:
-            _mount_passthrough(app, path, config, usage)
+            _mount_passthrough(app, path, config, usage, upstream_path=_PATHS[config.llm_backend])
         else:
             _mount_unavailable(
                 app,
@@ -188,9 +197,12 @@ def _mount_passthrough(
     path: str,
     config: LLMProxyConfig,
     usage: LLMProxyUsage,
+    *,
+    upstream_path: str | None = None,
 ) -> None:
     base_url = (config.upstream_base_url or DEFAULT_UPSTREAM_BASE_URL).rstrip("/")
-    upstream_url = base_url + path.removeprefix("/v1")
+    upstream_path = upstream_path or path
+    upstream_url = base_url + upstream_path.removeprefix("/v1")
 
     @app.post(path)
     async def passthrough_endpoint(request: Request) -> Response:
@@ -208,7 +220,7 @@ def _mount_passthrough(
             # carry the mutations below and would be rejected upstream anyway.
             return _error_response(400, "Request body must be a JSON object.", "invalid_request_error")
         body["model"] = config.model_name
-        if path == _PATHS["responses-api"]:
+        if upstream_path == _PATHS["responses-api"]:
             # Session holders are anonymous; forcing store off keeps them from
             # creating persistent state on the operator's provider account.
             body["store"] = False

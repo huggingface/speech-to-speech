@@ -670,7 +670,11 @@ pipelines:
     monkeypatch.setitem(
         sys.modules,
         "speech_to_speech.configured_runtime",
-        SimpleNamespace(run_configured_command=lambda command, config: calls.append((command, config))),
+        SimpleNamespace(
+            run_configured_command=lambda command, config, *, pipeline_name=None: calls.append(
+                (command, config, pipeline_name)
+            )
+        ),
     )
     return path, calls
 
@@ -699,7 +703,7 @@ def test_file_talk_resolves_only_client(configured_cli, monkeypatch):
     assert calls[0][1].client["model"] == "client-model"
 
 
-@pytest.mark.parametrize("command", ["serve", "local"])
+@pytest.mark.parametrize("command", ["local"])
 def test_file_cli_rejects_multiple_definitions_before_runtime(command, configured_cli, monkeypatch):
     path, calls = configured_cli
     monkeypatch.setattr(sys, "argv", ["speech-to-speech", command, "-f", str(path)])
@@ -729,12 +733,13 @@ def test_file_cli_rejects_invalid_and_mixed_flags(extra, configured_cli, monkeyp
     assert "SECRET_MARKER" not in capsys.readouterr().err
 
 
-def test_file_talk_rejects_name(configured_cli, monkeypatch):
+def test_file_talk_selects_declared_name_without_model_override(configured_cli, monkeypatch):
     path, calls = configured_cli
     monkeypatch.setattr(sys, "argv", ["speech-to-speech", "talk", "-f", str(path), "--name", "primary"])
-    with pytest.raises(SystemExit, match="2"):
-        main()
-    assert calls == []
+    main()
+    assert calls[0][2] == "primary"
+    assert calls[0][1].pipelines == {}
+    assert calls[0][1].client["model"] == "local"
 
 
 @pytest.mark.parametrize("command", ["serve", "talk", "local"])
@@ -831,6 +836,66 @@ def test_legacy_help_keeps_command_settings(arguments, flags, monkeypatch, capsy
     output = capsys.readouterr().out
     for flag in flags:
         assert flag in output
+
+
+@pytest.mark.parametrize(
+    "names, selected",
+    [
+        ([], ["primary", "secondary"]),
+        (["--name", "secondary", "--name", "primary"], ["secondary", "primary"]),
+    ],
+)
+def test_file_serve_activates_named_set(names, selected, configured_cli, monkeypatch):
+    path, calls = configured_cli
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", "serve", "-f", str(path), *names])
+    main()
+    assert list(calls[0][1].pipelines) == selected
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        ["unknown"],
+        ["Primary"],
+        [""],
+        ["primary,secondary"],
+        ["primary", "primary"],
+        ["primary", "secondary"],
+    ],
+)
+def test_file_talk_rejects_invalid_named_selection(names, configured_cli, monkeypatch, capsys):
+    path, calls = configured_cli
+    arguments = ["speech-to-speech", "talk", "-f", str(path)]
+    for name in names:
+        arguments.extend(["--name", name])
+    monkeypatch.setattr(sys, "argv", arguments)
+    with pytest.raises(SystemExit, match="2"):
+        main()
+    assert calls == []
+    assert "unknown" not in capsys.readouterr().err
+
+
+def test_file_named_talk_ignores_server_environment(configured_cli, monkeypatch):
+    path, calls = configured_cli
+    path.write_text(
+        path.read_text()
+        .replace(
+            "schema_version: 1",
+            """schema_version: 1
+runtime:
+  server: {port: {env: MISSING_PORT}}
+  client: {model: client-model}
+""",
+        )
+        .replace(
+            "backend: chat-completions}",
+            "backend: chat-completions, settings: {responses_api_api_key: {env: MISSING_PROVIDER_KEY}}}",
+        )
+    )
+    monkeypatch.setattr(sys, "argv", ["speech-to-speech", "talk", "-f", str(path), "--name", "secondary"])
+    main()
+    assert calls[0][2] == "secondary"
+    assert calls[0][1].client["model"] == "client-model"
 
 
 def test_parse_arguments_preserves_kitten_backend_options():
