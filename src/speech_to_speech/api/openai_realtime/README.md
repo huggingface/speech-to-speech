@@ -400,6 +400,34 @@ sequenceDiagram
 7. **Client-initiated cancel**: `response.cancel` calls `cancel_scope.cancel()` when a response is active or queued, removes queued model requests while preserving pipeline-control sentinels, flushes the output queues with the same preservation rules, clears pending response keys, triggers `finish_response(status="cancelled", reason="client_cancelled")` for an opened response, re-enables `should_listen`, and clears `response_playing`.
 8. **Spurious cancel safety**: if no response is active, `cancel_scope.cancel()` is not called, preventing the discard guard from being set without a `__RESPONSE_DONE__` to clear it.
 
+### Turning off barge-in from a client
+
+A client sets the VAD threshold and turns off interruption for its session with `session.update`:
+
+```json
+{
+  "type": "session.update",
+  "session": {
+    "type": "realtime",
+    "audio": {
+      "input": {
+        "turn_detection": {
+          "type": "server_vad",
+          "threshold": 0.8,
+          "interrupt_response": false
+        }
+      }
+    }
+  }
+}
+```
+
+`threshold` is optional and must be between 0 and 1. Without it the server keeps its `--thresh` value. The 0.8 above is only an example, not a preset for noisy rooms. A higher threshold can reduce false triggers, but it cannot tell the intended speaker apart from other people talking nearby.
+
+With `interrupt_response: false` the server still sends `input_audio_buffer.speech_started` and transcribes the user, but it keeps the active response. A client that clears its playback queue on `speech_started` will still cut the reply off, so clients should only do that when interruption is on. A cancelled `response.done` or an `output_audio_buffer.cleared` event should still clear playback. The packaged Python client follows these rules, and `talk --vad-threshold` / `--no-interrupt-response` (or `vad_threshold` / `interrupt_response` under YAML `runtime.client`) set the fields.
+
+This is not the same as `--block-mic-during-playback`. That option stops sending microphone audio while the assistant speaks, so nothing is heard or transcribed until playback ends.
+
 ---
 
 ## Testing

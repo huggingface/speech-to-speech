@@ -69,6 +69,8 @@ class RealtimeAudioClientConfig:
     voice: Optional[str] = None
     print_json: bool = False
     block_mic_during_playback: bool = False
+    vad_threshold: Optional[float] = None
+    interrupt_response: bool = True
     log_transcripts: bool = False
     connection_retry_timeout_s: float = 30.0
     tools: list[dict[str, Any]] = field(default_factory=list)
@@ -78,6 +80,8 @@ class RealtimeAudioClientConfig:
     def __post_init__(self) -> None:
         if not 0 <= self.playback_buffer_ms < float("inf"):
             raise ValueError("playback_buffer_ms must be a finite non-negative number")
+        if self.vad_threshold is not None and not 0 <= self.vad_threshold <= 1:
+            raise ValueError("vad_threshold must be a number between 0 and 1")
 
 
 def load_realtime_tool_module(module_name: str) -> tuple[list[dict[str, Any]], ToolExecutor, bool]:
@@ -185,9 +189,10 @@ def build_session_update(config: RealtimeAudioClientConfig) -> dict[str, Any]:
             "or 24000 for the OpenAI Realtime PCM schema."
         )
 
-    input_config: dict[str, Any] = {
-        "turn_detection": {"type": "server_vad", "interrupt_response": True},
-    }
+    turn_detection: dict[str, Any] = {"type": "server_vad", "interrupt_response": config.interrupt_response}
+    if config.vad_threshold is not None:
+        turn_detection["threshold"] = config.vad_threshold
+    input_config: dict[str, Any] = {"turn_detection": turn_detection}
     output_config: dict[str, Any] = {}
 
     input_format = maybe_pcm_format(config.send_rate)
@@ -368,6 +373,7 @@ def handle_server_event(
     playback: PlaybackBuffer,
     renderer: _FriendlyEventRenderer,
     print_json: bool,
+    interrupt_response: bool = True,
 ) -> None:
     """Apply one Realtime lifecycle event to local playback and console state."""
 
@@ -383,7 +389,9 @@ def handle_server_event(
         print("Connected.", flush=True)
     elif event.type == "input_audio_buffer.speech_started":
         renderer.finish_live_assistant_text()
-        playback.clear()
+        # Without barge-in the server keeps the response, so its queued audio must keep playing.
+        if interrupt_response:
+            playback.clear()
         if renderer.saw_user_speech:
             print("", flush=True)
         renderer.saw_user_speech = True
@@ -969,6 +977,7 @@ async def _run_audio_session(
                 playback=playback,
                 renderer=renderer,
                 print_json=config.print_json,
+                interrupt_response=config.interrupt_response,
             )
 
     opened_streams: list[Any] = []

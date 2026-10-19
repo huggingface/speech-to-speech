@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import logging
 import signal
@@ -27,6 +28,7 @@ from speech_to_speech.api.openai_realtime.tool_followup import (
     TOOL_FOLLOWUP_METADATA_KEY,
     TOOL_INPUT_METADATA_KEY,
 )
+from speech_to_speech.pipeline.events import SpeechStartedEvent
 
 TOOL_DEFINITION = {
     "type": "function",
@@ -278,6 +280,12 @@ def test_audio_client_rejects_invalid_playback_buffer(buffer_ms):
         RealtimeAudioClientConfig(playback_buffer_ms=buffer_ms)
 
 
+@pytest.mark.parametrize("vad_threshold", [-0.1, 1.1, float("inf"), float("nan")])
+def test_audio_client_rejects_invalid_vad_threshold(vad_threshold):
+    with pytest.raises(ValueError, match="vad_threshold"):
+        RealtimeAudioClientConfig(vad_threshold=vad_threshold)
+
+
 def test_audio_client_clears_unplayed_audio_on_barge_in(capsys):
     playback = PlaybackBuffer(16000)
     renderer = _FriendlyEventRenderer()
@@ -325,6 +333,92 @@ def test_audio_client_clears_unplayed_audio_when_response_is_cancelled(capsys):
 
     assert playback.buffered_bytes == 0
     assert not playback.is_active()
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        SimpleNamespace(type="response.done", response=SimpleNamespace(status="cancelled")),
+        SimpleNamespace(type="output_audio_buffer.cleared"),
+    ],
+)
+def test_audio_client_clears_cancelled_audio_without_barge_in(capsys, event):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer()
+    playback.append(b"\x01\x02" * 100)
+
+    handle_server_event(event, playback=playback, renderer=renderer, print_json=False, interrupt_response=False)
+
+    assert playback.buffered_bytes == 0
+    capsys.readouterr()
+
+
+async def test_audio_client_keeps_playing_and_listening_through_non_interrupting_speech(
+    monkeypatch, service, conn_id, capsys
+):
+    config = RealtimeAudioClientConfig(vad_threshold=0.8, interrupt_response=False)
+    assert service.handle_session_update(conn_id, service.parse_client_event(build_session_update(config))) is None
+    turn_detection = service.build_session_updated(conn_id).session.audio.input.turn_detection
+    assert (turn_detection.threshold, turn_detection.interrupt_response) == (0.8, False)
+    service._state(conn_id).in_response = True
+    speech_events = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent())
+    assert [event.type for event in speech_events] == ["input_audio_buffer.speech_started"]
+    assert service._state(conn_id).in_response
+
+    callbacks = {}
+
+    class FakeStream:
+        def __init__(self, name, callback, **_kwargs):
+            callbacks[name] = callback
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sounddevice",
+        SimpleNamespace(
+            RawInputStream=lambda **kwargs: FakeStream("input", **kwargs),
+            RawOutputStream=lambda **kwargs: FakeStream("output", **kwargs),
+        ),
+    )
+
+    class Connection(RecordingConnection):
+        def __init__(self):
+            super().__init__()
+            self.events = asyncio.Queue()
+
+        async def recv(self):
+            return await self.events.get()
+
+    conn = Connection()
+    conn.events.put_nowait(
+        SimpleNamespace(type="response.output_audio.delta", delta=base64.b64encode(b"\x01\x02" * 100).decode())
+    )
+    for event in speech_events:
+        conn.events.put_nowait(event)
+    stop_event = Event()
+    session = asyncio.create_task(audio_client_module._run_audio_session(conn, config, stop_event))
+    await wait_until(lambda: "output" in callbacks and conn.events.empty())
+
+    played = bytearray(200)
+    callbacks["output"](played, 100, None, None)
+    callbacks["input"](b"\x03\x04" * 10, 10, None, None)
+    await wait_until(lambda: conn.sent)
+    stop_event.set()
+    await session
+
+    assert played == b"\x01\x02" * 100
+    assert conn.sent == [
+        {"type": "input_audio_buffer.append", "audio": base64.b64encode(b"\x03\x04" * 10).decode("ascii")}
+    ]
     capsys.readouterr()
 
 

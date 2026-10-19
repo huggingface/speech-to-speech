@@ -232,6 +232,13 @@ def test_client_log_conflict_and_single_explicit_choice(config):
         runtime.build_configured_client(config)
 
 
+def test_client_turn_detection_settings_come_from_yaml(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(BASE + "runtime:\n  client: {vad_threshold: 0.8, interrupt_response: false}\n")
+    client = runtime.build_configured_client(resolve_config(load_config(path), client_only=True, environ={}))
+    assert (client.vad_threshold, client.interrupt_response) == (0.8, False)
+
+
 def test_local_buffer_default_and_talk_defaults(config):
     config.pipelines = {"primary": config.pipelines["primary"]}
     assert runtime.build_configured_client(config, local=True).playback_buffer_ms == 196

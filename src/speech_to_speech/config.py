@@ -333,6 +333,9 @@ def _client_settings(
     buffer = result["playback_buffer_ms"]
     if not _is_env(buffer) and buffer < 0:
         _error(document, (*path, "playback_buffer_ms"), "Use a finite non-negative playback buffer.")
+    threshold = result["vad_threshold"]
+    if threshold is not None and not _is_env(threshold) and not 0 <= threshold <= 1:
+        _error(document, (*path, "vad_threshold"), "Use a VAD threshold from 0 to 1.")
     tool_module = supplied.get("tool_module")
     result["tool_module"] = _value(document, tool_module, str | None, (*path, "tool_module"), environ)
     if sources is not None:
