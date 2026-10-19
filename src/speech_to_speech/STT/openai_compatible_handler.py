@@ -482,7 +482,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
 
     @staticmethod
     def _audio_fingerprint(audio: np.ndarray) -> bytes:
-        return hashlib.sha256(memoryview(np.ascontiguousarray(audio)).cast("B")).digest()
+        return hashlib.sha256(np.ascontiguousarray(audio).data.cast("B")).digest()
 
     @staticmethod
     def _window_end(audio: np.ndarray, start: int, maximum: int) -> int:
