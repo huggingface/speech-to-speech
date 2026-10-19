@@ -36,13 +36,14 @@ def test_remove_unspeechable_keeps_chinese_punctuation() -> None:
         "สวัสดีครับ",
         "வணக்கம்",
         "বাংলা ভাষা",
+        "مَرْحَبًا",
         "cafe\u0301",
         "Hello, world!",
         "안녕하세요",
         "你好。今天天气怎么样？",
         "café",
     ],
-    ids=["hindi", "thai", "tamil", "bengali", "nfd-latin", "english", "korean", "chinese", "nfc-latin"],
+    ids=["hindi", "thai", "tamil", "bengali", "arabic", "nfd-latin", "english", "korean", "chinese", "nfc-latin"],
 )
 def test_remove_unspeechable_preserves_unicode_text(text: str) -> None:
     assert remove_unspeechable(text) == text
