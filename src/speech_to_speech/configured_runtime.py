@@ -350,6 +350,13 @@ def build_configured_server(config: ResolvedConfig, stop_event: Event, *, local:
 
 def run_configured_command(command: Literal["serve", "local", "talk"], config: ResolvedConfig) -> None:
     """Own CLI signal handlers and always stop constructed resources."""
+    from speech_to_speech.pipeline.console import conversation_output
+
+    with conversation_output(command in {"local", "talk"} and (config.client or {}).get("conversation_only", False)):
+        _run_configured_command(command, config)
+
+
+def _run_configured_command(command: Literal["serve", "local", "talk"], config: ResolvedConfig) -> None:
     from speech_to_speech.pipeline.transcript_logging import set_log_transcripts, warn_if_log_transcripts_enabled
 
     stop_event = Event()

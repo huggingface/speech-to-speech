@@ -18,9 +18,9 @@ from time import perf_counter
 from typing import Any, Iterator, Optional
 
 import numpy as np
-from rich.console import Console
 from rich.text import Text
 
+from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.language_detection import (
     detect_language_from_text,
@@ -34,7 +34,6 @@ from speech_to_speech.utils.mlx_lock import MLXLockContext
 from speech_to_speech.utils.utils import resolve_device
 
 logger = logging.getLogger(__name__)
-console = Console()
 
 # Parakeet TDT v3 supports 25 European languages
 SUPPORTED_LANGUAGES = [
@@ -446,6 +445,8 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         return progressive_text
 
     def _print_live_transcription(self, rich_text: Text, progressive_text: str) -> None:
+        if getattr(console, "quiet", False):
+            return
         is_terminal = bool(getattr(console, "is_terminal", False))
         if is_terminal:
             self._write_live_control("\r\x1b[2K")
@@ -471,6 +472,8 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         self._live_transcription_active = False
 
     def _write_live_control(self, sequence: str) -> None:
+        if getattr(console, "quiet", False):
+            return
         file = getattr(console, "file", None)
         if file is None:
             return

@@ -203,6 +203,17 @@ def test_local_uses_one_client_and_preserves_explicit_settings(config, builder, 
     result.stop()
 
 
+def test_configured_conversation_only_reaches_local_client_and_rejects_raw_json(tmp_path):
+    path = tmp_path / "conversation.yaml"
+    path.write_text(BASE + "runtime:\n  client:\n    conversation_only: true\n")
+    config = resolve_config(load_config(path), names=["primary"], include_client=True, environ={})
+    assert runtime.build_configured_client(config, local=True).conversation_only is True
+    assert runtime.build_configured_client(config).conversation_only is True
+    config.client["print_json"] = True
+    with pytest.raises(ConfigurationError, match="Invalid packaged client settings"):
+        runtime.build_configured_client(config, local=True)
+
+
 @pytest.mark.parametrize("field,value", [("host", "0.0.0.0"), ("url", "ws://example.test/realtime")])
 def test_local_conflicts_fail_before_workers(config, builder, field, value):
     config.pipelines = {"primary": config.pipelines["primary"]}

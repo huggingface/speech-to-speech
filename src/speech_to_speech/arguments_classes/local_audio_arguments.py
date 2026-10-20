@@ -4,6 +4,12 @@ from typing import Optional
 
 @dataclass
 class LocalAudioArguments:
+    conversation_only: bool = field(
+        default=False,
+        metadata={
+            "help": "Show only conversation text and errors; hide backend transcripts, routine logs, and events.",
+        },
+    )
     local_audio_tool_module: Optional[str] = field(
         default=None,
         metadata={

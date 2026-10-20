@@ -9,10 +9,10 @@ import ChatTTS
 import librosa
 import numpy as np
 import torch
-from rich.console import Console
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -20,8 +20,6 @@ from speech_to_speech.pipeline.turn_latency import record_response_e2e, record_r
 from speech_to_speech.utils.utils import validate_device
 
 logger = logging.getLogger(__name__)
-
-console = Console()
 
 
 class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):

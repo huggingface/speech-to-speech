@@ -342,6 +342,64 @@ def test_audio_client_streams_assistant_transcript_without_reprinting_done(capsy
     assert capsys.readouterr().out == "ASSISTANT: Hello there.\n"
 
 
+def test_conversation_only_renders_one_exchange_and_keeps_playback_and_barge_in(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer(conversation_only=True)
+    for event in (
+        SimpleNamespace(type="session.created"),
+        SimpleNamespace(type="input_audio_buffer.speech_started"),
+        SimpleNamespace(type="speech_to_speech.input_audio_transcription.snapshot", transcript="How"),
+        SimpleNamespace(type="conversation.item.input_audio_transcription.delta", delta="How are you?"),
+        SimpleNamespace(type="input_audio_buffer.committed"),
+        SimpleNamespace(type="conversation.item.created"),
+        SimpleNamespace(type="conversation.item.input_audio_transcription.completed", transcript="How are you?"),
+        response_created("response_1"),
+        SimpleNamespace(type="response.content_part.added"),
+        SimpleNamespace(type="response.output_audio_transcript.delta", delta="I'm"),
+        SimpleNamespace(type="speech_to_speech.input_audio_transcription.snapshot", transcript="background"),
+        SimpleNamespace(type="rate_limits.updated"),
+        tool_call("call_1"),
+        SimpleNamespace(type="response.output_audio_transcript.delta", delta=" doing well."),
+        SimpleNamespace(type="response.output_audio_transcript.done", transcript="I'm doing well."),
+        SimpleNamespace(type="response.output_audio.delta", delta="AQI="),
+        SimpleNamespace(type="response.output_audio.done"),
+        SimpleNamespace(type="response.content_part.done"),
+        response_done(),
+    ):
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+
+    assert capsys.readouterr().out == "USER: How are you?\nASSISTANT: I'm doing well.\n"
+    assert playback.buffered_bytes == 2
+    handle_server_event(
+        SimpleNamespace(type="input_audio_buffer.speech_started"),
+        playback=playback,
+        renderer=renderer,
+        print_json=False,
+    )
+    assert playback.buffered_bytes == 0
+
+
+def test_conversation_only_keeps_errors_visible(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer(conversation_only=True)
+    for event in (
+        SimpleNamespace(type="error", error=SimpleNamespace(type="server_error", message="Try again")),
+        response_done(status="failed"),
+        SimpleNamespace(type="conversation.item.input_audio_transcription.failed", item_id="item_1", error=None),
+    ):
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+    assert capsys.readouterr().out == (
+        "ERROR: server_error: Try again\n"
+        "ERROR: response failed\n"
+        "ERROR: transcription_error: Input audio transcription failed\n"
+    )
+
+
+def test_conversation_only_and_raw_json_are_incompatible():
+    with pytest.raises(ValueError, match="conversation_only and print_json"):
+        RealtimeAudioClientConfig(conversation_only=True, print_json=True)
+
+
 def test_audio_client_tracks_interleaved_transcripts_per_output_item(capsys):
     playback = PlaybackBuffer(16000)
     renderer = _FriendlyEventRenderer()

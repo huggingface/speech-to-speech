@@ -138,7 +138,15 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
         default=defaults.voice,
         help="session.audio.output.voice (for example bm_fable, marin, or alloy).",
     )
-    parser.add_argument("--print-json", action="store_true", default=defaults.print_json)
+    display = parser.add_mutually_exclusive_group()
+    display.add_argument("--print-json", action="store_true", default=defaults.print_json)
+    display.add_argument(
+        "--conversation-only",
+        "--conversation_only",
+        action="store_true",
+        default=defaults.conversation_only,
+        help="Show conversation text without routine logs, tool details, or protocol events.",
+    )
     parser.add_argument(
         "--block-mic-during-playback",
         action="store_true",
@@ -178,6 +186,7 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
         instructions=namespace.instructions,
         voice=namespace.voice,
         print_json=namespace.print_json,
+        conversation_only=namespace.conversation_only,
         block_mic_during_playback=namespace.block_mic_during_playback,
         log_transcripts=namespace.log_transcripts,
         connection_retry_timeout_s=namespace.connection_retry_timeout_s,

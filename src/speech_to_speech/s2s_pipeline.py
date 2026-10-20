@@ -15,7 +15,6 @@ from typing import Any, Literal, Optional, Sequence
 
 import nltk
 import torch
-from rich.console import Console
 from transformers import HfArgumentParser
 
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
@@ -37,6 +36,7 @@ from speech_to_speech.backend_registry import (
     create_backend_handler,
 )
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.queue_types import (
     AudioInItem,
     AudioOutItem,
@@ -73,7 +73,6 @@ except (LookupError, OSError):
 CURRENT_DIR = Path(__file__).resolve().parent
 os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(CURRENT_DIR, "tmp")
 
-console = Console()
 logger = logging.getLogger(__name__)
 logging.getLogger("numba").setLevel(logging.WARNING)  # quiet down numba logs
 
@@ -769,6 +768,7 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
             input_device=local_audio.local_audio_input_device,
             output_device=local_audio.local_audio_output_device,
             print_json=local_audio.local_audio_print_json,
+            conversation_only=local_audio.conversation_only,
             block_mic_during_playback=local_audio.local_audio_block_mic_during_playback,
             tools=tools,
             tool_executor=tool_executor,
@@ -782,6 +782,17 @@ def run_pipeline_command(command: Literal["serve", "local"], argv: Sequence[str]
     """Run the server alone or compose it with the loopback audio client."""
 
     args = parse_arguments(argv, command=command)
+
+    from speech_to_speech.pipeline.console import conversation_output
+
+    if args.local_audio_kwargs.conversation_only and args.local_audio_kwargs.local_audio_print_json:
+        raise ValueError("--conversation-only cannot be combined with --local_audio_print_json")
+    with conversation_output(command == "local" and args.local_audio_kwargs.conversation_only):
+        _run_parsed_pipeline_command(command, args)
+
+
+def _run_parsed_pipeline_command(command: Literal["serve", "local"], args: ParsedArguments) -> None:
+    """Run a parsed command with its terminal display policy already applied."""
 
     setup_logger(args.module_kwargs.log_level)
     # Set the transcript gate and warn before any conversation is processed, so an operator

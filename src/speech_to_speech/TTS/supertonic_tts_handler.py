@@ -7,16 +7,15 @@ from typing import Iterator
 
 import numpy as np
 import scipy.signal
-from rich.console import Console
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 logger = logging.getLogger(__name__)
-console = Console()
 
 PIPELINE_SAMPLE_RATE = 16000
 SUPERTONIC_LANGUAGE_CODES = frozenset(
