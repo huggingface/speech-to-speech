@@ -34,6 +34,7 @@ from speech_to_speech.api.openai_realtime.tool_followup import (
     TOOL_INPUT_METADATA_KEY,
     tool_call_ids,
 )
+from speech_to_speech.api.openai_realtime.voice_controls import VoiceSelection, arrow_steps, has_terminal_arrows
 from speech_to_speech.pipeline.transcript_logging import log_exception
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,7 @@ class RealtimeAudioClientConfig:
     output_device: Optional[int] = None
     instructions: Optional[str] = None
     voice: Optional[str] = None
+    voice_choices: list[str] = field(default_factory=list)
     print_json: bool = False
     block_mic_during_playback: bool = False
     log_transcripts: bool = False
@@ -78,6 +80,13 @@ class RealtimeAudioClientConfig:
     def __post_init__(self) -> None:
         if not 0 <= self.playback_buffer_ms < float("inf"):
             raise ValueError("playback_buffer_ms must be a finite non-negative number")
+        if any(not isinstance(voice, str) or not voice.strip() for voice in self.voice_choices):
+            raise ValueError("voice_choices must contain non-empty voice names")
+        self.voice_choices = list(dict.fromkeys(self.voice_choices))
+        if self.voice_choices:
+            if self.voice and self.voice not in self.voice_choices:
+                self.voice_choices.insert(0, self.voice)
+            self.voice = self.voice or self.voice_choices[0]
 
 
 def load_realtime_tool_module(module_name: str) -> tuple[list[dict[str, Any]], ToolExecutor, bool]:
@@ -932,6 +941,27 @@ async def _run_audio_session(
     renderer = _FriendlyEventRenderer()
     tool_calls = _ToolCallCoordinator(conn, config)
 
+    def show_voice(message: str) -> None:
+        renderer.clear_live_user_text()
+        renderer.finish_live_assistant_text()
+        print(message, flush=True)
+
+    voices = VoiceSelection(conn, config, show_voice) if len(config.voice_choices) > 1 else None
+
+    async def select_voices() -> None:
+        assert voices is not None
+        try:
+            keys = arrow_steps()
+            try:
+                async for step in keys:
+                    await voices.select(step)
+            finally:
+                await keys.aclose()
+        except (OSError, ValueError, NotImplementedError):
+            logger.debug("Terminal arrow controls unavailable", exc_info=True)
+        # No terminal or stdin EOF must not disconnect a working audio session.
+        await _wait_for_stop(stop_event)
+
     def callback_recv(outdata: Any, _frames: int, _time_info: Any, status: Any) -> None:
         if status:
             logger.warning("Speaker status: %s", status)
@@ -964,6 +994,8 @@ async def _run_audio_session(
         while not stop_event.is_set():
             event = await conn.recv()
             tool_calls.handle_event(event)
+            if voices is not None:
+                await voices.handle_event(event)
             handle_server_event(
                 event,
                 playback=playback,
@@ -973,6 +1005,7 @@ async def _run_audio_session(
 
     opened_streams: list[Any] = []
     started_streams: list[Any] = []
+    tasks: set[asyncio.Task[Any]] = set()
     try:
         input_stream = sd.RawInputStream(
             samplerate=config.send_rate,
@@ -1003,6 +1036,11 @@ async def _run_audio_session(
             asyncio.create_task(_wait_for_stop(stop_event)),
             asyncio.create_task(tool_calls.wait_for_failure()),
         }
+        if voices is not None:
+            voices.announce()
+            if has_terminal_arrows():
+                show_voice("Use ←/→ or ↑/↓ to change voice; changes apply between replies. Ctrl+C stops.")
+                tasks.add(asyncio.create_task(select_voices()))
 
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         stop_event.set()
@@ -1014,6 +1052,10 @@ async def _run_audio_session(
                 raise task.exception()  # type: ignore[misc]
     finally:
         stop_event.set()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await tool_calls.close()
         renderer.clear_live_user_text()
         renderer.reset_assistant_text()

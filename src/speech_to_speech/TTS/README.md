@@ -337,7 +337,7 @@ Primary args prefix: `--phonon_tts_*`
 pip install "speech-to-speech[phonon]"
 speech-to-speech serve \
   --tts phonon \
-  --phonon_tts_model_name /path/to/checkpoint \
+  --phonon_tts_model_name gradium/phonon-40m-en \
   --phonon_tts_language en
 ```
 
@@ -345,6 +345,7 @@ speech-to-speech serve \
 - A checkpoint is required. Runtime packages include no weights. Supply a local directory/config path, or a Hugging Face repository ID with `--phonon_tts_revision` when appropriate. The checkpoint needs its own config, tokenizer JSON, weights and voice files. Keep private checkpoint files outside this repository.
 - `--phonon_tts_quant q8` is the default and loads `model.q8.gguf`. Other formats require matching checkpoint weights.
 - `--phonon_tts_voice VOICE_NAME` selects a registered checkpoint voice. Omitting it uses the upstream default. Realtime session and response voice overrides also accept checkpoint voice names. Raw reference-audio voice cloning is not exposed by this handler.
+- With multiple registered voices, the `local` client enables arrow-key voice selection in an interactive macOS or Linux terminal. Left/up selects the previous voice; right/down selects the next. Changes wait until the current response completes and keep the session and conversation intact. The standalone `talk` client accepts `--voices VOICE_NAME ...` to enable the same controls.
 - `--phonon_tts_language en|fr|de|es|pt|none` selects text normalization at startup, not a different model. The preview cannot change it per utterance, so session language selections must match it; `auto` keeps the configured normalizer. Checkpoint language coverage is independent of text normalization.
 - `--phonon_tts_blocksize` changes the number of samples per output block; the output rate stays 16 kHz.
 - `--phonon_tts_num_threads N` sets a positive CPU thread count before loading the model. Omit it to keep the runtime default. The native pool is shared process-wide, so this is a startup setting shared by all Phonon pipelines. Try `--phonon_tts_num_threads 4` on an Apple M3 Pro: four threads performed better than the runtime's twelve-thread default in local testing. Tune for your hardware and workload; more threads are not always faster.

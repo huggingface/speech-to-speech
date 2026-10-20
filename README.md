@@ -726,11 +726,13 @@ pip install "speech-to-speech[phonon]"
 speech-to-speech local \
     --mac-optimal-settings \
     --tts phonon \
-    --phonon_tts_model_name /path/to/checkpoint \
+    --phonon_tts_model_name gradium/phonon-40m-en \
     --phonon_tts_language en
 ```
 
-The checkpoint must include its matching `config.json`, `tokenizer.json`, q8 `model.q8.gguf`, and voice embeddings. The runtime preview does not include weights or select a checkpoint automatically. Use `--phonon_tts_voice VOICE_NAME` to select a voice from your checkpoint; omitting it uses the checkpoint's default. Keep private checkpoints outside the repository.
+The checkpoint must include its matching `config.json`, `tokenizer.json`, q8 `model.q8.gguf`, and voice embeddings. You can also pass a local checkpoint directory. The runtime preview does not include weights or select a checkpoint automatically. Use `--phonon_tts_voice VOICE_NAME` to select a voice from your checkpoint; omitting it uses the checkpoint's default. Keep private checkpoints outside the repository.
+
+With multiple registered voices, `local --tts phonon` lets you cycle through them using the terminal's left/right or up/down arrows. The selected voice is displayed immediately and applied after the current reply finishes, preserving the conversation. This requires an interactive macOS or Linux terminal. The standalone `talk` client can opt in with `--voices Zoey Maeve Hugh` and select its initial voice with `--voice Zoey`.
 
 Use `--phonon_tts_num_threads N` to tune the native CPU thread pool at startup; omitting it preserves the runtime default. On an Apple M3 Pro, try `--phonon_tts_num_threads 4`, which performed better than the twelve-thread default in local testing. The setting is shared by all Phonon pipelines in the process.
 

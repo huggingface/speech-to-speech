@@ -454,6 +454,12 @@ def test_talk_leaves_api_key_unset_for_sdk_environment_authentication():
     assert parse_talk_arguments(["--api-key", "explicit-secret"]).api_key == "explicit-secret"
 
 
+def test_talk_can_cycle_voices_without_losing_initial_voice():
+    config = parse_talk_arguments(["--voice", "Zoey", "--voices", "Zoey", "Maeve", "Hugh"])
+    assert config.voice == "Zoey"
+    assert config.voice_choices == ["Zoey", "Maeve", "Hugh"]
+
+
 def test_talk_accepts_custom_playback_buffer():
     config = parse_talk_arguments(["--playback-buffer-ms", "240"])
 
