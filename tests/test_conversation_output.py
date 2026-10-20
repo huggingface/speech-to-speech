@@ -58,3 +58,55 @@ def test_local_display_policy_is_applied_before_pipeline_startup(monkeypatch, ca
     with caplog.at_level(logging.INFO):
         s2s_pipeline.run_pipeline_command("local", flags)
     assert observed == ["local"]
+
+
+def test_model_startup_hides_library_chatter_and_retained_handlers_keep_working(capsys):
+    import sys
+
+    from speech_to_speech.pipeline.console import model_startup_output
+
+    previous_level = logging.getLogger("transformers").level
+    with model_startup_output(True):
+        print("Initialized encoder codebooks")
+        print("Fetching files: 100%", file=sys.stderr)
+        handler = logging.StreamHandler(sys.stderr)
+    handler.emit(logging.LogRecord("library", logging.ERROR, "", 0, "runtime error", (), None))
+    print("conversation is visible")
+
+    output = capsys.readouterr()
+    assert output.out == "Loading models…\nconversation is visible\n"
+    assert output.err == "runtime error\n"
+    assert logging.getLogger("transformers").level == previous_level
+
+
+def test_model_startup_failure_replays_diagnostics_and_restores_streams(capsys):
+    import sys
+
+    from speech_to_speech.pipeline.console import model_startup_output
+
+    previous_stdout, previous_stderr = sys.stdout, sys.stderr
+    previous_level = logging.getLogger("transformers").level
+    with pytest.raises(RuntimeError, match="model failed"):
+        with model_startup_output(True):
+            print("checkpoint could not load")
+            print("loader details", file=sys.stderr)
+            raise RuntimeError("model failed")
+    assert sys.stdout is previous_stdout
+    assert sys.stderr is previous_stderr
+    assert logging.getLogger("transformers").level == previous_level
+    output = capsys.readouterr()
+    assert output.out == "Loading models…\n"
+    assert output.err == "checkpoint could not load\nloader details\n"
+
+
+def test_verbose_model_startup_keeps_diagnostics(capsys):
+    import sys
+
+    from speech_to_speech.pipeline.console import model_startup_output
+
+    with model_startup_output(False):
+        print("model loaded")
+        print("download progress", file=sys.stderr)
+    output = capsys.readouterr()
+    assert output.out == "model loaded\n"
+    assert output.err == "download progress\n"

@@ -43,8 +43,11 @@ Then talk: speak, pause, and the assistant answers through your speakers. Stop w
 
 By default, `local` and `talk` show final user transcripts and streaming assistant
 replies once, hiding backend transcript copies, routine logs, tool details, and protocol
-events. Warnings and errors remain visible. Model downloads and third-party startup
-messages may still appear.
+events. User messages are yellow and assistant replies are green in a color-capable
+terminal. Startup shows `Loading models…`, followed by `Ready — start speaking.` once
+the audio devices are running and the session is configured. Routine model-loading
+output is hidden; startup failures show their diagnostics. Runtime warnings and errors
+remain visible.
 
 For diagnostic output, add `--verbose`:
 

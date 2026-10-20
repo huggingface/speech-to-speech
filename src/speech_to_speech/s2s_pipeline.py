@@ -36,7 +36,7 @@ from speech_to_speech.backend_registry import (
     create_backend_handler,
 )
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.console import console
+from speech_to_speech.pipeline.console import console, model_startup_output
 from speech_to_speech.pipeline.queue_types import (
     AudioInItem,
     AudioOutItem,
@@ -819,9 +819,10 @@ def _run_parsed_pipeline_command(command: Literal["serve", "local"], args: Parse
         args.module_kwargs.enable_live_transcription = False
 
     stop_event = Event()
-    pipeline_manager = (
-        build_local_pipeline(args, stop_event) if command == "local" else build_pipeline(args, stop_event)
-    )
+    with model_startup_output(command == "local" and console.quiet):
+        pipeline_manager = (
+            build_local_pipeline(args, stop_event) if command == "local" else build_pipeline(args, stop_event)
+        )
 
     # Set up graceful shutdown handler
     shutdown_requested = [False]  # Use list for nonlocal mutation

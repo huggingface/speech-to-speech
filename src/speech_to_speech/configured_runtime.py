@@ -378,10 +378,12 @@ def _run_configured_command(command: Literal["serve", "local", "talk"], config: 
             warn_if_log_transcripts_enabled()
             asyncio.run(listen_and_play_realtime(client, stop_event=stop_event))
         else:
+            from speech_to_speech.pipeline.console import console, model_startup_output
             from speech_to_speech.s2s_pipeline import setup_logger
 
             setup_logger(config.runtime.get("log_level", "info"))
-            result = build_configured_server(config, stop_event, local=command == "local")
+            with model_startup_output(command == "local" and console.quiet):
+                result = build_configured_server(config, stop_event, local=command == "local")
             set_log_transcripts(
                 result.client.config.log_transcripts
                 if command == "local"
