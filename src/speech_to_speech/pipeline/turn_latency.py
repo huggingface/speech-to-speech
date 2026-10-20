@@ -46,6 +46,32 @@ class MLXLockStat:
         self.count += other.count
 
 
+class SpeechLatencyAnchor:
+    """One speech input's eligibility, shared by its response/tool chain."""
+
+    def __init__(self) -> None:
+        self.requested = False
+        self._closed = False
+        self._lock = Lock()
+
+    @property
+    def available(self) -> bool:
+        with self._lock:
+            return not self._closed
+
+    def consume(self) -> bool:
+        """Only the first yielded audio across the chain may record speech E2E."""
+        with self._lock:
+            if self._closed:
+                return False
+            self._closed = True
+            return True
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+
+
 @dataclass
 class TurnLatencyTracker:
     """Server timings, not an additive breakdown or client playback latency.
@@ -71,6 +97,8 @@ class TurnLatencyTracker:
 
     turn_id: str | None = None
     turn_revision: int | None = None
+    source: Literal["speech", "client", "tool"] | None = None
+    speech_anchor: SpeechLatencyAnchor | None = field(default=None, repr=False)
     stt_s: float | None = None
     llm_ttft_s: float | None = None
     llm_s: float | None = None
@@ -107,9 +135,13 @@ class TurnLatencyTracker:
         if self.tts_ttfa_s is None:
             self.tts_ttfa_s = max(0.0, seconds)
 
-    def record_e2e(self, seconds: float) -> None:
-        if self.e2e_s is None:
-            self.e2e_s = max(0.0, seconds)
+    def record_e2e(self, seconds: float) -> bool:
+        if self.e2e_s is not None:
+            return False
+        if self.speech_anchor is not None and not self.speech_anchor.consume():
+            return False
+        self.e2e_s = max(0.0, seconds)
+        return True
 
     def record_mlx_lock_wait(self, seconds: float, handler_name: str | None = None) -> None:
         if seconds > 0.0:
@@ -152,6 +184,7 @@ class TurnLatencyTracker:
 
         return {
             "version": 2,
+            "source": self.source,
             "turn_id": self.turn_id,
             "turn_revision": 0 if self.turn_revision is None else self.turn_revision,
             "response_key": response_key,
@@ -191,7 +224,7 @@ class TurnLatencyTracker:
         return f"{seconds:.2f}s"
 
     def format_log_line(self) -> str | None:
-        if self.turn_id is None:
+        if self.turn_id is None and self.source is None:
             return None
         revision = 0 if self.turn_revision is None else self.turn_revision
         settle = "" if self.vad_settle_s is None else f"vad_settle={self._fmt(self.vad_settle_s)} "
@@ -203,7 +236,7 @@ class TurnLatencyTracker:
         # A cancelled turn whose TTS already spoke is not a finished reply.
         cut = " tts=cut" if self.status == "cancelled" and self.tts_ttfa_s is not None else ""
         return (
-            f"Turn {self.turn_id} rev={revision} latency: "
+            f"Turn {self.turn_id or 'n/a'} rev={revision} latency: "
             f"stt={self._fmt(self.stt_s)} "
             f"llm={self._fmt(self.llm_s)} "
             f"tts_ttfa={self._fmt(self.tts_ttfa_s)} e2e={self._fmt(self.e2e_s)} "
@@ -212,6 +245,7 @@ class TurnLatencyTracker:
             f"hold={self._fmt(self.smart_turn_wait_s)} "
             f"smart_turn_status={self.smart_turn_status or 'n/a'} "
             f"status={self.status}{mlx_wait}{cut}"
+            f"{' source=' + self.source if self.source is not None else ''}"
         )
 
     @staticmethod
@@ -380,8 +414,7 @@ def record_response_e2e(
     store: TurnLatencyStore | None,
     response_key: str | None,
     seconds: float,
-) -> None:
-    """Publish speech-end → first yielded TTS audio on an existing response tracker."""
+) -> bool:
+    """Publish eligible speech E2E; return whether a first sample was recorded."""
     tracker = store.get_response(response_key) if store is not None else None
-    if tracker is not None:
-        tracker.record_e2e(seconds)
+    return tracker.record_e2e(seconds) if tracker is not None else False

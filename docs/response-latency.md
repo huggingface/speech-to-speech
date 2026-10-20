@@ -20,7 +20,7 @@ reserved `response.metadata["speech_to_speech.turn_latency"]` key. Realtime
 metadata values are strings, so the value is compact JSON with this schema:
 
 ```json
-{"e2e_s":2.013482,"hold_s":0.24,"llm_s":1.241907,"response_key":"...","smart_status":"complete","status":"completed","stt_s":0.181284,"tts_ttfa_s":0.121775,"turn_id":"turn_3","turn_revision":0,"vad_decision_s":0.36,"version":2}
+{"e2e_s":2.013482,"hold_s":0.24,"llm_s":1.241907,"response_key":"...","smart_status":"complete","source":"speech","status":"completed","stt_s":0.181284,"tts_ttfa_s":0.121775,"turn_id":"turn_3","turn_revision":0,"vad_decision_s":0.36,"version":2}
 ```
 
 Version 2 changes `e2e_s` from VAD handoff to **estimated speech end** to
@@ -38,7 +38,7 @@ client metadata is preserved, except that terminal responses remove any
 client-supplied reserved latency key before adding the server measurement.
 The reserved JSON value is included only when it fits Realtime's 512-character
 metadata value limit. Client metadata is never shortened to make room.
-The measurement is omitted when no attributed turn exists or when all 16
+The measurement is omitted when all 16
 Realtime metadata slots are occupied by other client keys. `response.created`
 continues to carry the client-supplied metadata unchanged; server measurements
 are added only to terminal responses.
@@ -47,7 +47,7 @@ are added only to terminal responses.
 | --- | --- | --- |
 | `stt` | `parakeet-tdt`, `openai`, `openai-realtime`, `vllm-realtime`, `whisper`, `whisper-mlx`, `mlx-audio-whisper`, `faster-whisper`, `qwen3-asr`, `parakeet-unified`, `nemotron-streaming`, `orukeet`, `paraformer`, `sense-voice` | None of the built-in STT backends (`--stt none` excluded) |
 | `llm` | `transformers`, `mlx-lm`, `responses-api`, `chat-completions` | None of the built-in LLM backends |
-| `tts_ttfa`, `e2e` | `qwen3`, `openai`, `pocket`, `kokoro`, `facebookMMS` | `chatTTS`, `omnivoice`, `supertonic` |
+| `tts_ttfa`, `e2e` | `qwen3`, `openai`, `pocket`, `kokoro`, `facebookMMS`, `chatTTS`, `omnivoice` | `supertonic` |
 
 `--stt none` deliberately has no STT measurement. Any field is also `n/a`
 when its stage did not run, produced no audio, or its measurement was unavailable.
@@ -76,6 +76,9 @@ that lock is not contended, and hold is omitted entirely when nothing held it.
   on the selected device, before CPU copying, resampling, and PCM block assembly.
   A language-model reload is excluded from MMS TTFA but remains inside E2E;
   low TTFA alone therefore does not imply that all delay was upstream of TTS.
+  OmniVoice likewise returns a full waveform from a blocking `generate` call:
+  its TTFA ends when that waveform is available, before reshape, resampling,
+  and PCM block assembly.
 - `e2e` runs from estimated speech end to the first audio block yielded by TTS.
   It includes VAD decision time, Smart Turn analysis, audio enhancement, and
   subsequent processing/hold time before that block. The timestamp is propagated
@@ -119,11 +122,30 @@ that lock is not contended, and hold is omitted entirely when nothing held it.
   lands just after the final chunk gets the marker too. It distinguishes
   "cancelled before it spoke" from "cancelled after it spoke".
 
+Terminal records include an additive `source` field: `speech` for the first
+response to supplied speech (including a manual create with automatic responses
+disabled), `client` for an independent create, and `tool` for a continuation
+resolved through function-call identity. This is a server diagnostic extension,
+not an OpenAI-defined metadata field. Independent responses also export LLM/TTS
+stage timings, with `e2e_s: null`; input ownership can still carry a turn ID for
+speculative gating, so turn identity alone does not imply E2E eligibility. New
+supplied user input supersedes an earlier tool timing origin, including when
+private follow-up generation is rebuilt for that input. Subsequent tool calls
+inherit the emitting response's timing eligibility, even when generation
+ownership still names the earlier turn.
+
 Tool follow-ups have separate response keys and do not repeat the originating
 turn's VAD/Smart Turn measurements. Their E2E retains the originating speech-end
-timestamp and therefore includes intervening tool work. Stages overlap; do not
-sum them to reconstruct E2E. Configured grace and delay and Smart Turn analysis
-are no longer part of the terminal timing record.
+timestamp until the chain first yields audio, including intervening tool work.
+Only one response in that chain records speech E2E. A spoken lead-in consumes
+the first-audio measurement too; subsequent tool answers keep stage timings but
+have no second E2E sample. Completed answers and cancelled/failed responses close
+the speech anchor. Idle time before an independent create cannot reuse it.
+These attribution changes retain metadata version 2's timing boundaries. `source`
+is a new field, and `turn_id` is `null` when a `client` or `tool` record has no
+attributed input turn. Out-of-band responses retain their existing metadata
+behavior. Stages overlap; do not sum them to reconstruct E2E. Configured grace
+and delay and Smart Turn analysis are no longer part of the terminal timing record.
 
 Remote timings are measured by this server. They include network transfer and
 provider waits within the operation, so they are not provider-only inference

@@ -140,6 +140,12 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
     )
     parser.add_argument("--print-json", action="store_true", default=defaults.print_json)
     parser.add_argument(
+        "--verbose",
+        action="store_true",
+        default=defaults.verbose,
+        help="Show routine logs, tool details, and Realtime events alongside the conversation.",
+    )
+    parser.add_argument(
         "--block-mic-during-playback",
         action="store_true",
         default=defaults.block_mic_during_playback,
@@ -185,6 +191,7 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
         instructions=namespace.instructions,
         voice=namespace.voice,
         print_json=namespace.print_json,
+        verbose=namespace.verbose,
         block_mic_during_playback=namespace.block_mic_during_playback,
         echo_cancellation=namespace.echo_cancellation,
         log_transcripts=namespace.log_transcripts,

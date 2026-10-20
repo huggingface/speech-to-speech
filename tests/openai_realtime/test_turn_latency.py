@@ -44,6 +44,8 @@ from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
 from speech_to_speech.VAD.smart_turn import SmartTurnResult
+from tests.test_chattts_tts_latency import _handler as _chattts_handler
+from tests.test_chattts_tts_latency import chattts_modules as chattts_modules
 from tests.test_facebookmms_tts_latency import _handler as _mms_handler
 from tests.test_qwen3_asr_transcription_events import _handler as _qwen3_asr_handler
 from tests.test_speculative_turns import (
@@ -74,6 +76,81 @@ def _queue_turn(service, conn_id, *, turn_id="turn_1", revision=0, interrupt=Tru
 
 def _latency_lines(caplog):
     return [r.message for r in caplog.records if r.name == LATENCY_LOGGER and " latency: " in r.message]
+
+
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize("cancel_during", [None, "provider", "resample"])
+def test_chattts_first_audio_reaches_terminal_response(
+    service, conn_id, monkeypatch, caplog, chattts_modules, stream, cancel_during
+):
+    chattts_module, handler_type = chattts_modules
+    request = _queue_turn(service, conn_id)
+    service.response._ensure_response(conn_id, request.response_key)
+    clock = [10.0]
+    monkeypatch.setattr(chattts_module, "perf_counter", lambda: clock[0])
+    handler = _chattts_handler(handler_type, stream=stream, chunks=[])
+    handler.cancel_scope = CancelScope()
+    handler.turn_latency_store = service.turn_latency_store
+
+    def infer(*_args, **_kwargs):
+        clock[0] = 10.05
+        if cancel_during == "provider":
+            handler.cancel_scope.cancel()
+        audio = [np.full(768, 0.1, dtype=np.float32)]
+        return iter([audio]) if stream else audio
+
+    def resample(audio, **_kwargs):
+        clock[0] = 10.40
+        if cancel_during == "resample":
+            handler.cancel_scope.cancel()
+        return audio[:512]
+
+    handler.model = SimpleNamespace(infer=infer)
+    monkeypatch.setattr(chattts_module, "librosa", SimpleNamespace(resample=resample))
+    tts_input = TTSInput(
+        text="Hello",
+        response_key=request.response_key,
+        turn_id=request.turn_id,
+        turn_revision=request.turn_revision,
+        speech_stopped_at_s=8.0,
+        cancel_generation=0,
+    )
+    outputs = list(handler.process(tts_input))
+    if cancel_during is None:
+        assert outputs
+        for output in outputs:
+            service.encode_audio_chunk(conn_id, output.tobytes(), request.response_key)
+    else:
+        # The router drops stale output; finalize while the tracker still exists.
+        assert all(
+            handler.cancel_scope.is_stale(handler.output_for_queue(output, tts_input).cancel_generation)
+            for output in outputs
+        )
+        assert service.turn_latency_store.get_response(request.response_key) is not None
+
+    with caplog.at_level(logging.INFO, logger=LATENCY_LOGGER):
+        events = (
+            service.finish_response(conn_id, response_key=request.response_key)
+            if cancel_during is None
+            else service.handle_response_cancel(conn_id)
+        )
+    terminal = next(event for event in events if event.type == "response.done")
+    payload = json.loads(terminal.response.metadata[TURN_LATENCY_METADATA_KEY])
+    assert payload["response_key"] == request.response_key
+    assert payload["status"] == ("completed" if cancel_during is None else "cancelled")
+    if cancel_during == "provider":
+        assert payload["tts_ttfa_s"] is None
+    else:
+        assert payload["tts_ttfa_s"] == pytest.approx(0.05)
+    if cancel_during is None:
+        assert payload["e2e_s"] == pytest.approx(2.40)
+    else:
+        assert payload["e2e_s"] is None
+    lines = _latency_lines(caplog)
+    assert len(lines) == 1
+    assert f"response_key={request.response_key}" in lines[0]
+    assert ("e2e=2.40s" if cancel_during is None else "e2e=n/a") in lines[0]
+    assert service.turn_latency_store.get_response(request.response_key) is None
 
 
 @pytest.fixture
@@ -435,7 +512,7 @@ def test_terminal_response_emits_one_latency_record(service, conn_id, caplog, st
         f"status={status}"
         + (" mlx_lock_wait=0.03s[Qwen3TTS:0.03s]" if sys.platform == "darwin" else "")
         + cut
-        + f" response_key={request.response_key}"
+        + f" source=speech response_key={request.response_key}"
     ]
     done = [event for event in events if event.type == "response.done"]
     assert len(done) == 1

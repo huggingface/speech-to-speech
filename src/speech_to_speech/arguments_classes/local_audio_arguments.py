@@ -4,6 +4,10 @@ from typing import Optional
 
 @dataclass
 class LocalAudioArguments:
+    verbose: bool = field(
+        default=False,
+        metadata={"help": "Show backend transcripts, routine logs, tool details, and Realtime events."},
+    )
     local_audio_tool_module: Optional[str] = field(
         default=None,
         metadata={

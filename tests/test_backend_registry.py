@@ -403,14 +403,19 @@ def test_test_backend_only_needs_config_factory_and_registry_entry():
     assert calls[0][1] is selection.config
 
 
-def test_openai_tts_backend_constructs_through_registry(monkeypatch):
+@pytest.mark.parametrize("backend", ["openai", "drama3"])
+def test_openai_tts_backend_constructs_through_registry(monkeypatch, backend):
+    from speech_to_speech.TTS.drama3_handler import Drama3TTSHandler
     from speech_to_speech.TTS.openai_compatible_handler import OpenAICompatibleTTSHandler
 
     monkeypatch.setattr(OpenAICompatibleTTSHandler, "warmup", lambda self: None)
-    args = parse_arguments(["--tts", "openai"])
-    tts = create_backend_handler(args.tts_backend, _context())
+    args = parse_arguments(["--tts", backend])
+    context = _context()
+    tts = create_backend_handler(args.tts_backend, context)
 
-    assert isinstance(tts, OpenAICompatibleTTSHandler)
+    assert type(tts) is (Drama3TTSHandler if backend == "drama3" else OpenAICompatibleTTSHandler)
+    assert tts.cancel_scope is context.cancel_scope
+    assert tts.speculative_turns is context.speculative_turns
 
 
 def test_openai_tts_factory_receives_assistant_language_opt_in(monkeypatch):
@@ -449,6 +454,49 @@ def test_openai_stt_backend_constructs_through_registry(monkeypatch):
     stt = create_backend_handler(args.stt_backend, _context())
 
     assert isinstance(stt, OpenAICompatibleSTTHandler)
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_windowed_http_stt_configuration_reaches_handler_and_vad(monkeypatch, live):
+    from speech_to_speech.STT.openai_compatible_handler import OpenAICompatibleSTTHandler
+
+    class DummyHandler:
+        def __init__(self, *_args, **kwargs):
+            self.__dict__.update(kwargs.get("setup_kwargs", {}))
+
+    monkeypatch.setattr(OpenAICompatibleSTTHandler, "warmup", lambda self: None)
+    monkeypatch.setattr(s2s_pipeline, "VADHandler", DummyHandler)
+    monkeypatch.setattr(s2s_pipeline, "TranscriptionNotifier", DummyHandler)
+    monkeypatch.setattr("speech_to_speech.LLM.lm_output_processor.LMOutputProcessor", DummyHandler)
+    args = parse_arguments(["--stt", "openai", "--openai_stt_max_window_s", "120"])
+    args.module_kwargs.enable_live_transcription = live
+    other = BackendSpec("dummy", "llm", FakeArguments, lambda *_args: object())
+    selection = BackendSelection(other, other.normalize(FakeArguments()))
+    handlers = s2s_pipeline._build_handlers(
+        stop_event=Event(),
+        should_listen=Event(),
+        recv_audio_chunks_queue=Queue(),
+        spoken_prompt_queue=Queue(),
+        stt_output_queue=Queue(),
+        text_prompt_queue=Queue(),
+        lm_response_queue=Queue(),
+        lm_processed_queue=Queue(),
+        send_audio_chunks_queue=Queue(),
+        text_output_queue=Queue(),
+        module_kwargs=args.module_kwargs,
+        vad_handler_kwargs=VADHandlerArguments(enable_realtime_transcription=live),
+        stt_backend=args.stt_backend,
+        llm_backend=selection,
+        tts_backend=selection,
+        speculative_turns=SpeculativeTurnTracker(),
+        cancel_scope=CancelScope(),
+        pipeline_index=0,
+    )
+    assert handlers[0].transcription_window_samples == 120 * 16000
+    assert handlers[0].enable_realtime_transcription == live
+    stt = next(h for h in handlers if isinstance(h, OpenAICompatibleSTTHandler))
+    assert stt.max_window_s == 120
+    assert stt.window_partials_enabled == live
 
 
 @pytest.mark.parametrize(

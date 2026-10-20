@@ -1853,7 +1853,9 @@ class TestHandleResponseCreate:
         assert req.response.tool_choice == "auto"
         assert req.runtime_config is runtime_config
 
-    def test_response_create_preserves_latest_user_turn_timing(self, service, conn_id, text_prompt_queue):
+    def test_response_create_preserves_ownership_without_reusing_answered_speech_timing(
+        self, service, conn_id, text_prompt_queue
+    ):
         service.speculative_turns = SpeculativeTurnTracker()
         service.speculative_turns.start_turn()
         reopen(service.speculative_turns)
@@ -1883,13 +1885,13 @@ class TestHandleResponseCreate:
         assert isinstance(followup_req, GenerateResponseRequest)
         assert followup_req.turn_id == "turn_1"
         assert followup_req.turn_revision == 2
-        assert followup_req.speech_stopped_at_s == 123.0
+        assert followup_req.speech_stopped_at_s is None
 
     @pytest.mark.parametrize(
         "new_input",
         ["none", "conversation_item", "response_input"],
     )
-    def test_response_create_uses_current_language_without_losing_speech_timing(
+    def test_response_create_uses_current_language_without_reusing_speech_timing(
         self, service, conn_id, runtime_config, text_prompt_queue, new_input
     ):
         def select_language(language):
@@ -1948,9 +1950,9 @@ class TestHandleResponseCreate:
         response = service.handle_response_create(conn_id, create_event)
         assert isinstance(response, ResponseCreatedEvent)
         request = text_prompt_queue.get_nowait()
-        # Client text is new input without a speech-turn association. Only
-        # a create over the unchanged spoken input inherits its timing.
-        expected = ("turn_1", 2, 123.0) if new_input == "none" else (None, None, None)
+        # Keep generation ownership for the unchanged input, but a completed
+        # speech answer cannot lend its E2E anchor to an independent create.
+        expected = ("turn_1", 2, None) if new_input == "none" else (None, None, None)
         assert (request.turn_id, request.turn_revision, request.speech_stopped_at_s) == expected
 
         processor = LMOutputProcessor.__new__(LMOutputProcessor)
@@ -2606,6 +2608,7 @@ class TestFinishAudioResponse:
         assert done.response.metadata["client-key"] == "client-value"
         assert json.loads(done.response.metadata[TURN_LATENCY_METADATA_KEY]) == {
             "version": 2,
+            "source": None,
             "turn_id": "turn_3",
             "turn_revision": 2,
             "response_key": response_key,
@@ -2702,7 +2705,14 @@ class TestFinishAudioResponse:
 
         events = service.finish_response(conn_id, status=status)
         done = next(event for event in events if isinstance(event, ResponseDoneEvent))
-        assert json.loads(done.model_dump_json())["response"]["metadata"] == (client_metadata or None)
+        wire_metadata = json.loads(done.model_dump_json())["response"]["metadata"] or {}
+        if conversation == "auto":
+            record = json.loads(wire_metadata.pop(TURN_LATENCY_METADATA_KEY))
+            assert record["source"] == "client"
+            assert record["turn_id"] is None
+            assert record["e2e_s"] is None
+            assert record["status"] == status
+        assert wire_metadata == client_metadata
         assert created.response.metadata == metadata
         assert service.turn_latency_store._trackers == {}
 

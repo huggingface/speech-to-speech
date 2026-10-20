@@ -13,6 +13,7 @@ from speech_to_speech.arguments_classes.chat_completions_language_model_argument
     ChatCompletionsLanguageModelHandlerArguments,
 )
 from speech_to_speech.arguments_classes.chat_tts_arguments import ChatTTSHandlerArguments
+from speech_to_speech.arguments_classes.drama3_tts_arguments import Drama3TTSHandlerArguments
 from speech_to_speech.arguments_classes.facebookmms_tts_arguments import FacebookMMSTTSHandlerArguments
 from speech_to_speech.arguments_classes.faster_whisper_stt_arguments import (
     FasterWhisperSTTHandlerArguments,
@@ -650,6 +651,18 @@ TTS_BACKENDS = build_backend_registry(
             OpenAICompatibleTTSHandlerArguments,
             _create_openai_tts,
             config_prefix="openai_tts",
+        ),
+        BackendSpec(
+            "drama3",
+            "tts",
+            Drama3TTSHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.TTS.drama3_handler",
+                "Drama3TTSHandler",
+                setup_should_listen=True,
+                context_kwargs=True,
+            ),
+            config_prefix="drama3",
         ),
         BackendSpec(
             "minimax",

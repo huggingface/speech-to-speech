@@ -313,6 +313,7 @@ def test_log_platform_and_export_fields(monkeypatch):
         assert ("mlx_lock_wait=" in tracker.format_log_line()) == (platform == "darwin")
     assert set(tracker.metadata_payload(response_key="r", status="completed")) == {
         "version",
+        "source",
         "turn_id",
         "turn_revision",
         "response_key",

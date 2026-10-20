@@ -20,6 +20,7 @@ Runtime-supported values in `s2s_pipeline.py`:
 - `omnivoice` → `omnivoice_handler.py`
 - `qwen3` → `qwen3_tts_handler.py`
 - `openai` → `openai_compatible_handler.py`
+- `drama3` → `drama3_handler.py`
 - `supertonic` → `supertonic_tts_handler.py`
 - `minimax` → `minimax_tts_handler.py`
 
@@ -73,6 +74,15 @@ audio with `--pocket_tts_voice`. This requires the author's Pocket TTS fork and
 uses a separate G2P model to convert Persian text to phonemes.
 
 ### 4) Kokoro (`--tts kokoro`)
+
+Install the optional runtime on every platform:
+
+```bash
+pip install "speech-to-speech[kokoro]"
+```
+
+On macOS, use Python 3.11 or 3.12: Kokoro's Misaki phonemizer requires Python
+<3.13. These dependencies are not needed by the default Qwen3-TTS backend.
 
 Primary args prefix: `--kokoro_*`
 
