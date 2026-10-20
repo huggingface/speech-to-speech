@@ -15,7 +15,6 @@ def test_text_prompt_can_include_language_hint():
     prompt = build_text_system_prompt("Be helpful.", language_name="swedish")
 
     assert "Please reply to my message in swedish." in prompt
-    assert prompt.index("## Text Rules") < prompt.index("Please reply to my message in swedish.")
 
 
 def test_text_prompt_allows_markdown_and_drops_voice_rules():

@@ -257,28 +257,14 @@ WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
 
 def format_language_instruction(lang_name: str) -> str:
     """Build the opt-in language instruction for ``--enable_lang_prompt``."""
-    native_instruction = {
-        "english": "Reply only in English.",
-        "french": "Réponds uniquement en français.",
-        "german": "Antworte ausschließlich auf Deutsch.",
-        "spanish": "Responde únicamente en español.",
-        "portuguese": "Responda apenas em português.",
-    }.get(lang_name, "")
-    return (
-        f"Please reply to my message in {lang_name}. "
-        f"Use {lang_name} for your entire next reply, even if the user or earlier messages use another language. "
-        f"{native_instruction}"
-    ).strip()
+    return f"Please reply to my message in {lang_name}."
 
 
-def language_name_for_prompt(
-    language_code: Optional[str], *, enable: bool, selected_language: str | None = None
-) -> Optional[str]:
+def language_name_for_prompt(language_code: Optional[str], *, enable: bool) -> Optional[str]:
     """Resolve the language name injected into the system prompt when enabled."""
     if not enable:
         return None
-    target = selected_language if selected_language not in (None, "auto") else language_code
-    _, lang_name = resolve_auto_language(target)
+    _, lang_name = resolve_auto_language(language_code)
     return lang_name
 
 

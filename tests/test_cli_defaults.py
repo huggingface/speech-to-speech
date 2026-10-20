@@ -13,6 +13,7 @@ from speech_to_speech.arguments_classes.language_model_arguments import (
 )
 from speech_to_speech.arguments_classes.local_audio_arguments import LocalAudioArguments
 from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
+from speech_to_speech.arguments_classes.phonon_tts_arguments import PhononTTSHandlerArguments
 from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
 from speech_to_speech.arguments_classes.realtime_server_arguments import RealtimeServerArguments
 from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
@@ -22,6 +23,12 @@ from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
 from speech_to_speech.cli import main, parse_command, parse_talk_arguments
 from speech_to_speech.pipeline.transcript_logging import set_log_transcripts, transcript_for_log
 from speech_to_speech.s2s_pipeline import ParsedArguments, parse_arguments, prepare_all_args, prepare_module_args
+
+
+def test_phonon_defaults_to_english_40m_checkpoint():
+    phonon_args = PhononTTSHandlerArguments()
+    assert phonon_args.phonon_tts_model_name == "gradium/phonon-40m-en"
+    assert phonon_args.phonon_tts_language == "en"
 
 
 def test_release_defaults_match_local_qwen35_parakeet_qwen3_profile():

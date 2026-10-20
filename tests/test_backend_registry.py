@@ -245,7 +245,7 @@ def test_phonon_cli_and_registry_construct_native_handler(monkeypatch, num_threa
 
     def load(**kwargs):
         loaded.append(kwargs)
-        return SimpleNamespace(sample_rate=24000, voices=["voice-a"], languages=["fr"])
+        return SimpleNamespace(sample_rate=24000, voices=["voice-a"])
 
     monkeypatch.setitem(sys.modules, "ptts", SimpleNamespace(TTS=load, set_num_threads=thread_counts.append))
     args = parse_arguments(
@@ -295,12 +295,12 @@ def test_phonon_stays_on_cpu_when_global_device_is_set():
     assert "device" not in args.tts_backend.config
 
 
-@pytest.mark.parametrize("expected", [{"en"}, {"fr"}, {"en", "fr", "de", "es", "pt"}])
+@pytest.mark.parametrize(("normalizer", "expected"), [("en", {"en"}), ("fr", {"fr"}), ("none", set())])
 @pytest.mark.parametrize("enable_visemes", [False, True])
-def test_phonon_session_languages_match_checkpoint(monkeypatch, expected, enable_visemes):
-    args = parse_arguments(["--stt", "openai", "--tts", "phonon"])
+def test_phonon_session_languages_match_fixed_normalizer(monkeypatch, normalizer, expected, enable_visemes):
+    args = parse_arguments(["--stt", "openai", "--tts", "phonon", "--phonon_tts_language", normalizer])
     args.module_kwargs.enable_visemes = enable_visemes
-    handlers = [SimpleNamespace(), SimpleNamespace(supported_languages=expected)]
+    handlers = [SimpleNamespace(), SimpleNamespace(language=normalizer)]
     if enable_visemes:
         handlers.append(SimpleNamespace())
     monkeypatch.setattr(s2s_pipeline, "_build_handlers", lambda **kwargs: handlers)

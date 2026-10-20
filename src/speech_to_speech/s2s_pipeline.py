@@ -685,7 +685,10 @@ def _build_pipeline_unit(
     elif tts_selection.name in {"chatTTS", "pocket"}:
         service.tts_supported_languages = set()
     elif tts_selection.name == "phonon":
-        service.tts_supported_languages = tts_handler.supported_languages
+        # The preview runtime fixes text normalization at model load. Allow
+        # the configured language, but reject session changes we cannot honor.
+        language = tts_handler.language
+        service.tts_supported_languages = {language} if language != "none" else set()
 
     return PipelineUnit(
         index=index,
@@ -759,14 +762,9 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
     tool_response_create = True
     if local_audio.local_audio_tool_module:
         tools, tool_executor, tool_response_create = load_realtime_tool_module(local_audio.local_audio_tool_module)
-    if args.tts_backend.name == "phonon":
-        # Local language controls must also steer the LLM's reply language.
-        args.llm_backend.config["enable_lang_prompt"] = True
     server_manager = build_pipeline(args, stop_event, host="127.0.0.1")
     voice_choices: list[str] = []
     voice = None
-    language_choices: list[str] = []
-    language = None
     if args.tts_backend.name == "phonon":
         from speech_to_speech.TTS.phonon_tts_handler import PhononTTSHandler
 
@@ -777,12 +775,6 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
                     voice_choices.remove("default")
                     voice_choices.insert(0, "default")
                 voice = handler.voice
-                language_choices = [
-                    code for code in ("en", "fr", "de", "es", "pt") if code in handler.supported_languages
-                ]
-                if handler.language == "none":
-                    language_choices = []
-                language = handler.language if handler.language in language_choices else None
                 break
     client = RealtimeAudioClient(
         stop_event,
@@ -791,8 +783,6 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
             api_key="local",
             voice=voice,
             voice_choices=voice_choices,
-            language=language,
-            language_choices=language_choices,
             chunk_size=local_audio.local_audio_chunk_size,
             playback_buffer_ms=playback_buffer_ms,
             input_device=local_audio.local_audio_input_device,

@@ -246,7 +246,7 @@ class TTSInput(PipelineMessage):
         values = values.copy()
         if "selected_language" not in values:
             config = values.get("runtime_config")
-            values["selected_language"] = config.reply_language if config is not None else None
+            values["selected_language"] = config.selected_language if config is not None else None
         if "tts_language_code" not in values:
             selected = values["selected_language"]
             values["tts_language_code"] = (
@@ -405,7 +405,7 @@ class GenerateResponseRequest(PipelineMessage):
         if not isinstance(values, dict) or "selected_language" in values:
             return values
         values = values.copy()
-        values["selected_language"] = values["runtime_config"].reply_language
+        values["selected_language"] = values["runtime_config"].selected_language
         return values
 
 

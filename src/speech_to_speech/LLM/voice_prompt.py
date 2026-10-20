@@ -26,9 +26,9 @@ _VOICE_SYSTEM_PROMPT_FULL = """\
 {lead}
 
 Session Prompt:
-{session_prompt}{optional_tools}
+{session_prompt}{optional_tools}{optional_language}
 
-{tail}{optional_language}
+{tail}
 """
 
 
@@ -38,7 +38,7 @@ def build_voice_system_prompt(
     tool_section: str = "",
     language_name: str | None = None,
 ) -> str:
-    """Context → session prompt → tools → voice rules → current reply language."""
+    """Context → session prompt → optional tool block → optional language hint → voice rules."""
     tools = tool_section.strip()
     optional_tools = f"\n\n{tools}" if tools else ""
     optional_language = ""

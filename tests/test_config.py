@@ -56,18 +56,10 @@ def test_load_resolve_selection_defaults_and_independence(document):
 def test_configured_client_accepts_voice_choices(document):
     from speech_to_speech.configured_runtime import build_configured_client
 
-    document.data["runtime"] = {
-        "client": {
-            "voice": "Zoey",
-            "voice_choices": ["Zoey", "Maeve"],
-            "language": "en",
-            "language_choices": ["en", "fr"],
-        }
-    }
+    document.data["runtime"] = {"client": {"voice": "Zoey", "voice_choices": ["Zoey", "Maeve"]}}
     validate_config(document)
     client = build_configured_client(resolve_config(document, include_client=True))
     assert client.voice == "Zoey" and client.voice_choices == ["Zoey", "Maeve"]
-    assert client.language == "en" and client.language_choices == ["en", "fr"]
 
 
 @pytest.mark.parametrize("names", [[], "primary", ["primary", "primary"], ["unknown"]])
@@ -483,8 +475,6 @@ def test_explicit_scope_inventory():
         "instructions",
         "voice",
         "voice_choices",
-        "language",
-        "language_choices",
         "print_json",
         "verbose",
         "block_mic_during_playback",

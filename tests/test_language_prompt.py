@@ -68,19 +68,13 @@ def _make_handler(*, enable_lang_prompt):
         base_mod.OpenAI = orig_openai
 
 
-def _sent_system_messages(handler, language_code, *, selected_language=None, enable_lang_prompt=True):
+def _sent_system_messages(handler, language_code, *, enable_lang_prompt=True):
     """Drive one request and return system message contents the backend sent."""
     chat = Chat(10)
     chat.add_item(make_user_message("Hej, hur mar du?"))
     session = RealtimeSessionCreateRequest(type="realtime", instructions="You are a robot.")
     rc = RuntimeConfig(chat=chat, session=session)
-    req = GenerateResponseRequest(
-        runtime_config=rc,
-        language_code=language_code,
-        selected_language=selected_language,
-        turn_id="t",
-        turn_revision=0,
-    )
+    req = GenerateResponseRequest(runtime_config=rc, language_code=language_code, turn_id="t", turn_revision=0)
 
     list(handler.process(req))
 
@@ -114,11 +108,3 @@ def test_unknown_language_code_still_emits_no_instruction():
     contents = _sent_system_messages(handler, "xx-auto")
 
     assert not [c for c in contents if isinstance(c, str) and LANGUAGE_INSTRUCTION_PREFIX in c]
-
-
-def test_explicit_reply_language_overrides_input_language_and_works_for_text_requests():
-    handler = _make_handler(enable_lang_prompt=True)
-    for detected in ["en-auto", None]:
-        contents = _sent_system_messages(handler, detected, selected_language="fr")
-        assert any(isinstance(c, str) and f"{LANGUAGE_INSTRUCTION_PREFIX}french." in c for c in contents)
-        assert not any(isinstance(c, str) and f"{LANGUAGE_INSTRUCTION_PREFIX}english." in c for c in contents)

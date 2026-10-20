@@ -113,10 +113,3 @@ class RuntimeConfig(BaseModel):
         if isinstance(language, str) and language.strip().lower() == "auto":
             return "auto"
         return language
-
-    @property
-    def reply_language(self) -> str | None:
-        """The local output-language extension can differ from the STT hint."""
-        audio = self.session.audio
-        language = getattr(audio.output, "language", None) if audio is not None else None
-        return language if language is not None else self.selected_language

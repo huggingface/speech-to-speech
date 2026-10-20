@@ -54,10 +54,8 @@ def make_handler(samples, *, sample_rate=24000, blocksize=512):
     handler.speculative_turns = None
     handler.voice = None
     handler.language = "en"
-    handler.supported_languages = {"en"}
     handler.blocksize = blocksize
     handler.model = SimpleNamespace(stream=generate, voices=["voice-a", "voice-b"])
-    handler._language_models = {"en": handler.model}
     return handler, stream, requests
 
 
@@ -84,7 +82,7 @@ def test_setup_loads_once_and_forwards_checkpoint_options(monkeypatch, num_threa
     loaded = []
     calls = []
     stream = FakeStream([np.zeros(1000, dtype=np.float32)])
-    model = SimpleNamespace(sample_rate=24000, voices=["voice-a"], languages=["fr"], stream=lambda *a, **kw: stream)
+    model = SimpleNamespace(sample_rate=24000, voices=["voice-a"], stream=lambda *a, **kw: stream)
 
     def load(**kwargs):
         calls.append("load")
@@ -111,44 +109,6 @@ def test_setup_loads_once_and_forwards_checkpoint_options(monkeypatch, num_threa
     list(handler.process(TTSInput(text="Salut")))
     assert loaded == [{"config": "/models/test", "revision": "revision", "lang": "fr", "quant": "q8", "device": "cpu"}]
     assert calls == (["load"] if num_threads is None else [("threads", num_threads), "load"])
-
-
-def test_language_selection_is_snapshotted_and_runtimes_are_cached(monkeypatch):
-    handler, _, requests = make_handler([np.ones(4, dtype=np.float32)], sample_rate=16000, blocksize=4)
-    handler.supported_languages = {"en", "fr"}
-    handler._model_options = {"config": "/models/multilingual", "device": "cpu", "quant": "q8"}
-    loaded = []
-    spoken = []
-
-    def load(**kwargs):
-        loaded.append(kwargs["lang"])
-        return SimpleNamespace(
-            stream=lambda text, **kw: (
-                spoken.append((kwargs["lang"], text)) or FakeStream([np.ones(4, dtype=np.float32)], 16000)
-            )
-        )
-
-    monkeypatch.setitem(sys.modules, "ptts", SimpleNamespace(TTS=load))
-    config = RuntimeConfig(
-        session=RealtimeSessionCreateRequest(type="realtime", audio={"input": {"transcription": {"language": "fr"}}})
-    )
-    french_reply = TTSInput(text="Bonjour", runtime_config=config)
-    config.session.audio.input.transcription.language = "en"
-    assert list(handler.process(french_reply))
-    assert list(handler.process(french_reply))
-    assert list(handler.process(TTSInput(text="Hello", runtime_config=config)))
-    assert loaded == ["fr"]
-    assert spoken == [("fr", "Bonjour"), ("fr", "Bonjour")]
-    assert requests == [("Hello", None)]
-
-
-def test_explicit_unsupported_language_fails_but_auto_detection_falls_back():
-    handler, _, requests = make_handler([np.ones(4, dtype=np.float32)], sample_rate=16000, blocksize=4)
-    assert list(handler.process(TTSInput(text="Ciao", selected_language="it", tts_language_code="it"))) == []
-    assert isinstance(handler.queue_out.get_nowait(), ResponseFailedEvent)
-    handler.on_session_end()
-    assert list(handler.process(TTSInput(text="Hello", selected_language="auto", tts_language_code="it")))
-    assert requests == [("Hello", None)]
 
 
 def test_resampling_is_independent_of_native_chunk_boundaries():

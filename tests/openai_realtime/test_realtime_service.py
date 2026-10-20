@@ -237,28 +237,6 @@ class TestConnectionLifecycle:
         assert runtime_config.selected_language == "es"
         assert service.build_session_updated(conn_id).session.audio.input.transcription.language == "es"
 
-    @pytest.mark.parametrize("language", [" fr ", "it", "", 1])
-    def test_reply_language_can_change_with_auto_detect_stt_and_rejects_invalid_values(
-        self, service, conn_id, runtime_config, language
-    ):
-        service.stt_supported_languages = set()
-        service.tts_supported_languages = {"en", "fr"}
-        update = SessionUpdateEvent.model_validate(
-            {
-                "type": "session.update",
-                "session": {"type": "realtime", "audio": {"output": {"language": language}}},
-            }
-        )
-        error = service.handle_session_update(conn_id, update)
-        if language == " fr ":
-            assert error is None
-            assert runtime_config.reply_language == "fr"
-            assert getattr(service.build_session_updated(conn_id).session.audio.output, "language") == "fr"
-        else:
-            assert isinstance(error, RealtimeErrorEvent)
-            assert runtime_config.reply_language is None
-        assert runtime_config.selected_language is None
-
 
 # ===================================================================
 # Client event parsing

@@ -6,59 +6,10 @@ import asyncio
 import os
 import sys
 from collections.abc import AsyncGenerator, Callable, Sequence
-from typing import TYPE_CHECKING, Any, Literal, TextIO
-
-from rich.console import Console
-from rich.text import Text
+from typing import TYPE_CHECKING, Any, TextIO
 
 if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.audio_client import RealtimeAudioClientConfig
-
-ArrowKey = Literal["up", "down", "right", "left"]
-_ARROWS: dict[bytes, ArrowKey] = {b"A": "up", b"B": "down", b"C": "right", b"D": "left"}
-LANGUAGE_NAMES = {"en": "English", "fr": "French", "de": "German", "es": "Spanish", "pt": "Portuguese"}
-
-
-class SelectionDisplay:
-    """Keep selectors on one transient terminal line, away from streamed speech."""
-
-    def __init__(self, console: Console, *, inline: bool = True) -> None:
-        self.console = console
-        self.inline = inline and console.is_terminal
-        self.values: dict[str, str] = {}
-        self.busy = False
-        self.visible = False
-
-    def update(self, message: str) -> None:
-        self.values[message.partition(" [")[0]] = message
-        if self.inline:
-            self.draw()
-        elif " — " not in message or message.endswith(" — selected") or "rejected" in message:
-            self.console.print(message, markup=False, highlight=False)
-
-    def clear(self) -> None:
-        if self.visible:
-            self.console.file.write("\r\x1b[2K")
-            self.console.file.flush()
-            self.visible = False
-
-    def draw(self) -> None:
-        if self.busy or not self.inline or not self.values:
-            return
-        self.clear()
-        ordered = [self.values[key] for key in ("Language", "Voice") if key in self.values]
-        line = Text("  |  ".join(ordered), style="cyan")
-        line.truncate(max(1, self.console.width - 1), overflow="ellipsis")
-        self.console.print(line, end="", soft_wrap=True)
-        self.visible = True
-
-    def pause(self) -> None:
-        self.busy = True
-        self.clear()
-
-    def resume(self) -> None:
-        self.busy = False
-        self.draw()
 
 
 def has_terminal_arrows(stream: TextIO | None = None) -> bool:
@@ -75,7 +26,7 @@ class ArrowDecoder:
     def __init__(self) -> None:
         self.pending = b""
 
-    def feed(self, data: bytes) -> list[ArrowKey]:
+    def feed(self, data: bytes) -> list[int]:
         self.pending += data
         steps = []
         while self.pending:
@@ -96,11 +47,11 @@ class ArrowDecoder:
                 break
             sequence, self.pending = self.pending[: end + 1], self.pending[end + 1 :]
             if len(sequence) == 3 and sequence[-1:] in (b"A", b"B", b"C", b"D"):
-                steps.append(_ARROWS[sequence[-1:]])
+                steps.append(1 if sequence[-1:] in (b"B", b"C") else -1)
         return steps
 
 
-async def arrow_steps(stream: TextIO | None = None) -> AsyncGenerator[ArrowKey, None]:
+async def arrow_steps(stream: TextIO | None = None) -> AsyncGenerator[int, None]:
     """Read arrows on POSIX TTYs; restore echo and input mode on every exit path."""
 
     stream = stream if stream is not None else sys.stdin
@@ -142,15 +93,13 @@ async def arrow_steps(stream: TextIO | None = None) -> AsyncGenerator[ArrowKey, 
 class VoiceSelection:
     """Send voice-only updates on the existing connection, between responses."""
 
-    field = "voice"
-    label = "Voice"
-
     def __init__(self, conn: Any, config: RealtimeAudioClientConfig, show: Callable[[str], None]) -> None:
         self.conn = conn
         self.config = config
-        self.choices: Sequence[str] = getattr(config, f"{self.field}_choices")
-        current = getattr(config, self.field)
-        self.index = self.choices.index(current) if current is not None and current in self.choices else 0
+        self.choices: Sequence[str] = config.voice_choices
+        self.index = (
+            self.choices.index(config.voice) if config.voice is not None and config.voice in self.choices else 0
+        )
         self.show = show
         self.active_response: str | None = None
         self.pending: str | None = None
@@ -161,20 +110,7 @@ class VoiceSelection:
 
     def announce(self, status: str = "") -> None:
         suffix = f" — {status}" if status else ""
-        value = self.choices[self.index].replace("_", " ")
-        if self.field == "language":
-            value = LANGUAGE_NAMES.get(value, value)
-        self.show(f"{self.label} [{self.index + 1}/{len(self.choices)}]: {value}{suffix}")
-
-    def _audio_update(self, value: str) -> dict[str, Any]:
-        if self.field == "language":
-            return {"output": {"language": value}}
-        return {"output": {"voice": value}}
-
-    def _updated_value(self, audio: Any) -> str | None:
-        if self.field == "language":
-            return getattr(getattr(audio, "output", None), "language", None)
-        return getattr(getattr(audio, "output", None), "voice", None)
+        self.show(f"Voice [{self.index + 1}/{len(self.choices)}]: {self.choices[self.index]}{suffix}")
 
     async def select(self, step: int) -> None:
         self.index = (self.index + step) % len(self.choices)
@@ -188,13 +124,13 @@ class VoiceSelection:
                 return
             voice, self.pending = self.pending, None
             self.sequence += 1
-            self.request_id = f"local_{self.field}_{self.sequence}"
+            self.request_id = f"local_voice_{self.sequence}"
             self.requested_voice = voice
             await self.conn.send(
                 {
                     "type": "session.update",
                     "event_id": self.request_id,
-                    "session": {"type": "realtime", "audio": self._audio_update(voice)},
+                    "session": {"type": "realtime", "audio": {"output": {"voice": voice}}},
                 }
             )
 
@@ -206,9 +142,10 @@ class VoiceSelection:
             await self._flush()
         elif event.type == "session.updated":
             audio = getattr(event.session, "audio", None)
-            voice = self._updated_value(audio)
+            output = getattr(audio, "output", None)
+            voice = getattr(output, "voice", None)
             if voice in self.choices:
-                setattr(self.config, self.field, voice)
+                self.config.voice = voice
             if voice == self.requested_voice and voice == self.choices[self.index]:
                 self.request_id = None
                 self.requested_voice = None
@@ -220,14 +157,6 @@ class VoiceSelection:
         ):
             self.request_id = None
             self.requested_voice = None
-            current = getattr(self.config, self.field)
-            if self.pending is None and current is not None and current in self.choices:
-                self.index = self.choices.index(current)
-                self.announce(f"{self.field} change rejected; keeping previous {self.field}")
-
-
-class LanguageSelection(VoiceSelection):
-    """Update LLM and TTS reply language without changing the recognition hint."""
-
-    field = "language"
-    label = "Language"
+            if self.pending is None and self.config.voice is not None and self.config.voice in self.choices:
+                self.index = self.choices.index(self.config.voice)
+                self.announce("voice change rejected; keeping previous voice")

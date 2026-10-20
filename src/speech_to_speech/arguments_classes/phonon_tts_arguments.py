@@ -4,9 +4,9 @@ from dataclasses import dataclass, field
 @dataclass
 class PhononTTSHandlerArguments:
     phonon_tts_model_name: str | None = field(
-        default="gradium/phonon-40m-multilingual",
+        default="gradium/phonon-40m-en",
         metadata={
-            "help": "Phonon checkpoint directory, config.json path, or Hugging Face repo ID. Defaults to gradium/phonon-40m-multilingual (Hub access required)."
+            "help": "Phonon checkpoint directory, config.json path, or Hugging Face repo ID. Defaults to gradium/phonon-40m-en (gated, CC BY-NC 4.0)."
         },
     )
     phonon_tts_revision: str | None = field(
@@ -20,7 +20,7 @@ class PhononTTSHandlerArguments:
     phonon_tts_language: str = field(
         default="en",
         metadata={
-            "help": "Initial text normalization language: en, fr, de, es, pt, or none. Multilingual checkpoints follow session language selections."
+            "help": "Fixed text normalization language: en, fr, de, es, pt, or none. This does not select a model."
         },
     )
     phonon_tts_quant: str = field(
