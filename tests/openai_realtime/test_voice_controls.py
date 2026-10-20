@@ -6,7 +6,12 @@ from types import SimpleNamespace
 import pytest
 
 from speech_to_speech.api.openai_realtime.audio_client import RealtimeAudioClientConfig
-from speech_to_speech.api.openai_realtime.voice_controls import ArrowDecoder, VoiceSelection, arrow_steps
+from speech_to_speech.api.openai_realtime.voice_controls import (
+    ArrowDecoder,
+    LanguageSelection,
+    VoiceSelection,
+    arrow_steps,
+)
 
 
 class Connection:
@@ -30,11 +35,44 @@ def updated(voice):
     )
 
 
+def language_updated(language):
+    return SimpleNamespace(
+        type="session.updated",
+        session=SimpleNamespace(audio=SimpleNamespace(output=SimpleNamespace(language=language))),
+    )
+
+
+async def test_language_update_waits_for_reply_and_preserves_instructions_and_voice():
+    connection = Connection()
+    config = RealtimeAudioClientConfig(
+        voice="Zoey", language="en", language_choices=["en", "fr", "de"], instructions="Be brief."
+    )
+    shown = []
+    control = LanguageSelection(connection, config, shown.append)
+    await control.handle_event(SimpleNamespace(type="response.created", response=SimpleNamespace(id="current")))
+    await control.select(1)
+    assert connection.sent == [] and "French" in shown[-1]
+    await control.handle_event(SimpleNamespace(type="response.done", response=SimpleNamespace(id="current")))
+    assert connection.sent == [
+        {
+            "type": "session.update",
+            "event_id": "local_language_1",
+            "session": {"type": "realtime", "audio": {"output": {"language": "fr"}}},
+        }
+    ]
+    assert config.language == "en"
+    await control.handle_event(language_updated("fr"))
+    assert config.language == "fr" and config.voice == "Zoey" and config.instructions == "Be brief."
+    await control.select(1)
+    await control.handle_event(SimpleNamespace(type="error", error=SimpleNamespace(event_id="local_language_2")))
+    assert config.language == "fr" and control.index == 1 and "rejected" in shown[-1]
+
+
 def test_decoder_handles_split_keys_application_mode_and_ignores_text():
     decoder = ArrowDecoder()
     assert decoder.feed(b"text\x1b") == []
     assert decoder.feed(b"[") == []
-    assert decoder.feed(b"C\x1b[D\x1bOA\x1bOB") == [1, -1, -1, 1]
+    assert decoder.feed(b"C\x1b[D\x1bOA\x1bOB") == ["right", "left", "up", "down"]
     assert decoder.feed(b"lettersABCD\x1b[1;5C\x1b[3~") == []
     assert decoder.feed(b"\x1b[" + b"1" * 100) == []
     assert decoder.pending == b""
@@ -118,7 +156,7 @@ async def test_real_terminal_arrows_restore_echo_and_keep_ctrl_c(cancel):
                 await asyncio.sleep(0.01)
                 assert not task.done()
                 os.write(master, b"C")
-                assert await asyncio.wait_for(task, 1) == 1
+                assert await asyncio.wait_for(task, 1) == "right"
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -134,7 +172,8 @@ async def test_redirected_input_has_no_keyboard_controls(tmp_path):
         assert [step async for step in arrow_steps(stream)] == []
 
 
-async def test_live_audio_session_applies_arrow_on_existing_connection_after_reply(monkeypatch):
+@pytest.mark.parametrize("key", ["right", "down"])
+async def test_live_audio_session_applies_arrow_on_existing_connection_after_reply(monkeypatch, key):
     import sys
 
     from speech_to_speech.api.openai_realtime import audio_client
@@ -156,12 +195,15 @@ async def test_live_audio_session_applies_arrow_on_existing_connection_after_rep
 
         async def send(self, event):
             await super().send(event)
-            events.put_nowait(updated(event["session"]["audio"]["output"]["voice"]))
+            audio = event["session"]["audio"]
+            events.put_nowait(
+                updated(audio["output"]["voice"]) if "voice" in audio["output"] else language_updated("fr")
+            )
 
     async def keys():
         try:
             await ready.wait()
-            yield 1
+            yield key
             events.put_nowait(
                 SimpleNamespace(type="response.done", response=SimpleNamespace(id="reply", status="completed"))
             )
@@ -189,9 +231,57 @@ async def test_live_audio_session_applies_arrow_on_existing_connection_after_rep
             RawOutputStream=lambda **kwargs: Stream(),
         ),
     )
-    config = RealtimeAudioClientConfig(voice="Zoey", voice_choices=["Zoey", "Maeve"])
+    config = RealtimeAudioClientConfig(
+        voice="Zoey", voice_choices=["Zoey", "Maeve"], language="en", language_choices=["en", "fr"]
+    )
     conn = AudioConnection()
     await asyncio.wait_for(audio_client._run_audio_session(conn, config, stop), 2)
-    assert config.voice == "Maeve"
+    assert config.voice == ("Maeve" if key == "right" else "Zoey")
+    assert config.language == ("fr" if key == "down" else "en")
     assert len(conn.sent) == 1 and conn.sent[0]["type"] == "session.update"
     assert "keyboard" in closed and closed.count("stream closed") == 2
+
+
+def test_terminal_selector_updates_one_line_and_waits_during_streamed_text():
+    from io import StringIO
+
+    from rich.console import Console
+
+    from speech_to_speech.api.openai_realtime.audio_client import _FriendlyEventRenderer
+    from speech_to_speech.api.openai_realtime.voice_controls import SelectionDisplay
+
+    output = StringIO()
+    console = Console(file=output, force_terminal=True, width=100, color_system=None)
+    display = SelectionDisplay(console)
+    renderer = _FriendlyEventRenderer(conversation_only=True, console=console)
+    renderer.selection_display = display
+    display.update("Voice [1/2]: Trevor — switching")
+    display.update("Voice [1/2]: Trevor — selected")
+    assert "\n" not in output.getvalue()
+    assert "\r\x1b[2K" in output.getvalue()
+    renderer.render_assistant_text_delta(SimpleNamespace(delta="Hello"))
+    during_reply = output.getvalue()
+    display.update("Voice [2/2]: Vyrmathrax the Ancient — selected")
+    assert output.getvalue() == during_reply
+    renderer.render_assistant_text_delta(SimpleNamespace(delta=" there!"))
+    assert output.getvalue().endswith("ASSISTANT: Hello there!")
+    renderer.finish_live_assistant_text()
+    assert output.getvalue().endswith("Voice [2/2]: Vyrmathrax the Ancient — selected")
+    display.clear()
+    assert not display.visible
+
+
+def test_redirected_selector_omits_transient_switching_and_uses_readable_names():
+    from io import StringIO
+
+    from rich.console import Console
+
+    from speech_to_speech.api.openai_realtime.voice_controls import SelectionDisplay
+
+    output = StringIO()
+    display = SelectionDisplay(Console(file=output, force_terminal=False))
+    config = RealtimeAudioClientConfig(voice_choices=["Vyrmathrax_the_Ancient"])
+    control = VoiceSelection(Connection(), config, display.update)
+    control.announce("switching")
+    control.announce("selected")
+    assert output.getvalue() == "Voice [1/1]: Vyrmathrax the Ancient — selected\n"

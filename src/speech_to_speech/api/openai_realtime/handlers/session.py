@@ -63,6 +63,22 @@ class SessionHandler(RealtimeBaseHandler):
                         )
                 transcription.language = language
 
+        output = s.audio.output if s.audio is not None else None
+        reply_language = getattr(output, "language", None)
+        if reply_language is not None:
+            if not isinstance(reply_language, str) or not reply_language.strip():
+                return self.make_error(
+                    message="Reply language must be a non-empty string.", _type="invalid_request_error"
+                )
+            reply_language = reply_language.strip().lower()
+            supported = self._service.tts_supported_languages
+            if reply_language != "auto" and supported is not None and reply_language not in supported:
+                return self.make_error(
+                    message=f"Language {reply_language!r} is not supported by the active TTS backend.",
+                    _type="invalid_request_error",
+                )
+            setattr(output, "language", reply_language)
+
         model = getattr(s, "model", None)
         if model is not None:
             logger.info(f"Session model set to: {model}")

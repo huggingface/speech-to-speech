@@ -66,9 +66,14 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
         self._failed_responses: set[tuple[int | None, str | None, str | None, int | None]] = set()
-        # Published preview wheels run on CPU; global Torch/MLX device flags do
-        # not apply to this Rust runtime. Keep it loaded across utterances.
-        self.model = ptts.TTS(config=model_name, revision=revision, lang=language, quant=quant, device="cpu")
+        # Each cached runtime owns its language-specific text normalizer. Global
+        # Torch/MLX device flags do not apply to this native CPU runtime.
+        self._model_options = {"config": model_name, "revision": revision, "quant": quant, "device": "cpu"}
+        self.model = ptts.TTS(**self._model_options, lang=language)
+        self.supported_languages = set(self.model.languages) & (PHONON_NORMALIZATION_LANGUAGES - {"none"})
+        if language != "none" and language not in self.supported_languages:
+            raise ValueError(f"Phonon checkpoint does not support language {language!r}.")
+        self._language_models = {language: self.model}
         self._validate_voice(voice)
         logger.info("Loaded Phonon at %s Hz; voices: %s", self.model.sample_rate, ", ".join(self.model.voices))
 
@@ -104,6 +109,21 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 and not self.speculative_turns.is_latest(tts_input.turn_id, tts_input.turn_revision)
             )
         )
+
+    def _model_for_input(self, tts_input: TTSInput) -> Any:
+        # TTSInput snapshots the selection for the whole response, so changing
+        # the session cannot change normalization halfway through a reply.
+        language = tts_input.tts_language_code or self.language
+        if language != self.language and language not in self.supported_languages:
+            if tts_input.selected_language not in (None, "auto"):
+                raise ValueError(f"Phonon checkpoint does not support language {language!r}.")
+            language = self.language
+        if language not in self._language_models:
+            import ptts
+
+            logger.info("Loading Phonon text normalizer for %s", language)
+            self._language_models[language] = ptts.TTS(**self._model_options, lang=language)
+        return self._language_models[language]
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         tracker = self.speculative_turns
@@ -153,6 +173,7 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
     def _synthesize(self, tts_input: TTSInput, generation: int | None) -> Iterator[TTSOut]:
         voice = self._resolve_voice(tts_input)
+        model = self._model_for_input(tts_input)
         console.print(f"[green]ASSISTANT: {tts_input.text}")
         started_at = perf_counter()
         first_audio = True
@@ -160,7 +181,7 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         # Closing the context on cancellation, exceptions, or generator.close()
         # stops native generation and joins its worker threads.
-        with self.model.stream(tts_input.text, voice=voice) as audio:
+        with model.stream(tts_input.text, voice=voice) as audio:
             source_rate = audio.sample_rate
             resampler = (
                 soxr.ResampleStream(source_rate, PIPELINE_SAMPLE_RATE, 1, dtype="float32", quality="HQ")

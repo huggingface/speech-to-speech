@@ -267,7 +267,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 self._response_selected_language = (
                     lm_output.selected_language
                     if "selected_language" in lm_output.model_fields_set
-                    else config.selected_language
+                    else config.reply_language
                     if config is not None
                     else None
                 )

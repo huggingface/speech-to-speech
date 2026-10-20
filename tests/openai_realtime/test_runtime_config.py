@@ -25,6 +25,17 @@ def _parse_session(**session_fields) -> RealtimeSessionCreateRequest:
 
 
 class TestApplySessionUpdate:
+    def test_reply_language_preserves_recognition_hint_and_is_snapshotted(self):
+        cfg = RuntimeConfig()
+        cfg.apply_session_update(_parse_session(audio={"input": {"transcription": {"language": "en"}}}))
+        cfg.apply_session_update(_parse_session(audio={"output": {"language": "fr", "voice": "Zoey"}}))
+        request = GenerateResponseRequest(runtime_config=cfg)
+        cfg.apply_session_update(_parse_session(audio={"output": {"language": "de"}}))
+        assert cfg.selected_language == "en"
+        assert cfg.reply_language == "de"
+        assert request.selected_language == "fr"
+        assert cfg.session.audio.output.voice == "Zoey"
+
     def test_selected_language_changes_without_a_turn_snapshot(self):
         cfg = RuntimeConfig()
         cfg.apply_session_update(_parse_session(audio={"input": {"transcription": {"language": "es"}}}))

@@ -90,12 +90,17 @@ def test_local_phonon_offers_loaded_voices_and_preserves_configured_voice(monkey
     handler = PhononTTSHandler.__new__(PhononTTSHandler)
     handler.model = SimpleNamespace(voices=["Maeve", "Zoey", "default"])
     handler.voice = "Zoey"
+    handler.language = "en"
+    handler.supported_languages = {"en", "fr", "de", "es", "pt"}
     unit = SimpleNamespace(handlers=[handler])
     monkeypatch.setattr("speech_to_speech.s2s_pipeline._build_pipeline_unit", lambda **_kwargs: unit)
     args = parse_arguments(["--tts", "phonon"], command="local")
     manager = build_local_pipeline(args, Event())
     assert manager.handlers[-1].config.voice == "Zoey"
     assert manager.handlers[-1].config.voice_choices == ["default", "Maeve", "Zoey"]
+    assert manager.handlers[-1].config.language == "en"
+    assert manager.handlers[-1].config.language_choices == ["en", "fr", "de", "es", "pt"]
+    assert args.llm_backend.config["enable_lang_prompt"] is True
 
 
 def test_failed_handler_setup_cleans_and_preserves_original_error():

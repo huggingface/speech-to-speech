@@ -606,7 +606,9 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 return
         language_code = request.language_code
         language_code, _ = resolve_auto_language(language_code)
-        lang_name = language_name_for_prompt(language_code, enable=self.enable_lang_prompt)
+        lang_name = language_name_for_prompt(
+            language_code, enable=self.enable_lang_prompt, selected_language=request.selected_language
+        )
         instructions = (
             response.instructions
             if response is not None and response.instructions is not None

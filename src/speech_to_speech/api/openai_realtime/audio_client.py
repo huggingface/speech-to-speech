@@ -35,7 +35,14 @@ from speech_to_speech.api.openai_realtime.tool_followup import (
     TOOL_INPUT_METADATA_KEY,
     tool_call_ids,
 )
-from speech_to_speech.api.openai_realtime.voice_controls import VoiceSelection, arrow_steps, has_terminal_arrows
+from speech_to_speech.api.openai_realtime.voice_controls import (
+    LANGUAGE_NAMES,
+    LanguageSelection,
+    SelectionDisplay,
+    VoiceSelection,
+    arrow_steps,
+    has_terminal_arrows,
+)
 from speech_to_speech.pipeline.transcript_logging import log_exception
 
 logger = logging.getLogger(__name__)
@@ -70,6 +77,8 @@ class RealtimeAudioClientConfig:
     instructions: Optional[str] = None
     voice: Optional[str] = None
     voice_choices: list[str] = field(default_factory=list)
+    language: str | None = None
+    language_choices: list[str] = field(default_factory=list)
     print_json: bool = False
     verbose: bool = False
     block_mic_during_playback: bool = False
@@ -89,6 +98,13 @@ class RealtimeAudioClientConfig:
             if self.voice and self.voice not in self.voice_choices:
                 self.voice_choices.insert(0, self.voice)
             self.voice = self.voice or self.voice_choices[0]
+        if any(language not in LANGUAGE_NAMES for language in self.language_choices):
+            raise ValueError("language_choices must contain en, fr, de, es, or pt")
+        self.language_choices = list(dict.fromkeys(self.language_choices))
+        if self.language_choices:
+            if self.language is not None and self.language not in self.language_choices:
+                raise ValueError("language must be one of language_choices")
+            self.language = self.language or self.language_choices[0]
 
     @property
     def conversation_only(self) -> bool:
@@ -205,6 +221,8 @@ def build_session_update(config: RealtimeAudioClientConfig) -> dict[str, Any]:
         "turn_detection": {"type": "server_vad", "interrupt_response": True},
     }
     output_config: dict[str, Any] = {}
+    if config.language:
+        output_config["language"] = config.language
 
     input_format = maybe_pcm_format(config.send_rate)
     output_format = maybe_pcm_format(config.recv_rate)
@@ -305,6 +323,7 @@ class _FriendlyEventRenderer:
         self.conversation_only = conversation_only
         self.console = console or Console(highlight=False, markup=False, soft_wrap=True)
         self.ready_announced = False
+        self.selection_display: SelectionDisplay | None = None
         # Input transcription events can arrive out of order across items.
         self.user_transcript_by_item: dict[str | None, str] = {}
         self.user_snapshot_by_item: dict[str | None, str] = {}
@@ -314,14 +333,18 @@ class _FriendlyEventRenderer:
         self.streamed_assistant_transcripts: set[_AssistantTranscriptStream] = set()
 
     def print_conversation(self, text: str, *, style: str, end: str = "\n") -> None:
+        if self.selection_display is not None:
+            self.selection_display.clear()
         if self.conversation_only:
             self.console.print(text, style=style, end=end, markup=False, highlight=False, soft_wrap=True)
         else:
             print(text, end=end, flush=True)
+        if end == "\n" and self.live_assistant_stream is None and self.selection_display is not None:
+            self.selection_display.draw()
 
     def announce_ready(self) -> None:
         if self.conversation_only and not self.ready_announced:
-            self.console.print("Ready — start speaking.", style="cyan")
+            self.print_conversation("Ready — start speaking.", style="cyan")
             self.ready_announced = True
 
     def render_live_user_text(self, text: str, *, final: bool = False) -> None:
@@ -364,6 +387,8 @@ class _FriendlyEventRenderer:
             delta = delta.lstrip()
             if not delta:
                 return
+            if self.selection_display is not None:
+                self.selection_display.pause()
             self.print_conversation("ASSISTANT: ", style="green", end="")
             self.live_assistant_stream = stream_key
         self.streamed_assistant_transcripts.add(stream_key)
@@ -384,6 +409,8 @@ class _FriendlyEventRenderer:
         if self.live_assistant_stream is not None:
             self.print_conversation("", style="green")
             self.live_assistant_stream = None
+            if self.selection_display is not None:
+                self.selection_display.resume()
 
     def reset_assistant_text(self) -> None:
         self.finish_live_assistant_text()
@@ -475,7 +502,7 @@ def handle_server_event(
             if error
             else "Input audio transcription failed"
         )
-        print(f"ERROR: {err_type}: {err_msg}", flush=True)
+        renderer.print_conversation(f"ERROR: {err_type}: {err_msg}", style="red")
     elif event.type == "response.created":
         renderer.clear_live_user_text()
         renderer.finish_live_assistant_text()
@@ -510,13 +537,13 @@ def handle_server_event(
         if not renderer.conversation_only:
             print(f"ASSISTANT: <response {event.response.status}>", flush=True)
         elif event.response.status not in {"completed", "cancelled"}:
-            print(f"ERROR: response {event.response.status}", flush=True)
+            renderer.print_conversation(f"ERROR: response {event.response.status}", style="red")
     elif event.type == "output_audio_buffer.cleared":
         playback.clear()
     elif event.type == "error":
         renderer.clear_live_user_text()
         renderer.finish_live_assistant_text()
-        print(f"ERROR: {event.error.type}: {event.error.message}", flush=True)
+        renderer.print_conversation(f"ERROR: {event.error.type}: {event.error.message}", style="red")
     else:
         if not renderer.conversation_only:
             renderer.clear_live_user_text()
@@ -986,22 +1013,31 @@ async def _run_audio_session(
     mic_queue: Queue[bytes] = Queue(maxsize=128)
     playback = PlaybackBuffer(config.recv_rate, startup_buffer_ms=config.playback_buffer_ms)
     renderer = _FriendlyEventRenderer(conversation_only=config.conversation_only)
+    if config.voice_choices or config.language_choices:
+        renderer.selection_display = SelectionDisplay(renderer.console, inline=config.conversation_only)
     tool_calls = _ToolCallCoordinator(conn, config)
 
     def show_voice(message: str) -> None:
-        renderer.clear_live_user_text()
-        renderer.finish_live_assistant_text()
-        print(message, flush=True)
+        display = renderer.selection_display
+        assert display is not None
+        if message.startswith(("Voice [", "Language [")):
+            display.update(message)
+        else:
+            display.clear()
+            print(message, flush=True)
+            display.draw()
 
     voices = VoiceSelection(conn, config, show_voice) if len(config.voice_choices) > 1 else None
+    languages = LanguageSelection(conn, config, show_voice) if len(config.language_choices) > 1 else None
 
     async def select_voices() -> None:
-        assert voices is not None
         try:
             keys = arrow_steps()
             try:
-                async for step in keys:
-                    await voices.select(step)
+                async for key in keys:
+                    control = languages if languages is not None and key in {"up", "down"} else voices
+                    if control is not None:
+                        await control.select(1 if key in {"down", "right"} else -1)
             finally:
                 await keys.aclose()
         except (OSError, ValueError, NotImplementedError):
@@ -1043,6 +1079,8 @@ async def _run_audio_session(
             tool_calls.handle_event(event)
             if voices is not None:
                 await voices.handle_event(event)
+            if languages is not None:
+                await languages.handle_event(event)
             handle_server_event(
                 event,
                 playback=playback,
@@ -1083,10 +1121,14 @@ async def _run_audio_session(
             asyncio.create_task(_wait_for_stop(stop_event)),
             asyncio.create_task(tool_calls.wait_for_failure()),
         }
-        if voices is not None:
-            voices.announce()
+        if voices is not None or languages is not None:
+            if voices is not None:
+                voices.announce()
+            if languages is not None:
+                languages.announce()
             if has_terminal_arrows():
-                show_voice("Use ←/→ or ↑/↓ to change voice; changes apply between replies. Ctrl+C stops.")
+                controls = "←/→ change voice; ↑/↓ change language" if languages else "←/→ or ↑/↓ change voice"
+                show_voice(f"Use {controls}; changes apply between replies. Ctrl+C stops.")
                 tasks.add(asyncio.create_task(select_voices()))
 
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -1106,6 +1148,8 @@ async def _run_audio_session(
         await tool_calls.close()
         renderer.clear_live_user_text()
         renderer.reset_assistant_text()
+        if renderer.selection_display is not None:
+            renderer.selection_display.clear()
         for stream in reversed(started_streams):
             try:
                 stream.stop()

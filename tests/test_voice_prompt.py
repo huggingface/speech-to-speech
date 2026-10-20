@@ -68,6 +68,7 @@ def test_voice_prompt_can_include_language_hint():
 
     assert "Please reply to my message in french." in prompt
     assert "Be concise." in prompt
+    assert prompt.endswith("Réponds uniquement en français.\n")
 
 
 def test_voice_prompt_makes_speech_the_default_and_handles_noisy_stt():
