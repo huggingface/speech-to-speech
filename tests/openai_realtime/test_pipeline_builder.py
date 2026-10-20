@@ -88,7 +88,7 @@ def test_local_phonon_offers_loaded_voices_and_preserves_configured_voice(monkey
     from speech_to_speech.TTS.phonon_tts_handler import PhononTTSHandler
 
     handler = PhononTTSHandler.__new__(PhononTTSHandler)
-    handler.model = SimpleNamespace(voices=["Maeve", "Zoey", "default"])
+    handler.voices = ["Maeve", "Zoey", "default"]
     handler.voice = "Zoey"
     unit = SimpleNamespace(handlers=[handler])
     monkeypatch.setattr("speech_to_speech.s2s_pipeline._build_pipeline_unit", lambda **_kwargs: unit)

@@ -69,16 +69,32 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
         # The published wheels run on CPU; global Torch/MLX device flags do
         # not apply to this Rust runtime. Keep it loaded across utterances.
         self.model = ptts.TTS(config=model_name, revision=revision, lang=language, quant=quant, device="cpu")
+        self.voices = self._selectable_voices(ptts)
         self._validate_voice(voice)
-        logger.info("Loaded Phonon at %s Hz; voices: %s", self.model.sample_rate, ", ".join(self.model.voices))
+        logger.info("Loaded Phonon at %s Hz with %d voices", self.model.sample_rate, len(self.voices))
 
     @property
     def min_time_to_debug(self) -> float:
         return 0.1
 
+    def _selectable_voices(self, ptts: Any) -> list[str]:
+        """Checkpoint voices, then catalog voices in the checkpoint's languages."""
+        voices = list(self.model.voices)
+        try:
+            # Only the catalog index downloads here; ptts fetches a voice on first use.
+            catalog = ptts.catalog_voices()
+        except Exception as exc:
+            logger.warning("Phonon voice catalog unavailable; using checkpoint voices only: %s", exc)
+            return voices
+        languages = set(self.model.languages)
+        voices += [
+            entry["name"] for entry in catalog if entry.get("language") in languages and entry["name"] not in voices
+        ]
+        return voices
+
     def _validate_voice(self, voice: str | None) -> None:
-        if voice is not None and voice not in self.model.voices:
-            raise ValueError(f"Unknown Phonon voice {voice!r}; available voices: {', '.join(self.model.voices)}")
+        if voice is not None and voice not in self.voices:
+            raise ValueError(f"Unknown Phonon voice {voice!r}; available voices: {', '.join(self.voices)}")
 
     def _resolve_voice(self, tts_input: TTSInput) -> str | None:
         voice: Any = self.voice

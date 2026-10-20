@@ -56,6 +56,7 @@ def make_handler(samples, *, sample_rate=24000, blocksize=512):
     handler.language = "en"
     handler.blocksize = blocksize
     handler.model = SimpleNamespace(stream=generate, voices=["voice-a", "voice-b"])
+    handler.voices = ["voice-a", "voice-b"]
     return handler, stream, requests
 
 
@@ -75,6 +76,30 @@ def test_invalid_setup_fails_before_importing_runtime(monkeypatch, kwargs, error
     handler = PhononTTSHandler.__new__(PhononTTSHandler)
     with pytest.raises(ValueError, match=error):
         handler.setup(Event(), **kwargs)
+
+
+def test_setup_offers_catalog_voices_in_checkpoint_languages(monkeypatch):
+    model = SimpleNamespace(sample_rate=24000, voices=["default"], languages=["en"])
+    catalog = [
+        {"name": "Zoey", "language": "en"},
+        {"name": "Lucie", "language": "fr"},
+        {"name": "default", "language": "en"},
+    ]
+    monkeypatch.setitem(sys.modules, "ptts", SimpleNamespace(TTS=lambda **_kw: model, catalog_voices=lambda: catalog))
+    handler = PhononTTSHandler.__new__(PhononTTSHandler)
+    handler.setup(Event(), model_name="/models/test", voice="Zoey")
+    assert handler.voices == ["default", "Zoey"]
+
+
+def test_unavailable_catalog_keeps_checkpoint_voices(monkeypatch):
+    def unavailable():
+        raise OSError("offline")
+
+    model = SimpleNamespace(sample_rate=24000, voices=["default"], languages=["en"])
+    monkeypatch.setitem(sys.modules, "ptts", SimpleNamespace(TTS=lambda **_kw: model, catalog_voices=unavailable))
+    handler = PhononTTSHandler.__new__(PhononTTSHandler)
+    with pytest.raises(ValueError, match="Unknown Phonon voice 'Zoey'"):
+        handler.setup(Event(), model_name="/models/test", voice="Zoey")
 
 
 @pytest.mark.parametrize("num_threads", [None, 4])

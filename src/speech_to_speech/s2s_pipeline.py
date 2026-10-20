@@ -770,7 +770,7 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
 
         for handler in server_manager.handlers:
             if isinstance(handler, PhononTTSHandler):
-                voice_choices = list(handler.model.voices)
+                voice_choices = list(handler.voices)
                 if "default" in voice_choices:
                     voice_choices.remove("default")
                     voice_choices.insert(0, "default")
