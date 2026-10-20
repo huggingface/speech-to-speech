@@ -238,7 +238,10 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
             lock_scope_start_s = perf_counter()
             try:
                 with bind_active_turn_latency_tracker(tracker):
-                    with self._compute_lock_context(handler_name="ParakeetSTT-Progressive", timeout=0.01) as acquired:
+                    # A busy lock only skips this progressive update, so a miss is not a warning.
+                    with self._compute_lock_context(
+                        handler_name="ParakeetSTT-Progressive", timeout=0.01, miss_log_level=logging.DEBUG
+                    ) as acquired:
                         if acquired:
                             try:
                                 inference_start_s = perf_counter()
@@ -392,9 +395,11 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         return language
 
     @contextmanager
-    def _compute_lock_context(self, handler_name: str, timeout: float) -> Iterator[bool]:
+    def _compute_lock_context(
+        self, handler_name: str, timeout: float, miss_log_level: int = logging.WARNING
+    ) -> Iterator[bool]:
         if self.backend == "mlx":
-            with MLXLockContext(handler_name=handler_name, timeout=timeout) as acquired:
+            with MLXLockContext(handler_name=handler_name, timeout=timeout, miss_log_level=miss_log_level) as acquired:
                 yield acquired
             return
 
@@ -409,7 +414,13 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                 logger.debug("%s: compute lock acquired after %.3fs", handler_name, wait_s)
             hold_start_s = perf_counter()
         else:
-            logger.warning("%s: Failed to acquire compute lock after %.3fs (timeout=%s)", handler_name, wait_s, timeout)
+            logger.log(
+                miss_log_level,
+                "%s: Failed to acquire compute lock after %.3fs (timeout=%s)",
+                handler_name,
+                wait_s,
+                timeout,
+            )
         try:
             yield acquired
         finally:
