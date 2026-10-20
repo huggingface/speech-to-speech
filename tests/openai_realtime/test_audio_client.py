@@ -1780,3 +1780,35 @@ async def test_ready_waits_for_audio_devices_and_session_acknowledgement(monkeyp
         ),
     )
     await audio_client_module._run_audio_session(Connection(), RealtimeAudioClientConfig(), stop)
+
+
+def test_voice_status_is_rewritten_in_place_below_the_conversation():
+    from io import StringIO
+
+    from rich.console import Console
+
+    output = StringIO()
+    terminal = Console(file=output, force_terminal=True, no_color=True, width=40)
+    renderer = _FriendlyEventRenderer(conversation_only=True, console=terminal)
+    renderer.show_status("Voice [1/38]: default")
+    renderer.show_status("Voice [2/38]: Zoey — switching")
+    renderer.render_assistant_text_delta(
+        SimpleNamespace(delta="Hi.", response_id="r", item_id="i", output_index=0, content_index=0)
+    )
+    renderer.show_status("Voice [3/38]: Juniper — next reply")
+    renderer.finish_live_assistant_text()
+    renderer.clear_status()
+
+    clear = "\r\x1b[2K"
+    assert output.getvalue() == (
+        "Voice [1/38]: default"
+        f"{clear}Voice [2/38]: Zoey — switching"
+        f"{clear}ASSISTANT: Hi.\n"
+        f"Voice [3/38]: Juniper — next reply{clear}"
+    )
+
+
+def test_voice_status_prints_lines_without_a_terminal(capsys):
+    renderer = _FriendlyEventRenderer(conversation_only=False)
+    renderer.show_status("Voice [2/38]: Zoey — selected")
+    assert capsys.readouterr().out == "Voice [2/38]: Zoey — selected\n"

@@ -312,16 +312,48 @@ class _FriendlyEventRenderer:
         self.saw_user_speech = False
         self.live_assistant_stream: _AssistantTranscriptStream | None = None
         self.streamed_assistant_transcripts: set[_AssistantTranscriptStream] = set()
+        self.status = ""
+        self.status_visible = False
 
     def print_conversation(self, text: str, *, style: str, end: str = "\n") -> None:
+        self._clear_status()
         if self.conversation_only:
             self.console.print(text, style=style, end=end, markup=False, highlight=False, soft_wrap=True)
         else:
             print(text, end=end, flush=True)
+        if end == "\n":
+            self._draw_status()
+
+    def show_status(self, text: str) -> None:
+        """Keep one status line below the conversation, rewritten in place on a terminal."""
+        if not (self.conversation_only and self.console.is_terminal):
+            self.print_conversation(text, style="cyan")
+            return
+        # A wrapped line could not be cleared in place.
+        self.status = text[: max(1, self.console.width - 1)]
+        self._draw_status()
+
+    def clear_status(self) -> None:
+        self._clear_status()
+        self.status = ""
+
+    def _clear_status(self) -> None:
+        if self.status_visible:
+            self.console.file.write("\r\x1b[2K")
+            self.console.file.flush()
+            self.status_visible = False
+
+    def _draw_status(self) -> None:
+        # Wait for a streamed assistant line to finish before taking the cursor line.
+        if not self.status or self.live_assistant_stream is not None:
+            return
+        self._clear_status()
+        self.console.print(self.status, style="cyan", end="", markup=False, highlight=False, soft_wrap=True)
+        self.status_visible = True
 
     def announce_ready(self) -> None:
         if self.conversation_only and not self.ready_announced:
-            self.console.print("Ready — start speaking.", style="cyan")
+            self.print_conversation("Ready — start speaking.", style="cyan")
             self.ready_announced = True
 
     def render_live_user_text(self, text: str, *, final: bool = False) -> None:
@@ -382,8 +414,8 @@ class _FriendlyEventRenderer:
 
     def finish_live_assistant_text(self) -> None:
         if self.live_assistant_stream is not None:
-            self.print_conversation("", style="green")
             self.live_assistant_stream = None
+            self.print_conversation("", style="green")
 
     def reset_assistant_text(self) -> None:
         self.finish_live_assistant_text()
@@ -475,7 +507,7 @@ def handle_server_event(
             if error
             else "Input audio transcription failed"
         )
-        print(f"ERROR: {err_type}: {err_msg}", flush=True)
+        renderer.print_conversation(f"ERROR: {err_type}: {err_msg}", style="red")
     elif event.type == "response.created":
         renderer.clear_live_user_text()
         renderer.finish_live_assistant_text()
@@ -510,13 +542,13 @@ def handle_server_event(
         if not renderer.conversation_only:
             print(f"ASSISTANT: <response {event.response.status}>", flush=True)
         elif event.response.status not in {"completed", "cancelled"}:
-            print(f"ERROR: response {event.response.status}", flush=True)
+            renderer.print_conversation(f"ERROR: response {event.response.status}", style="red")
     elif event.type == "output_audio_buffer.cleared":
         playback.clear()
     elif event.type == "error":
         renderer.clear_live_user_text()
         renderer.finish_live_assistant_text()
-        print(f"ERROR: {event.error.type}: {event.error.message}", flush=True)
+        renderer.print_conversation(f"ERROR: {event.error.type}: {event.error.message}", style="red")
     else:
         if not renderer.conversation_only:
             renderer.clear_live_user_text()
@@ -988,12 +1020,7 @@ async def _run_audio_session(
     renderer = _FriendlyEventRenderer(conversation_only=config.conversation_only)
     tool_calls = _ToolCallCoordinator(conn, config)
 
-    def show_voice(message: str) -> None:
-        renderer.clear_live_user_text()
-        renderer.finish_live_assistant_text()
-        print(message, flush=True)
-
-    voices = VoiceSelection(conn, config, show_voice) if len(config.voice_choices) > 1 else None
+    voices = VoiceSelection(conn, config, renderer.show_status) if len(config.voice_choices) > 1 else None
 
     async def select_voices() -> None:
         assert voices is not None
@@ -1086,7 +1113,9 @@ async def _run_audio_session(
         if voices is not None:
             voices.announce()
             if has_terminal_arrows():
-                show_voice("Use ←/→ or ↑/↓ to change voice; changes apply between replies. Ctrl+C stops.")
+                renderer.print_conversation(
+                    "Use ←/→ or ↑/↓ to change voice; changes apply between replies. Ctrl+C stops.", style="cyan"
+                )
                 tasks.add(asyncio.create_task(select_voices()))
 
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -1106,6 +1135,7 @@ async def _run_audio_session(
         await tool_calls.close()
         renderer.clear_live_user_text()
         renderer.reset_assistant_text()
+        renderer.clear_status()
         for stream in reversed(started_streams):
             try:
                 stream.stop()
