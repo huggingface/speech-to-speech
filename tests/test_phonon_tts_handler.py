@@ -233,6 +233,7 @@ def test_native_failure_closes_stream_and_marks_response_failed():
         ("voice-a", "voice-b", None, "voice-b"),
         ("voice-a", "voice-b", "voice-a", "voice-a"),
         (None, "alloy", None, None),
+        ("voice-a", "alloy", None, "voice-a"),
         (None, "voice-b", "alloy", None),
         ("voice-a", "alloy", "voice-b", "voice-b"),
         ("voice-a", "voice-b", "alloy", "voice-a"),
@@ -252,17 +253,11 @@ def test_voice_override_precedence(configured, session, response, expected):
 @pytest.mark.parametrize(
     "voice", ["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]
 )
-@pytest.mark.parametrize("source", ["session", "response"])
-def test_realtime_voices_use_configured_voice(voice, source):
+def test_realtime_voices_use_configured_voice(voice):
     handler, _, requests = make_handler([np.ones(4, dtype=np.float32)], sample_rate=16000, blocksize=4)
     handler.voice = "voice-a"
-    runtime = RuntimeConfig()
-    override = None
-    if source == "session":
-        runtime.apply_session_update(RealtimeSessionCreateRequest(type="realtime", audio={"output": {"voice": voice}}))
-    else:
-        override = RealtimeResponseCreateParams(audio={"output": {"voice": voice}})
-    output = list(handler.process(TTSInput(text="Hello", runtime_config=runtime, response=override)))
+    override = RealtimeResponseCreateParams(audio={"output": {"voice": voice}})
+    output = list(handler.process(TTSInput(text="Hello", response=override)))
     assert len(output) == 1 and np.any(output[0])
     assert handler.queue_out.empty()
     assert requests == [("Hello", "voice-a")]
