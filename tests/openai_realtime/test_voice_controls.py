@@ -138,7 +138,8 @@ async def test_real_terminal_arrows_restore_echo_and_keep_ctrl_c(cancel):
     import termios
 
     master, slave = os.openpty()
-    with os.fdopen(slave) as stream:
+    # Linux hangs up the slave when its master closes, so inspect restoration first.
+    with os.fdopen(master, "wb", buffering=0), os.fdopen(slave) as stream:
         previous = termios.tcgetattr(stream.fileno())
         keys = arrow_steps(stream)
         task = asyncio.create_task(anext(keys))
@@ -161,7 +162,6 @@ async def test_real_terminal_arrows_restore_echo_and_keep_ctrl_c(cancel):
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             await keys.aclose()
-            os.close(master)
         assert termios.tcgetattr(stream.fileno()) == previous
 
 
