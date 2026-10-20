@@ -162,6 +162,9 @@ async def test_real_terminal_arrows_restore_echo_and_keep_ctrl_c(cancel):
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             await keys.aclose()
+        # macOS sets PENDIN when canonical mode resumes; clear pending input
+        # before comparing the restored configuration, with both PTY ends open.
+        termios.tcflush(stream.fileno(), termios.TCIFLUSH)
         assert termios.tcgetattr(stream.fileno()) == previous
 
 
