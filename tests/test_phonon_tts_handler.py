@@ -18,6 +18,7 @@ from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, AudioOutput, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.phonon_tts_handler import PhononTTSHandler
+from tests.turns import reopen
 
 
 class FakeStream:
@@ -133,9 +134,9 @@ def test_clipping_and_padding_without_resampling():
 def test_interrupt_drops_buffered_audio_and_closes_native_stream(cancel):
     handler, stream, _ = make_handler([np.ones(10, dtype=np.float32)], sample_rate=16000, blocksize=4)
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn", 0)
+    turn_id, revision = tracker.start_turn()
     handler.speculative_turns = tracker
-    output = handler.process(TTSInput(text="Hello", turn_id="turn", turn_revision=0))
+    output = handler.process(TTSInput(text="Hello", turn_id=turn_id, turn_revision=revision))
     next(output)
     if cancel == "generation":
         handler.cancel_scope.cancel()
@@ -164,9 +165,10 @@ def test_stale_generation_and_empty_text_do_not_start_native_stream():
 def test_stale_speculative_input_does_not_start_native_stream():
     handler, _, requests = make_handler([])
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn", 1)
+    turn_id, revision = tracker.start_turn()
+    reopen(tracker, turn_id, revision)
     handler.speculative_turns = tracker
-    assert list(handler.process(TTSInput(text="Hello", turn_id="turn", turn_revision=0))) == []
+    assert list(handler.process(TTSInput(text="Hello", turn_id=turn_id, turn_revision=revision))) == []
     assert requests == []
 
 
@@ -231,10 +233,10 @@ def test_session_reset_clears_previous_failure():
 def test_stale_keyed_terminal_keeps_response_cleanup():
     handler, _, _ = make_handler([])
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn", 0)
+    turn_id, revision = tracker.start_turn()
     handler.speculative_turns = tracker
-    terminal = EndOfResponse(response_key="response", turn_id="turn", turn_revision=0, cancel_generation=7)
-    tracker.observe("turn", 1)
+    terminal = EndOfResponse(response_key="response", turn_id=turn_id, turn_revision=revision, cancel_generation=7)
+    reopen(tracker, turn_id, revision)
     outputs = list(handler.process(terminal))
     queued = handler.output_for_queue(outputs[0], terminal)
     assert outputs == [AUDIO_RESPONSE_DONE]

@@ -424,7 +424,7 @@ class TestPackagedAudioClient:
             assert len(first_chunk) == 1024
             first_generation = server_env.cancel_scope.generation
 
-            tracker.observe("turn_1", 0)
+            tracker.start_turn()
             tracker.start_reopen_grace("turn_1", 0, 5.0)
             server_env.text_output_queue.put(SpeechStartedEvent(turn_id="turn_1", turn_revision=0))
             server_env.text_output_queue.put(

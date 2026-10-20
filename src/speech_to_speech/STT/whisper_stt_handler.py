@@ -64,7 +64,8 @@ class WhisperSTTHandler(BaseSTTHandler):
         self.device = resolve_device(device, TORCH_DEVICES, "Whisper STT")
         self.torch_dtype = getattr(torch, torch_dtype)
         self.compile_mode = compile_mode
-        self.gen_kwargs = gen_kwargs
+        # Copy before adding the language so handlers and caller-owned config stay isolated.
+        self.gen_kwargs = dict(gen_kwargs)
         language = self.canonical_language(language)
         self.start_language = language
         self.last_language = language if language != "auto" else None

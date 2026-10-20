@@ -262,21 +262,6 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
 
             self.model = load_model(model_name)
         except ImportError as e:
-            message = str(e)
-            if any(
-                dep in message
-                for dep in (
-                    "misaki",
-                    "spacy",
-                    "phonemizer",
-                    "espeakng_loader",
-                )
-            ):
-                raise ImportError(
-                    "Qwen3-TTS on Apple Silicon requires mlx-audio and its TTS dependencies. "
-                    f"Missing dependency: {message}. "
-                    "Install with: pip install mlx-audio misaki spacy phonemizer-fork espeakng-loader"
-                ) from e
             raise ImportError(
                 "mlx-audio is required for Qwen3 TTS on Apple Silicon. Install with: pip install mlx-audio"
             ) from e
@@ -902,8 +887,8 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         if latency_s < 0:
             return
         tracker = active_turn_latency_tracker()
-        if tracker is not None:
-            tracker.record_e2e(latency_s)
+        if tracker is not None and not tracker.record_e2e(latency_s):
+            return
         logger.info(
             "Last speech detected to first speech out: %.3fs (turn=%s rev=%s)",
             latency_s,

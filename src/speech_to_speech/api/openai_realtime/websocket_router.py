@@ -11,6 +11,7 @@ import numpy as np
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from openai.types.realtime import (
     ConversationItemCreateEvent,
+    ConversationItemDeleteEvent,
     ConversationItemTruncateEvent,
     InputAudioBufferAppendEvent,
     InputAudioBufferCommitEvent,
@@ -31,6 +32,7 @@ from speech_to_speech.api.openai_realtime.transports import (
     WebSocketTransport,
     send_ws_event,
 )
+from speech_to_speech.api.openai_realtime.visemes import SpeechToSpeechVisemesEvent
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
@@ -466,6 +468,11 @@ async def _dispatch_client_event(
         if events:
             await send_correlated(events)
 
+    elif isinstance(event, ConversationItemDeleteEvent):
+        events = service.handle_conversation_item_delete(session_id, event)
+        if events:
+            await send_correlated(events)
+
     elif isinstance(event, ConversationItemTruncateEvent):
         # The stock Agents SDK sends this after an audible WebSocket
         # interruption. An explicit response.cancel or automatic server-VAD
@@ -847,6 +854,9 @@ def create_app(
                         # Unlike the serial output hold, this list does not stall
                         # the origin response whose completion enables the claim,
                         # or speech events while resumed speech is checked.
+                        # Keep its history private; a prefetch claim or the
+                        # later dispatch writes it before anything is exposed.
+                        unit.service.history.hold(session_id, text_msg)
                         session.pending_text_output_items.append(text_msg)
                         text_msg = None
                     if text_msg is None:
@@ -941,6 +951,7 @@ def create_app(
                         # response.create, or before response.created finishes
                         # sending. Keep every lifecycle event private until the
                         # response is publicly announced and its turn has settled.
+                        unit.service.history.hold(session_id, audio_chunk)
                         session.pending_output_item = audio_chunk
                         await asyncio.sleep(0.01)
                         continue
@@ -1050,6 +1061,8 @@ def create_app(
                         _discard_obsolete_response_key(unit, session_id, response_key)
                         continue
 
+                    audio_generation = _audio_generation(audio_chunk)
+                    visemes = audio_chunk.visemes if isinstance(audio_chunk, AudioOutput) else []
                     audio_chunk = _to_audio_bytes(audio_chunk)
 
                     audio_batch = bytearray(audio_chunk)
@@ -1063,6 +1076,7 @@ def create_app(
                             _is_pipeline_end(next_chunk)
                             or _is_audio_done(next_chunk)
                             or isinstance(next_chunk, PipelineEvent)
+                            or (isinstance(next_chunk, AudioOutput) and bool(next_chunk.visemes))
                             or is_control_message(next_chunk, SESSION_END.kind)
                         ):
                             # Only stash if we still have a session; otherwise drop it.
@@ -1090,6 +1104,32 @@ def create_app(
                         unit.should_listen.set()
 
                     if transport is not None and session_id:
+                        if visemes:
+                            response_id, item_id, output_index, events = unit.service.begin_audio_output(
+                                session_id,
+                                response_key,
+                            )
+                            events.append(
+                                SpeechToSpeechVisemesEvent(
+                                    event_id=unit.service._next_event_id(),
+                                    response_id=response_id,
+                                    item_id=item_id,
+                                    output_index=output_index,
+                                    visemes=visemes,
+                                )
+                            )
+                            await transport.send_events(events)
+                            # Sending metadata yields to cancellation and session
+                            # release. Never reopen that response with stale audio.
+                            if (
+                                session is None
+                                or unit.session is not session
+                                or session.released_at is not None
+                                or session.transport is not transport
+                                or _generation_is_discardable(unit, audio_generation)
+                                or unit.service._state(session_id).current_response_id != response_id
+                            ):
+                                continue
                         await transport.send_audio_chunk(
                             unit.service,
                             session_id,

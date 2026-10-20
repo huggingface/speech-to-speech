@@ -220,3 +220,18 @@ test("SDK preserves terminal server timings through its WebSocket parser", async
   assert.equal(finished.length, 1);
   assert.deepEqual(finished[0].latency, timing);
 });
+
+test("the pinned SDK forwards viseme extension events to avatar consumers", async (t) => {
+  const f = await fixture(0);
+  t.after(() => f.client.close());
+  let detail;
+  f.client.addEventListener("visemes", (event) => { detail = event.detail; });
+  f.start();
+  f.receive({
+    type: "speech_to_speech.output_audio.visemes", response_id: "a", item_id: "item-a",
+    output_index: 0, content_index: 0,
+    visemes: [{ viseme: 21, start_s: 0, end_s: 0.1 }],
+  });
+  assert.equal(detail?.response_id, "a");
+  assert.deepEqual(detail?.visemes, [{ viseme: 21, start_s: 0, end_s: 0.1 }]);
+});

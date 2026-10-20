@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from time import perf_counter
 from typing import Any, Iterator
 
 import numpy as np
@@ -62,6 +63,7 @@ class SenseVoiceSTTHandler(BaseSTTHandler):
             torch.mps.empty_cache()
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
+        started_at_s = perf_counter()
         pred_text = self._generate(vad_audio.audio)
         self._empty_cache()
         console.print(f"[yellow]USER: {pred_text}")
@@ -72,10 +74,12 @@ class SenseVoiceSTTHandler(BaseSTTHandler):
                 turn_id=vad_audio.turn_id,
                 turn_revision=vad_audio.turn_revision,
             )
-        else:
-            yield Transcription(
-                text=pred_text,
-                turn_id=vad_audio.turn_id,
-                turn_revision=vad_audio.turn_revision,
-                speech_stopped_at_s=vad_audio.speech_end_at_s,
-            )
+            return
+
+        self._record_final_stt(vad_audio, perf_counter() - started_at_s)
+        yield Transcription(
+            text=pred_text,
+            turn_id=vad_audio.turn_id,
+            turn_revision=vad_audio.turn_revision,
+            speech_stopped_at_s=vad_audio.speech_end_at_s,
+        )

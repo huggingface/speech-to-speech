@@ -36,3 +36,9 @@ class OpenAICompatibleSTTHandlerArguments:
         default=60.0,
         metadata={"help": "HTTP request timeout in seconds."},
     )
+    openai_stt_max_window_s: Optional[float] = field(
+        default=None,
+        metadata={
+            "help": "Maximum audio duration per HTTP upload (seconds, at least 1). Unset preserves whole-turn uploads."
+        },
+    )

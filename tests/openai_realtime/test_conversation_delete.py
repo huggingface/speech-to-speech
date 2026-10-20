@@ -1,0 +1,748 @@
+"""Realtime history deletion through Chat, the service, and the wire route."""
+
+from types import SimpleNamespace
+
+import pytest
+from openai.types.realtime import (
+    ConversationItemCreateEvent,
+    ConversationItemDeleteEvent,
+    RealtimeConversationItemFunctionCall,
+    RealtimeConversationItemFunctionCallOutput,
+    ResponseCreateEvent,
+)
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputItemDoneEvent,
+    ResponseOutputMessage,
+    ResponseReasoningItem,
+    ResponseTextDeltaEvent,
+)
+from starlette.testclient import TestClient
+
+from speech_to_speech.LLM.chat import (
+    Chat,
+    CompactionResult,
+    ResponsesAssistantMessage,
+    make_assistant_message,
+    make_system_message,
+    make_user_message,
+)
+from speech_to_speech.pipeline.events import (
+    AssistantOutputEvent,
+    PartialTranscriptionEvent,
+    SpeechStartedEvent,
+    SpeechStoppedEvent,
+    TranscriptionCompletedEvent,
+    TranscriptionFailedEvent,
+)
+from speech_to_speech.pipeline.history import ResponseHistory
+from speech_to_speech.pipeline.messages import AssistantTextPart, EndOfResponse, LLMResponseChunk
+from tests.llm_history import drive_llm
+from tests.test_response_overrides import _RecordingLocalHandler
+from tests.test_responses_api_language_model import _make_handler, _make_response, _make_stream
+
+from .test_websocket_router import setup as setup
+
+
+def _call():
+    return RealtimeConversationItemFunctionCall(
+        type="function_call", id="client_call", call_id="call_test", name="lookup", arguments="{}"
+    )
+
+
+def _wire_message(item_id):
+    return make_assistant_message("wire output").model_copy(update={"id": item_id})
+
+
+def _output():
+    return RealtimeConversationItemFunctionCallOutput(
+        type="function_call_output", id="client_output", call_id="call_test", output="result"
+    )
+
+
+@pytest.mark.parametrize("kind", ["system", "user", "assistant", "function_call", "function_call_output"])
+def test_delete_supported_item(service, conn_id, kind):
+    chat = service._state(conn_id).runtime_config.chat
+    if kind == "function_call_output":
+        chat.add_item(_call())
+        item = _output()
+    elif kind == "function_call":
+        item = _call()
+    else:
+        item = {"system": make_system_message, "user": make_user_message, "assistant": make_assistant_message}[kind](
+            "delete me"
+        )
+    chat.add_item(item)
+    item_id = item.id
+    events = service.handle_conversation_item_delete(
+        conn_id, ConversationItemDeleteEvent(type="conversation.item.delete", item_id=item_id, event_id="client_delete")
+    )
+    assert [(e.type, e.item_id) for e in events] == [("conversation.item.deleted", item_id)]
+    assert events[0].event_id.startswith("event_")
+    assert chat.delete_item(item_id) is None
+    assert "delete me" not in str(chat.to_transformers_chat())
+    missing = service.handle_conversation_item_delete(
+        conn_id,
+        ConversationItemDeleteEvent(type="conversation.item.delete", item_id=item_id, event_id="missing_delete"),
+    )
+    assert missing[0].type == "error"
+    assert missing[0].error.event_id == "missing_delete"
+
+
+def test_delete_call_preserves_output_but_omits_orphan_from_model():
+    chat = Chat(10)
+    chat.add_item(_call())
+    output = chat.add_item(_output())
+    assert chat.delete_item("client_call").type == "function_call"
+    assert chat.buffer == [output]
+    assert not chat.has_pending_tool_calls()
+    assert chat.to_transformers_chat() == []
+    assert chat.to_responses_api_chat() == []
+    assert chat.copy(deep=True).to_transformers_chat() == []
+    assert chat.copy_without_provisional_generation("unused").to_responses_api_chat() == []
+    assert chat.delete_item(output.id) is output
+
+
+def test_delete_output_requires_replacement_before_response(service, conn_id):
+    chat = service._state(conn_id).runtime_config.chat
+    chat.add_item(_call())
+    chat.add_item(_output())
+    assert chat.delete_item("client_output").type == "function_call_output"
+    assert chat.has_pending_tool_calls()
+    result = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
+    assert result.type == "error"
+    assert result.error.type == "function_call_output_pending"
+    chat.add_item(_output())
+    assert not chat.has_pending_tool_calls()
+    assert (
+        service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create")).type == "response.created"
+    )
+
+
+def test_delete_invalidates_compaction_snapshot():
+    chat = Chat(10)
+    first = chat.add_item(make_user_message("private detail"))
+    second = chat.add_item(make_user_message("keep this"))
+    generation = chat._gen_counter
+    chat.delete_item(first.id)
+    chat._apply_compaction(
+        CompactionResult(user_summary="private detail", assistant_summary="old summary"), {first.id}, generation
+    )
+    assert chat.buffer == [second]
+    assert chat._user_turn_count == 1
+
+
+def test_active_create_delete_replace_preserves_order_and_error_correlation(service, conn_id):
+    st = service._state(conn_id)
+    service.response._ensure_response(conn_id, "active")
+    for item_id, text in [("context_1", "old"), ("context_2", "new")]:
+        item = make_system_message(text)
+        item.id = item_id
+        assert (
+            service.handle_conversation_item_create(
+                conn_id, ConversationItemCreateEvent(type="conversation.item.create", item=item)
+            )
+            == []
+        )
+        if item_id == "context_1":
+            assert (
+                service.handle_conversation_item_delete(
+                    conn_id, ConversationItemDeleteEvent(type="conversation.item.delete", item_id=item_id)
+                )
+                == []
+            )
+            assert (
+                service.handle_conversation_item_delete(
+                    conn_id,
+                    ConversationItemDeleteEvent(type="conversation.item.delete", item_id=item_id, event_id="repeated"),
+                )
+                == []
+            )
+    events = service.handle_response_cancel(conn_id)
+    history_events = [e for e in events if e.type.startswith("conversation.item.") or e.type == "error"]
+    assert [e.type for e in history_events] == [
+        "conversation.item.created",
+        "conversation.item.deleted",
+        "error",
+        "conversation.item.created",
+    ]
+    assert history_events[2].error.event_id == "repeated"
+    assert history_events[-1].previous_item_id is None
+    assert st.runtime_config.chat.to_transformers_chat() == [{"role": "system", "content": "new"}]
+
+
+def test_generated_assistant_is_deletable_by_wire_id(service, conn_id):
+    st = service._state(conn_id)
+    created = service.handle_response_create(
+        conn_id, ResponseCreateEvent(type="response.create", response={"output_modalities": ["text"]})
+    )
+    request = service.text_prompt_queue.get_nowait()
+    handler = object.__new__(_RecordingLocalHandler)
+    handler.cancel_scope = handler.speculative_turns = handler.compactor = None
+    handler.enable_lang_prompt = False
+    handler.tokenizer = SimpleNamespace(encode=lambda _text: [])
+    handler.emit_text = True
+    list(drive_llm(handler, request, service=service, conn_id=conn_id))
+    events = service.dispatch_pipeline_event(
+        conn_id, AssistantOutputEvent(parts=[AssistantTextPart(text="ok")], response_key=request.response_key)
+    )
+    wire_item_id = next(e.item.id for e in events if e.type == "response.output_item.added")
+    service.finish_response(conn_id)
+    assert created.type == "response.created"
+    assert st.runtime_config.chat.buffer[-1].id == wire_item_id
+    assert (
+        service.handle_conversation_item_delete(
+            conn_id, ConversationItemDeleteEvent(type="conversation.item.delete", item_id=wire_item_id)
+        )[0].type
+        == "conversation.item.deleted"
+    )
+    assert not st.runtime_config.chat.buffer
+
+
+def test_spoken_user_is_deletable_by_wire_id(service, conn_id):
+    events = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="spoken", turn_revision=0))
+    wire_item_id = next(e.item_id for e in events if e.type == "input_audio_buffer.speech_started")
+    events = service.dispatch_pipeline_event(conn_id, SpeechStoppedEvent(turn_id="spoken", turn_revision=0))
+    events += service.dispatch_pipeline_event(
+        conn_id, TranscriptionCompletedEvent(transcript="delete this speech", turn_id="spoken", turn_revision=0)
+    )
+    assert any(e.type == "conversation.item.created" and e.item.id == wire_item_id for e in events)
+    assert service._state(conn_id).runtime_config.chat.buffer[-1].id == wire_item_id
+    # A queued response finishes/cancels before the deletion is applied.
+    assert (
+        service.handle_conversation_item_delete(
+            conn_id, ConversationItemDeleteEvent(type="conversation.item.delete", item_id=wire_item_id)
+        )
+        == []
+    )
+    assert any(e.type == "conversation.item.deleted" for e in service.handle_response_cancel(conn_id))
+    assert not service._state(conn_id).runtime_config.chat.buffer
+    # A late transcript must not restore the deleted turn or queue new work.
+    queued = service.text_prompt_queue.qsize()
+    assert (
+        service.dispatch_pipeline_event(
+            conn_id, TranscriptionCompletedEvent(transcript="late speech", turn_id="spoken", turn_revision=0)
+        )
+        == []
+    )
+    assert not service._state(conn_id).runtime_config.chat.buffer
+    assert service.text_prompt_queue.qsize() == queued
+
+
+@pytest.mark.parametrize("delete_newest", [False, True])
+def test_delete_committed_speech_before_transcription_preserves_other_item(service, conn_id, delete_newest):
+    st = service._state(conn_id)
+    items = []
+    for turn_id, duration_s in [("first", 1.25), ("second", 2.5)]:
+        started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id=turn_id, turn_revision=0))
+        item_id = next(event.item_id for event in started if event.type == "input_audio_buffer.speech_started")
+        stopped = service.dispatch_pipeline_event(
+            conn_id, SpeechStoppedEvent(turn_id=turn_id, turn_revision=0, duration_s=duration_s)
+        )
+        assert any(event.type == "conversation.item.created" and event.item.id == item_id for event in stopped)
+        items.append((turn_id, item_id, duration_s))
+    assert not st.runtime_config.chat.buffer
+    deleted_turn, deleted_id, _ = items[int(delete_newest)]
+    kept_turn, kept_id, kept_duration = items[int(not delete_newest)]
+    events = service.handle_conversation_item_delete(
+        conn_id, ConversationItemDeleteEvent(type="conversation.item.delete", item_id=deleted_id)
+    )
+    assert [event.type for event in events] == ["conversation.item.deleted"]
+    assert events[0].item_id == deleted_id
+    assert set(st.input_items) == {kept_id}
+    assert set(st.pending_input_terminals) == {kept_id}
+    assert st.input_item_by_turn_revision == {(kept_turn, 0): kept_id}
+    assert st.acknowledged_item_ids == [kept_id]
+    assert st.last_item_id == kept_id
+
+    for late_event in [
+        PartialTranscriptionEvent(delta="deleted speech", turn_id=deleted_turn, turn_revision=0),
+        TranscriptionCompletedEvent(transcript="deleted speech", turn_id=deleted_turn, turn_revision=0),
+        TranscriptionFailedEvent(message="late failure", turn_id=deleted_turn, turn_revision=0),
+    ]:
+        assert service.dispatch_pipeline_event(conn_id, late_event) == []
+    assert service.audio.resolve_input_terminals(conn_id) == []
+    assert not st.runtime_config.chat.buffer
+    assert service.text_prompt_queue.empty()
+    assert st.response_usage.audio_duration_s == 0.0
+
+    repeated = service.handle_conversation_item_delete(
+        conn_id,
+        ConversationItemDeleteEvent(type="conversation.item.delete", item_id=deleted_id, event_id="repeated_delete"),
+    )
+    assert repeated[0].type == "error"
+    assert repeated[0].error.type == "conversation_item_not_found"
+    assert repeated[0].error.event_id == "repeated_delete"
+
+    completed = service.dispatch_pipeline_event(
+        conn_id, TranscriptionCompletedEvent(transcript="keep this speech", turn_id=kept_turn, turn_revision=0)
+    )
+    assert len(completed) == 1
+    assert completed[0].item_id == kept_id
+    assert completed[0].usage.seconds == kept_duration
+    assert st.runtime_config.chat.buffer[0].id == kept_id
+    assert st.response_usage.audio_duration_s == kept_duration
+    assert service.text_prompt_queue.qsize() == 1
+
+
+def test_delete_uncommitted_speech_does_not_remove_input_state(service, conn_id):
+    started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="speaking", turn_revision=0))
+    item_id = started[0].item_id
+    events = service.handle_conversation_item_delete(
+        conn_id, ConversationItemDeleteEvent(type="conversation.item.delete", item_id=item_id, event_id="too_early")
+    )
+    assert events[0].type == "error"
+    assert events[0].error.event_id == "too_early"
+    st = service._state(conn_id)
+    assert item_id in st.input_items
+    assert st.input_item_by_turn_revision == {("speaking", 0): item_id}
+    assert not st.deleted_input_turn_ids
+
+
+def test_delete_tail_restores_staged_call_predecessor(service, conn_id):
+    first = _call()
+    second = _call().model_copy(update={"id": "second_call", "call_id": "call_second"})
+    service.handle_conversation_item_create(
+        conn_id, ConversationItemCreateEvent(type="conversation.item.create", item=first)
+    )
+    service.handle_conversation_item_create(
+        conn_id, ConversationItemCreateEvent(type="conversation.item.create", item=second)
+    )
+    service.handle_conversation_item_delete(
+        conn_id, ConversationItemDeleteEvent(type="conversation.item.delete", item_id=second.id)
+    )
+    event = service.handle_conversation_item_create(
+        conn_id, ConversationItemCreateEvent(type="conversation.item.create", item=make_user_message("next"))
+    )[0]
+    assert event.previous_item_id == first.id
+
+
+def test_openwebui_refresh_reaches_model_and_socket_stays_open(setup):
+    app, service, *_ = setup
+    with TestClient(app) as client, client.websocket_connect("/v1/realtime") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "session.update", "session": {"type": "realtime", "instructions": "Be concise."}})
+        assert ws.receive_json()["type"] == "session.updated"
+        for revision in (1, 2):
+            if revision == 2:
+                ws.send_json({"type": "conversation.item.delete", "item_id": "chat_context_1"})
+                deleted = ws.receive_json()
+                assert deleted["type"] == "conversation.item.deleted"
+                assert deleted["item_id"] == "chat_context_1"
+            ws.send_json(
+                {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "id": f"chat_context_{revision}",
+                        "type": "message",
+                        "role": "system",
+                        "content": [{"type": "input_text", "text": f"Snapshot {revision}"}],
+                    },
+                }
+            )
+            created = ws.receive_json()
+            assert created["type"] == "conversation.item.created"
+            assert created["previous_item_id"] is None
+        ws.send_json({"type": "response.create", "response": {"output_modalities": ["text"]}})
+        assert ws.receive_json()["type"] == "response.created"
+        request = service.text_prompt_queue.get(timeout=1)
+        handler = object.__new__(_RecordingLocalHandler)
+        handler.cancel_scope = handler.speculative_turns = handler.compactor = None
+        handler.enable_lang_prompt = False
+        handler.tokenizer = SimpleNamespace(encode=lambda _text: [])
+        handler.emit_text = True
+        assert any(isinstance(chunk, EndOfResponse) for chunk in drive_llm(handler, request))
+        assert "Snapshot 2" in str(handler.seen_chat.to_transformers_chat())
+        assert "Be concise." in str(handler.seen_chat.to_transformers_chat())
+        assert "Snapshot 1" not in str(handler.seen_chat.to_transformers_chat())
+        ws.send_json({"type": "response.cancel"})
+        assert ws.receive_json()["type"] == "response.done"
+        ws.send_json({"type": "conversation.item.delete", "item_id": "missing", "event_id": "delete_error"})
+        error = ws.receive_json()
+        assert error["type"] == "error"
+        assert error["error"]["event_id"] == "delete_error"
+        ws.send_json({"type": "session.update", "session": {"type": "realtime"}})
+        assert ws.receive_json()["type"] == "session.updated"
+
+
+@pytest.mark.parametrize("automatic_response", [True, False])
+def test_direct_audio_request_preserves_wire_identity(service, conn_id, automatic_response):
+    import numpy as np
+
+    from speech_to_speech.pipeline.events import AudioInputCompletedEvent
+
+    if not automatic_response:
+        update = service.parse_client_event(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "realtime",
+                    "audio": {"input": {"turn_detection": {"type": "server_vad", "create_response": False}}},
+                },
+            }
+        )
+        assert service.handle_session_update(conn_id, update) is None
+
+    started = service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(turn_id="audio", turn_revision=0))
+    item_id = next(e.item_id for e in started if e.type == "input_audio_buffer.speech_started")
+    service.dispatch_pipeline_event(conn_id, SpeechStoppedEvent(turn_id="audio", turn_revision=0))
+    service.dispatch_pipeline_event(
+        conn_id,
+        AudioInputCompletedEvent(
+            audio=np.zeros(10, dtype=np.float32),
+            audio_sample_rate=16000,
+            audio_duration_s=0.001,
+            turn_id="audio",
+            turn_revision=0,
+        ),
+    )
+    if automatic_response:
+        assert service.text_prompt_queue.get_nowait().input_item_id == item_id
+    else:
+        assert service.text_prompt_queue.empty()
+        chat = service._state(conn_id).runtime_config.chat
+        assert chat.buffer[-1].id == item_id
+        deleted = service.handle_conversation_item_delete(
+            conn_id, ConversationItemDeleteEvent(type="conversation.item.delete", item_id=item_id)
+        )
+        assert deleted[0].type == "conversation.item.deleted"
+        assert deleted[0].item_id == item_id
+        assert not chat.buffer
+
+
+def test_delete_discards_hidden_prefetch_and_late_write(service, conn_id):
+    from speech_to_speech.pipeline.messages import GenerateResponseRequest, ResponsePrefetchTransaction
+
+    st = service._state(conn_id)
+    item = st.runtime_config.chat.add_item(make_system_message("old context"))
+    request = GenerateResponseRequest(
+        runtime_config=st.runtime_config, prefetch_transaction=ResponsePrefetchTransaction()
+    )
+    st.tool_followup_prefetch_request = request
+    st.mark_response_pending(request.response_key)
+    service.text_prompt_queue.put(request)
+    events = service.handle_conversation_item_delete(
+        conn_id, ConversationItemDeleteEvent(type="conversation.item.delete", item_id=item.id)
+    )
+    assert events[0].type == "conversation.item.deleted"
+    assert st.tool_followup_prefetch_request is None
+    assert not st.response_pending
+    assert service.text_prompt_queue.empty()
+    proposal = ResponseHistory.capture(
+        st.runtime_config.chat, [make_assistant_message("stale")], after_item_id=None, complete=True
+    )
+    service.dispatch_pipeline_event(
+        conn_id,
+        AssistantOutputEvent(
+            parts=[AssistantTextPart(text="stale")], response_key=request.response_key, history=proposal
+        ),
+    )
+    assert proposal.wait_until_resolved(0)
+    assert st.runtime_config.chat.to_transformers_chat() == []
+
+
+def test_generated_message_binding_preserves_pending_tool_context():
+    chat = Chat(10)
+    first = make_assistant_message("before")
+    last = make_assistant_message("after")
+    chat.add_provisional_generation_items("response", [first, _call(), last])
+    chat.bind_assistant_item_ids("response", [_wire_message("wire_first"), _call(), _wire_message("wire_last")])
+    assert [item.id for item in chat.buffer] == ["wire_first", "client_call", "wire_last"]
+    assert chat._ordered_pending_calls["call_test"] == {"wire_first", "client_call", "wire_last"}
+    chat.rollback_provisional_generation("response")
+    assert not chat.buffer
+    assert not chat.has_pending_tool_calls()
+
+
+def test_one_wire_message_deletes_all_retained_provider_fragments():
+    chat = Chat(10)
+    before = [make_assistant_message("first"), make_assistant_message("second")]
+    after = make_assistant_message("after call")
+    chat.add_provisional_generation_items("response", [*before, _call(), after])
+    chat.bind_assistant_item_ids("response", [_wire_message("wire_before"), _call(), _wire_message("wire_after")])
+    chat.finalize_provisional_generation("response")
+    assert "wire_before" in chat.item_ids()
+    assert "wire_before" in chat.copy(deep=True).item_ids()
+    assert chat.delete_item("wire_before").role == "assistant"
+    assert chat.buffer == [chat._pending_tool_calls["call_test"], after]
+    assert chat.delete_item("wire_before") is None
+    assert chat.delete_item("wire_after") is after
+
+
+@pytest.mark.parametrize("cancel_active", [False, True])
+def test_delete_waits_for_overlapping_queued_response(service, conn_id, cancel_active):
+    st = service._state(conn_id)
+    original = st.runtime_config.chat.add_item(make_system_message("old"))
+    service.response._ensure_response(conn_id, "active")
+    st.mark_response_pending("queued")
+    assert (
+        service.handle_conversation_item_delete(
+            conn_id, ConversationItemDeleteEvent(type="conversation.item.delete", item_id=original.id)
+        )
+        == []
+    )
+    if not cancel_active:
+        assert not any(e.type == "conversation.item.deleted" for e in service.finish_response(conn_id))
+        assert st.runtime_config.chat.init_chat_message is original
+    events = service.handle_response_cancel(conn_id)
+    assert any(e.type == "conversation.item.deleted" for e in events)
+    assert not st.response_pending
+    assert st.runtime_config.chat.init_chat_message is None
+    proposal = ResponseHistory.capture(
+        st.runtime_config.chat, [make_assistant_message("late")], after_item_id=None, complete=True
+    )
+    service.dispatch_pipeline_event(
+        conn_id, AssistantOutputEvent(parts=[AssistantTextPart(text="late")], response_key="queued", history=proposal)
+    )
+    assert proposal.wait_until_resolved(0)
+    assert not st.runtime_config.chat.buffer
+
+
+def test_deleting_provisional_call_does_not_remove_replacement_on_rollback():
+    chat = Chat(10)
+    chat.add_provisional_generation_items("response", [_call()])
+    chat.delete_item("client_call")
+    replacement = chat.add_item(_call().model_copy(update={"id": "replacement"}))
+    chat.rollback_provisional_generation("response")
+    assert chat._pending_tool_calls == {"call_test": replacement}
+
+
+def test_evicted_message_does_not_steal_later_wire_identity():
+    chat = Chat(1)
+    chat.add_item(make_user_message("first turn"))
+    before = make_assistant_message("before call")
+    chat.add_provisional_generation_items("response", [before, _call()])
+    chat.add_item(_output())
+    chat.add_item(make_user_message("second turn"))
+    chat.add_item(make_user_message("third turn"))
+    assert before not in chat.buffer
+    after = make_assistant_message("after call")
+    chat.add_provisional_generation_items("response", [after])
+    chat.bind_assistant_item_ids("response", [_wire_message("wire_before"), _call(), _wire_message("wire_after")])
+    chat.finalize_provisional_generation("response")
+    assert after.id == "wire_after"
+    assert chat.delete_item("wire_before") is None
+    assert chat.delete_item("wire_after") is after
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("modality", ["audio", "text"])
+@pytest.mark.parametrize("hidden_interval", ["before_call", "between_calls"])
+def test_filtered_provider_message_does_not_steal_visible_reply_identity(
+    service, conn_id, stream, modality, hidden_interval
+):
+    def message(item_id, text):
+        return ResponseOutputMessage(
+            id=item_id,
+            type="message",
+            role="assistant",
+            status="completed",
+            content=[{"type": "output_text", "text": text, "annotations": []}],
+        )
+
+    def call(number):
+        return ResponseFunctionToolCall(
+            id=f"provider_call_{number}",
+            type="function_call",
+            call_id=f"call_{number}",
+            name="lookup",
+            arguments="{}",
+            status="completed",
+        )
+
+    provider_items = [message("provider_hidden", "✅"), call(1)]
+    if hidden_interval == "between_calls":
+        provider_items = [
+            message("provider_first", "Visible first reply."),
+            call(1),
+            message("provider_hidden", "✅"),
+            call(2),
+        ]
+    provider_items.append(message("provider_last", "Visible reply after call."))
+    service._state(conn_id).runtime_config.chat.add_item(make_user_message("Please look it up."))
+    service.handle_response_create(
+        conn_id, ResponseCreateEvent(type="response.create", response={"output_modalities": [modality]})
+    )
+    request = service.text_prompt_queue.get_nowait()
+    if stream:
+        events = []
+        for index, item in enumerate(provider_items):
+            if item.type == "message":
+                events.append(
+                    ResponseTextDeltaEvent(
+                        type="response.output_text.delta",
+                        item_id=item.id,
+                        output_index=index,
+                        content_index=0,
+                        delta=item.content[0].text,
+                        logprobs=[],
+                        sequence_number=len(events),
+                    )
+                )
+            events.append(
+                ResponseOutputItemDoneEvent(
+                    type="response.output_item.done",
+                    output_index=index,
+                    sequence_number=len(events),
+                    item=item,
+                )
+            )
+        provider_response = _make_stream(events)
+    else:
+        provider_response = _make_response(provider_items)
+    handler = _make_handler(stream=stream)
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **_kwargs: provider_response))
+    wire_messages = []
+    chunks = list(drive_llm(handler, request, service=service, conn_id=conn_id))
+    assert any(isinstance(chunk, EndOfResponse) and chunk.error is None for chunk in chunks)
+    for chunk in chunks:
+        if not isinstance(chunk, LLMResponseChunk):
+            continue
+        wire_events = service.dispatch_pipeline_event(
+            conn_id, AssistantOutputEvent(parts=chunk.parts, response_key=request.response_key)
+        )
+        wire_messages.extend(
+            event.item
+            for event in wire_events
+            if event.type == "response.output_item.added" and event.item.type == "message"
+        )
+    assert wire_messages, repr(chunks)
+    service.finish_response(conn_id)
+    reply_id = wire_messages[-1].id
+    chat = service._state(conn_id).runtime_config.chat
+    calls_before = [item.model_dump() for item in chat.buffer if item.type == "function_call"]
+    deleted = service.handle_conversation_item_delete(
+        conn_id, ConversationItemDeleteEvent(type="conversation.item.delete", item_id=reply_id)
+    )
+    assert deleted[0].type == "conversation.item.deleted"
+    assert deleted[0].item_id == reply_id
+    chat = service._state(conn_id).runtime_config.chat
+    assert not any(
+        part.text == "Visible reply after call."
+        for item in chat.buffer
+        if item.type == "message"
+        for part in item.content
+    )
+    assert any(part.text == "✅" for item in chat.buffer if item.type == "message" for part in item.content)
+    assert [item.model_dump() for item in chat.buffer if item.type == "function_call"] == calls_before
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "kind, leading_message", [("assistant", False), ("function_call", False), ("function_call", True)]
+)
+@pytest.mark.parametrize("interleaved_input", [False, True])
+def test_delete_provider_companion_keeps_next_responses_request_valid(
+    service, conn_id, stream, kind, leading_message, interleaved_input
+):
+    def reasoning(item_id):
+        return ResponseReasoningItem(id=item_id, type="reasoning", summary=[], encrypted_content="opaque")
+
+    def message(item_id, text):
+        return ResponseOutputMessage(
+            id=item_id,
+            type="message",
+            role="assistant",
+            status="completed",
+            content=[{"type": "output_text", "text": text, "annotations": []}],
+        )
+
+    chat = service._state(conn_id).runtime_config.chat
+    previous = [reasoning("rs_previous"), message("msg_previous", "Earlier answer.")]
+    chat.add_item(previous[0])
+    chat.add_item(
+        ResponsesAssistantMessage(**make_assistant_message("Earlier answer.").model_dump(), response_item=previous[1])
+    )
+    chat.add_item(make_user_message("Please answer."))
+    provider_items = [reasoning("rs_deleted")]
+    if leading_message:
+        provider_items.append(message("msg_kept", "Keep this answer."))
+    if kind == "assistant":
+        provider_items.append(message("msg_deleted", "Delete this answer."))
+    else:
+        provider_items.append(
+            ResponseFunctionToolCall(
+                id="fc_deleted", type="function_call", call_id="call_provider", name="lookup", arguments="{}"
+            )
+        )
+    if stream:
+        events = []
+        for index, item in enumerate(provider_items):
+            if item.type == "message":
+                events.append(
+                    ResponseTextDeltaEvent(
+                        type="response.output_text.delta",
+                        item_id=item.id,
+                        output_index=index,
+                        content_index=0,
+                        delta=item.content[0].text,
+                        logprobs=[],
+                        sequence_number=len(events),
+                    )
+                )
+            events.append(
+                ResponseOutputItemDoneEvent(
+                    type="response.output_item.done", output_index=index, sequence_number=len(events), item=item
+                )
+            )
+        provider_response = _make_stream(events)
+    else:
+        provider_response = _make_response(provider_items)
+    requests = []
+
+    def create(**kwargs):
+        requests.append(kwargs)
+        if len(requests) == 1:
+            return provider_response
+        return _make_stream([]) if stream else _make_response([])
+
+    handler = _make_handler(stream=stream)
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    service.handle_response_create(
+        conn_id, ResponseCreateEvent(type="response.create", response={"output_modalities": ["text"]})
+    )
+    request = service.text_prompt_queue.get_nowait()
+    output_items = []
+    chunks = list(drive_llm(handler, request, service=service, conn_id=conn_id))
+    assert any(isinstance(chunk, EndOfResponse) and chunk.error is None for chunk in chunks)
+    for chunk in chunks:
+        if isinstance(chunk, LLMResponseChunk):
+            output_items.extend(
+                event.item
+                for event in service.dispatch_pipeline_event(
+                    conn_id, AssistantOutputEvent(parts=chunk.parts, response_key=request.response_key)
+                )
+                if event.type == "response.output_item.added"
+            )
+    service.finish_response(conn_id)
+    if interleaved_input:
+        overlapping = chat.add_item(make_user_message("Overlapping question."))
+        chat.buffer.remove(overlapping)
+        reasoning_index = next(i for i, item in enumerate(chat.buffer) if item.id == "rs_deleted")
+        chat.buffer.insert(reasoning_index + 1, overlapping)
+    wire_item = next(item for item in output_items if item.type == ("message" if kind == "assistant" else kind))
+    if kind == "function_call":
+        result = chat.add_item(_output().model_copy(update={"call_id": wire_item.call_id}))
+    deleted = service.handle_conversation_item_delete(
+        conn_id, ConversationItemDeleteEvent(type="conversation.item.delete", item_id=wire_item.id)
+    )
+    assert [(event.type, event.item_id) for event in deleted] == [("conversation.item.deleted", wire_item.id)]
+    if kind == "function_call":
+        assert result in chat.buffer  # Exact wire deletion does not cascade to the tool result.
+    chat.add_item(make_user_message("Next question."))
+    service.handle_response_create(
+        conn_id, ResponseCreateEvent(type="response.create", response={"output_modalities": ["text"]})
+    )
+    chunks = list(drive_llm(handler, service.text_prompt_queue.get_nowait(), service=service, conn_id=conn_id))
+    assert any(isinstance(chunk, EndOfResponse) and chunk.error is None for chunk in chunks)
+    provider_input = requests[-1]["input"]
+    deleted_ids = {"msg_deleted", "fc_deleted"} if leading_message else {"rs_deleted", "msg_deleted", "fc_deleted"}
+    assert not any(item.get("id") in deleted_ids for item in provider_input)
+    if leading_message:
+        assert [item for item in provider_input if item.get("id") in {"rs_deleted", "msg_kept"}] == [
+            item.model_dump(exclude_unset=True) for item in provider_items[:2]
+        ]
+    assert [item for item in provider_input if item.get("id") in {"rs_previous", "msg_previous"}] == [
+        item.model_dump(exclude_unset=True) for item in previous
+    ]
+    assert provider_input[-1]["content"][0]["text"].endswith("Next question.")
