@@ -20,6 +20,9 @@ from speech_to_speech.pipeline.transcript_logging import log_exception
 logger = logging.getLogger(__name__)
 PIPELINE_SAMPLE_RATE = 16000
 PHONON_NORMALIZATION_LANGUAGES = frozenset({"en", "fr", "de", "es", "pt", "none"})
+OPENAI_REALTIME_VOICES = frozenset(
+    {"alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"}
+)
 
 
 class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
@@ -108,6 +111,10 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 voice = output.voice
         if voice is not None and not isinstance(voice, str):
             raise ValueError("Phonon voice overrides must be checkpoint voice names")
+        if voice in OPENAI_REALTIME_VOICES and voice not in self.voices:
+            # Realtime clients may only offer OpenAI voices. Keep the configured
+            # Phonon voice, or let the checkpoint choose its default.
+            voice = self.voice
         self._validate_voice(voice)
         return voice
 
