@@ -52,7 +52,7 @@ try:
     HAS_DF = True
 except (ImportError, ModuleNotFoundError) as e:
     HAS_DF = False
-    logger.warning(f"DeepFilterNet not available for audio enhancement: {e}")
+    logger.debug("DeepFilterNet not available for optional audio enhancement: %s", e)
 
 
 class VADHandler(BaseHandler[VADIn, VADOut]):

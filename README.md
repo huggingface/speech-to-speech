@@ -41,6 +41,23 @@ speech-to-speech local
 
 Then talk: speak, pause, and the assistant answers through your speakers. Stop with `Ctrl+C`. The first run downloads the models, so give it a few minutes. Use headphones so the assistant does not hear itself, or add `--local_audio_block_mic_during_playback`.
 
+By default, `local` and `talk` show final user transcripts and streaming assistant
+replies once, hiding backend transcript copies, routine logs, tool details, and protocol
+events. User messages are yellow and assistant replies are green in a color-capable
+terminal. Startup shows `Loading models…`, followed by `Ready — start speaking.` once
+the audio devices are running and the session is configured. Routine model-loading
+output is hidden; startup failures show their diagnostics. Runtime warnings and errors
+remain visible.
+
+For diagnostic output, add `--verbose`:
+
+```bash
+speech-to-speech local --verbose
+```
+
+Use `--verbose --log_level debug` for more detailed local logs. Raw event output
+(`local --local_audio_print_json` or `talk --print-json`) also enables diagnostic output.
+
 On Ubuntu, first install the audio libraries with `sudo apt-get install libportaudio2 libsndfile1`. The default Linux Qwen3-TTS wheel targets CUDA 12.8 and Ubuntu 24.04; see the [CUDA note](#cuda-note-for-qwen3-tts) for other systems. On Windows, activate the environment with `.venv\Scripts\Activate.ps1`.
 
 The default installation has the following CI coverage:

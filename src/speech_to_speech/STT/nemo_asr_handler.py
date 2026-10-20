@@ -6,9 +6,9 @@ from time import perf_counter
 from typing import Any, Iterator
 
 import numpy as np
-from rich.console import Console
 
 from speech_to_speech.LLM.utils import WHISPER_LANGUAGE_TO_LLM_LANGUAGE
+from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.language_detection import (
     detect_language_from_text,
@@ -19,7 +19,6 @@ from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 from speech_to_speech.utils.utils import resolve_device
 
 logger = logging.getLogger(__name__)
-console = Console()
 
 SAMPLE_RATE = 16000
 FARSI_MODEL = "mehdi-hf/nemotron-asr-streaming-farsi"
