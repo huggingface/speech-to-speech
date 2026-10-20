@@ -116,6 +116,71 @@ that viseme events arrive before the corresponding audio plays.
 Standard Realtime audio events and the current endpoints stay unchanged. See the
 [viseme guide](../../STV/README.md) for the event schema, timing, and model limits.
 
+### Discovering speech languages
+
+`GET /v1/realtime/capabilities` reports the active handlers' language capabilities
+before a client opens a session. It does not claim a pipeline slot, run inference,
+or contact a remote provider. It remains available while all slots are busy.
+The response lists each pipeline by its `/v1/pool` index:
+
+```json
+{
+  "pipelines": [{
+    "index": 0,
+    "stt": {
+      "languages": [{"code": "en", "name": "english"}],
+      "supports_language_selection": true,
+      "supports_auto": null
+    },
+    "tts": {
+      "languages": [{"code": "en", "name": "english"}],
+      "supports_language_selection": true,
+      "supports_auto": null
+    },
+    "conversation": {
+      "languages": [{"code": "en", "name": "english"}],
+      "selectable_languages": [{"code": "en", "name": "english"}],
+      "session_auto_supported": true
+    }
+  }]
+}
+```
+
+`languages: null` means coverage is unknown; an empty array means the declared
+set is empty. Unknown names appear as `name: null`. Codes and known names use the
+same trimming, lowercase normalization, and name-to-code mapping as session
+language validation.
+
+`conversation.languages` is the intersection when both coverage sets are known.
+Build a session language selector from `conversation.selectable_languages`, which
+also accounts for the adapters' language controls and session validation. It is
+`null` when the complete set is unknown. For example, Parakeet TDT v3 has multilingual
+coverage but no selectable session languages because its decoder accepts no hint.
+
+Each handler's `supports_auto` describes automatic language selection; `null`
+means unknown. `conversation.session_auto_supported` says whether validation
+accepts `"auto"`. That value can be true for a fixed-language model: `"auto"` uses
+the adapter's configured behavior and does not turn a fixed model into a detector.
+
+Handlers expose an immutable `SpeechLanguageCapabilities` value through
+`language_capabilities` after pipeline construction. A custom handler can supply
+this value itself. Built-in adapters read loaded checkpoint metadata or their
+native language tables. Remote model aliases and `/v1/models` do not establish
+language coverage. For vLLM, vLLM-Omni, or another provider without language
+metadata, declare the deployed model's capabilities explicitly:
+
+```bash
+speech-to-speech serve --stt openai --tts openai \
+  --stt_supported_languages en es --tts_supported_languages en fr \
+  --stt_auto_language_supported true --tts_auto_language_supported false
+```
+
+These declarations fill missing metadata and constrain named session choices;
+they cannot add a language control that the adapter lacks. A declaration that
+conflicts with known backend metadata raises a startup error. Omit a flag to
+retain discovered metadata or report unknown. Check the deployed model's
+configuration rather than inferring support from its served name.
+
 ### Terminal status details
 
 For the Chat Completions and Responses LLM backends, an explicit provider token

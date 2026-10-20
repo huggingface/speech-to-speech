@@ -612,6 +612,12 @@ def create_app(
             # can be skipped/cancelled by Starlette's runner and never resume.
             _release_session(unit, session_id)
 
+    @app.get("/v1/realtime/capabilities")
+    async def capabilities_endpoint() -> dict[str, Any]:
+        return {
+            "pipelines": [{"index": unit.index, **unit.service.get_language_capabilities()} for unit in pool],
+        }
+
     @app.get("/v1/usage")
     async def usage_endpoint() -> dict[str, Any]:
         # Aggregate usage across the pool. Numeric fields sum; dict fields (e.g.

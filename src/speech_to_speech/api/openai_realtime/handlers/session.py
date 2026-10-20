@@ -14,6 +14,7 @@ from openai.types.realtime.realtime_transcription_session_create_request import 
 )
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
+from speech_to_speech.speech_languages import normalize_language
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +42,8 @@ class SessionHandler(RealtimeBaseHandler):
 
         transcription = s.audio.input.transcription if s.audio is not None and s.audio.input is not None else None
         if transcription is not None and isinstance(transcription.language, str):
-            language = transcription.language.strip()
-            if language.lower() == "auto":
+            language = normalize_language(transcription.language)
+            if language == "auto":
                 if not self._service.stt_auto_reset_supported:
                     return self.make_error(
                         message="Auto cannot reset the active STT backend's configured language hint.",
