@@ -395,9 +395,17 @@ def test_conversation_only_keeps_errors_visible(capsys):
     )
 
 
-def test_conversation_only_and_raw_json_are_incompatible():
-    with pytest.raises(ValueError, match="conversation_only and print_json"):
-        RealtimeAudioClientConfig(conversation_only=True, print_json=True)
+@pytest.mark.parametrize(
+    "settings,conversation_only",
+    [
+        ({}, True),
+        ({"verbose": True}, False),
+        ({"print_json": True}, False),
+        ({"verbose": True, "print_json": True}, False),
+    ],
+)
+def test_audio_client_defaults_to_clean_output_with_explicit_diagnostics(settings, conversation_only):
+    assert RealtimeAudioClientConfig(**settings).conversation_only is conversation_only
 
 
 def test_audio_client_tracks_interleaved_transcripts_per_output_item(capsys):

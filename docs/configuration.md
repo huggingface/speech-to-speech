@@ -88,16 +88,18 @@ concurrently is separate work in [#681](https://github.com/huggingface/speech-to
 client URL follows the server port; an explicit non-loopback host or conflicting
 client URL fails.
 
-For conversation-only terminal output with `local` or `talk`, set:
+`local` and `talk` show conversation-only terminal output by default, with warnings
+and errors still visible. To include routine logs, backend transcripts, tool details,
+and protocol events, set:
 
 ```yaml
 runtime:
   client:
-    conversation_only: true
+    verbose: true
 ```
 
-This hides routine logs, backend transcript copies, tool details, and protocol events.
-Warnings and errors remain visible. `conversation_only` and `print_json` cannot both be enabled.
+Setting `runtime.client.print_json: true` also enables diagnostic output with raw events.
+Use `runtime.log_level: debug` together with `verbose: true` for more detailed logs.
 
 `talk` reads `runtime.client` and process logging settings. It does not start
 pipeline handlers or require server/block environment values, and rejects

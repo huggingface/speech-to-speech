@@ -87,23 +87,26 @@ def test_parse_talk_arguments_keeps_retry_timeout_field_name():
     assert config.connection_retry_timeout_s == 12.5
 
 
-@pytest.mark.parametrize("flag", ["--conversation-only", "--conversation_only"])
-def test_conversation_only_flag_for_local_and_talk(flag):
-    args = parse_arguments([flag], command="local")
-    assert args.local_audio_kwargs.conversation_only is True
-    assert parse_talk_arguments([flag]).conversation_only is True
+def test_conversation_only_is_the_default_for_local_and_talk():
+    assert parse_arguments([], command="local").local_audio_kwargs.verbose is False
+    assert parse_talk_arguments([]).conversation_only is True
 
 
-def test_conversation_only_is_opt_in_and_rejects_raw_json():
-    assert parse_arguments([], command="local").local_audio_kwargs.conversation_only is False
-    assert parse_talk_arguments([]).conversation_only is False
-    with pytest.raises(SystemExit):
-        parse_talk_arguments(["--conversation-only", "--print-json"])
+def test_verbose_restores_diagnostic_output_for_local_and_talk():
+    assert parse_arguments(["--verbose"], command="local").local_audio_kwargs.verbose is True
+    assert parse_talk_arguments(["--verbose"]).conversation_only is False
 
 
-def test_serve_rejects_conversation_only_flag():
-    with pytest.raises(ValueError, match="conversation-only"):
-        parse_arguments(["--conversation-only"], command="serve")
+@pytest.mark.parametrize("flags", [["--print-json"], ["--verbose", "--print-json"]])
+def test_raw_json_enables_diagnostic_output(flags):
+    config = parse_talk_arguments(flags)
+    assert config.print_json is True
+    assert config.conversation_only is False
+
+
+def test_serve_rejects_client_verbose_flag():
+    with pytest.raises(ValueError, match="verbose"):
+        parse_arguments(["--verbose"], command="serve")
 
 
 def test_vad_firered_flag_is_accepted():

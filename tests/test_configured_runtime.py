@@ -203,15 +203,21 @@ def test_local_uses_one_client_and_preserves_explicit_settings(config, builder, 
     result.stop()
 
 
-def test_configured_conversation_only_reaches_local_client_and_rejects_raw_json(tmp_path):
+@pytest.mark.parametrize(
+    "settings,conversation_only",
+    [
+        ("{}", True),
+        ("{verbose: true}", False),
+        ("{print_json: true}", False),
+        ("{verbose: true, print_json: true}", False),
+    ],
+)
+def test_configured_client_defaults_to_clean_output_and_accepts_diagnostics(tmp_path, settings, conversation_only):
     path = tmp_path / "conversation.yaml"
-    path.write_text(BASE + "runtime:\n  client:\n    conversation_only: true\n")
+    path.write_text(BASE + f"runtime:\n  client: {settings}\n")
     config = resolve_config(load_config(path), names=["primary"], include_client=True, environ={})
-    assert runtime.build_configured_client(config, local=True).conversation_only is True
-    assert runtime.build_configured_client(config).conversation_only is True
-    config.client["print_json"] = True
-    with pytest.raises(ConfigurationError, match="Invalid packaged client settings"):
-        runtime.build_configured_client(config, local=True)
+    assert runtime.build_configured_client(config, local=True).conversation_only is conversation_only
+    assert runtime.build_configured_client(config).conversation_only is conversation_only
 
 
 @pytest.mark.parametrize("field,value", [("host", "0.0.0.0"), ("url", "ws://example.test/realtime")])
@@ -642,3 +648,15 @@ def test_later_replica_failure_cleans_completed_viseme_handlers(config, viseme_c
     assert len(visemes) == 2
     assert cleaned == list(reversed(visemes))
     assert all(viseme.stop_event.is_set() and viseme._pending == [] for viseme in visemes)
+
+
+@pytest.mark.parametrize("command", ["local", "talk", "serve"])
+@pytest.mark.parametrize("settings", [{}, {"verbose": True}, {"print_json": True}])
+def test_configured_display_policy_wraps_startup(config, monkeypatch, command, settings):
+    from speech_to_speech.pipeline.console import console
+
+    config.client.update(settings)
+    observed = []
+    monkeypatch.setattr(runtime, "_run_configured_command", lambda *_: observed.append(console.quiet))
+    runtime.run_configured_command(command, config)
+    assert observed == [command != "serve" and not settings]

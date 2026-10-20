@@ -41,3 +41,20 @@ def test_nested_output_context_keeps_existing_logging_policy():
         assert logging.root.manager.disable == logging.ERROR
     finally:
         logging.disable(previous_disable)
+
+
+@pytest.mark.parametrize("flags,quiet", [([], True), (["--verbose"], False), (["--local_audio_print_json"], False)])
+def test_local_display_policy_is_applied_before_pipeline_startup(monkeypatch, caplog, flags, quiet):
+    from speech_to_speech import s2s_pipeline
+
+    observed = []
+
+    def check_startup(command, args):
+        observed.append(command)
+        assert console.quiet is quiet
+        assert logging.getLogger("speech_to_speech.test_backend").isEnabledFor(logging.INFO) is not quiet
+
+    monkeypatch.setattr(s2s_pipeline, "_run_parsed_pipeline_command", check_startup)
+    with caplog.at_level(logging.INFO):
+        s2s_pipeline.run_pipeline_command("local", flags)
+    assert observed == ["local"]

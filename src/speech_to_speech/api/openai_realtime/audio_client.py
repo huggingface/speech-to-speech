@@ -68,7 +68,7 @@ class RealtimeAudioClientConfig:
     instructions: Optional[str] = None
     voice: Optional[str] = None
     print_json: bool = False
-    conversation_only: bool = False
+    verbose: bool = False
     block_mic_during_playback: bool = False
     log_transcripts: bool = False
     connection_retry_timeout_s: float = 30.0
@@ -77,10 +77,13 @@ class RealtimeAudioClientConfig:
     tool_response_create: bool = True
 
     def __post_init__(self) -> None:
-        if self.conversation_only and self.print_json:
-            raise ValueError("conversation_only and print_json cannot be enabled together")
         if not 0 <= self.playback_buffer_ms < float("inf"):
             raise ValueError("playback_buffer_ms must be a finite non-negative number")
+
+    @property
+    def conversation_only(self) -> bool:
+        """Use the clean display unless diagnostics or raw events were requested."""
+        return not (self.verbose or self.print_json)
 
 
 def load_realtime_tool_module(module_name: str) -> tuple[list[dict[str, Any]], ToolExecutor, bool]:
@@ -1100,6 +1103,8 @@ def run_realtime_audio_client(config: RealtimeAudioClientConfig) -> None:
 
     from speech_to_speech.pipeline.console import conversation_output
 
+    if not config.conversation_only:
+        logging.basicConfig(level=logging.INFO)
     stop_event = Event()
     previous_handlers: dict[signal.Signals, Any] = {}
 

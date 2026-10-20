@@ -352,7 +352,11 @@ def run_configured_command(command: Literal["serve", "local", "talk"], config: R
     """Own CLI signal handlers and always stop constructed resources."""
     from speech_to_speech.pipeline.console import conversation_output
 
-    with conversation_output(command in {"local", "talk"} and (config.client or {}).get("conversation_only", False)):
+    settings = config.client or {}
+    conversation_only = command in {"local", "talk"} and not (
+        settings.get("verbose", False) or settings.get("print_json", False)
+    )
+    with conversation_output(conversation_only):
         _run_configured_command(command, config)
 
 

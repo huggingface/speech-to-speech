@@ -768,7 +768,7 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
             input_device=local_audio.local_audio_input_device,
             output_device=local_audio.local_audio_output_device,
             print_json=local_audio.local_audio_print_json,
-            conversation_only=local_audio.conversation_only,
+            verbose=local_audio.verbose,
             block_mic_during_playback=local_audio.local_audio_block_mic_during_playback,
             tools=tools,
             tool_executor=tool_executor,
@@ -785,9 +785,9 @@ def run_pipeline_command(command: Literal["serve", "local"], argv: Sequence[str]
 
     from speech_to_speech.pipeline.console import conversation_output
 
-    conversation_only = command == "local" and args.local_audio_kwargs.conversation_only
-    if conversation_only and args.local_audio_kwargs.local_audio_print_json:
-        raise ValueError("--conversation-only cannot be combined with --local_audio_print_json")
+    conversation_only = command == "local" and not (
+        args.local_audio_kwargs.verbose or args.local_audio_kwargs.local_audio_print_json
+    )
     with conversation_output(conversation_only):
         _run_parsed_pipeline_command(command, args)
 
