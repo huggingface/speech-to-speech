@@ -756,7 +756,7 @@ The default checkpoint is [`gradium/phonon-40m-en`](https://huggingface.co/gradi
 
 `local --tts phonon` lets you cycle through these voices using the terminal's left/right or up/down arrows. The selected voice is displayed immediately and applied after the current reply finishes, preserving the conversation. This requires an interactive macOS or Linux terminal. The standalone `talk` client can opt in with `--voices Zoey Harper Easton` and select its initial voice with `--voice Zoey`.
 
-Use `--phonon_tts_num_threads N` to tune the native CPU thread pool at startup; omitting it preserves the runtime default. On an Apple M3 Pro, try `--phonon_tts_num_threads 4`, which performed better than the twelve-thread default in local testing. The setting is shared by all Phonon pipelines in the process.
+Phonon uses four native CPU threads by default, which performed better than the runtime's twelve-thread default on an Apple M3 Pro in local testing. Use `--phonon_tts_num_threads N` to tune it at startup; the setting is shared by all Phonon pipelines in the process.
 
 Phonon runs on CPU even when STT or the LLM uses a GPU. Native audio is resampled to the pipeline's 16 kHz PCM16 output, and interruption closes the native stream. `--phonon_tts_language` fixes text normalization at startup; use `en` (the default), `fr`, `de`, `es`, `pt`, or `none`. Session language changes are restricted to that configured language. See the [TTS component guide](./src/speech_to_speech/TTS/README.md#10-phonon---tts-phonon) for installation and checkpoint options.
 

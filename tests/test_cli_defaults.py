@@ -29,6 +29,7 @@ def test_phonon_defaults_to_english_40m_checkpoint():
     phonon_args = PhononTTSHandlerArguments()
     assert phonon_args.phonon_tts_model_name == "gradium/phonon-40m-en"
     assert phonon_args.phonon_tts_language == "en"
+    assert phonon_args.phonon_tts_num_threads == 4
 
 
 def test_release_defaults_match_local_qwen35_parakeet_qwen3_profile():
