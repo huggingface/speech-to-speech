@@ -318,10 +318,10 @@ def check_mac_settings(module_kwargs: ModuleArguments) -> None:
             logger.warning(
                 "For macOS users, it is recommended to use mlx-lm. You can activate it by passing --llm_backend mlx-lm."
             )
-        if module_kwargs.tts not in ("pocket", "kokoro", "omnivoice", "qwen3"):
+        if module_kwargs.tts not in ("pocket", "phonon", "kokoro", "omnivoice", "qwen3"):
             logger.warning(
                 "For macOS users, it is recommended to use qwen3 for TTS "
-                "(pocket, kokoro, and omnivoice are also valid options)."
+                "(pocket, phonon, kokoro, and omnivoice are also valid options)."
             )
 
 
@@ -684,6 +684,11 @@ def _build_pipeline_unit(
         service.tts_supported_languages = {code for code in tts_module.QWEN3_LANGUAGE_ALIASES if len(code) == 2}
     elif tts_selection.name in {"chatTTS", "pocket"}:
         service.tts_supported_languages = set()
+    elif tts_selection.name == "phonon":
+        # The preview runtime fixes text normalization at model load. Allow
+        # the configured language, but reject session changes we cannot honor.
+        language = tts_handler.language
+        service.tts_supported_languages = {language} if language != "none" else set()
 
     return PipelineUnit(
         index=index,
@@ -758,11 +763,26 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
     if local_audio.local_audio_tool_module:
         tools, tool_executor, tool_response_create = load_realtime_tool_module(local_audio.local_audio_tool_module)
     server_manager = build_pipeline(args, stop_event, host="127.0.0.1")
+    voice_choices: list[str] = []
+    voice = None
+    if args.tts_backend.name == "phonon":
+        from speech_to_speech.TTS.phonon_tts_handler import PhononTTSHandler
+
+        for handler in server_manager.handlers:
+            if isinstance(handler, PhononTTSHandler):
+                voice_choices = list(handler.voices)
+                if "default" in voice_choices:
+                    voice_choices.remove("default")
+                    voice_choices.insert(0, "default")
+                voice = handler.voice
+                break
     client = RealtimeAudioClient(
         stop_event,
         RealtimeAudioClientConfig(
             url=f"ws://127.0.0.1:{args.realtime_server_kwargs.port}/v1/realtime",
             api_key="local",
+            voice=voice,
+            voice_choices=voice_choices,
             chunk_size=local_audio.local_audio_chunk_size,
             playback_buffer_ms=playback_buffer_ms,
             input_device=local_audio.local_audio_input_device,

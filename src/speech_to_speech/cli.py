@@ -138,6 +138,7 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
         default=defaults.voice,
         help="session.audio.output.voice (for example bm_fable, marin, or alloy).",
     )
+    parser.add_argument("--voices", nargs="+", default=[], help="Voice names to cycle with terminal arrow keys.")
     parser.add_argument("--print-json", action="store_true", default=defaults.print_json)
     parser.add_argument(
         "--verbose",
@@ -183,6 +184,7 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
         output_device=namespace.output_device,
         instructions=namespace.instructions,
         voice=namespace.voice,
+        voice_choices=namespace.voices,
         print_json=namespace.print_json,
         verbose=namespace.verbose,
         block_mic_during_playback=namespace.block_mic_during_playback,
