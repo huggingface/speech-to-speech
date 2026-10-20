@@ -13,7 +13,6 @@ import torch
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
-from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEvent
 from speech_to_speech.pipeline.handler_types import VADIn, VADOut
 from speech_to_speech.pipeline.messages import VADAudio
@@ -154,7 +153,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 "silero_vad",
                 trust_repo=True,
                 skip_validation=True,
-                verbose=not console.quiet,
             )
             self.iterator = VADIterator(
                 self.model,

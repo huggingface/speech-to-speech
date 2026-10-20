@@ -69,6 +69,7 @@ def test_model_startup_hides_library_chatter_and_retained_handlers_keep_working(
     with model_startup_output(True):
         print("Initialized encoder codebooks")
         print("Fetching files: 100%", file=sys.stderr)
+        print("Using cache found in model cache", file=sys.stderr)
         handler = logging.StreamHandler(sys.stderr)
     handler.emit(logging.LogRecord("library", logging.ERROR, "", 0, "runtime error", (), None))
     print("conversation is visible")
