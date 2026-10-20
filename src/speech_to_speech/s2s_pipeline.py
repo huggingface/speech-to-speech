@@ -785,9 +785,10 @@ def run_pipeline_command(command: Literal["serve", "local"], argv: Sequence[str]
 
     from speech_to_speech.pipeline.console import conversation_output
 
-    if args.local_audio_kwargs.conversation_only and args.local_audio_kwargs.local_audio_print_json:
+    conversation_only = command == "local" and args.local_audio_kwargs.conversation_only
+    if conversation_only and args.local_audio_kwargs.local_audio_print_json:
         raise ValueError("--conversation-only cannot be combined with --local_audio_print_json")
-    with conversation_output(command == "local" and args.local_audio_kwargs.conversation_only):
+    with conversation_output(conversation_only):
         _run_parsed_pipeline_command(command, args)
 
 
