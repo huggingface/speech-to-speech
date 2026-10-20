@@ -7,10 +7,10 @@ from typing import Any, Iterator, cast
 
 import numpy as np
 import soxr
-from rich.console import Console
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
@@ -18,7 +18,6 @@ from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception
 
 logger = logging.getLogger(__name__)
-console = Console()
 PIPELINE_SAMPLE_RATE = 16000
 PHONON_NORMALIZATION_LANGUAGES = frozenset({"en", "fr", "de", "es", "pt", "none"})
 

@@ -476,6 +476,7 @@ def test_explicit_scope_inventory():
         "voice",
         "voice_choices",
         "print_json",
+        "verbose",
         "block_mic_during_playback",
         "log_transcripts",
         "connection_retry_timeout_s",

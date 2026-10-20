@@ -14,6 +14,7 @@ from openai.types.realtime.realtime_response_create_params import RealtimeRespon
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.console import conversation_output
 from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, AudioOutput, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -128,6 +129,16 @@ def test_clipping_and_padding_without_resampling():
     handler, _, _ = make_handler([np.array([2, -2, 0.5], dtype=np.float32)], sample_rate=16000, blocksize=4)
     output = list(handler.process(TTSInput(text="Hello")))
     np.testing.assert_array_equal(output[0], [32767, -32768, 16384, 0])
+
+
+@pytest.mark.parametrize("quiet", [False, True])
+def test_backend_transcript_follows_conversation_display_policy(capsys, quiet):
+    handler, _, requests = make_handler([np.ones(4, dtype=np.float32)], sample_rate=16000, blocksize=4)
+    with conversation_output(quiet):
+        output = list(handler.process(TTSInput(text="Hello")))
+    assert len(output) == 1
+    assert requests == [("Hello", None)]
+    assert capsys.readouterr().out == ("" if quiet else "ASSISTANT: Hello\n")
 
 
 @pytest.mark.parametrize("cancel", ["generation", "stop"])

@@ -87,6 +87,28 @@ def test_parse_talk_arguments_keeps_retry_timeout_field_name():
     assert config.connection_retry_timeout_s == 12.5
 
 
+def test_conversation_only_is_the_default_for_local_and_talk():
+    assert parse_arguments([], command="local").local_audio_kwargs.verbose is False
+    assert parse_talk_arguments([]).conversation_only is True
+
+
+def test_verbose_restores_diagnostic_output_for_local_and_talk():
+    assert parse_arguments(["--verbose"], command="local").local_audio_kwargs.verbose is True
+    assert parse_talk_arguments(["--verbose"]).conversation_only is False
+
+
+@pytest.mark.parametrize("flags", [["--print-json"], ["--verbose", "--print-json"]])
+def test_raw_json_enables_diagnostic_output(flags):
+    config = parse_talk_arguments(flags)
+    assert config.print_json is True
+    assert config.conversation_only is False
+
+
+def test_serve_rejects_client_verbose_flag():
+    with pytest.raises(ValueError, match="verbose"):
+        parse_arguments(["--verbose"], command="serve")
+
+
 def test_vad_firered_flag_is_accepted():
     args = parse_arguments(["--vad", "firered", "--vad_firered_model_dir", "/tmp/firered-stream-vad"])
 

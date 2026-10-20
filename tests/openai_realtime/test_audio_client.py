@@ -342,6 +342,72 @@ def test_audio_client_streams_assistant_transcript_without_reprinting_done(capsy
     assert capsys.readouterr().out == "ASSISTANT: Hello there.\n"
 
 
+def test_conversation_only_renders_one_exchange_and_keeps_playback_and_barge_in(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer(conversation_only=True)
+    for event in (
+        SimpleNamespace(type="session.created"),
+        SimpleNamespace(type="input_audio_buffer.speech_started"),
+        SimpleNamespace(type="speech_to_speech.input_audio_transcription.snapshot", transcript="How"),
+        SimpleNamespace(type="conversation.item.input_audio_transcription.delta", delta="How are you?"),
+        SimpleNamespace(type="input_audio_buffer.committed"),
+        SimpleNamespace(type="conversation.item.created"),
+        SimpleNamespace(type="conversation.item.input_audio_transcription.completed", transcript="How are you?"),
+        response_created("response_1"),
+        SimpleNamespace(type="response.content_part.added"),
+        SimpleNamespace(type="response.output_audio_transcript.delta", delta="I'm"),
+        SimpleNamespace(type="speech_to_speech.input_audio_transcription.snapshot", transcript="background"),
+        SimpleNamespace(type="rate_limits.updated"),
+        tool_call("call_1"),
+        SimpleNamespace(type="response.output_audio_transcript.delta", delta=" doing well."),
+        SimpleNamespace(type="response.output_audio_transcript.done", transcript="I'm doing well."),
+        SimpleNamespace(type="response.output_audio.delta", delta="AQI="),
+        SimpleNamespace(type="response.output_audio.done"),
+        SimpleNamespace(type="response.content_part.done"),
+        response_done(),
+    ):
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+
+    assert capsys.readouterr().out == "USER: How are you?\nASSISTANT: I'm doing well.\n"
+    assert playback.buffered_bytes == 2
+    handle_server_event(
+        SimpleNamespace(type="input_audio_buffer.speech_started"),
+        playback=playback,
+        renderer=renderer,
+        print_json=False,
+    )
+    assert playback.buffered_bytes == 0
+
+
+def test_conversation_only_keeps_errors_visible(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer(conversation_only=True)
+    for event in (
+        SimpleNamespace(type="error", error=SimpleNamespace(type="server_error", message="Try again")),
+        response_done(status="failed"),
+        SimpleNamespace(type="conversation.item.input_audio_transcription.failed", item_id="item_1", error=None),
+    ):
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+    assert capsys.readouterr().out == (
+        "ERROR: server_error: Try again\n"
+        "ERROR: response failed\n"
+        "ERROR: transcription_error: Input audio transcription failed\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "settings,conversation_only",
+    [
+        ({}, True),
+        ({"verbose": True}, False),
+        ({"print_json": True}, False),
+        ({"verbose": True, "print_json": True}, False),
+    ],
+)
+def test_audio_client_defaults_to_clean_output_with_explicit_diagnostics(settings, conversation_only):
+    assert RealtimeAudioClientConfig(**settings).conversation_only is conversation_only
+
+
 def test_audio_client_tracks_interleaved_transcripts_per_output_item(capsys):
     playback = PlaybackBuffer(16000)
     renderer = _FriendlyEventRenderer()
@@ -1477,7 +1543,7 @@ def test_audio_client_does_not_duplicate_partial_transcript_on_cancel(capsys):
     assert playback.buffered_bytes == 0
 
 
-async def test_audio_streams_are_cleaned_up_when_output_start_fails(monkeypatch):
+async def test_audio_streams_are_cleaned_up_when_output_start_fails(monkeypatch, capsys):
     events = []
     playback_args = []
 
@@ -1519,6 +1585,7 @@ async def test_audio_streams_are_cleaned_up_when_output_start_fails(monkeypatch)
             Event(),
         )
 
+    assert "Ready" not in capsys.readouterr().out
     assert playback_args == [(16000, 240)]
     assert events == [
         "input.start",
@@ -1631,3 +1698,85 @@ def test_talk_client_uses_signal_driven_shutdown(monkeypatch):
         (signal.SIGINT, "previous-SIGINT"),
         (signal.SIGTERM, "previous-SIGTERM"),
     ]
+
+
+def test_clean_conversation_has_colors_literal_text_and_no_blank_lines_between_turns():
+    from io import StringIO
+
+    from rich.console import Console
+    from rich.text import Text
+
+    output = StringIO()
+    terminal = Console(file=output, force_terminal=True, color_system="standard", no_color=False)
+    renderer = _FriendlyEventRenderer(conversation_only=True, console=terminal)
+    playback = PlaybackBuffer(16000)
+    events = [
+        SimpleNamespace(type="session.created"),
+        SimpleNamespace(type="session.updated"),
+        SimpleNamespace(type="session.updated"),
+    ]
+    for user, assistant in (("Hello [bold]", "Hi there!"), ("Thanks", "You're welcome.")):
+        events.extend(
+            [
+                SimpleNamespace(type="input_audio_buffer.speech_started"),
+                SimpleNamespace(type="conversation.item.input_audio_transcription.completed", transcript=user),
+                response_created("response_1"),
+                SimpleNamespace(type="response.output_audio_transcript.delta", delta=assistant),
+                SimpleNamespace(type="response.output_audio_transcript.done", transcript=assistant),
+                SimpleNamespace(type="response.output_audio.done"),
+                response_done(),
+            ]
+        )
+    for event in events:
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+
+    colored = output.getvalue()
+    assert "\x1b[33mUSER: Hello [bold]" in colored
+    assert "\x1b[32mASSISTANT: " in colored
+    assert Text.from_ansi(colored).plain == (
+        "Ready — start speaking.\nUSER: Hello [bold]\nASSISTANT: Hi there!\nUSER: Thanks\nASSISTANT: You're welcome.\n"
+    )
+
+
+async def test_ready_waits_for_audio_devices_and_session_acknowledgement(monkeypatch, capsys):
+    starts = []
+    stop = Event()
+
+    class Stream:
+        def __init__(self, name):
+            self.name = name
+
+        def start(self):
+            starts.append(self.name)
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    class Connection:
+        count = 0
+
+        async def recv(self):
+            assert starts == ["microphone", "speakers"]
+            self.count += 1
+            if self.count == 1:
+                assert capsys.readouterr().out == ""
+                return SimpleNamespace(type="session.created")
+            if self.count == 2:
+                assert capsys.readouterr().out == ""
+                return SimpleNamespace(type="session.updated")
+            assert capsys.readouterr().out == "Ready — start speaking.\n"
+            stop.set()
+            await asyncio.Future()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sounddevice",
+        SimpleNamespace(
+            RawInputStream=lambda **_: Stream("microphone"),
+            RawOutputStream=lambda **_: Stream("speakers"),
+        ),
+    )
+    await audio_client_module._run_audio_session(Connection(), RealtimeAudioClientConfig(), stop)
