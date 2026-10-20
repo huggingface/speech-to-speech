@@ -169,6 +169,15 @@ pip install "qwentts-cpp-python==0.3.1+cpu" \
 pip install speech-to-speech
 ```
 
+On **DGX Spark (Linux ARM64, CUDA 13)**, the default CUDA 12 wheel can fail with `libcudart.so.12` missing. From the repository root, sync dependencies, then install the CUDA 13 ARM64 wheel and launch with `--no-sync` as shown below. Plain `uv run` or `uv sync` can replace this wheel; reinstall it after syncing. When using VS Code Remote SSH, run `serve` on the Spark and use the [browser demo](demo/README.md) for your laptop's microphone and speakers: forward ports **8765** and **7860**, start the demo with `SPEECH_TO_SPEECH_URL=ws://localhost:8765/v1/realtime` (also use `uv run --no-sync` for its launch command), and open <http://localhost:7860> on your laptop using WebSocket transport.
+
+```bash
+uv sync
+uv pip install --python .venv/bin/python --no-deps \
+  "https://huggingface.co/datasets/andito/qwentts-cpp-python-wheels/resolve/main/whl/cu130/qwentts_cpp_python-0.5.0%2Bcu130-py3-none-manylinux_2_39_aarch64.whl"
+uv run --no-sync speech-to-speech serve
+```
+
 To use the previous CUDA-graphs implementation instead of GGML, pass `--qwen3_tts_backend torch`.
 
 ### Optional Components
