@@ -152,22 +152,25 @@ same trimming, lowercase normalization, and name-to-code mapping as session
 language validation.
 
 `conversation.languages` is the intersection when both coverage sets are known.
-Build a session language selector from `conversation.selectable_languages`, which
-also accounts for the adapters' language controls and session validation. It is
-`null` when the complete set is unknown. For example, Parakeet TDT v3 has multilingual
-coverage but no selectable session languages because its decoder accepts no hint.
+Build a session language selector from `conversation.selectable_languages`: choices
+the adapters can honor and session validation accepts. A `null` value means complete
+coverage is unknown. Some adapters accept hints they ignore; that does not establish
+selection support. Parakeet TDT v3 has multilingual coverage but no selectable
+session languages because its decoder accepts no hint.
 
 Each handler's `supports_auto` describes automatic language selection; `null`
 means unknown. `conversation.session_auto_supported` says whether validation
 accepts `"auto"`. That value can be true for a fixed-language model: `"auto"` uses
 the adapter's configured behavior and does not turn a fixed model into a detector.
 
-Handlers expose an immutable `SpeechLanguageCapabilities` value through
-`language_capabilities` after pipeline construction. A custom handler can supply
-this value itself. Built-in adapters read loaded checkpoint metadata or their
-native language tables. Remote model aliases and `/v1/models` do not establish
-language coverage. For vLLM, vLLM-Omni, or another provider without language
-metadata, declare the deployed model's capabilities explicitly:
+After pipeline construction, handlers expose native metadata as an immutable
+`SpeechLanguageCapabilities` value through `language_capabilities`; custom handlers
+can supply it as a read-only property. Deployment declarations affect the service's
+response without changing that metadata. Remote model aliases, `/v1/models`, and
+Whisper decoder language tokens do not establish coverage. Multilingual Whisper
+architectures can hold English-only checkpoints, so they report unknown coverage.
+For these models or providers such as vLLM/vLLM-Omni without discovery, declare
+coverage explicitly:
 
 ```bash
 speech-to-speech serve --stt openai --tts openai \

@@ -59,19 +59,15 @@ def backend_language_capabilities(
             "vllm-realtime",
         }
         if name == "faster-whisper":
-            languages = getattr(model, "supported_languages", None)
-            if languages is not None:
-                auto = len(languages) > 1
+            # Multilingual decoder vocabulary survives English-only fine-tuning.
+            # It constrains hints but cannot establish the checkpoint's coverage.
+            supported = getattr(model, "supported_languages", None)
+            if supported is not None and set(supported) == {"en"}:
+                languages, auto = {"en"}, False
         elif name == "whisper":
             generation = getattr(model, "generation_config", None)
-            multilingual = getattr(generation, "is_multilingual", None)
-            if multilingual is False:
+            if getattr(generation, "is_multilingual", None) is False:
                 languages, selection, auto = {"en"}, False, False
-            else:
-                language_tokens = getattr(generation, "lang_to_id", None)
-                if language_tokens is not None:
-                    languages = {token.removeprefix("<|").removesuffix("|>") for token in language_tokens}
-                auto = multilingual if isinstance(multilingual, bool) else None
         elif name == "qwen3-asr":
             languages = getattr(module, "SUPPORTED_LANGUAGES", None)
             auto = True

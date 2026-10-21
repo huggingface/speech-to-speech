@@ -671,7 +671,6 @@ def _build_pipeline_unit(
         h.turn_latency_store = turn_latency_store
 
     # Validate only against language sets already known to the active backends.
-    # Faster Whisper reports the loaded checkpoint's actual language set.
     # The fixed suffix is STT → [notifier] → LM → processor → TTS → [visemes].
     tts_index = -2 if module_kwargs.enable_visemes else -1
     stt_index = tts_index - (3 if stt_selection.spec.capabilities.bypasses_transcription_notifier else 4)
@@ -703,6 +702,8 @@ def _build_pipeline_unit(
     for selection, handler in ((stt_selection, stt_handler), (tts_selection, tts_handler)):
         kind = selection.kind
         capabilities = backend_language_capabilities(kind, selection.name, selection.config, handler)
+        if not isinstance(getattr(handler, "language_capabilities", None), SpeechLanguageCapabilities):
+            handler.language_capabilities = capabilities
         declared = getattr(module_kwargs, f"{kind}_supported_languages")
         automatic = getattr(module_kwargs, f"{kind}_auto_language_supported")
         if declared is not None:
@@ -713,7 +714,6 @@ def _build_pipeline_unit(
             if capabilities.supports_auto is not None and capabilities.supports_auto != automatic:
                 raise ValueError(f"--{kind}_auto_language_supported conflicts with the active backend's auto support.")
             capabilities = replace(capabilities, supports_auto=automatic)
-        handler.language_capabilities = capabilities
         setattr(service, f"{kind}_language_capabilities", capabilities)
         if capabilities.languages is not None:
             allowed = getattr(service, f"{kind}_supported_languages")

@@ -85,7 +85,9 @@ def test_session_language_validation_uses_loaded_faster_whisper_capabilities(mod
     handler = SimpleNamespace(model=SimpleNamespace(supported_languages=supported_languages))
 
     assert s2s_pipeline._stt_session_languages(selection, handler) == expected
-    assert backend_language_capabilities("stt", "faster-whisper", selection.config, handler).languages == expected
+    coverage = backend_language_capabilities("stt", "faster-whisper", selection.config, handler)
+    assert coverage.languages == ({"en"} if expected == {"en"} else None)
+    assert coverage.supports_auto is (False if expected == {"en"} else None)
     assert TTS_BACKENDS["qwen3"].kind == "tts"
     assert TTS_BACKENDS["openai"].kind == "tts"
     assert TTS_BACKENDS["supertonic"].required_extra == "supertonic"
@@ -110,6 +112,16 @@ def test_language_coverage_uses_loaded_metadata_and_native_language_tables():
     from speech_to_speech.TTS.pocket_tts_handler import PocketTTSHandler
     from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
     from speech_to_speech.TTS.supertonic_tts_handler import SupertonicTTSHandler
+
+    # English-only Distil-Whisper retains its teacher's multilingual decoder tokens.
+    whisper = SimpleNamespace(
+        model=SimpleNamespace(
+            generation_config=SimpleNamespace(is_multilingual=True, lang_to_id={"<|en|>": 1, "<|es|>": 2})
+        )
+    )
+    capability = backend_language_capabilities("stt", "whisper", {}, whisper)
+    assert capability.languages is None
+    assert capability.supports_auto is None
 
     parakeet = ParakeetTDTSTTHandler.__new__(ParakeetTDTSTTHandler)
     for model, languages, auto in (
@@ -153,7 +165,8 @@ def test_language_coverage_uses_loaded_metadata_and_native_language_tables():
 
 
 @pytest.mark.parametrize("declared", [False, True])
-def test_remote_language_declarations_drive_discovery_and_validation(monkeypatch, declared):
+@pytest.mark.parametrize("read_only_metadata", [False, True])
+def test_remote_language_declarations_drive_discovery_and_validation(monkeypatch, declared, read_only_metadata):
     from starlette.testclient import TestClient
 
     from speech_to_speech.api.openai_realtime.websocket_router import create_app
@@ -176,6 +189,14 @@ def test_remote_language_declarations_drive_discovery_and_validation(monkeypatch
     args = parse_arguments(cli)
     prepare_all_args(args)
     handlers = [SimpleNamespace() for _ in range(6)]
+    if read_only_metadata:
+
+        class Handler:
+            @property
+            def language_capabilities(self):
+                return SpeechLanguageCapabilities()
+
+        handlers[1] = Handler()
     monkeypatch.setattr(s2s_pipeline, "_build_handlers", lambda **kwargs: handlers)
     unit = s2s_pipeline._build_pipeline_unit(
         index=0,
@@ -186,8 +207,8 @@ def test_remote_language_declarations_drive_discovery_and_validation(monkeypatch
         llm_backend=args.llm_backend,
         tts_backend=args.tts_backend,
     )
-    assert handlers[1].language_capabilities is unit.service.stt_language_capabilities
-    assert handlers[-1].language_capabilities is unit.service.tts_language_capabilities
+    assert handlers[1].language_capabilities == SpeechLanguageCapabilities()
+    assert handlers[-1].language_capabilities == SpeechLanguageCapabilities()
     with TestClient(create_app(pool=[unit], stop_event=Event())) as client:
         capability = client.get("/v1/realtime/capabilities").json()["pipelines"][0]
         assert capability["stt"]["supports_auto"] is (True if declared else None)
