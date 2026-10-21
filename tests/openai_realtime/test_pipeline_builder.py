@@ -44,6 +44,7 @@ def test_local_composes_loopback_client_with_same_server_builder(monkeypatch):
     args.realtime_server_kwargs.host = "192.0.2.10"
     args.realtime_server_kwargs.port = 9876
     args.local_audio_kwargs.local_audio_playback_buffer_ms = 240
+    args.local_audio_kwargs.verbose = True
     pipeline_handler = object()
     unit = SimpleNamespace(handlers=[pipeline_handler])
     monkeypatch.setattr("speech_to_speech.s2s_pipeline._build_pipeline_unit", lambda **_kwargs: unit)
@@ -61,6 +62,7 @@ def test_local_composes_loopback_client_with_same_server_builder(monkeypatch):
     assert client.config.url == f"ws://127.0.0.1:{server.port}/v1/realtime"
     assert client.config.api_key == "local"
     assert client.config.playback_buffer_ms == 240
+    assert client.config.conversation_only is False
 
 
 def test_local_resolves_backend_specific_playback_buffer_defaults(monkeypatch):
@@ -80,3 +82,129 @@ def test_local_resolves_backend_specific_playback_buffer_defaults(monkeypatch):
 
         assert isinstance(client, RealtimeAudioClient)
         assert client.config.playback_buffer_ms == expected_buffer_ms
+
+
+def test_local_phonon_offers_loaded_voices_and_preserves_configured_voice(monkeypatch):
+    from speech_to_speech.TTS.phonon_tts_handler import PhononTTSHandler
+
+    handler = PhononTTSHandler.__new__(PhononTTSHandler)
+    handler.voices = ["Maeve", "Zoey", "default"]
+    handler.voice = "Zoey"
+    unit = SimpleNamespace(handlers=[handler])
+    monkeypatch.setattr("speech_to_speech.s2s_pipeline._build_pipeline_unit", lambda **_kwargs: unit)
+    args = parse_arguments(["--tts", "phonon"], command="local")
+    manager = build_local_pipeline(args, Event())
+    assert manager.handlers[-1].config.voice == "Zoey"
+    assert manager.handlers[-1].config.voice_choices == ["default", "Maeve", "Zoey"]
+
+
+def test_failed_handler_setup_cleans_and_preserves_original_error():
+    from queue import Queue
+
+    import pytest
+
+    from speech_to_speech.baseHandler import BaseHandler
+
+    cleaned = []
+    original = RuntimeError("original setup error")
+
+    class FailingHandler(BaseHandler):
+        def setup(self):
+            raise original
+
+        def cleanup(self):
+            cleaned.append(True)
+            raise RuntimeError("cleanup error")
+
+    with pytest.raises(RuntimeError) as exc:
+        FailingHandler(Event(), Queue(), Queue())
+    assert exc.value is original
+    assert cleaned == [True]
+
+
+def test_pipeline_ledger_records_handlers_before_later_factory_failure(monkeypatch):
+    import pytest
+
+    from speech_to_speech import s2s_pipeline
+
+    args = _default_args()
+    ledger = []
+    vad = SimpleNamespace()
+    monkeypatch.setattr(s2s_pipeline, "VADHandler", lambda *args, **kwargs: vad)
+    monkeypatch.setattr(
+        s2s_pipeline, "create_backend_handler", lambda *args: (_ for _ in ()).throw(ValueError("failure"))
+    )
+    with pytest.raises(ValueError):
+        s2s_pipeline._build_pipeline_unit(
+            index=0,
+            stop_event=Event(),
+            module_kwargs=args.module_kwargs,
+            vad_handler_kwargs=args.vad_handler_kwargs,
+            stt_backend=args.stt_backend,
+            llm_backend=args.llm_backend,
+            tts_backend=args.tts_backend,
+            resource_ledger=ledger,
+        )
+    assert ledger == [vad]
+
+
+def test_remote_handler_closes_owned_client_once():
+    from speech_to_speech.LLM.base_openai_compatible_language_model import BaseOpenAICompatibleHandler
+    from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
+
+    closed = []
+    handler = object.__new__(ResponsesApiModelHandler)
+    handler.client = SimpleNamespace(close=lambda: closed.append(True))
+    BaseOpenAICompatibleHandler.cleanup(handler)
+    BaseOpenAICompatibleHandler.cleanup(handler)
+    assert closed == [True]
+
+
+def test_remote_warmup_failure_closes_allocated_client_and_keeps_error(monkeypatch):
+    from queue import Queue
+
+    import pytest
+
+    from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
+
+    original = RuntimeError("warmup failure")
+    closed = []
+    monkeypatch.setattr(
+        "speech_to_speech.LLM.base_openai_compatible_language_model.OpenAI",
+        lambda **kwargs: SimpleNamespace(close=lambda: closed.append(True)),
+    )
+    monkeypatch.setattr(ResponsesApiModelHandler, "warmup", lambda self: (_ for _ in ()).throw(original))
+    with pytest.raises(RuntimeError) as exc:
+        ResponsesApiModelHandler(Event(), Queue(), Queue(), setup_kwargs={"api_key": "test"})
+    assert exc.value is original
+    assert closed == [True]
+
+
+def test_diarizer_ledger_registration_precedes_warmup(monkeypatch):
+    import pytest
+
+    from speech_to_speech import s2s_pipeline
+    from speech_to_speech.diarization import StreamingDiarizer
+
+    args = _default_args()
+    args.module_kwargs.diarization_model_name = "test-model"
+    ledger = []
+    vad = SimpleNamespace()
+    diarizer = SimpleNamespace(
+        sample_rate=args.vad_handler_kwargs.sample_rate, warmup=lambda: (_ for _ in ()).throw(ValueError("warmup"))
+    )
+    monkeypatch.setattr(s2s_pipeline, "VADHandler", lambda *args, **kwargs: vad)
+    monkeypatch.setattr(s2s_pipeline, "resolve_device", lambda *args: "cpu")
+    monkeypatch.setattr(StreamingDiarizer, "from_pretrained", lambda *args, **kwargs: diarizer)
+    with pytest.raises(ValueError):
+        s2s_pipeline._build_pipeline_unit(
+            index=0,
+            stop_event=Event(),
+            module_kwargs=args.module_kwargs,
+            vad_handler_kwargs=args.vad_handler_kwargs,
+            stt_backend=args.stt_backend,
+            llm_backend=args.llm_backend,
+            tts_backend=args.tts_backend,
+            resource_ledger=ledger,
+        )
+    assert ledger == [vad, diarizer]

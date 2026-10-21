@@ -2,25 +2,26 @@ from __future__ import annotations
 
 import logging
 from threading import Event
+from time import perf_counter
 from typing import Any, Iterator
 
 import librosa
 import numpy as np
 import torch
-from rich.console import Console
 from transformers import AutoTokenizer, VitsModel
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
+from speech_to_speech.pipeline.turn_latency import record_response_e2e, record_response_tts_ttfa
 from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
 
 logger = logging.getLogger(__name__)
 
-console = Console()
 
 WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE = {
     "en": "eng",  # English
@@ -192,11 +193,30 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 )
                 logger.warning(f"Unsupported language: {language_code}")
 
+        # Synthesis start: after any language model reload, before provider work.
+        started_at_s = perf_counter()
         audio_output = self.generate_audio(text)
 
         if audio_output is None or audio_output.numel() == 0:
             logger.warning("No audio output generated")
             return
+
+        store = getattr(self, "turn_latency_store", None)
+        response_key = getattr(tts_input, "response_key", None)
+        speech_stopped_at_s = getattr(tts_input, "speech_stopped_at_s", None)
+
+        def cancelled() -> bool:
+            return gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen)
+
+        # Device tensors may return before synthesis kernels finish. Wait for
+        # waveform readiness without including the later CPU copy or resampling.
+        device_type = audio_output.device.type
+        if device_type == "mps":
+            torch.mps.synchronize()
+        elif device_type in {"cuda", "xpu", "npu"}:
+            getattr(torch, device_type).current_stream(audio_output.device).synchronize()
+        if not cancelled():
+            record_response_tts_ttfa(store, response_key, perf_counter() - started_at_s)
 
         audio_numpy = audio_output.cpu().numpy().squeeze()
         logger.debug(f"Raw audio shape: {audio_numpy.shape}, dtype: {audio_numpy.dtype}")
@@ -207,22 +227,23 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
         audio_int16 = (audio_resampled * 32768).astype(np.int16)
         logger.debug(f"Final audio shape: {audio_int16.shape}, dtype: {audio_int16.dtype}")
 
-        if self.stream:
-            for i in range(0, len(audio_int16), self.chunk_size):
-                if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
-                    logger.info("TTS generation cancelled (interruption)")
-                    return
-                chunk = audio_int16[i : i + self.chunk_size]
-                yield np.pad(chunk, (0, self.chunk_size - len(chunk)))
-        else:
-            for i in range(0, len(audio_int16), self.chunk_size):
-                if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
-                    logger.info("TTS generation cancelled (interruption)")
-                    return
-                yield np.pad(
-                    audio_int16[i : i + self.chunk_size],
-                    (0, self.chunk_size - len(audio_int16[i : i + self.chunk_size])),
-                )
+        first_yielded = True
+
+        for i in range(0, len(audio_int16), self.chunk_size):
+            if cancelled():
+                logger.info("TTS generation cancelled (interruption)")
+                return
+            chunk = audio_int16[i : i + self.chunk_size]
+            block = np.pad(chunk, (0, self.chunk_size - len(chunk)))
+            if first_yielded:
+                if speech_stopped_at_s is not None:
+                    record_response_e2e(
+                        store,
+                        response_key,
+                        max(0.0, perf_counter() - speech_stopped_at_s),
+                    )
+                first_yielded = False
+            yield block
 
     def on_session_end(self) -> None:
         custom_model_changed = self._initial_model_name is not None and self.model_name != self._initial_model_name

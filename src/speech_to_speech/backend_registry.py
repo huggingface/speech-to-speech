@@ -13,12 +13,18 @@ from speech_to_speech.arguments_classes.chat_completions_language_model_argument
     ChatCompletionsLanguageModelHandlerArguments,
 )
 from speech_to_speech.arguments_classes.chat_tts_arguments import ChatTTSHandlerArguments
+from speech_to_speech.arguments_classes.drama3_tts_arguments import Drama3TTSHandlerArguments
 from speech_to_speech.arguments_classes.facebookmms_tts_arguments import FacebookMMSTTSHandlerArguments
 from speech_to_speech.arguments_classes.faster_whisper_stt_arguments import (
     FasterWhisperSTTHandlerArguments,
 )
+from speech_to_speech.arguments_classes.kitten_tts_arguments import KittenTTSHandlerArguments
 from speech_to_speech.arguments_classes.kokoro_tts_arguments import KokoroTTSHandlerArguments
-from speech_to_speech.arguments_classes.language_model_arguments import LanguageModelHandlerArguments
+from speech_to_speech.arguments_classes.language_model_arguments import (
+    LanguageModelHandlerArguments,
+    MLXLanguageModelHandlerArguments,
+)
+from speech_to_speech.arguments_classes.minimax_tts_arguments import MiniMaxTTSHandlerArguments
 from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import (
     MLXAudioWhisperSTTHandlerArguments,
 )
@@ -37,6 +43,7 @@ from speech_to_speech.arguments_classes.parakeet_tdt_arguments import (
 from speech_to_speech.arguments_classes.parakeet_unified_stt_arguments import (
     ParakeetUnifiedSTTHandlerArguments,
 )
+from speech_to_speech.arguments_classes.phonon_tts_arguments import PhononTTSHandlerArguments
 from speech_to_speech.arguments_classes.pocket_tts_arguments import PocketTTSHandlerArguments
 from speech_to_speech.arguments_classes.qwen3_asr_stt_arguments import Qwen3ASRSTTHandlerArguments
 from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
@@ -514,7 +521,7 @@ LLM_BACKENDS = build_backend_registry(
         BackendSpec(
             "mlx-lm",
             "llm",
-            LanguageModelHandlerArguments,
+            MLXLanguageModelHandlerArguments,
             _create_local_llm("mlx-lm"),
             config_prefix="llm",
             required_extra="mlx-lm",
@@ -601,6 +608,19 @@ TTS_BACKENDS = build_backend_registry(
             required_extra="pocket",
         ),
         BackendSpec(
+            "phonon",
+            "tts",
+            PhononTTSHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.TTS.phonon_tts_handler",
+                "PhononTTSHandler",
+                setup_should_listen=True,
+                context_kwargs=True,
+            ),
+            config_prefix="phonon_tts",
+            required_extra="phonon",
+        ),
+        BackendSpec(
             "kokoro",
             "tts",
             KokoroTTSHandlerArguments,
@@ -612,6 +632,19 @@ TTS_BACKENDS = build_backend_registry(
             ),
             config_prefix="kokoro",
             required_extra="kokoro",
+        ),
+        BackendSpec(
+            "kitten",
+            "tts",
+            KittenTTSHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.TTS.kitten_tts_handler",
+                "KittenTTSHandler",
+                setup_should_listen=True,
+                context_kwargs=True,
+            ),
+            config_prefix="kitten",
+            required_extra="kitten",
         ),
         BackendSpec(
             "qwen3",
@@ -632,6 +665,30 @@ TTS_BACKENDS = build_backend_registry(
             OpenAICompatibleTTSHandlerArguments,
             _create_openai_tts,
             config_prefix="openai_tts",
+        ),
+        BackendSpec(
+            "drama3",
+            "tts",
+            Drama3TTSHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.TTS.drama3_handler",
+                "Drama3TTSHandler",
+                setup_should_listen=True,
+                context_kwargs=True,
+            ),
+            config_prefix="drama3",
+        ),
+        BackendSpec(
+            "minimax",
+            "tts",
+            MiniMaxTTSHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.TTS.minimax_tts_handler",
+                "MiniMaxTTSHandler",
+                setup_should_listen=True,
+                context_kwargs=True,
+            ),
+            config_prefix="minimax_tts",
         ),
         BackendSpec(
             "supertonic",

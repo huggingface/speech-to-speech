@@ -14,6 +14,7 @@ from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, AudioOutput, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
+from tests.turns import reopen
 
 
 def _audible_stream_chunk():
@@ -562,7 +563,7 @@ def test_process_passes_selected_language_without_changing_setup_default(monkeyp
 
 def test_stale_keyed_terminal_becomes_cleanup_after_lm_tts_handoff():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     handler = object.__new__(Qwen3TTSHandler)
     handler.speculative_turns = tracker
     terminal = EndOfResponse(
@@ -571,7 +572,7 @@ def test_stale_keyed_terminal_becomes_cleanup_after_lm_tts_handoff():
         turn_revision=0,
         cancel_generation=7,
     )
-    tracker.observe("turn_1", 1)
+    reopen(tracker)
 
     outputs = list(handler.process(terminal))
     queued = handler.output_for_queue(outputs[0], terminal)
@@ -586,7 +587,7 @@ def test_stale_keyed_terminal_becomes_cleanup_after_lm_tts_handoff():
 
 def test_process_waits_for_pending_reopen_and_drops_stale_tts_input():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
     handler = object.__new__(Qwen3TTSHandler)
     handler.speculative_turns = tracker
@@ -618,7 +619,7 @@ def test_process_waits_for_pending_reopen_and_drops_stale_tts_input():
 
 def test_process_waits_for_pending_reopen_and_drops_stale_end_of_response():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
     handler = object.__new__(Qwen3TTSHandler)
     handler.speculative_turns = tracker
@@ -642,7 +643,7 @@ def test_process_waits_for_pending_reopen_and_drops_stale_end_of_response():
 
 def test_process_waits_for_reopen_grace_and_drops_stale_tts_input():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     tracker.start_reopen_grace("turn_1", 0, grace_s=0.5)
     handler = object.__new__(Qwen3TTSHandler)
     handler.speculative_turns = tracker
@@ -675,7 +676,7 @@ def test_process_waits_for_reopen_grace_and_drops_stale_tts_input():
 
 def test_process_waits_for_reopen_grace_and_drops_stale_end_of_response():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     tracker.start_reopen_grace("turn_1", 0, grace_s=0.5)
     handler = object.__new__(Qwen3TTSHandler)
     handler.speculative_turns = tracker
@@ -700,7 +701,7 @@ def test_process_waits_for_reopen_grace_and_drops_stale_end_of_response():
 
 def test_process_commits_turn_before_generating_audio(monkeypatch, caplog):
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     handler = object.__new__(Qwen3TTSHandler)
     handler.should_listen = Event()
     handler.cancel_scope = None

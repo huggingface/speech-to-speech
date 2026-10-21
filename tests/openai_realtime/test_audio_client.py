@@ -22,6 +22,11 @@ from speech_to_speech.api.openai_realtime.audio_client import (
     normalize_realtime_url,
     run_realtime_audio_client,
 )
+from speech_to_speech.api.openai_realtime.tool_followup import (
+    TOOL_FOLLOWUP_COVERED,
+    TOOL_FOLLOWUP_METADATA_KEY,
+    TOOL_INPUT_METADATA_KEY,
+)
 
 TOOL_DEFINITION = {
     "type": "function",
@@ -91,10 +96,10 @@ def function_call(call_id, *, name="lookup", arguments="{}"):
     )
 
 
-def response_done(response_id="response_1", status="completed", output=()):
+def response_done(response_id="response_1", status="completed", output=(), metadata=None):
     return SimpleNamespace(
         type="response.done",
-        response=SimpleNamespace(id=response_id, status=status, output=list(output)),
+        response=SimpleNamespace(id=response_id, status=status, output=list(output), metadata=metadata),
     )
 
 
@@ -335,6 +340,72 @@ def test_audio_client_streams_assistant_transcript_without_reprinting_done(capsy
         handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
 
     assert capsys.readouterr().out == "ASSISTANT: Hello there.\n"
+
+
+def test_conversation_only_renders_one_exchange_and_keeps_playback_and_barge_in(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer(conversation_only=True)
+    for event in (
+        SimpleNamespace(type="session.created"),
+        SimpleNamespace(type="input_audio_buffer.speech_started"),
+        SimpleNamespace(type="speech_to_speech.input_audio_transcription.snapshot", transcript="How"),
+        SimpleNamespace(type="conversation.item.input_audio_transcription.delta", delta="How are you?"),
+        SimpleNamespace(type="input_audio_buffer.committed"),
+        SimpleNamespace(type="conversation.item.created"),
+        SimpleNamespace(type="conversation.item.input_audio_transcription.completed", transcript="How are you?"),
+        response_created("response_1"),
+        SimpleNamespace(type="response.content_part.added"),
+        SimpleNamespace(type="response.output_audio_transcript.delta", delta="I'm"),
+        SimpleNamespace(type="speech_to_speech.input_audio_transcription.snapshot", transcript="background"),
+        SimpleNamespace(type="rate_limits.updated"),
+        tool_call("call_1"),
+        SimpleNamespace(type="response.output_audio_transcript.delta", delta=" doing well."),
+        SimpleNamespace(type="response.output_audio_transcript.done", transcript="I'm doing well."),
+        SimpleNamespace(type="response.output_audio.delta", delta="AQI="),
+        SimpleNamespace(type="response.output_audio.done"),
+        SimpleNamespace(type="response.content_part.done"),
+        response_done(),
+    ):
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+
+    assert capsys.readouterr().out == "USER: How are you?\nASSISTANT: I'm doing well.\n"
+    assert playback.buffered_bytes == 2
+    handle_server_event(
+        SimpleNamespace(type="input_audio_buffer.speech_started"),
+        playback=playback,
+        renderer=renderer,
+        print_json=False,
+    )
+    assert playback.buffered_bytes == 0
+
+
+def test_conversation_only_keeps_errors_visible(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer(conversation_only=True)
+    for event in (
+        SimpleNamespace(type="error", error=SimpleNamespace(type="server_error", message="Try again")),
+        response_done(status="failed"),
+        SimpleNamespace(type="conversation.item.input_audio_transcription.failed", item_id="item_1", error=None),
+    ):
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+    assert capsys.readouterr().out == (
+        "ERROR: server_error: Try again\n"
+        "ERROR: response failed\n"
+        "ERROR: transcription_error: Input audio transcription failed\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "settings,conversation_only",
+    [
+        ({}, True),
+        ({"verbose": True}, False),
+        ({"print_json": True}, False),
+        ({"verbose": True, "print_json": True}, False),
+    ],
+)
+def test_audio_client_defaults_to_clean_output_with_explicit_diagnostics(settings, conversation_only):
+    assert RealtimeAudioClientConfig(**settings).conversation_only is conversation_only
 
 
 def test_audio_client_tracks_interleaved_transcripts_per_output_item(capsys):
@@ -1100,6 +1171,62 @@ async def test_audio_client_waits_for_an_active_response_before_tool_follow_up()
     await coordinator.close()
 
 
+@pytest.mark.parametrize(
+    "turn_end",
+    ["answered", "missed_output", "empty_answer", "cancelled_answer", "refused_before_output", "refused_after_output"],
+)
+async def test_audio_client_holds_tool_follow_up_until_user_turn_ends(turn_end):
+    release = asyncio.Event()
+
+    async def executor(_name, _arguments):
+        await release.wait()
+        return "result"
+
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(
+        conn,
+        RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor),
+    )
+    coordinator.handle_event(response_created("response_1"))
+    coordinator.handle_event(response_done(output=[function_call("call_1")]))
+    coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.speech_started", item_id="item_2"))
+
+    def refuse():
+        # The model refuses a question asked while the call has no output.
+        # The turn stays open, and speech can resume without another start.
+        coordinator.handle_event(response_created("response_refused"))
+        coordinator.handle_event(response_done("response_refused", status="failed"))
+
+    if turn_end == "refused_before_output":
+        refuse()
+    release.set()
+    # The output reaches the conversation, but nothing talks over the user.
+    await wait_until(lambda: len(conn.sent) == 1)
+    if turn_end == "refused_after_output":
+        refuse()
+    coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.committed", item_id="item_1"))
+    await asyncio.sleep(0.01)
+    assert [event["type"] for event in conn.sent] == ["conversation.item.create"]
+
+    # The user item commits once the turn cannot reopen.
+    coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.committed", item_id="item_2"))
+    if turn_end in {"answered", "missed_output", "empty_answer", "cancelled_answer"}:
+        output = [SimpleNamespace(type="message")] if turn_end != "empty_answer" else []
+        coordinator.handle_event(response_created("response_2"))
+        coordinator.handle_event(
+            response_done(
+                "response_2",
+                output=output,
+                status="cancelled" if turn_end == "cancelled_answer" else "completed",
+                metadata={TOOL_INPUT_METADATA_KEY: '["call_1"]'} if turn_end != "missed_output" else None,
+            )
+        )
+    await asyncio.sleep(0.01)
+    # Only an answer the user heard makes the follow-up unnecessary.
+    assert [event["type"] for event in conn.sent][1:] == ([] if turn_end == "answered" else ["response.create"])
+    await coordinator.close()
+
+
 async def test_audio_client_one_follow_up_covers_all_queued_tool_outputs():
     conn = RecordingConnection()
     coordinator = _ToolCallCoordinator(
@@ -1122,7 +1249,7 @@ async def test_audio_client_one_follow_up_covers_all_queued_tool_outputs():
         "conversation.item.create",
         "response.create",
     ]
-    assert coordinator._queued_follow_ups == 2
+    assert len(coordinator._queued_tool_results) == 2
     create_event = conn.sent[-1]
 
     coordinator.handle_event(
@@ -1131,12 +1258,60 @@ async def test_audio_client_one_follow_up_covers_all_queued_tool_outputs():
             metadata={"s2s_local_tool_create_id": create_event["event_id"]},
         )
     )
-    assert coordinator._queued_follow_ups == 0
+    assert len(coordinator._queued_tool_results) == 0
 
     coordinator.handle_event(response_done("response_tool_1"))
     await asyncio.sleep(0.05)
     assert len(conn.sent) == 3
     await coordinator.close()
+
+
+@pytest.mark.parametrize("settlement", ["accepted", "covered"])
+async def test_audio_client_tool_follow_up_preserves_batch_beyond_metadata_limit(settlement):
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(
+        conn, RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=done_tool_executor)
+    )
+    call_ids = {f"call_{index:02d}_" + "x" * 24 for index in range(20)}
+    try:
+        coordinator.handle_event(response_done(output=[function_call(call_id) for call_id in sorted(call_ids)]))
+        await wait_until(lambda: len(conn.sent) == len(call_ids) + 1)
+        create = conn.sent[-1]
+        marker = create["response"]["metadata"][TOOL_FOLLOWUP_METADATA_KEY]
+        marked_ids = set(json.loads(marker))
+        assert len(marker) <= 512
+        assert marked_ids < call_ids
+        assert {event["item"]["call_id"] for event in conn.sent[:-1]} == call_ids
+
+        if settlement == "covered":
+            # Only the IDs that fit in the marker have already been answered.
+            coordinator.handle_event(
+                SimpleNamespace(
+                    type="error",
+                    error=SimpleNamespace(type=TOOL_FOLLOWUP_COVERED, code=None, event_id=create["event_id"]),
+                )
+            )
+            await wait_until(lambda: len(conn.sent) == len(call_ids) + 2)
+            create = conn.sent[-1]
+            assert set(json.loads(create["response"]["metadata"][TOOL_FOLLOWUP_METADATA_KEY])) == (
+                call_ids - marked_ids
+            )
+
+        # A server without the acknowledgement extension echoes request metadata.
+        # Acceptance covers every submitted result, even if the marker is partial.
+        coordinator.handle_event(response_created("response_tool", metadata=create["response"]["metadata"]))
+        assert not coordinator._queued_tool_results
+        coordinator.handle_event(
+            response_done(
+                "response_tool",
+                output=[SimpleNamespace(type="message")],
+                metadata=create["response"]["metadata"],
+            )
+        )
+        await asyncio.sleep(0.01)
+        assert len(conn.sent) == len(call_ids) + (2 if settlement == "covered" else 1)
+    finally:
+        await coordinator.close()
 
 
 async def test_audio_client_waits_for_all_tool_flushes_before_follow_up():
@@ -1177,7 +1352,8 @@ async def test_audio_client_waits_for_all_tool_flushes_before_follow_up():
     await coordinator.close()
 
 
-async def test_audio_client_waits_for_response_lifecycle_after_follow_up_collision():
+@pytest.mark.parametrize("user_turn", [False, True])
+async def test_audio_client_waits_for_response_lifecycle_after_follow_up_collision(user_turn):
     conn = RecordingConnection()
     coordinator = _ToolCallCoordinator(
         conn,
@@ -1186,6 +1362,8 @@ async def test_audio_client_waits_for_response_lifecycle_after_follow_up_collisi
     coordinator.handle_event(response_done(output=[function_call("call_1")]))
     await wait_until(lambda: len(conn.sent) == 2)
     create_id = conn.sent[-1]["event_id"]
+    if user_turn:
+        coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.speech_started", item_id="item_2"))
 
     coordinator.handle_event(
         SimpleNamespace(
@@ -1199,12 +1377,47 @@ async def test_audio_client_waits_for_response_lifecycle_after_follow_up_collisi
     )
     await asyncio.sleep(0.01)
     assert len(conn.sent) == 2
-    assert coordinator._queued_follow_ups == 1
+    assert len(coordinator._queued_tool_results) == 1
 
+    if user_turn:
+        coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.committed", item_id="item_2"))
     coordinator.handle_event(response_created("response_implicit"))
-    coordinator.handle_event(response_done("response_implicit"))
-    await wait_until(lambda: len(conn.sent) == 3)
-    assert conn.sent[-1]["type"] == "response.create"
+    coordinator.handle_event(
+        response_done(
+            "response_implicit",
+            output=[SimpleNamespace(type="message")],
+            metadata={TOOL_INPUT_METADATA_KEY: '["call_1"]'} if user_turn else None,
+        )
+    )
+    if user_turn:
+        # The answer to the turn started after the output, so it used it.
+        await asyncio.sleep(0.01)
+        assert len(conn.sent) == 2
+    else:
+        await wait_until(lambda: len(conn.sent) == 3)
+        assert conn.sent[-1]["type"] == "response.create"
+    await coordinator.close()
+
+
+@pytest.mark.parametrize("rejection", ["tool_followup_already_answered", "tool_followup_user_turn_open"])
+async def test_audio_client_handles_tool_followup_settlement(rejection):
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(
+        conn, RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=done_tool_executor)
+    )
+    coordinator.handle_event(response_done(output=[function_call("call_1")]))
+    await wait_until(lambda: len(conn.sent) == 2)
+    create_id = conn.sent[-1]["event_id"]
+    coordinator.handle_event(
+        SimpleNamespace(type="error", error=SimpleNamespace(type=rejection, code=None, event_id=create_id))
+    )
+    await asyncio.sleep(0.01)
+    assert len(conn.sent) == 2
+    if rejection == "tool_followup_user_turn_open":
+        coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.committed", item_id="item_2"))
+        await wait_until(lambda: len(conn.sent) == 3)
+    else:
+        assert len(coordinator._queued_tool_results) == 0
     await coordinator.close()
 
 
@@ -1330,7 +1543,7 @@ def test_audio_client_does_not_duplicate_partial_transcript_on_cancel(capsys):
     assert playback.buffered_bytes == 0
 
 
-async def test_audio_streams_are_cleaned_up_when_output_start_fails(monkeypatch):
+async def test_audio_streams_are_cleaned_up_when_output_start_fails(monkeypatch, capsys):
     events = []
     playback_args = []
 
@@ -1372,6 +1585,7 @@ async def test_audio_streams_are_cleaned_up_when_output_start_fails(monkeypatch)
             Event(),
         )
 
+    assert "Ready" not in capsys.readouterr().out
     assert playback_args == [(16000, 240)]
     assert events == [
         "input.start",
@@ -1484,3 +1698,117 @@ def test_talk_client_uses_signal_driven_shutdown(monkeypatch):
         (signal.SIGINT, "previous-SIGINT"),
         (signal.SIGTERM, "previous-SIGTERM"),
     ]
+
+
+def test_clean_conversation_has_colors_literal_text_and_no_blank_lines_between_turns():
+    from io import StringIO
+
+    from rich.console import Console
+    from rich.text import Text
+
+    output = StringIO()
+    terminal = Console(file=output, force_terminal=True, color_system="standard", no_color=False)
+    renderer = _FriendlyEventRenderer(conversation_only=True, console=terminal)
+    playback = PlaybackBuffer(16000)
+    events = [
+        SimpleNamespace(type="session.created"),
+        SimpleNamespace(type="session.updated"),
+        SimpleNamespace(type="session.updated"),
+    ]
+    for user, assistant in (("Hello [bold]", "Hi there!"), ("Thanks", "You're welcome.")):
+        events.extend(
+            [
+                SimpleNamespace(type="input_audio_buffer.speech_started"),
+                SimpleNamespace(type="conversation.item.input_audio_transcription.completed", transcript=user),
+                response_created("response_1"),
+                SimpleNamespace(type="response.output_audio_transcript.delta", delta=assistant),
+                SimpleNamespace(type="response.output_audio_transcript.done", transcript=assistant),
+                SimpleNamespace(type="response.output_audio.done"),
+                response_done(),
+            ]
+        )
+    for event in events:
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+
+    colored = output.getvalue()
+    assert "\x1b[33mUSER: Hello [bold]" in colored
+    assert "\x1b[32mASSISTANT: " in colored
+    assert Text.from_ansi(colored).plain == (
+        "Ready — start speaking.\nUSER: Hello [bold]\nASSISTANT: Hi there!\nUSER: Thanks\nASSISTANT: You're welcome.\n"
+    )
+
+
+async def test_ready_waits_for_audio_devices_and_session_acknowledgement(monkeypatch, capsys):
+    starts = []
+    stop = Event()
+
+    class Stream:
+        def __init__(self, name):
+            self.name = name
+
+        def start(self):
+            starts.append(self.name)
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    class Connection:
+        count = 0
+
+        async def recv(self):
+            assert starts == ["microphone", "speakers"]
+            self.count += 1
+            if self.count == 1:
+                assert capsys.readouterr().out == ""
+                return SimpleNamespace(type="session.created")
+            if self.count == 2:
+                assert capsys.readouterr().out == ""
+                return SimpleNamespace(type="session.updated")
+            assert capsys.readouterr().out == "Ready — start speaking.\n"
+            stop.set()
+            await asyncio.Future()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sounddevice",
+        SimpleNamespace(
+            RawInputStream=lambda **_: Stream("microphone"),
+            RawOutputStream=lambda **_: Stream("speakers"),
+        ),
+    )
+    await audio_client_module._run_audio_session(Connection(), RealtimeAudioClientConfig(), stop)
+
+
+def test_voice_status_is_rewritten_in_place_below_the_conversation():
+    from io import StringIO
+
+    from rich.console import Console
+
+    output = StringIO()
+    terminal = Console(file=output, force_terminal=True, no_color=True, width=40)
+    renderer = _FriendlyEventRenderer(conversation_only=True, console=terminal)
+    renderer.show_status("Voice [1/38]: default")
+    renderer.show_status("Voice [2/38]: Zoey — switching")
+    renderer.render_assistant_text_delta(
+        SimpleNamespace(delta="Hi.", response_id="r", item_id="i", output_index=0, content_index=0)
+    )
+    renderer.show_status("Voice [3/38]: Juniper — next reply")
+    renderer.finish_live_assistant_text()
+    renderer.clear_status()
+
+    clear = "\r\x1b[2K"
+    assert output.getvalue() == (
+        "Voice [1/38]: default"
+        f"{clear}Voice [2/38]: Zoey — switching"
+        f"{clear}ASSISTANT: Hi.\n"
+        f"Voice [3/38]: Juniper — next reply{clear}"
+    )
+
+
+def test_voice_status_prints_lines_without_a_terminal(capsys):
+    renderer = _FriendlyEventRenderer(conversation_only=False)
+    renderer.show_status("Voice [2/38]: Zoey — selected")
+    assert capsys.readouterr().out == "Voice [2/38]: Zoey — selected\n"

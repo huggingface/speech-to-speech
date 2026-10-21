@@ -15,10 +15,10 @@ from typing import Any, Literal, Optional, Sequence
 
 import nltk
 import torch
-from rich.console import Console
 from transformers import HfArgumentParser
 
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
+from speech_to_speech.arguments_classes.language_model_arguments import MLX_DEFAULT_LM_MODEL
 from speech_to_speech.arguments_classes.local_audio_arguments import LocalAudioArguments
 from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
 from speech_to_speech.arguments_classes.realtime_server_arguments import (
@@ -36,6 +36,7 @@ from speech_to_speech.backend_registry import (
     create_backend_handler,
 )
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.console import console, model_startup_output
 from speech_to_speech.pipeline.queue_types import (
     AudioInItem,
     AudioOutItem,
@@ -72,11 +73,9 @@ except (LookupError, OSError):
 CURRENT_DIR = Path(__file__).resolve().parent
 os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(CURRENT_DIR, "tmp")
 
-console = Console()
 logger = logging.getLogger(__name__)
 logging.getLogger("numba").setLevel(logging.WARNING)  # quiet down numba logs
 
-MLX_DEFAULT_LM_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
 OPENAI_TTS_PLAYBACK_BUFFER_MS = 196.0
 
 
@@ -319,14 +318,26 @@ def check_mac_settings(module_kwargs: ModuleArguments) -> None:
             logger.warning(
                 "For macOS users, it is recommended to use mlx-lm. You can activate it by passing --llm_backend mlx-lm."
             )
-        if module_kwargs.tts not in ("pocket", "kokoro", "omnivoice", "qwen3"):
+        if module_kwargs.tts not in ("pocket", "phonon", "kokoro", "omnivoice", "qwen3"):
             logger.warning(
                 "For macOS users, it is recommended to use qwen3 for TTS "
-                "(pocket, kokoro, and omnivoice are also valid options)."
+                "(pocket, phonon, kokoro, and omnivoice are also valid options)."
             )
 
 
+def validate_torch_num_threads(value: Any) -> None:
+    if value is not None and (type(value) is not int or value < 1):
+        raise ValueError(f"--torch_num_threads must be a positive integer; got {value!r}.")
+
+
+def apply_torch_num_threads(module_kwargs: ModuleArguments) -> None:
+    """Apply an explicit --torch_num_threads; with it unset, leave PyTorch's thread count alone."""
+    if module_kwargs.torch_num_threads is not None:
+        torch.set_num_threads(module_kwargs.torch_num_threads)
+
+
 def prepare_module_args(module_kwargs: ModuleArguments, llm_backend: BackendSelection) -> None:
+    validate_torch_num_threads(module_kwargs.torch_num_threads)
     if module_kwargs.diarization_model_name and module_kwargs.stt == "none":
         raise ValueError("Speaker-aware conversation requires an STT backend; --stt none does not produce transcripts.")
     if module_kwargs.diarization_model_name and not 0 < module_kwargs.diarization_threshold < 1:
@@ -380,6 +391,7 @@ def _build_handlers(
     speculative_turns: SpeculativeTurnTracker,
     cancel_scope: CancelScope,
     pipeline_index: int,
+    resource_ledger: list[Any] | None = None,
 ) -> list[Any]:
     """Build a handler chain: VAD → STT/AudioInput → LM → TTS."""
     from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
@@ -398,6 +410,12 @@ def _build_handlers(
             "speculative_turns": speculative_turns,
         },
     )
+
+    if resource_ledger is not None:
+        resource_ledger.append(vad)
+    # Loading Silero sets PyTorch to one thread for the whole process. Re-apply an explicit
+    # --torch_num_threads after every VAD build, before the other models load and warm up.
+    apply_torch_num_threads(module_kwargs)
 
     side_handlers: list[Any] = []
     if module_kwargs.diarization_model_name:
@@ -423,6 +441,8 @@ def _build_handlers(
             streaming_mode=module_kwargs.diarization_streaming_mode,
             threshold=module_kwargs.diarization_threshold,
         )
+        if resource_ledger is not None:
+            resource_ledger.append(diarizer)
         if diarizer.sample_rate != vad_handler_kwargs.sample_rate:
             raise ValueError("Diarization and VAD must use the same audio sample rate.")
         diarizer.warmup()
@@ -432,6 +452,10 @@ def _build_handlers(
             module_kwargs.diarization_streaming_mode,
         )
         vad.diarization_worker = DiarizationWorker(diarizer, stop_event)
+        if resource_ledger is not None:
+            # The worker takes ownership after all model preparation succeeds.
+            resource_ledger.remove(diarizer)
+            resource_ledger.append(vad.diarization_worker)
         side_handlers.append(vad.diarization_worker)
 
     needs_notifier = not stt_backend.spec.capabilities.bypasses_transcription_notifier
@@ -450,8 +474,13 @@ def _build_handlers(
         live_transcription_update_interval=module_kwargs.live_transcription_update_interval,
     )
     stt_handler = create_backend_handler(stt_backend, stt_context)
+    if resource_ledger is not None:
+        resource_ledger.append(stt_handler)
     if stt_backend.spec.capabilities.streams_audio_chunks:
         vad.streaming_stt_sink = stt_handler
+    if stt_backend.name == "openai" and stt_backend.config.get("max_window_s") is not None:
+        vad.transcription_window_samples = int(stt_backend.config["max_window_s"] * vad.sample_rate)
+        stt_handler.window_partials_enabled = module_kwargs.enable_live_transcription
     speech_input_handlers = [stt_handler]
     if needs_notifier:
         transcription_notifier = TranscriptionNotifier(
@@ -463,6 +492,8 @@ def _build_handlers(
                 "should_listen": should_listen,
             },
         )
+        if resource_ledger is not None:
+            resource_ledger.append(transcription_notifier)
         speech_input_handlers.append(transcription_notifier)
 
     def handler_context(queue_in: Queue[Any], queue_out: Queue[Any]) -> HandlerContext:
@@ -487,6 +518,9 @@ def _build_handlers(
         lm_context,
     )
 
+    if resource_ledger is not None:
+        resource_ledger.append(lm)
+
     lm_processor = LMOutputProcessor(
         stop_event,
         queue_in=lm_response_queue,
@@ -498,13 +532,38 @@ def _build_handlers(
         },
     )
 
-    tts_context = handler_context(lm_processed_queue, send_audio_chunks_queue)
+    if resource_ledger is not None:
+        resource_ledger.append(lm_processor)
+
+    tts_output_queue: Queue[AudioOutItem] = Queue() if module_kwargs.enable_visemes else send_audio_chunks_queue
+    tts_context = handler_context(lm_processed_queue, tts_output_queue)
     tts = create_backend_handler(
         tts_backend,
         tts_context,
     )
 
-    return [vad, *side_handlers, *speech_input_handlers, lm, lm_processor, tts]
+    if resource_ledger is not None:
+        resource_ledger.append(tts)
+
+    handlers = [vad, *side_handlers, *speech_input_handlers, lm, lm_processor, tts]
+    if module_kwargs.enable_visemes:
+        from speech_to_speech.STV.w2v_stv_handler import Wav2Vec2STVHandler
+
+        handlers.append(
+            Wav2Vec2STVHandler(
+                stop_event,
+                queue_in=tts_output_queue,
+                queue_out=send_audio_chunks_queue,
+                setup_kwargs={
+                    "model_name": module_kwargs.stv_model_name,
+                    "device": module_kwargs.device or module_kwargs.stv_device,
+                    "cancel_scope": cancel_scope,
+                },
+            )
+        )
+        if resource_ledger is not None:
+            resource_ledger.append(handlers[-1])
+    return handlers
 
 
 def _stt_session_languages(selection: BackendSelection, handler: Any) -> set[str] | None:
@@ -533,6 +592,7 @@ def _build_pipeline_unit(
     stt_backend: BackendSelection,
     llm_backend: BackendSelection,
     tts_backend: BackendSelection,
+    resource_ledger: list[Any] | None = None,
 ) -> "PipelineUnit":
     """Build one isolated pipeline with its own state and queues.
 
@@ -598,6 +658,7 @@ def _build_pipeline_unit(
         speculative_turns=speculative_turns,
         cancel_scope=cancel_scope,
         pipeline_index=index,
+        **({"resource_ledger": resource_ledger} if resource_ledger is not None else {}),
     )
     for h in handlers:
         h.pipeline_index = index
@@ -611,7 +672,8 @@ def _build_pipeline_unit(
         stt_selection.name == "openai-realtime" and isinstance(setup_language, str) and bool(setup_language.strip())
     )
 
-    tts_module = modules[type(handlers[-1]).__module__]
+    tts_handler = handlers[-2] if module_kwargs.enable_visemes else handlers[-1]
+    tts_module = modules[type(tts_handler).__module__]
     if tts_selection.name == "kokoro":
         service.tts_supported_languages = {"en", "ja", "zh", "fr", "es", "it", "pt", "hi"}
     elif tts_selection.name == "facebookMMS":
@@ -622,6 +684,11 @@ def _build_pipeline_unit(
         service.tts_supported_languages = {code for code in tts_module.QWEN3_LANGUAGE_ALIASES if len(code) == 2}
     elif tts_selection.name in {"chatTTS", "pocket"}:
         service.tts_supported_languages = set()
+    elif tts_selection.name == "phonon":
+        # The preview runtime fixes text normalization at model load. Allow
+        # the configured language, but reject session changes we cannot honor.
+        language = tts_handler.language
+        service.tts_supported_languages = {language} if language != "none" else set()
 
     return PipelineUnit(
         index=index,
@@ -696,16 +763,32 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
     if local_audio.local_audio_tool_module:
         tools, tool_executor, tool_response_create = load_realtime_tool_module(local_audio.local_audio_tool_module)
     server_manager = build_pipeline(args, stop_event, host="127.0.0.1")
+    voice_choices: list[str] = []
+    voice = None
+    if args.tts_backend.name == "phonon":
+        from speech_to_speech.TTS.phonon_tts_handler import PhononTTSHandler
+
+        for handler in server_manager.handlers:
+            if isinstance(handler, PhononTTSHandler):
+                voice_choices = list(handler.voices)
+                if "default" in voice_choices:
+                    voice_choices.remove("default")
+                    voice_choices.insert(0, "default")
+                voice = handler.voice
+                break
     client = RealtimeAudioClient(
         stop_event,
         RealtimeAudioClientConfig(
             url=f"ws://127.0.0.1:{args.realtime_server_kwargs.port}/v1/realtime",
             api_key="local",
+            voice=voice,
+            voice_choices=voice_choices,
             chunk_size=local_audio.local_audio_chunk_size,
             playback_buffer_ms=playback_buffer_ms,
             input_device=local_audio.local_audio_input_device,
             output_device=local_audio.local_audio_output_device,
             print_json=local_audio.local_audio_print_json,
+            verbose=local_audio.verbose,
             block_mic_during_playback=local_audio.local_audio_block_mic_during_playback,
             tools=tools,
             tool_executor=tool_executor,
@@ -719,6 +802,18 @@ def run_pipeline_command(command: Literal["serve", "local"], argv: Sequence[str]
     """Run the server alone or compose it with the loopback audio client."""
 
     args = parse_arguments(argv, command=command)
+
+    from speech_to_speech.pipeline.console import conversation_output
+
+    conversation_only = command == "local" and not (
+        args.local_audio_kwargs.verbose or args.local_audio_kwargs.local_audio_print_json
+    )
+    with conversation_output(conversation_only):
+        _run_parsed_pipeline_command(command, args)
+
+
+def _run_parsed_pipeline_command(command: Literal["serve", "local"], args: ParsedArguments) -> None:
+    """Run a parsed command with its terminal display policy already applied."""
 
     setup_logger(args.module_kwargs.log_level)
     # Set the transcript gate and warn before any conversation is processed, so an operator
@@ -744,9 +839,10 @@ def run_pipeline_command(command: Literal["serve", "local"], argv: Sequence[str]
         args.module_kwargs.enable_live_transcription = False
 
     stop_event = Event()
-    pipeline_manager = (
-        build_local_pipeline(args, stop_event) if command == "local" else build_pipeline(args, stop_event)
-    )
+    with model_startup_output(command == "local" and console.quiet):
+        pipeline_manager = (
+            build_local_pipeline(args, stop_event) if command == "local" else build_pipeline(args, stop_event)
+        )
 
     # Set up graceful shutdown handler
     shutdown_requested = [False]  # Use list for nonlocal mutation

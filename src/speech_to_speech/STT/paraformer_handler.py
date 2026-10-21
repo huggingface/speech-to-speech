@@ -1,20 +1,19 @@
 from __future__ import annotations
 
 import logging
+from time import perf_counter
 from typing import Any, Iterator
 
 import numpy as np
 import torch
-from rich.console import Console
 
+from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
 
 logger = logging.getLogger(__name__)
-
-console = Console()
 
 
 class ParaformerSTTHandler(BaseSTTHandler):
@@ -57,6 +56,7 @@ class ParaformerSTTHandler(BaseSTTHandler):
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         logger.debug("infering paraformer...")
 
+        started_at_s = perf_counter()
         pred_text = self.model.generate(vad_audio.audio)[0]["text"].strip().replace(" ", "")
         # Same idea as ChatTTSHandler: MPS cache clear only on Apple Silicon.
         if self.device == "mps":
@@ -71,11 +71,13 @@ class ParaformerSTTHandler(BaseSTTHandler):
                 turn_id=vad_audio.turn_id,
                 turn_revision=vad_audio.turn_revision,
             )
-        else:
-            yield Transcription(
-                text=pred_text,
-                language_code=self.language,
-                turn_id=vad_audio.turn_id,
-                turn_revision=vad_audio.turn_revision,
-                speech_stopped_at_s=vad_audio.speech_end_at_s,
-            )
+            return
+
+        self._record_final_stt(vad_audio, perf_counter() - started_at_s)
+        yield Transcription(
+            text=pred_text,
+            language_code=self.language,
+            turn_id=vad_audio.turn_id,
+            turn_revision=vad_audio.turn_revision,
+            speech_stopped_at_s=vad_audio.speech_end_at_s,
+        )

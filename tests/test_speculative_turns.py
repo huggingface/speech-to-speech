@@ -15,6 +15,7 @@ from speech_to_speech.VAD.smart_turn import SmartTurnResult
 from speech_to_speech.VAD.vad_handler import VADHandler
 from speech_to_speech.VAD.vad_iterator import VADIterator
 from tests.test_vad_iterator import _FakeVADModel
+from tests.turns import reopen
 
 ACCEPT, DROP, HOLD = TurnGateAction.ACCEPT, TurnGateAction.DROP, TurnGateAction.HOLD
 
@@ -74,33 +75,6 @@ def test_newer_conversation_order_supersedes_uncommitted_turn():
     assert tracker.is_latest("turn_2", 0)
 
 
-def test_new_turn_drops_inflight_uncommitted_generation():
-    tracker = SpeculativeTurnTracker()
-    tracker.start_turn()
-    generation_started = Event()
-    generation_finished = Event()
-    accepted_outputs: list[str] = []
-
-    def finish_slow_generation():
-        generation_started.set()
-        assert generation_finished.wait(timeout=1.0)
-        if tracker.is_latest("turn_1", 0):
-            accepted_outputs.append("stale turn_1 reply")
-
-    thread = Thread(target=finish_slow_generation)
-    thread.start()
-    assert generation_started.wait(timeout=1.0)
-
-    tracker.start_turn()
-    generation_finished.set()
-    thread.join(timeout=1.0)
-    if tracker.is_latest("turn_2", 0):
-        accepted_outputs.append("current turn_2 reply")
-
-    assert not thread.is_alive()
-    assert accepted_outputs == ["current turn_2 reply"]
-
-
 def test_reopen_revision_does_not_advance_turn_sequence():
     tracker = SpeculativeTurnTracker()
     tracker.start_turn()
@@ -120,6 +94,7 @@ def test_late_commit_from_superseded_turn_is_rejected():
 
     assert not tracker.wait_for_gate("turn_1", 0, commit=True)
     assert not tracker.is_committed("turn_1", 0)
+    assert tracker.is_latest("turn_2", 0)
 
 
 def test_committed_turn_remains_valid_after_conversation_advances():
@@ -164,14 +139,14 @@ def test_closed_current_turn_accepts_followups_but_cannot_reopen():
     assert tracker.gate("turn_1", 0, commit=True).action is ACCEPT
     assert tracker.phase == TurnPhase.ANSWERING
 
-    # The observe adapter cannot revise either an accepted or a closed turn.
-    tracker.observe("turn_1", 1)
+    # Neither an accepted nor a closed turn can reopen.
+    assert tracker.begin_reopen_candidate("turn_1", 0) is None
     assert tracker.current_turn() == ("turn_1", 0)
     assert tracker.wait_for_gate("turn_1", 1, commit=True) is False
     assert not tracker.is_committed("turn_1", 1)
     tracker.close("turn_1", 0)
     assert tracker.phase == TurnPhase.CLOSED
-    tracker.observe("turn_1", 1)
+    assert tracker.begin_reopen_candidate("turn_1", 0) is None
     assert tracker.current_turn() == ("turn_1", 0)
     assert tracker.wait_for_gate("turn_1", 1, commit=True) is False
     assert not tracker.is_committed("turn_1", 1)
@@ -256,7 +231,7 @@ def test_starting_new_turn_clears_pending_reopen():
 
 def test_pending_reopen_hold_expires_without_clearing_candidate(clock):
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
     assert tracker.gate("turn_1", 0, hold_for_grace=False).action is HOLD
 
@@ -270,7 +245,7 @@ def test_pending_reopen_hold_expires_without_clearing_candidate(clock):
 
 def test_committing_wait_drops_confirmed_reopen():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
 
     assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
@@ -280,7 +255,7 @@ def test_committing_wait_drops_confirmed_reopen():
 
 def test_committing_wait_commits_after_pending_reopen_is_cancelled():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
 
     tracker.cancel_reopen_candidate("turn_1", candidate_revision)
@@ -291,7 +266,7 @@ def test_committing_wait_commits_after_pending_reopen_is_cancelled():
 
 def test_gate_holds_for_reopen_grace_without_blocking():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     tracker.start_reopen_grace("turn_1", 0, grace_s=0.05)
 
     assert tracker.gate("turn_1", 0, commit=True).action is HOLD
@@ -304,7 +279,7 @@ def test_gate_holds_for_reopen_grace_without_blocking():
 
 def test_reopen_grace_wait_drops_confirmed_reopen():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     tracker.start_reopen_grace("turn_1", 0, grace_s=0.2)
     result: dict[str, bool] = {}
 
@@ -325,7 +300,7 @@ def test_reopen_grace_wait_drops_confirmed_reopen():
 
 def test_processing_hold_catches_reopen_started_during_wait():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
 
     def reopen_turn():
         time.sleep(0.02)
@@ -341,7 +316,7 @@ def test_processing_hold_catches_reopen_started_during_wait():
 
 def test_processing_hold_survives_cancelled_reopen_candidate():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     started = Event()
     result: list[bool] = []
 
@@ -367,27 +342,6 @@ def test_processing_hold_survives_cancelled_reopen_candidate():
     assert result == [True]
 
 
-def test_commit_after_reset_does_not_resurrect_untracked_turn():
-    tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
-    tracker.reset()
-
-    tracker.wait_for_gate("turn_1", 0, commit=True)
-
-    assert not tracker.is_committed("turn_1", 0)
-
-
-def test_commit_after_new_turn_does_not_resurrect_superseded_turn():
-    tracker = SpeculativeTurnTracker()
-    tracker.start_turn()
-    tracker.start_turn()
-
-    tracker.wait_for_gate("turn_1", 0, commit=True)
-
-    assert not tracker.is_committed("turn_1", 0)
-    assert tracker.is_latest("turn_2", 0)
-
-
 @pytest.mark.parametrize(
     "accept",
     [
@@ -401,7 +355,7 @@ def test_untracked_turn_cannot_be_accepted(accept):
     assert not tracker.is_latest("turn_1", 0)
     assert tracker.is_latest(None, None)
     assert accept(tracker) is False
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     tracker.reset()
 
     assert accept(tracker) is False
@@ -410,11 +364,11 @@ def test_untracked_turn_cannot_be_accepted(accept):
 
 def test_reused_turn_id_after_reset_is_not_reported_as_committed():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     tracker.reset()
     tracker.wait_for_gate("turn_1", 0, commit=True)
 
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
 
     assert not tracker.is_committed("turn_1", 0)
     assert tracker.begin_reopen_candidate("turn_1", 0) == 1
@@ -470,7 +424,7 @@ def test_push_to_talk_pause_expires_output_hold_without_advancing_audio_cap(cloc
 
 def test_vad_direct_reopen_path_uses_tracker_candidate_protocol():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     handler = object.__new__(VADHandler)
     handler.enable_realtime_transcription = True
     handler._speech_started_emitted = False
@@ -489,7 +443,7 @@ def test_vad_direct_reopen_path_uses_tracker_candidate_protocol():
 
 def test_vad_reopens_speculative_turn_when_live_transcription_disabled():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     handler = object.__new__(VADHandler)
     handler.enable_realtime_transcription = False
     handler._speech_started_emitted = False
@@ -507,7 +461,7 @@ def test_vad_reopens_speculative_turn_when_live_transcription_disabled():
 
 def test_vad_starts_new_turn_after_committed_turn_would_have_reopened():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     tracker.wait_for_gate("turn_1", 0, commit=True)
     handler = object.__new__(VADHandler)
     handler.enable_realtime_transcription = False
@@ -650,7 +604,7 @@ def test_vad_pending_reopen_starts_before_active_speech_threshold():
     )
     handler = _vad_handler_for_iterator(iterator)
     tracker = handler.speculative_turns
-    tracker.observe("turn_1", 0)
+    tracker.start_turn()
     tracker.segment_finalized(0)
 
     assert list(handler.process(_audio_bytes())) == []
@@ -1423,7 +1377,8 @@ def test_vad_drops_pending_timing_with_superseded_final_audio():
     handler = object.__new__(VADHandler)
     handler.queue_out = Queue()
     handler.speculative_turns = SpeculativeTurnTracker()
-    handler.speculative_turns.observe("turn_1", 1)
+    handler.speculative_turns.start_turn()
+    reopen(handler.speculative_turns)
     handler.turn_latency_store = TurnLatencyStore()
     old = handler.turn_latency_store.get_or_create_for_turn("turn_1", 0)
     old.vad_decision_s = 0.3
@@ -1438,7 +1393,8 @@ def test_vad_drops_pending_timing_with_superseded_final_audio():
 
 def test_vad_drops_stale_progressive_revisions_from_output_queue():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("turn_1", 1)
+    tracker.start_turn()
+    reopen(tracker)
     handler = object.__new__(VADHandler)
     handler.queue_out = Queue()
     handler.speculative_turns = tracker

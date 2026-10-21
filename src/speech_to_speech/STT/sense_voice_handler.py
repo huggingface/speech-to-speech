@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 import logging
+from time import perf_counter
 from typing import Any, Iterator
 
 import numpy as np
 import torch
-from rich.console import Console
 
+from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 
 logger = logging.getLogger(__name__)
-console = Console()
 
 
 class SenseVoiceSTTHandler(BaseSTTHandler):
@@ -62,6 +62,7 @@ class SenseVoiceSTTHandler(BaseSTTHandler):
             torch.mps.empty_cache()
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
+        started_at_s = perf_counter()
         pred_text = self._generate(vad_audio.audio)
         self._empty_cache()
         console.print(f"[yellow]USER: {pred_text}")
@@ -72,10 +73,12 @@ class SenseVoiceSTTHandler(BaseSTTHandler):
                 turn_id=vad_audio.turn_id,
                 turn_revision=vad_audio.turn_revision,
             )
-        else:
-            yield Transcription(
-                text=pred_text,
-                turn_id=vad_audio.turn_id,
-                turn_revision=vad_audio.turn_revision,
-                speech_stopped_at_s=vad_audio.speech_end_at_s,
-            )
+            return
+
+        self._record_final_stt(vad_audio, perf_counter() - started_at_s)
+        yield Transcription(
+            text=pred_text,
+            turn_id=vad_audio.turn_id,
+            turn_revision=vad_audio.turn_revision,
+            speech_stopped_at_s=vad_audio.speech_end_at_s,
+        )

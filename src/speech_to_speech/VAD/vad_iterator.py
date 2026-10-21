@@ -2,6 +2,9 @@ from collections import deque
 
 import torch
 
+# Bound noise history while idle, independently of the utterance-end delay.
+_MODEL_RESET_IDLE_MS = 500
+
 
 class VADIterator:
     def __init__(
@@ -50,10 +53,12 @@ class VADIterator:
 
         self.min_silence_samples = int(sampling_rate * min_silence_duration_ms / 1000)
         self.speech_pad_samples = int(sampling_rate * speech_pad_ms / 1000)
+        self._model_reset_idle_samples = int(sampling_rate * _MODEL_RESET_IDLE_MS / 1000)
         self.reset_states()
 
     def reset_states(self) -> None:
         self.model.reset_states()
+        self._model_idle_samples = 0
         self.triggered = False
         self.temp_end = 0
         self.last_speech_end_sample: int | None = None
@@ -129,6 +134,7 @@ class VADIterator:
         speech_prob = self.model(x, self.sampling_rate).item()
 
         if (speech_prob >= self.threshold) and not self.triggered:
+            self._model_idle_samples = 0
             self.triggered = True
             self.prefix_buffer = list(self._pre_speech_buffer)
             self._pre_speech_buffer.clear()
@@ -140,6 +146,15 @@ class VADIterator:
 
         if not self.triggered:
             self._remember_pre_speech(x)
+            if speech_prob < self.threshold - 0.15:
+                self._model_idle_samples += window_size_samples
+                if self._model_idle_samples >= self._model_reset_idle_samples:
+                    # Reset inference history only: padding and the session
+                    # sample clock must survive for the next speech segment.
+                    self.model.reset_states()
+                    self._model_idle_samples = 0
+            else:
+                self._model_idle_samples = 0
             return None
 
         if self.triggered:
@@ -166,6 +181,8 @@ class VADIterator:
                 self.active_speech_samples = 0
                 self.buffer = []
                 self.prefix_buffer = []
+                self.model.reset_states()
+                self._model_idle_samples = 0
                 return spoken_utterance
 
         return None

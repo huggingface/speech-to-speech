@@ -5,6 +5,7 @@ validated for correct type, attributes, and state transitions.
 """
 
 import base64
+import hashlib
 import json
 from queue import Queue
 from threading import Event, Thread
@@ -54,6 +55,7 @@ from speech_to_speech.api.openai_realtime.service import (
     SpeechToSpeechInputAudioTranscriptionSnapshotEvent,
 )
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
+from speech_to_speech.LLM.tool_call.function_call import FunctionToolCall
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
@@ -78,6 +80,7 @@ from speech_to_speech.pipeline.messages import (
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnPhase
 from speech_to_speech.pipeline.turn_latency import TURN_LATENCY_METADATA_KEY
+from tests.turns import reopen
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1727,14 +1730,6 @@ class TestHandleResponseCreate:
             ),
         )
         prefetch = text_prompt_queue.get_nowait()
-        nested_call = RealtimeConversationItemFunctionCall(
-            type="function_call",
-            id="fc_nested",
-            call_id="call_nested",
-            name="nested",
-            arguments="{}",
-        )
-        assert st.runtime_config.chat.add_provisional_generation_items(prefetch.response_key, [nested_call]) is not None
         service.finish_response(conn_id, response_key=origin_key)
 
         created = service.handle_response_create(
@@ -1909,9 +1904,13 @@ class TestHandleResponseCreate:
         assert req.response.tool_choice == "auto"
         assert req.runtime_config is runtime_config
 
-    def test_response_create_preserves_latest_user_turn_timing(self, service, conn_id, text_prompt_queue):
+    def test_response_create_preserves_ownership_without_reusing_answered_speech_timing(
+        self, service, conn_id, text_prompt_queue
+    ):
         service.speculative_turns = SpeculativeTurnTracker()
-        service.speculative_turns.observe("turn_1", 2)
+        service.speculative_turns.start_turn()
+        reopen(service.speculative_turns)
+        reopen(service.speculative_turns, "turn_1", 1)
         service.dispatch_pipeline_event(
             conn_id,
             TranscriptionCompletedEvent(
@@ -1937,13 +1936,13 @@ class TestHandleResponseCreate:
         assert isinstance(followup_req, GenerateResponseRequest)
         assert followup_req.turn_id == "turn_1"
         assert followup_req.turn_revision == 2
-        assert followup_req.speech_stopped_at_s == 123.0
+        assert followup_req.speech_stopped_at_s is None
 
     @pytest.mark.parametrize(
         "new_input",
         ["none", "conversation_item", "response_input"],
     )
-    def test_response_create_uses_current_language_without_losing_speech_timing(
+    def test_response_create_uses_current_language_without_reusing_speech_timing(
         self, service, conn_id, runtime_config, text_prompt_queue, new_input
     ):
         def select_language(language):
@@ -1958,7 +1957,9 @@ class TestHandleResponseCreate:
             )
 
         service.speculative_turns = SpeculativeTurnTracker()
-        service.speculative_turns.observe("turn_1", 2)
+        service.speculative_turns.start_turn()
+        reopen(service.speculative_turns)
+        reopen(service.speculative_turns, "turn_1", 1)
         assert select_language("es") is None
         service.dispatch_pipeline_event(
             conn_id,
@@ -2000,9 +2001,9 @@ class TestHandleResponseCreate:
         response = service.handle_response_create(conn_id, create_event)
         assert isinstance(response, ResponseCreatedEvent)
         request = text_prompt_queue.get_nowait()
-        # Client text is new input without a speech-turn association. Only
-        # a create over the unchanged spoken input inherits its timing.
-        expected = ("turn_1", 2, 123.0) if new_input == "none" else (None, None, None)
+        # Keep generation ownership for the unchanged input, but a completed
+        # speech answer cannot lend its E2E anchor to an independent create.
+        expected = ("turn_1", 2, None) if new_input == "none" else (None, None, None)
         assert (request.turn_id, request.turn_revision, request.speech_stopped_at_s) == expected
 
         processor = LMOutputProcessor.__new__(LMOutputProcessor)
@@ -2502,6 +2503,120 @@ class TestEncodeAudioChunk:
 
 
 class TestFinishAudioResponse:
+    @pytest.mark.parametrize(
+        "status,empty,out_of_band",
+        [
+            ("completed", False, False),
+            ("completed", True, False),
+            ("cancelled", False, False),
+            ("incomplete", False, False),
+            ("failed", False, False),
+            ("completed", False, True),
+        ],
+    )
+    def test_tool_followup_checks_completed_model_input(
+        self, service, conn_id, text_prompt_queue, status, empty, out_of_band
+    ):
+        from speech_to_speech.api.openai_realtime.tool_followup import (
+            TOOL_FOLLOWUP_ACK_LIMIT,
+            TOOL_FOLLOWUP_COVERED,
+            TOOL_FOLLOWUP_METADATA_KEY,
+            TOOL_INPUT_METADATA_KEY,
+        )
+        from speech_to_speech.pipeline.messages import AssistantTextPart
+
+        st = service._state(conn_id)
+        call = RealtimeConversationItemFunctionCall(
+            type="function_call", call_id="call_1", name="lookup", arguments="{}"
+        )
+        st.runtime_config.chat.add_item(call)
+        service.handle_conversation_item_create(
+            conn_id,
+            ConversationItemCreateEvent(
+                type="conversation.item.create",
+                item={"type": "function_call_output", "call_id": "call_1", "output": "flights"},
+            ),
+        )
+        created = service.handle_response_create(
+            conn_id,
+            ResponseCreateEvent(
+                type="response.create",
+                response={
+                    "metadata": {TOOL_INPUT_METADATA_KEY: '["forged"]'},
+                    "conversation": "none" if out_of_band else "auto",
+                },
+            ),
+        )
+        assert TOOL_INPUT_METADATA_KEY not in (created.response.metadata or {})
+        request = text_prompt_queue.get_nowait()
+        if not empty:
+            service.dispatch_pipeline_event(
+                conn_id,
+                AssistantOutputEvent(
+                    response_key=request.response_key,
+                    parts=[AssistantTextPart(text="Flights are ready.")],
+                ),
+            )
+        service.dispatch_pipeline_event(
+            conn_id,
+            AssistantResponseDoneEvent(
+                response_key=request.response_key,
+                input_tool_call_ids=["call_1"],
+            ),
+        )
+        if status == "completed" and not empty and not out_of_band:
+            # Acknowledgements stay bounded even when history no longer retains them.
+            st.answered_tool_call_ids = {f"old_{i}": None for i in range(TOOL_FOLLOWUP_ACK_LIMIT)}
+        terminal = service.finish_response(conn_id, status=status, response_key=request.response_key)
+        done = next(event for event in terminal if isinstance(event, ResponseDoneEvent))
+        assert (done.response.metadata or {}).get(TOOL_INPUT_METADATA_KEY) == (
+            '["call_1"]' if status == "completed" and not out_of_band else None
+        )
+        followup = ResponseCreateEvent(
+            type="response.create",
+            response={
+                "metadata": {TOOL_FOLLOWUP_METADATA_KEY: '["call_1"]'},
+            },
+        )
+        result = service.handle_response_create(conn_id, followup)
+        if status == "completed" and not empty and not out_of_band:
+            # The client create may arrive only after the answer finished.
+            assert result.error.type == TOOL_FOLLOWUP_COVERED
+            assert len(st.answered_tool_call_ids) == TOOL_FOLLOWUP_ACK_LIMIT
+            assert "old_0" not in st.answered_tool_call_ids
+            assert "call_1" in st.answered_tool_call_ids
+            assert text_prompt_queue.empty()
+            # Explicit requests remain valid even when they repeat context.
+            assert isinstance(
+                service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create")),
+                ResponseCreatedEvent,
+            )
+        else:
+            assert isinstance(result, ResponseCreatedEvent)
+        request = text_prompt_queue.get_nowait()
+        service.finish_response(conn_id, response_key=request.response_key)
+
+    def test_tool_followup_waits_for_open_input(self, service, conn_id, text_prompt_queue):
+        from speech_to_speech.api.openai_realtime.tool_followup import (
+            TOOL_FOLLOWUP_METADATA_KEY,
+            TOOL_FOLLOWUP_WAIT,
+        )
+
+        # A create sent before speech_started can reach the server during speech.
+        service.speculative_turns = SpeculativeTurnTracker()
+        turn_id, revision = service.speculative_turns.start_turn()
+        followup = ResponseCreateEvent(
+            type="response.create",
+            response={"metadata": {TOOL_FOLLOWUP_METADATA_KEY: '["not_yet_answered"]'}},
+        )
+        result = service.handle_response_create(conn_id, followup)
+        assert result.error.type == TOOL_FOLLOWUP_WAIT
+        assert text_prompt_queue.empty()
+        service.speculative_turns.segment_finalized(100)
+        assert service.speculative_turns.wait_for_gate(turn_id, revision, commit=True)
+        service.speculative_turns.close(turn_id, revision)
+        assert isinstance(service.handle_response_create(conn_id, followup), ResponseCreatedEvent)
+
     def test_finish_without_audio_emits_only_response_done(self, service, conn_id):
         service.response._ensure_response(conn_id)
         events = service.finish_response(conn_id)
@@ -2558,6 +2673,7 @@ class TestFinishAudioResponse:
         assert done.response.metadata["client-key"] == "client-value"
         assert json.loads(done.response.metadata[TURN_LATENCY_METADATA_KEY]) == {
             "version": 2,
+            "source": None,
             "turn_id": "turn_3",
             "turn_revision": 2,
             "response_key": response_key,
@@ -2579,7 +2695,8 @@ class TestFinishAudioResponse:
         if reserved:
             metadata[TURN_LATENCY_METADATA_KEY] = "client-value-must-not-win"
         service.speculative_turns = SpeculativeTurnTracker()
-        service.speculative_turns.observe("turn_1", 1)
+        service.speculative_turns.start_turn()
+        reopen(service.speculative_turns)
         service.dispatch_pipeline_event(
             conn_id, TranscriptionCompletedEvent(transcript="Hello", turn_id="turn_1", turn_revision=1)
         )
@@ -2655,7 +2772,14 @@ class TestFinishAudioResponse:
 
         events = service.finish_response(conn_id, status=status)
         done = next(event for event in events if isinstance(event, ResponseDoneEvent))
-        assert json.loads(done.model_dump_json())["response"]["metadata"] == (client_metadata or None)
+        wire_metadata = json.loads(done.model_dump_json())["response"]["metadata"] or {}
+        if conversation == "auto":
+            record = json.loads(wire_metadata.pop(TURN_LATENCY_METADATA_KEY))
+            assert record["source"] == "client"
+            assert record["turn_id"] is None
+            assert record["e2e_s"] is None
+            assert record["status"] == status
+        assert wire_metadata == client_metadata
         assert created.response.metadata == metadata
         assert service.turn_latency_store._trackers == {}
 
@@ -2685,6 +2809,55 @@ class TestResponseDoneOutputItems:
     calls from response.done (rather than only the incremental
     response.function_call_arguments.done event) never see them.
     """
+
+    def test_generated_tool_call_accepts_livekit_output_and_followup(self, service, conn_id, text_prompt_queue):
+        tool = (
+            FunctionToolCall(function_name="lookup", parameters={}, original_string="lookup()")
+            .to_realtime_function_tool_call()
+            .model_copy(update={"status": "completed"})
+        )
+        chat = service._state(conn_id).runtime_config.chat
+        call = RealtimeConversationItemFunctionCall.model_validate(tool.model_dump())
+        chat.add_ordered_function_call(call)
+        stream_events = service.dispatch_pipeline_event(conn_id, AssistantOutputEvent(tools=[tool]))
+        done = next(e for e in service.finish_response(conn_id) if isinstance(e, ResponseDoneEvent))
+        emitted_call = next(item for item in done.response.output if item.type == "function_call")
+        assert emitted_call.call_id == tool.call_id
+        for event in stream_events:
+            if isinstance(event, ResponseFunctionCallArgumentsDoneEvent):
+                assert event.call_id == tool.call_id
+                assert event.item_id == tool.id
+            elif isinstance(event, (ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent)):
+                assert event.item.call_id == tool.call_id
+                assert event.item.id == tool.id
+
+        # LiveKit Agents 1.8.5's _shorten_call_id hashes IDs longer than 32 characters.
+        output_call_id = emitted_call.call_id
+        if len(output_call_id) > 32:
+            output_call_id = hashlib.sha256(output_call_id.encode()).hexdigest()[:32]
+        result = service.handle_conversation_item_create(
+            conn_id,
+            ConversationItemCreateEvent(
+                type="conversation.item.create",
+                item={"type": "function_call_output", "call_id": output_call_id, "output": "sunny"},
+            ),
+        )
+        assert len(result) == 1 and isinstance(result[0], ConversationItemCreatedEvent)
+        assert output_call_id == tool.call_id
+        assert len(tool.call_id) <= 32
+        assert chat.buffer[-1].call_id == tool.call_id
+        assert not chat.has_pending_tool_calls()
+        assert not chat._ordered_pending_calls
+
+        result = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
+        assert isinstance(result, ResponseCreatedEvent)
+        request = text_prompt_queue.get_nowait()
+        assert isinstance(request, GenerateResponseRequest)
+        assert request.runtime_config.chat.tool_output_call_ids() == [tool.call_id]
+        service.dispatch_pipeline_event(conn_id, AssistantOutputEvent(text="It is sunny."))
+        followup_done = next(e for e in service.finish_response(conn_id) if isinstance(e, ResponseDoneEvent))
+        assert followup_done.response.status == "completed"
+        assert followup_done.response.output[0].content[0].transcript == "It is sunny."
 
     def test_output_includes_function_call_item(self, service, conn_id):
         service.dispatch_pipeline_event(
@@ -3118,7 +3291,8 @@ class TestDispatchPipelineEvent:
             conn_id,
             SpeechStartedEvent(turn_id="turn_1", turn_revision=0),
         )
-        tracker.observe("turn_1", 1)
+        tracker.start_turn()
+        reopen(tracker)
 
         events = service.dispatch_pipeline_event(
             conn_id,
@@ -3977,7 +4151,7 @@ class TestDispatchPipelineEvent:
         service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
         conn_id = service.register()
         service._state(conn_id).runtime_config = runtime_config
-        tracker.observe("turn_1", 0)
+        tracker.start_turn()
         candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
         event = AssistantOutputEvent(text="stale", turn_id="turn_1", turn_revision=0)
 
@@ -4093,7 +4267,7 @@ class TestDispatchPipelineEvent:
         service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
         conn_id = service.register()
         service._state(conn_id).runtime_config = runtime_config
-        tracker.observe("turn_1", 0)
+        tracker.start_turn()
         candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
         event = AssistantOutputEvent(text="latest", turn_id="turn_1", turn_revision=0)
 
@@ -4117,7 +4291,7 @@ class TestDispatchPipelineEvent:
         service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
         conn_id = service.register()
         service._state(conn_id).runtime_config = runtime_config
-        tracker.observe("turn_1", 0)
+        tracker.start_turn()
         candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
         done = Event()
         result = {}
@@ -4148,7 +4322,7 @@ class TestDispatchPipelineEvent:
         service = RealtimeService(should_listen=should_listen, speculative_turns=tracker)
         conn_id = service.register()
         service._state(conn_id).runtime_config = runtime_config
-        tracker.observe("turn_1", 0)
+        tracker.start_turn()
         tracker.start_reopen_grace("turn_1", 0, grace_s=0.2)
         event = AssistantOutputEvent(text="latest", turn_id="turn_1", turn_revision=0)
 
@@ -4742,7 +4916,7 @@ class TestDispatchPipelineEvent:
             TranscriptionCompletedEvent(transcript="hello", turn_id=turn_id, turn_revision=0),
         )
 
-        tracker.observe(turn_id, 1)
+        reopen(tracker, turn_id)
         service.dispatch_pipeline_event(
             conn_id,
             SpeechStartedEvent(turn_id=turn_id, turn_revision=1, reopened=True),
@@ -4794,7 +4968,7 @@ class TestDispatchPipelineEvent:
             TranscriptionCompletedEvent(transcript="hello", turn_id="turn_1", turn_revision=0),
         )
 
-        tracker.observe("turn_1", 1)
+        reopen(tracker)
         service.dispatch_pipeline_event(
             conn_id,
             SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True),
@@ -4895,7 +5069,7 @@ class TestDispatchPipelineEvent:
             SpeechStoppedEvent(duration_s=1.0, turn_id="turn_1", turn_revision=0),
         )
 
-        tracker.observe("turn_1", 1)
+        reopen(tracker)
         second_started = service.dispatch_pipeline_event(
             conn_id,
             SpeechStartedEvent(turn_id="turn_1", turn_revision=1, reopened=True),
@@ -4962,7 +5136,8 @@ class TestDispatchPipelineEvent:
         )
         conn_id = service.register()
         service._state(conn_id).runtime_config = runtime_config
-        tracker.observe("turn_1", 1)
+        tracker.start_turn()
+        reopen(tracker)
 
         events = service.dispatch_pipeline_event(
             conn_id,

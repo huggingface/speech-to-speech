@@ -5,7 +5,7 @@ from collections import defaultdict
 from collections.abc import Collection
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from threading import Lock
 from typing import Literal
 
@@ -32,6 +32,48 @@ def bind_active_turn_latency_tracker(tracker: TurnLatencyTracker | None):
 
 
 @dataclass
+class MLXLockStat:
+    """Per-handler MLX lock total, with the number of acquisitions behind it."""
+
+    total_s: float = 0.0
+    count: int = 0
+
+    def add(self, seconds: float) -> None:
+        self.total_s += seconds
+        self.count += 1
+
+    def merge(self, other: MLXLockStat) -> None:
+        self.total_s += other.total_s
+        self.count += other.count
+
+
+class SpeechLatencyAnchor:
+    """One speech input's eligibility, shared by its response/tool chain."""
+
+    def __init__(self) -> None:
+        self.requested = False
+        self._closed = False
+        self._lock = Lock()
+
+    @property
+    def available(self) -> bool:
+        with self._lock:
+            return not self._closed
+
+    def consume(self) -> bool:
+        """Only the first yielded audio across the chain may record speech E2E."""
+        with self._lock:
+            if self._closed:
+                return False
+            self._closed = True
+            return True
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+
+
+@dataclass
 class TurnLatencyTracker:
     """Server timings, not an additive breakdown or client playback latency.
 
@@ -40,11 +82,24 @@ class TurnLatencyTracker:
     at the first model audio chunk before trimming and block assembly;
     ``e2e_s`` runs from estimated speech end to first yielded TTS audio.
     TTFT remains an internal measurement, omitted from the simplified record.
+
+    ``vad_settle_s`` is the whole final STT input gate wait, where
+    ``smart_turn_wait_s`` only covers the client-requested processing delay.
+
+    MLX lock waits and holds are summed per handler, so the bracketed breakdown
+    accounts for the printed total however often a turn takes the lock.
+
+    ``tts=cut`` marks a cancelled turn that had already produced TTS audio. It
+    says the cancellation arrived after audio started, not that a sentence was
+    truncated: a cancellation landing just after the last chunk is marked too.
+
     Tool follow-ups use separate trackers with explicit cumulative LLM ancestry.
     """
 
     turn_id: str | None = None
     turn_revision: int | None = None
+    source: Literal["speech", "client", "tool"] | None = None
+    speech_anchor: SpeechLatencyAnchor | None = field(default=None, repr=False)
     stt_s: float | None = None
     llm_ttft_s: float | None = None
     llm_s: float | None = None
@@ -53,6 +108,7 @@ class TurnLatencyTracker:
     _prior_llm_rounds: int = 0
     tts_ttfa_s: float | None = None
     e2e_s: float | None = None
+    vad_settle_s: float | None = None
     vad_decision_s: float | None = None
     smart_turn_analysis_s: float | None = None
     smart_turn_status: Literal["disabled", "complete", "incomplete", "failed"] | None = None
@@ -61,6 +117,9 @@ class TurnLatencyTracker:
     smart_turn_wait_s: float | None = None
     _smart_wait_intervals: list[tuple[float, float]] | None = None
     mlx_lock_wait_s: float = 0.0
+    mlx_lock_hold_s: float = 0.0
+    mlx_lock_waits: dict[str, MLXLockStat] = field(default_factory=dict)
+    mlx_lock_holds: dict[str, MLXLockStat] = field(default_factory=dict)
     status: TurnLatencyStatus = "completed"
 
     def record_stt(self, seconds: float) -> None:
@@ -79,6 +138,9 @@ class TurnLatencyTracker:
     def record_llm(self, seconds: float) -> None:
         self.llm_s = max(0.0, seconds)
 
+    def record_vad_settle(self, seconds: float) -> None:
+        self.vad_settle_s = max(0.0, seconds)
+
     def record_llm_ttft(self, seconds: float) -> None:
         if self.llm_ttft_s is None:
             self.llm_ttft_s = max(0.0, seconds)
@@ -87,13 +149,25 @@ class TurnLatencyTracker:
         if self.tts_ttfa_s is None:
             self.tts_ttfa_s = max(0.0, seconds)
 
-    def record_e2e(self, seconds: float) -> None:
-        if self.e2e_s is None:
-            self.e2e_s = max(0.0, seconds)
+    def record_e2e(self, seconds: float) -> bool:
+        if self.e2e_s is not None:
+            return False
+        if self.speech_anchor is not None and not self.speech_anchor.consume():
+            return False
+        self.e2e_s = max(0.0, seconds)
+        return True
 
-    def record_mlx_lock_wait(self, seconds: float) -> None:
+    def record_mlx_lock_wait(self, seconds: float, handler_name: str | None = None) -> None:
         if seconds > 0.0:
-            self.mlx_lock_wait_s += max(0.0, seconds)
+            self.mlx_lock_wait_s += seconds
+            if handler_name:
+                self.mlx_lock_waits.setdefault(handler_name, MLXLockStat()).add(seconds)
+
+    def record_mlx_lock_hold(self, seconds: float, handler_name: str | None = None) -> None:
+        if seconds > 0.0:
+            self.mlx_lock_hold_s += seconds
+            if handler_name:
+                self.mlx_lock_holds.setdefault(handler_name, MLXLockStat()).add(seconds)
 
     def record_smart_wait(self, started_at_s: float, ended_at_s: float) -> None:
         """Count the union of actual gate waits, since workers can wait together."""
@@ -124,6 +198,7 @@ class TurnLatencyTracker:
 
         return {
             "version": 2,
+            "source": self.source,
             "turn_id": self.turn_id,
             "turn_revision": 0 if self.turn_revision is None else self.turn_revision,
             "response_key": response_key,
@@ -142,7 +217,14 @@ class TurnLatencyTracker:
     def absorb_pending(self, pending: TurnLatencyTracker) -> None:
         if pending.stt_s is not None:
             self.stt_s = pending.stt_s
+        if pending.vad_settle_s is not None:
+            self.vad_settle_s = pending.vad_settle_s
         self.mlx_lock_wait_s += pending.mlx_lock_wait_s
+        self.mlx_lock_hold_s += pending.mlx_lock_hold_s
+        for name, stat in pending.mlx_lock_waits.items():
+            self.mlx_lock_waits.setdefault(name, MLXLockStat()).merge(stat)
+        for name, stat in pending.mlx_lock_holds.items():
+            self.mlx_lock_holds.setdefault(name, MLXLockStat()).merge(stat)
         self.vad_decision_s = pending.vad_decision_s
         self.smart_turn_analysis_s = pending.smart_turn_analysis_s
         self.smart_turn_status = pending.smart_turn_status
@@ -158,21 +240,39 @@ class TurnLatencyTracker:
         return f"{seconds:.2f}s"
 
     def format_log_line(self) -> str | None:
-        if self.turn_id is None:
+        if self.turn_id is None and self.source is None:
             return None
         revision = 0 if self.turn_revision is None else self.turn_revision
-        mlx_wait = f" mlx_lock_wait={self.mlx_lock_wait_s:.2f}s" if sys.platform == "darwin" else ""
+        settle = "" if self.vad_settle_s is None else f"vad_settle={self._fmt(self.vad_settle_s)} "
+        mlx_wait = ""
+        if sys.platform == "darwin":
+            mlx_wait = f" mlx_lock_wait={self._fmt_lock(self.mlx_lock_wait_s, self.mlx_lock_waits)}"
+            if self.mlx_lock_hold_s > 0.0:
+                mlx_wait += f" mlx_lock_hold={self._fmt_lock(self.mlx_lock_hold_s, self.mlx_lock_holds)}"
+        # A cancelled turn whose TTS already spoke is not a finished reply.
+        cut = " tts=cut" if self.status == "cancelled" and self.tts_ttfa_s is not None else ""
         return (
-            f"Turn {self.turn_id} rev={revision} latency: "
+            f"Turn {self.turn_id or 'n/a'} rev={revision} latency: "
             f"stt={self._fmt(self.stt_s)} "
             f"llm={self._fmt(self.llm_s)} "
             f"llm_total={self._fmt(self.llm_total_s)} llm_rounds={self.llm_rounds} "
             f"tts_ttfa={self._fmt(self.tts_ttfa_s)} e2e={self._fmt(self.e2e_s)} "
+            f"{settle}"
             f"vad_decision={self._fmt(self.vad_decision_s)} "
             f"hold={self._fmt(self.smart_turn_wait_s)} "
             f"smart_turn_status={self.smart_turn_status or 'n/a'} "
-            f"status={self.status}{mlx_wait}"
+            f"status={self.status}{mlx_wait}{cut}"
+            f"{' source=' + self.source if self.source is not None else ''}"
         )
+
+    @staticmethod
+    def _fmt_lock(total: float, stats: dict[str, MLXLockStat]) -> str:
+        if not stats:
+            return f"{total:.2f}s"
+        named = ",".join(
+            f"{name}:{stat.total_s:.2f}s" + (f"x{stat.count}" if stat.count > 1 else "") for name, stat in stats.items()
+        )
+        return f"{total:.2f}s[{named}]"
 
 
 @dataclass(frozen=True)
@@ -227,6 +327,13 @@ class TurnLatencyStore:
         if not keys:
             self._session_keys.pop(session_id, None)
 
+    def pending_for_turn(self, turn_id: str | None, turn_revision: int | None) -> TurnLatencyTracker | None:
+        """Read the pending slot without creating one."""
+        if turn_id is None:
+            return None
+        with self._lock:
+            return self._pending_turn.get(self._turn_key(turn_id, turn_revision))
+
     def get_or_create_for_turn(
         self,
         turn_id: str | None,
@@ -277,11 +384,7 @@ class TurnLatencyStore:
                         parent = next(
                             (chain for chain in reversed(completed.values()) if parent_call_id in chain.call_ids), None
                         )
-                    if (
-                        parent is not None
-                        and turn_id is not None
-                        and (parent.turn_id, parent.turn_revision) == (turn_id, turn_revision)
-                    ):
+                    if parent is not None and (parent.turn_id, parent.turn_revision) == (turn_id, turn_revision):
                         tracker._prior_llm_s = parent.llm_total_s
                         tracker._prior_llm_rounds = parent.llm_rounds
                         tracker.llm_rounds = parent.llm_rounds
@@ -360,3 +463,24 @@ class TurnLatencyStore:
                         self._turn_responses.pop(key, None)
             if not self._session_keys:
                 self._pending_turn.clear()
+
+
+def record_response_tts_ttfa(
+    store: TurnLatencyStore | None,
+    response_key: str | None,
+    seconds: float,
+) -> None:
+    """Publish first-provider TTS audio on an existing response tracker."""
+    tracker = store.get_response(response_key) if store is not None else None
+    if tracker is not None:
+        tracker.record_tts_ttfa(seconds)
+
+
+def record_response_e2e(
+    store: TurnLatencyStore | None,
+    response_key: str | None,
+    seconds: float,
+) -> bool:
+    """Publish eligible speech E2E; return whether a first sample was recorded."""
+    tracker = store.get_response(response_key) if store is not None else None
+    return tracker.record_e2e(seconds) if tracker is not None else False
