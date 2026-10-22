@@ -435,8 +435,7 @@ async def test_search_needs_the_callers_live_session(monkeypatch, space_search, 
 async def test_search_needs_a_heartbeating_session(monkeypatch, space_search):
     _as(monkeypatch, "pro")
     demo_server.limiter.begin("mine", ["k_alice"], "pro")
-    later = demo_server.limiter.time.time() + demo_server.limiter.REAP_AFTER_SEC + 1
-    monkeypatch.setattr(demo_server.limiter.time, "time", lambda: later)
+    _advance(monkeypatch, demo_server.limiter.REAP_AFTER_SEC + 1)
 
     with pytest.raises(demo_server.HTTPException) as exc:
         await _search("mine")
@@ -446,12 +445,44 @@ async def test_search_needs_a_heartbeating_session(monkeypatch, space_search):
     assert (await _search("mine")).status_code == 200
 
 
+def _advance(monkeypatch, seconds):
+    later = demo_server.limiter.time.time() + seconds
+    monkeypatch.setattr(demo_server.limiter.time, "time", lambda: later)
+
+
+async def test_unlimited_search_recovers_after_a_sweep(monkeypatch, space_search):
+    _as(monkeypatch, "pro")
+    demo_server.limiter.begin("mine", ["k_alice"], "pro")
+    _advance(monkeypatch, demo_server.limiter.REAP_AFTER_SEC * 2 + 1)
+    demo_server.limiter.sweep()
+
+    with pytest.raises(demo_server.HTTPException) as exc:
+        await _search("mine")
+    assert exc.value.status_code == 403
+
+    assert demo_server.limiter.heartbeat("mine")
+    assert (await _search("mine")).status_code == 200
+
+    demo_server.limiter.end("mine")
+    assert not demo_server.limiter.heartbeat("mine")
+    with pytest.raises(demo_server.HTTPException) as exc:
+        await _search("mine")
+    assert exc.value.status_code == 403
+
+
+def test_sweep_still_reaps_silent_metered_sessions(monkeypatch, space_search):
+    demo_server.limiter.begin("mine", ["k_alice"], "free")
+    _advance(monkeypatch, demo_server.limiter.REAP_AFTER_SEC * 2 + 1)
+    demo_server.limiter.sweep()
+
+    assert not demo_server.limiter.heartbeat("mine")
+
+
 async def test_unlimited_grants_are_recorded_but_never_debited(monkeypatch, space_search):
     monkeypatch.setattr(demo_server, "LIMITER_ENABLED", True)
 
     response = await demo_server._finalize_grant({"session_id": "mine"}, ["k_alice"], "org", False, None)
-    later = demo_server.limiter.time.time() + 600
-    monkeypatch.setattr(demo_server.limiter.time, "time", lambda: later)
+    _advance(monkeypatch, 600)
     assert demo_server.limiter.heartbeat("mine")
 
     grant = json.loads(response.body)

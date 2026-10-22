@@ -58,12 +58,14 @@ _lock = threading.Lock()
 _db_path: "Path | None" = None
 
 
-def budget_for(tier: str) -> "int | None":
-    """Daily second-budget for a tier, or None for unlimited.
+# 'pro' (paying PRO members) and 'org' (members of an allow-listed
+# organisation, see UNLIMITED_ORGS in auth.py).
+UNLIMITED_TIERS = ("pro", "org")
 
-    Unlimited tiers: 'pro' (paying PRO members) and 'org' (members of an
-    allow-listed organisation, see UNLIMITED_ORGS in auth.py)."""
-    if tier in ("pro", "org"):
+
+def budget_for(tier: str) -> "int | None":
+    """Daily second-budget for a tier, or None for unlimited (UNLIMITED_TIERS)."""
+    if tier in UNLIMITED_TIERS:
         return None
     if tier == "free":
         return FREE_SEC
@@ -267,15 +269,20 @@ def end(session_id: str) -> None:
 
 
 def sweep() -> None:
-    """Reap sessions that went silent (crash / closed without a beacon): bill
-    their elapsed time, refund the rest, mark ended. Forfeits ≤ one chunk."""
+    """Reap metered sessions that went silent (crash / closed without a beacon):
+    bill their elapsed time, refund the rest, mark ended. Forfeits ≤ one chunk.
+
+    Unlimited sessions have nothing to bill, so they're left open: a heartbeat
+    after an outage revives them, while session_live() treats them as stale in
+    the meantime. Only an explicit end() closes them."""
     now = time.time()
     cutoff = now - REAP_AFTER_SEC
+    unlimited = ",".join("?" * len(UNLIMITED_TIERS))
     with _lock, _connect() as con:
         stale = con.execute(
             "SELECT session_id, keys, day, grant_ts, last_seen_ts, reserved_sec FROM sessions "
-            "WHERE ended=0 AND last_seen_ts < ?",
-            (cutoff,),
+            f"WHERE ended=0 AND last_seen_ts < ? AND tier NOT IN ({unlimited})",
+            (cutoff, *UNLIMITED_TIERS),
         ).fetchall()
         for session_id, keys_s, day, grant_ts, last_seen, reserved in stale:
             _reconcile(con, keys_s.split(","), day, grant_ts, int(reserved), end_ts=last_seen)
