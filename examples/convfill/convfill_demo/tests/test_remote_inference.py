@@ -142,8 +142,9 @@ def test_background_failure_reaches_run_turn_and_rolls_back_history():
     assert system.dialogue_state_manager.responses == []
 
 
+@pytest.mark.parametrize("method", ["knowledge", "greeting"])
 @pytest.mark.parametrize("cancel", [True, False])
-def test_socket_stall_is_bounded_and_cancel_does_not_flush_partial_text(cancel):
+def test_socket_stall_is_bounded_and_cancel_does_not_flush_partial_text(cancel, method):
     started, release = threading.Event(), threading.Event()
 
     class Handler(BaseHTTPRequestHandler):
@@ -174,7 +175,7 @@ def test_socket_stall_is_bounded_and_cancel_does_not_flush_partial_text(cancel):
 
     def run():
         try:
-            output.extend(remote.knowledge("prompt"))
+            output.extend(getattr(remote, method)("prompt"))
         except InferenceError as exc:
             errors.append(exc)
 
@@ -418,3 +419,37 @@ def test_fast_tool_continuation_does_not_restart_with_a_filler():
     system = _bare_system(Backend())
     system.convfill_frontend = SimpleNamespace(turn_state_manager=SimpleNamespace(responses=["Let me check that."]))
     assert list(system.backend_fn()) == ["The verified result."]
+
+
+def test_direct_greeting_filters_thoughts_and_does_not_use_knowledge_or_tools():
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            content=sse(
+                chat(None),
+                chat("", reasoning_content="private"),
+                chat("<think>hidden</think>Hello! "),
+                chat("What would you like to talk about?"),
+            ),
+        )
+
+    remote = RemoteInference(
+        {"base_url": "http://model/v1", "model": "gemma", "enable_thinking": True},
+        transport=httpx.MockTransport(respond),
+    )
+    remote.configure_request(
+        tools=[{"type": "function", "function": {"name": "web_search"}}],
+        messages=[{"role": "user", "content": "Do not include old context"}],
+    )
+    assert list(remote.greeting("Greet the user.", instructions="Be friendly.")) == [
+        "Hello!",
+        "What would you like to talk about?",
+    ]
+    payload = requests[0]
+    assert "tools" not in payload and payload["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "Supply concise factual" not in payload["messages"][0]["content"]
+    assert "Be friendly." in payload["messages"][0]["content"]
+    assert len(payload["messages"]) == 2 and payload["max_tokens"] <= 96

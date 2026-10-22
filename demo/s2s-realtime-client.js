@@ -246,7 +246,10 @@ export class S2sRealtimeClient extends EventTarget {
     const greeting = this.options.startupGreeting?.trim();
     if (greeting) {
       this._responseRequested = true;
-      this._session.sendMessage(greeting);
+      this._transport.sendMessage(greeting, {}, { triggerResponse: false });
+      this._transport.requestResponse({
+        metadata: { "speech_to_speech.startup_greeting": "true" },
+      });
     }
     this.setMuted(this._muted);
     this._setStatus("connected");

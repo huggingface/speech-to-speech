@@ -6,7 +6,7 @@ import { worklet } from "./playback-helpers.mjs";
 
 // Exercise the pinned SDK's parsing, event ordering, session, and transport.
 // Only the socket and audio device are deterministic in-process stand-ins.
-async function fixture(bufferMs = 1200, sampleRate = 48_000) {
+async function fixture(bufferMs = 1200, sampleRate = 48_000, options = {}) {
   const sent = [];
   const socket = new class extends EventTarget {
     send(data) { sent.push(JSON.parse(data)); }
@@ -23,7 +23,7 @@ async function fixture(bufferMs = 1200, sampleRate = 48_000) {
   };
   const client = new S2sRealtimeClient({
     transport: "websocket", directUrl: "ws://test", playbackBufferMs: bufferMs,
-    micStream: { getAudioTracks: () => [{}] }, voice: "coral", instructions: "Test.",
+    micStream: { getAudioTracks: () => [{}] }, voice: "coral", instructions: "Test.", ...options,
   });
   const acknowledgements = [];
   const output = worklet((message) => acknowledgements.push(message), sampleRate);
@@ -258,4 +258,16 @@ test("SDK reports first non-silent playback while generation is still active", a
   assert.equal(events.length, 1);
   f.audioDone();
   f.done();
+});
+
+
+test("startup greeting creates exactly one explicitly marked response", async (t) => {
+  const f = await fixture(0, 48000, { startupGreeting: "Greet the user." });
+  t.after(() => f.client.close());
+  const inputs = f.sent.filter(event => event.type === "conversation.item.create");
+  assert.equal(inputs.length, 1);
+  assert.equal(inputs[0].item.content[0].text, "Greet the user.");
+  const responses = f.sent.filter(event => event.type === "response.create");
+  assert.equal(responses.length, 1);
+  assert.deepEqual(responses[0].response.metadata, { "speech_to_speech.startup_greeting": "true" });
 });

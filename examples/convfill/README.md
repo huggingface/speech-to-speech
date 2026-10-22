@@ -1,7 +1,8 @@
 # Hosted ConvFill speech-to-speech
 
 Browser microphone → VAD → STT → concurrent Gemma Reasoner / ConvFill Talker → TTS → browser.
-Only the fine-tuned Talker is spoken. This opt-in example retains ConvFill’s filler scheduler,
+Ordinary conversation speaks only the fine-tuned Talker. The explicitly marked startup
+greeting streams Gemma directly into TTS, bypassing the Talker and fillers. This opt-in example retains ConvFill’s filler scheduler,
 conversation state and cancellation while using this checkout’s realtime pipeline and `demo/` UI.
 No private repository checkout or commercial model key is required. The Reasoner can call the
 UI’s web search and opt-in camera tools. RAG, MCP, and browser automation remain disabled.
@@ -38,7 +39,13 @@ importing a private repository. This example reuses the current browser sources;
 
 ## Greeting, tools, settings, and timings
 
-The demo sends a short greeting after connection. Set `STARTUP_GREETING` to customize
+The demo sends a short greeting after connection. Its response carries
+`speech_to_speech.startup_greeting=true`, which the adapter honors only for the
+first message of a fresh session. Gemma receives a dedicated assistant greeting
+prompt with thinking off and no tools; its filtered sentence stream goes directly
+to TTS. The completed greeting is stored in both realtime and ConvFill history,
+so the next user turn uses the ordinary Talker/Reasoner path with that context.
+Cancellation, stream deadlines, and error propagation use the same handler controls. Set `STARTUP_GREETING` to customize
 its instruction, or set it to an empty string to disable it. The gear menu uses the current
 shared UI, including voice, instructions, audio buffering, noise gate, and connection settings.
 This gateway uses WebSocket transport; WebRTC remains unavailable here.

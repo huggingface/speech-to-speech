@@ -501,3 +501,111 @@ def test_echo_only_tool_followup_keeps_prior_response_without_an_error():
     output = list(handler.process(_request(chat)))
     assert len(output) == 1 and output[0].error is None
     assert handler.system.dialogue_state_manager.responses == ["Here is the answer."]
+
+
+class _GreetingRemote:
+    def __init__(self):
+        self.calls = []
+        self.cancelled = False
+        self.error = False
+        self.wait_for_cancel = False
+
+    def configure_request(self, **kwargs):
+        pass
+
+    def begin_turn(self, event):
+        self.event = event
+
+    def greeting(self, prompt, instructions=""):
+        self.calls.append((prompt, instructions))
+        if self.error:
+            raise RuntimeError("Greeting endpoint failed")
+        yield "Hello!"
+        if self.wait_for_cancel:
+            assert self.event.wait(1)
+            return
+        yield "What would you like to talk about?"
+
+    def cancel(self):
+        self.cancelled = True
+        self.event.set()
+
+
+class _GreetingSystem(_FakeSystem):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.remote = _GreetingRemote()
+        self.normal_calls = []
+        self.convfill_backend = SimpleNamespace(model_backend=SimpleNamespace(remote=self.remote))
+
+    def run_turn(self, text):
+        self.normal_calls.append(text)
+        return super().run_turn(text)
+
+    def cancel_turn(self):
+        super().cancel_turn()
+        self.remote.cancel()
+
+
+def _greeting_request(chat):
+    from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+
+    request = _request(chat)
+    request.response = RealtimeResponseCreateParams(metadata={"speech_to_speech.startup_greeting": "true"})
+    return request
+
+
+def test_marked_startup_greeting_uses_only_reasoner_and_preserves_followup_history():
+    handler = _handler(_GreetingSystem)
+    chat = _FakeChat([{"role": "user", "content": "Greet the user."}])
+    output = list(handler.process(_greeting_request(chat)))
+    assert [chunk.text for chunk in output if isinstance(chunk, LLMResponseChunk)] == [
+        "Hello!",
+        "What would you like to talk about?",
+    ]
+    assert output[-1].error is None
+    assert len(handler.system.remote.calls) == 1 and handler.system.normal_calls == []
+    assert handler.system.dialogue_state_manager.responses == ["Hello! What would you like to talk about?"]
+    assert chat.provisional
+    chat.messages.extend(
+        [
+            {"role": "assistant", "content": "Hello! What would you like to talk about?"},
+            {"role": "user", "content": "A regular follow-up."},
+        ]
+    )
+    assert list(handler.process(_request(chat)))[-1].error is None
+    assert handler.system.normal_calls == ["A regular follow-up."]
+    assert "Hello!" in handler.system.backend_transcripts[-1]
+    handler.on_session_end()
+    assert handler._greeting_attempted is False
+
+
+def test_unmarked_or_later_turn_does_not_bypass_talker():
+    handler = _handler(_GreetingSystem)
+    chat = _FakeChat([{"role": "user", "content": "Greet the user."}])
+    assert list(handler.process(_request(chat)))[-1].error is None
+    chat.messages.append({"role": "assistant", "content": "A previous answer."})
+    chat.messages.append({"role": "user", "content": "Greet the user."})
+    assert list(handler.process(_greeting_request(chat)))[-1].error is None
+    assert handler.system.remote.calls == [] and len(handler.system.normal_calls) == 2
+
+
+def test_direct_greeting_failure_propagates_without_talker_fallback():
+    handler = _handler(_GreetingSystem)
+    handler.system.remote.error = True
+    output = list(handler.process(_greeting_request(_FakeChat())))
+    assert output[-1].error == "ConvFill inference failed. Please try again."
+    assert handler.system.normal_calls == [] and handler.system.dialogue_state_manager.user_turns == []
+
+
+def test_direct_greeting_cancellation_closes_stream_and_discards_stale_text():
+    scope = CancelScope()
+    handler = _handler(_GreetingSystem, cancel_scope=scope)
+    handler.system.remote.wait_for_cancel = True
+    output = handler.process(_greeting_request(_FakeChat()))
+    assert next(output).text == "Hello!"
+    scope.cancel()
+    remaining = list(output)
+    assert len(remaining) == 1 and isinstance(remaining[0], EndOfResponse)
+    assert handler.system.remote.cancelled and handler.system.normal_calls == []
+    assert handler.system.dialogue_state_manager.user_turns == []

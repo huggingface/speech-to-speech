@@ -199,6 +199,45 @@ class RemoteInference:
                 threading.Thread(target=response.close, daemon=True).start()
             worker.join(timeout=0.2)
 
+    def greeting(self, prompt, instructions=""):
+        """Startup-only direct assistant text. Never enters the knowledge/Talker path."""
+        from .conversational_stream_parser import ConversationalStreamParser
+
+        cancel = self.cancel_event
+        parser, visible = ConversationalStreamParser(), VisibleTextFilter()
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (instructions or "") + "\nYou are opening a voice conversation. "
+                    "Return only a brief, natural spoken greeting that invites the user to talk. "
+                    "Do not explain greetings, add stage directions, provide factual knowledge, "
+                    "call tools, or include internal reasoning.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "stream": True,
+            "max_tokens": min(int(self.config.get("max_tokens", 256)), 96),
+            "temperature": float(self.config.get("temperature", 1.0)),
+            "top_p": float(self.config.get("top_p", 0.95)),
+            "top_k": int(self.config.get("top_k", 64)),
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        seen_text = False
+        for event in self.stream("/chat/completions", payload):
+            for choice in event.get("choices", []):
+                delta = choice.get("delta") or {}
+                if delta.get("tool_calls"):
+                    raise InferenceError("Startup greeting attempted a tool call")
+                text = visible.feed(delta.get("content") or "")
+                seen_text = seen_text or bool(text.strip())
+                yield from parser.feed(text)
+        if not cancel.is_set():
+            if not seen_text:
+                raise InferenceError("Reasoner returned no visible greeting")
+            yield from parser.flush()
+
     def knowledge(self, prompt):
         from .conversational_stream_parser import ConversationalStreamParser
 

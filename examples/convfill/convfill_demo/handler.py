@@ -55,7 +55,8 @@ class ConvFillRealtimeHandler(BaseHandler[LLMIn, LLMOut]):
     """Use the existing Talker/Reasoner system as an HF realtime LLM stage.
 
     The handler consumes the final STT transcript already stored in the
-    realtime session chat. ConvFill runs the remote Reasoner and fine-tuned Talker concurrently; only Talker fragments leave this stage.
+    realtime session chat. ConvFill runs the remote Reasoner and fine-tuned Talker concurrently. Only Talker fragments leave this stage during ordinary turns;
+    an explicitly marked startup greeting streams directly from the Reasoner.
     """
 
     def setup(
@@ -77,6 +78,7 @@ class ConvFillRealtimeHandler(BaseHandler[LLMIn, LLMOut]):
         self._ledger: DeliveryLedgerQueue | None = None
         self._turn_started_at = None
         self._first_knowledge = False
+        self._greeting_attempted = False
 
         callbacks = {
             "on_thought": self._on_thought,
@@ -185,6 +187,37 @@ class ConvFillRealtimeHandler(BaseHandler[LLMIn, LLMOut]):
             prefetch_transaction=request.prefetch_transaction,
         )
 
+    def _is_startup_greeting(self, request):
+        metadata = getattr(request.response, "metadata", None) or {}
+        if self._greeting_attempted or metadata.get("speech_to_speech.startup_greeting") != "true":
+            return False
+        messages = [
+            message for message in request.runtime_config.chat.to_transformers_chat() if message.get("role") != "system"
+        ]
+        return len(messages) == 1 and messages[0].get("role") == "user"
+
+    def _run_direct_greeting(self, remote, prompt, instructions):
+        if remote is None:
+            raise RuntimeError("Direct startup greeting requires a remote Reasoner")
+        cancel = threading.Event()
+        self.system.cancel_event = cancel
+        remote.begin_turn(cancel)
+        self.system.dialogue_state_manager.update_user_state(prompt)
+        parts = []
+        for sentence in remote.greeting(prompt, instructions=instructions):
+            if cancel.is_set():
+                return False
+            cleaned = strip_markdown(sentence).strip()
+            if cleaned:
+                parts.append(cleaned)
+                self._on_response_fragment(cleaned)
+        if cancel.is_set():
+            return False
+        if not parts:
+            raise RuntimeError("Direct startup greeting produced no visible text")
+        self.system.dialogue_state_manager.commit_turn(prompt, " ".join(parts), [])
+        return True
+
     def process(self, request: LLMIn) -> Iterator[LLMOut]:
         generation = self.cancel_scope.generation if self.cancel_scope is not None else None
         if is_out_of_band(request.response):
@@ -216,9 +249,23 @@ class ConvFillRealtimeHandler(BaseHandler[LLMIn, LLMOut]):
             self._response_key = request.response_key
 
         continuation_prefix = ""
+        direct_greeting = self._is_startup_greeting(request)
+        if direct_greeting:
+            self._greeting_attempted = True
+        session = request.runtime_config.session
+        response = request.response
+        instructions = (
+            response.instructions
+            if response is not None and response.instructions is not None
+            else session.instructions
+        )
 
         def run_turn() -> None:
             try:
+                if direct_greeting:
+                    completed = self._run_direct_greeting(remote, user_text, instructions)
+                    events.put(("runner_done", completed))
+                    return
                 frontend = getattr(self.system, "convfill_frontend", None)
                 if continuation_prefix and frontend is not None:
                     frontend.prepare_continuation(user_text, continuation_prefix)
@@ -446,6 +493,7 @@ class ConvFillRealtimeHandler(BaseHandler[LLMIn, LLMOut]):
                 self._response_key = None
 
     def on_session_end(self) -> None:
+        self._greeting_attempted = False
         self.system.reset()
         if self._ledger is not None:
             self._ledger.reset_playback()
