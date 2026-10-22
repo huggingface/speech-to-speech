@@ -25,9 +25,9 @@ from speech_to_speech.pipeline.transcript_logging import set_log_transcripts, tr
 from speech_to_speech.s2s_pipeline import ParsedArguments, parse_arguments, prepare_all_args, prepare_module_args
 
 
-def test_phonon_defaults_to_english_40m_checkpoint():
+def test_phonon_defaults_to_public_english_31m_checkpoint():
     phonon_args = PhononTTSHandlerArguments()
-    assert phonon_args.phonon_tts_model_name == "gradium/phonon-40m-en"
+    assert phonon_args.phonon_tts_model_name == "gradium/phonon-31m-en"
     assert phonon_args.phonon_tts_language == "en"
     assert phonon_args.phonon_tts_num_threads == 4
 

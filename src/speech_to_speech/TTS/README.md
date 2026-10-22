@@ -339,7 +339,7 @@ speech-to-speech serve --tts phonon
 ```
 
 - Uses the published `ptts==0.4.0` Python bindings on CPU. It streams mono float audio and resamples continuously to 16 kHz PCM16 in 512-sample blocks. GPU flags for other components do not move Phonon off CPU.
-- Defaults to `gradium/phonon-40m-en`, a gated English checkpoint under CC BY-NC 4.0 (non-commercial). Accept its Hub terms and log in before the first download. A local directory/config path or another Hub repository ID, such as the Apache-2.0 `gradium/phonon-31m-en`, can override it, with `--phonon_tts_revision` when appropriate. The checkpoint needs its own config, tokenizer JSON, weights and voice files. Keep private checkpoint files outside this repository.
+- Defaults to `gradium/phonon-31m-en`, a public English checkpoint under Apache-2.0 that needs no Hub login. A local directory/config path or another Hub repository ID can override it, with `--phonon_tts_revision` when appropriate. The Phonon 40M checkpoints, such as `gradium/phonon-40m-en`, are gated and CC BY-NC 4.0 (non-commercial); accept their Hub terms and log in before the first download. The checkpoint needs its own config, tokenizer JSON, weights and voice files. Keep private checkpoint files outside this repository.
 - `--phonon_tts_quant q8` is the default and loads `model.q8.gguf`. Other formats require matching checkpoint weights.
 - `--phonon_tts_voice VOICE_NAME` selects a checkpoint voice or a [voice catalog](https://huggingface.co/gradium/phonon-voices) voice in the checkpoint's languages; catalog voices download on first use. If the catalog cannot be reached at startup, only checkpoint voices are offered. Omitting it uses the upstream default. Realtime session and response voice overrides accept the same names. Raw reference-audio voice cloning is not exposed by this handler.
 - With multiple voices, the `local` client enables arrow-key voice selection in an interactive macOS or Linux terminal. Left/up selects the previous voice; right/down selects the next. Changes wait until the current response completes and keep the session and conversation intact. The standalone `talk` client accepts `--voices VOICE_NAME ...` to enable the same controls.
@@ -350,7 +350,7 @@ speech-to-speech serve --tts phonon
 
 For a checkout, install with `pip install -e ".[phonon]"`. An optional real-checkpoint test can be run with `PHONON_TEST_CHECKPOINT=/path/to/checkpoint pytest tests/test_phonon_tts_handler.py`; ordinary tests use a fake runtime and require no weights.
 
-Upstream: [runtime](https://github.com/gradium-ai/xn-ptts/releases/tag/v0.4.0), [Python guide](https://github.com/gradium-ai/xn-ptts/tree/v0.4.0/ptts-pyo3), and [default checkpoint](https://huggingface.co/gradium/phonon-40m-en).
+Upstream: [runtime](https://github.com/gradium-ai/xn-ptts/releases/tag/v0.4.0), [Python guide](https://github.com/gradium-ai/xn-ptts/tree/v0.4.0/ptts-pyo3), and [default checkpoint](https://huggingface.co/gradium/phonon-31m-en).
 
 ## Setup
 
