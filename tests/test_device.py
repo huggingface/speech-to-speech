@@ -153,3 +153,24 @@ def test_importing_device_helpers_does_not_import_torch() -> None:
     )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("devices", "expected"),
+    [
+        (("cuda", "npu", "mps"), "cuda"),
+        (("npu", "mps"), "npu"),
+        (("mps",), "mps"),
+        ((), "cpu"),
+    ],
+)
+def test_auxiliary_stages_resolve_auto_to_the_npu_when_it_is_available(
+    monkeypatch: pytest.MonkeyPatch, devices: tuple[str, ...], expected: str
+) -> None:
+    """The diarization and viseme stages follow the same accelerator order as the rest of the pipeline."""
+    from speech_to_speech.diarization.streaming import DIARIZATION_DEVICES
+    from speech_to_speech.STV.w2v_stv_handler import STV_DEVICES
+
+    _available(monkeypatch, *devices)
+    assert resolve_device("auto", DIARIZATION_DEVICES, "Nemotron diarization") == expected
+    assert resolve_device("auto", STV_DEVICES, "Speech-to-viseme") == expected

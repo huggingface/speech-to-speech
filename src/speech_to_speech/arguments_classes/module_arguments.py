@@ -27,8 +27,9 @@ class ModuleArguments(Wav2Vec2STVHandlerArguments):
     diarization_device: str = field(
         default="auto",
         metadata={
-            "help": "Diarization device: auto, cuda, mps, or cpu. Auto selects CUDA, then MPS, then CPU. "
-            "The global --device overrides this setting. CUDA or MPS is recommended for live sessions."
+            "help": "Diarization device: auto, cuda, npu, mps, or cpu. Auto selects CUDA, then NPU, then MPS, "
+            "then CPU. The global --device overrides this setting. CUDA, NPU, or MPS is recommended "
+            "for live sessions."
         },
     )
     diarization_dtype: str = field(default="float32", metadata={"choices": ("float32", "float16", "bfloat16")})
