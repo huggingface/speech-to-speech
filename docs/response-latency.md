@@ -63,28 +63,23 @@ that lock is not contended, and hold is omitted entirely when nothing held it.
   and ends when the provider's final transcript is received. For local STT
   models, it starts when the handler begins the final transcription and ends
   before its transcript is yielded.
-- `llm` covers full generation, from serialization and provider request through
-  consumption of provider output. It is recorded even if the request fails.
-  `llm_s` describes this response key only, including its serialization, provider
-  transfer/waits, and any model lock wait; it does not describe earlier tool rounds.
+- `llm` / `llm_s` covers generation for this response key, from serialization
+  through consumption of provider output, including model lock and provider
+  waits. It is recorded even if the request fails.
 - `llm_total_s` sums measured LLM generation durations across the initial request
   and its tool-result follow-ups. It excludes tool execution and waits between
   requests. Three generations of 0.7s, 0.9s and 0.8s produce 2.4s total, while
   the last response's `llm_s` remains 0.8s. Totals use nine decimal places in
-  metadata. Stages overlap; this total is not an additive E2E breakdown.
+  metadata.
 - `llm_rounds` counts model requests in that chain. A direct answer has one;
   a tool request followed by an answer has two. Parallel tools within one
-  generation count as one round. Queued work, empty provider input, and local
-  prompt preparation failures do not count as model requests. A failed or
-  interrupted model request counts once it starts. Totals include only durations
-  measured by the terminal event: cancellation can arrive before a running
-  worker records its duration, so that duration remains unavailable and late
-  measurements cannot change the terminal record. Failed or discarded prefetch
-  work does not become part of a replacement reply's chain.
+  generation count as one round. Only started requests count, including failed
+  or interrupted requests. Totals include durations measured before the terminal
+  event; cancellation can leave a running request's duration unavailable.
+  Failed or discarded prefetch work does not contribute to replacement replies.
 
-  The fields are optional additions to version 2. Older records remain readable;
-  the demo labels `llm_s` as **LLM for this response**, never as a total. Missing
-  totals and round counts appear as unavailable, with no assumed one-round count.
+  These optional version 2 fields appear as unavailable in older records.
+  The demo labels `llm_s` as **LLM for this response**.
 - `tts_ttfa` starts when synthesis of the first text segment begins and ends
   when the first provider audio samples arrive. For HTTP TTS, WAV headers are
   excluded, and resampling and output block assembly happen afterward.
@@ -167,13 +162,10 @@ attributed input turn. Out-of-band responses retain their existing metadata
 behavior. Stages overlap; do not sum them to reconstruct E2E. Configured grace
 and delay and Smart Turn analysis are no longer part of the terminal timing record.
 
-Only explicit tool origins in the same session, turn and revision carry LLM
-totals; a shared turn identity alone does not join responses. Typed chains can
-have no attributed speech turn. Successful tool responses retain at most 128
-timing records per session for delayed follow-ups;
-session teardown removes them. Tool call IDs preserve the successful parent
-timing across failed or discarded prefetch and unrelated out-of-band requests.
-Cancellation and failure do not seed new chains.
+LLM totals follow explicit tool origins within the same session, turn and
+revision, including typed chains without a speech turn. The server retains the
+last 128 successful tool responses' timings per session for delayed follow-ups
+and clears them on session teardown.
 
 Remote timings are measured by this server. They include network transfer and
 provider waits within the operation, so they are not provider-only inference
