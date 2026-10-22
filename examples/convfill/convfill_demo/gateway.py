@@ -18,6 +18,7 @@ import websockets
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from convfill_demo.keys import get_endpoint_api_key
 
@@ -25,7 +26,9 @@ HERE = Path(__file__).resolve().parents[3] / "demo"
 SPEECH_TO_SPEECH_URL = os.environ.get("SPEECH_TO_SPEECH_URL", "").strip()
 PIPELINE_URL = os.environ.get("CONVFILL_PIPELINE_URL", "ws://127.0.0.1:8765/v1/realtime")
 _session_active = False
-STARTUP_GREETING = os.environ.get("STARTUP_GREETING", "").strip()
+DEFAULT_STARTUP_GREETING = "Greet the user warmly in one short sentence, then invite them to talk."
+SERPER_KEY = get_endpoint_api_key("SERPER_API_KEY")
+STARTUP_GREETING = os.environ.get("STARTUP_GREETING", DEFAULT_STARTUP_GREETING).strip()
 
 logger = logging.getLogger("convfill.speech_demo")
 
@@ -54,8 +57,8 @@ def healthz() -> dict[str, str]:
 def config(request: Request) -> dict[str, object]:
     scheme = "wss" if request.url.scheme == "https" else "ws"
     return {
-        "search": False,
-        "tools": False,
+        "search": bool(SERPER_KEY),
+        "tools": True,
         "lb": False,
         "allowDirect": True,
         "s2sUrl": SPEECH_TO_SPEECH_URL or f"{scheme}://{request.url.netloc}/v1/realtime",
@@ -63,6 +66,43 @@ def config(request: Request) -> dict[str, object]:
         "iceServers": [],
         "startupGreeting": STARTUP_GREETING,
         "auth": False,
+    }
+
+
+class SearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=2000)
+    key: str | None = None
+
+
+@app.post("/api/search")
+async def search(req: SearchRequest):
+    query = req.query.strip()
+    if not query:
+        raise HTTPException(400, "Empty query.")
+    key = SERPER_KEY or (req.key or "").strip()
+    if not key:
+        raise HTTPException(503, "Search is not configured.")
+    try:
+        async with httpx.AsyncClient(timeout=12) as client:
+            response = await client.post(
+                "https://google.serper.dev/search",
+                headers={"X-API-KEY": key},
+                json={"q": query, "num": 5},
+            )
+        response.raise_for_status()
+        data = response.json()
+    except (httpx.HTTPError, ValueError):
+        # Never relay provider error bodies: they may contain request data.
+        raise HTTPException(502, "Search provider unavailable.")
+    box = data.get("answerBox") or {}
+    graph = data.get("knowledgeGraph") or {}
+    return {
+        "query": query,
+        "answer": box.get("answer") or box.get("snippet") or graph.get("description"),
+        "results": [
+            {"title": item.get("title", ""), "snippet": item.get("snippet", ""), "url": item.get("link", "")}
+            for item in (data.get("organic") or [])[:5]
+        ],
     }
 
 

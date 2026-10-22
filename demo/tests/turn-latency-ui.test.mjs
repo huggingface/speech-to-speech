@@ -47,11 +47,14 @@ test("history shows per-response server timings on desktop and phone", async (t)
         } : {}, output: [] },
       });
       chat.onTranscript({ role: "assistant", text: "The sky looks blue because air scatters blue light more strongly.", partial: false, responseId: "r1" });
+      chat.onPlaybackLatency({ responseId: "r1", seconds: 1.11 });
+      if (!document.querySelector(".playback-e2e")) throw new Error("Playback timing must appear before response.done");
       finish("r1", timing);
       chat._openPanel();
     }, timing);
     await page.evaluate(() => document.querySelector(".chat-panel-inner").getAnimations().forEach((animation) => animation.finish()));
     assert.equal(await page.locator(".hist-msg.assistant").count(), 1);
+    assert.match(await page.locator(".playback-e2e").textContent(), /1.11 s/);
     const summary = page.locator(".hist-timings summary").first();
     assert.match(await summary.textContent(), /E2E 1.61 s/);
     await summary.focus();

@@ -235,3 +235,27 @@ test("the pinned SDK forwards viseme extension events to avatar consumers", asyn
   assert.equal(detail?.response_id, "a");
   assert.deepEqual(detail?.visemes, [{ viseme: 21, start_s: 0, end_s: 0.1 }]);
 });
+
+
+test("SDK reports first non-silent playback while generation is still active", async (t) => {
+  const f = await fixture(0);
+  t.after(() => f.client.close());
+  const events = [];
+  f.client.addEventListener("playback-latency", event => events.push(event.detail));
+  f.client._ctx = { getOutputTimestamp: () => ({ contextTime: 0, performanceTime: 2000 }), close: async () => {} };
+  f.client._playbackLatency.capture(48000, 1000);
+  f.receive({ type: "input_audio_buffer.speech_stopped", item_id: "user", audio_end_ms: 1000 });
+  f.start();
+  f.audio(2400);
+  assert.equal(events.length, 0);
+  f.output.render(128);
+  f.acknowledge();
+  assert.equal(events.length, 1);
+  assert.equal(events[0].responseId, "a");
+  assert.ok(events[0].seconds >= 1 && events[0].seconds < 1.01);
+  f.output.render(128);
+  f.acknowledge();
+  assert.equal(events.length, 1);
+  f.audioDone();
+  f.done();
+});

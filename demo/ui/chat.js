@@ -69,6 +69,8 @@ export class ChatView {
     // ── Assistant transcript state (keyed by response_id) ──────────────────
     /** @type {Map<string, { bubble: HTMLElement, hist: HTMLElement }>} */
     this._asstByResp = new Map();
+    this._playbackTimings = new Map();
+    this._responseHistory = new Map();
 
     // ── Ephemeral bubble auto-dismiss ──────────────────────────────────────
     // Per-element expiry (epoch ms). A bubble fades once its expiry passes —
@@ -307,6 +309,8 @@ export class ChatView {
     this._audioUrls.clear();
     this._userAudioByItem.clear();
     this._userHistByItem.clear();
+    this._playbackTimings.clear();
+    this._responseHistory.clear();
     this.renderEmptyState();
     this._chatBadge.classList.remove("visible");
   }
@@ -426,6 +430,8 @@ export class ChatView {
     this._activeUserItemId = "";
     this._assistantDismissedUserItemId = "";
     this._asstByResp.clear();
+    this._playbackTimings.clear();
+    this._responseHistory.clear();
   }
 
   // ── Client event handlers ─────────────────────────────────────────────────
@@ -518,6 +524,7 @@ export class ChatView {
       if (!entry) {
         const bubble = this._spawnBubble("assistant", d.text);
         this._asstByResp.set(rid, { bubble, hist: this._appendHistMsg("assistant", d.text, false) });
+        this._renderPlaybackTiming(rid, this._asstByResp.get(rid).hist);
         this._bumpDismiss(bubble);
       } else {
         this._updateBubbleText(entry.bubble, d.text);
@@ -612,6 +619,11 @@ export class ChatView {
       this._markUnread();
     }
 
+    if (hist) {
+      this._responseHistory.set(responseId, hist);
+      if (this._responseHistory.size > 128) this._responseHistory.delete(this._responseHistory.keys().next().value);
+      this._renderPlaybackTiming(responseId, hist);
+    }
     if (status === "cancelled") {
       // Keep every transcript that was received — mark it interrupted rather
       // than erasing it. If the `*.transcript.done` never fired, build the row
@@ -631,6 +643,28 @@ export class ChatView {
     // the history row persists as the conversation log. Crucially we do NOT
     // touch user state here — that lifecycle is fully independent.
     this._asstByResp.delete(responseId);
+  }
+
+  onPlaybackLatency(detail) {
+    if (!detail.responseId || !Number.isFinite(detail.seconds) || detail.seconds < 0) return;
+    this._playbackTimings.set(detail.responseId, detail.seconds);
+    if (this._playbackTimings.size > 128) this._playbackTimings.delete(this._playbackTimings.keys().next().value);
+    const hist = this._asstByResp.get(detail.responseId)?.hist || this._responseHistory.get(detail.responseId);
+    if (hist) this._renderPlaybackTiming(detail.responseId, hist);
+  }
+
+  _renderPlaybackTiming(responseId, hist) {
+    const seconds = this._playbackTimings.get(responseId);
+    if (seconds === undefined) return;
+    let row = hist.querySelector(".playback-e2e");
+    if (!row) {
+      row = document.createElement("p");
+      row.className = "playback-e2e";
+      hist.appendChild(row);
+    }
+    row.textContent = `Playback E2E · ${seconds.toFixed(2)} s`;
+    row.title = "Estimated speech end to first non-silent audio rendered by the browser output device. Includes network and playback buffering; not a physical speaker measurement.";
+    this._markUnread();
   }
 
   /** @param {HTMLElement} hist @param {import("../turn-latency.js").TurnLatency} timing */

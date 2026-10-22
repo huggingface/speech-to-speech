@@ -301,3 +301,51 @@ def test_talker_stops_on_a_turn_boundary_split_across_chunks():
     frontend._iter_remote_chunks = chunks
     assert list(frontend.run_convfill_inference("serialized prompt")) == ["Hello."]
     assert closed.is_set()
+
+
+def test_streamed_tools_keep_arguments_out_of_knowledge_and_preserve_context():
+    requests, calls = [], []
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            content=sse(
+                chat(
+                    tool_calls=[
+                        {"index": 0, "id": "call_1", "function": {"name": "web_search", "arguments": '{"query":'}}
+                    ]
+                ),
+                chat(tool_calls=[{"index": 0, "function": {"arguments": '"weather"}'}}]),
+            ),
+        )
+
+    remote = RemoteInference({"base_url": "http://model/v1", "model": "gemma"}, transport=httpx.MockTransport(respond))
+    messages = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}]}]
+    remote.configure_request(
+        messages=messages,
+        tools=[{"type": "function", "function": {"name": "web_search", "parameters": {"type": "object"}}}],
+        instructions="Be brief.",
+        on_tool_call=lambda *args: calls.append(args),
+    )
+    assert list(remote.knowledge("prompt")) == []
+    assert calls == [("web_search", '{"query":"weather"}', "call_1")]
+    assert requests[0]["messages"][-1] == messages[0]
+    assert "Be brief." in requests[0]["messages"][0]["content"]
+    assert requests[0]["tool_choice"] == "auto"
+
+
+def test_cancelled_tool_stream_never_dispatches_call():
+    remote = RemoteInference({"base_url": "http://model/v1", "model": "gemma"})
+    calls = []
+    remote.configure_request(
+        tools=[{"function": {"name": "web_search"}}], on_tool_call=lambda *args: calls.append(args)
+    )
+
+    def events(*args):
+        yield chat(tool_calls=[{"index": 0, "function": {"name": "web_search", "arguments": "{}"}}])
+        remote.cancel_event.set()
+
+    remote.stream = events
+    assert list(remote.knowledge("prompt")) == []
+    assert calls == []

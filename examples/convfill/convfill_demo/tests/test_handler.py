@@ -387,3 +387,61 @@ def test_discard_pending_turn_removes_the_turn():
     assert system.discard_pending_turn("q") is True
     assert state.user_turns == []
     assert system._interrupted_thoughts == []
+
+
+def test_tool_history_is_proposed_before_delivery_and_turn_is_not_duplicated():
+    from openai.types.realtime import RealtimeSessionCreateRequest as RealtimeSession
+    from openai.types.realtime.conversation_item import RealtimeConversationItemUserMessage
+
+    from speech_to_speech.LLM.chat import Chat
+
+    class Remote:
+        def configure_request(self, **kwargs):
+            self.config = kwargs
+
+    class ToolSystem(_FakeSystem):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.remote = Remote()
+            self.convfill_backend = SimpleNamespace(model_backend=SimpleNamespace(remote=self.remote))
+
+        def run_turn(self, text):
+            self.dialogue_state_manager.update_user_state(text)
+            self.remote.config["on_tool_call"]("web_search", '{"query":"weather"}', "call_test")
+            return True
+
+    chat = Chat(6)
+    chat.add_item(
+        RealtimeConversationItemUserMessage(
+            type="message", role="user", content=[{"type": "input_text", "text": "Find the weather."}]
+        )
+    )
+    request = _request(chat)
+    request.runtime_config.session = RealtimeSession(
+        type="realtime",
+        tools=[{"type": "function", "name": "web_search", "parameters": {"type": "object"}}],
+        instructions="Be concise.",
+    )
+    handler = _handler(ToolSystem)
+    output = list(handler.process(request))
+    chunk, terminal = output
+    assert chunk.tools[0].name == "web_search"
+    assert chunk.text == ""
+    assert chunk.history.items[0].call_id == "call_test"
+    assert terminal.error is None and terminal.history.complete
+    assert handler.system.remote.config["instructions"] == "Be concise."
+    assert handler.system.dialogue_state_manager.user_turns == []
+
+
+def test_latest_text_survives_camera_only_user_message():
+    assert (
+        latest_user_text(
+            _FakeChat(
+                [
+                    {"role": "user", "content": "Describe my camera."},
+                    {"role": "user", "content": [{"type": "input_image", "image_url": "data:image/png;base64,abc"}]},
+                ]
+            )
+        )
+        == "Describe my camera."
+    )

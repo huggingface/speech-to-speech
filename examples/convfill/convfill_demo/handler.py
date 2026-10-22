@@ -6,13 +6,18 @@ import threading
 import time
 from queue import Empty, Queue
 from typing import Any, Callable, Iterator
+from uuid import uuid4
 
+from openai.types.realtime.conversation_item import RealtimeConversationItemFunctionCall
+from openai.types.responses import ResponseFunctionToolCall
 from strip_markdown import strip_markdown
 
 from convfill_demo.runtime.run_convfill import ConvFillConfig, ConvFillSystem
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.chat import make_assistant_message
+from speech_to_speech.LLM.chat_completions_language_model import _chat_messages
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
+from speech_to_speech.pipeline.history import ResponseHistory
 from speech_to_speech.pipeline.messages import EndOfResponse, LLMResponseChunk
 from speech_to_speech.utils.utils import is_out_of_band
 
@@ -31,14 +36,18 @@ def latest_user_text(chat: Any) -> str:
             continue
         content = message.get("content", "")
         if isinstance(content, str):
-            return content.strip()
+            if content.strip():
+                return content.strip()
+            continue
         if isinstance(content, list):
             parts = [
                 str(part.get("text", "")).strip()
                 for part in content
                 if isinstance(part, dict) and part.get("type") == "input_text"
             ]
-            return " ".join(part for part in parts if part).strip()
+            text = " ".join(part for part in parts if part).strip()
+            if text:
+                return text
     return ""
 
 
@@ -161,9 +170,10 @@ class ConvFillRealtimeHandler(BaseHandler[LLMIn, LLMOut]):
         return False
 
     @staticmethod
-    def _chunk(request: Any, generation: int | None, text: str) -> LLMResponseChunk:
+    def _chunk(request: Any, generation: int | None, text: str, tools=None) -> LLMResponseChunk:
         return LLMResponseChunk(
             text=text,
+            tools=tools or [],
             language_code=request.language_code,
             runtime_config=request.runtime_config,
             response=request.response,
@@ -212,12 +222,70 @@ class ConvFillRealtimeHandler(BaseHandler[LLMIn, LLMOut]):
             except BaseException as exc:
                 events.put(("runner_error", exc))
 
+        remote = getattr(getattr(getattr(self.system, "convfill_backend", None), "model_backend", None), "remote", None)
+        if remote is not None:
+            session = request.runtime_config.session
+            response = request.response
+            tools = response.tools if response is not None and response.tools is not None else session.tools
+            definitions = []
+            for tool in tools or []:
+                data = tool.model_dump(exclude_none=True) if hasattr(tool, "model_dump") else dict(tool)
+                if data.get("type") == "function":
+                    definitions.append(
+                        {
+                            "type": "function",
+                            "function": {
+                                key: value
+                                for key, value in data.items()
+                                if key in ("name", "description", "parameters")
+                            },
+                        }
+                    )
+            messages = _chat_messages(request.runtime_config.chat)
+            # Preserve ConvFill's canonical history and append this user/tool/image chain.
+            start = 0
+            for index, message in enumerate(messages):
+                content = message.get("content")
+                if message.get("role") == "user" and (
+                    isinstance(content, str)
+                    and content.strip()
+                    or isinstance(content, list)
+                    and any(part.get("text", "").strip() for part in content)
+                ):
+                    start = index
+            instructions = (
+                response.instructions
+                if response is not None and response.instructions is not None
+                else session.instructions
+            )
+            remote.configure_request(
+                messages=messages[start:],
+                tools=definitions,
+                instructions=instructions,
+                on_tool_call=lambda name, arguments, call_id: events.put(
+                    (
+                        "tool",
+                        ResponseFunctionToolCall(
+                            type="function_call",
+                            name=name,
+                            arguments=arguments,
+                            call_id=call_id,
+                            id="fc_" + uuid4().hex,
+                            status="completed",
+                        ),
+                    )
+                ),
+            )
+        store = getattr(self, "turn_latency_store", None)
+        tracker = store.get_response(request.response_key) if store is not None else None
         self._turn_started_at = time.perf_counter()
         self._first_knowledge = False
         worker = threading.Thread(target=run_turn, daemon=True, name="convfill-realtime-turn")
         worker.start()
 
         emitted: list[str] = []
+        tool_items = []
+        assistant = None
         completed = False
         cancelled = False
         error: BaseException | None = None
@@ -252,6 +320,12 @@ class ConvFillRealtimeHandler(BaseHandler[LLMIn, LLMOut]):
                         with self._audio_lock:
                             self._yielded_fragments += 1
                         yield self._chunk(request, generation, str(payload))
+                elif kind == "tool" and not cancelled:
+                    item = RealtimeConversationItemFunctionCall(**payload.model_dump())
+                    tool_items.append(item)
+                    chunk = self._chunk(request, generation, "", tools=[payload])
+                    chunk.history = ResponseHistory.capture(request.runtime_config.chat, tool_items, after_item_id=None)
+                    yield chunk
                 elif kind == "runner_done":
                     completed = bool(payload)
                 elif kind == "runner_error":
@@ -274,7 +348,9 @@ class ConvFillRealtimeHandler(BaseHandler[LLMIn, LLMOut]):
                     self.system.discard_pending_turn(user_text)
                 completed = False
 
-            if completed and emitted and not is_out_of_band(request.response):
+            if completed and emitted and tool_items:
+                assistant = make_assistant_message(" ".join(emitted).strip())
+            elif completed and emitted and not is_out_of_band(request.response):
                 assistant = make_assistant_message(" ".join(emitted).strip())
                 recorded = request.runtime_config.chat.add_provisional_generation_items(
                     request.response_key,
@@ -308,18 +384,34 @@ class ConvFillRealtimeHandler(BaseHandler[LLMIn, LLMOut]):
             elif not cancelled and not completed:
                 self.system.dialogue_state_manager.rollback_turn(user_text)
                 error_message = "ConvFill did not complete the response."
-            elif completed and not emitted:
+            elif completed and not emitted and not tool_items:
                 self.system.dialogue_state_manager.rollback_turn(user_text)
                 completed = False
                 error_message = "ConvFill completed without producing a Talker response."
 
-            yield EndOfResponse(
+            if tool_items and completed:
+                # The tool follow-up reuses the same user input. Do not duplicate a filler-only turn.
+                self.system.dialogue_state_manager.rollback_turn(user_text)
+            if tracker is not None:
+                tracker.record_llm(time.perf_counter() - self._turn_started_at)
+            output = EndOfResponse(
                 turn_id=request.turn_id,
                 turn_revision=request.turn_revision,
                 cancel_generation=generation,
                 response_key=request.response_key,
                 error=error_message,
+                input_tool_call_ids=request.runtime_config.chat.tool_output_call_ids()
+                if completed and hasattr(request.runtime_config.chat, "tool_output_call_ids")
+                else [],
             )
+            if tool_items and completed:
+                output.history = ResponseHistory.capture(
+                    request.runtime_config.chat,
+                    tool_items + ([assistant] if assistant else []),
+                    after_item_id=None,
+                    complete=True,
+                )
+            yield output
         finally:
             if worker.is_alive():
                 self.system.cancel_turn()

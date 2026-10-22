@@ -11,7 +11,7 @@ services:
     environment:
       HF_TOKEN: ${HF_TOKEN:-}
     volumes: [hf-cache:/root/.cache/huggingface]
-    command: [nvidia/Gemma-4-31B-IT-NVFP4, --revision, 4135a98a9b728a548947683219633b25682223ac, --quantization, modelopt, --language-model-only, --reasoning-parser, gemma4, --max-model-len, '8192', --max-num-seqs, '4', --gpu-memory-utilization, '0.90', --generation-config, vllm, --disable-log-requests]
+    command: [nvidia/Gemma-4-31B-IT-NVFP4, --revision, 4135a98a9b728a548947683219633b25682223ac, --quantization, modelopt, --enable-auto-tool-choice, --tool-call-parser, gemma4, --reasoning-parser, gemma4, --max-model-len, '8192', --max-num-seqs, '4', --gpu-memory-utilization, '0.90', --generation-config, vllm, --disable-log-requests]
     healthcheck:
       test: [CMD, curl, -f, http://127.0.0.1:8000/health]
       interval: 15s

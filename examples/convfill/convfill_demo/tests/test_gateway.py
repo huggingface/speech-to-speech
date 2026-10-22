@@ -13,7 +13,7 @@ def test_config_points_at_realtime_server() -> None:
     assert body["allowDirect"] is True
     assert body["lb"] is False
     assert body["rtc"] is False
-    assert body["tools"] is False
+    assert body["tools"] is True
 
 
 def test_interface_is_served() -> None:
@@ -138,3 +138,30 @@ def test_example_configuration_resolves_resources_outside_its_working_directory(
     assert Path(config.backend_prompt_template_file).is_file()
     assert config.backend_model_mode == "vllm"
     assert config.reasoner["enable_thinking"] is False
+
+
+def test_default_greeting_and_search_key_stays_server_side(monkeypatch):
+    import httpx
+
+    monkeypatch.setattr(server, "SERPER_KEY", "private-search-key")
+    config = client.get("/api/config")
+    assert config.json()["startupGreeting"]
+    assert config.json()["search"] is True
+    assert "private-search-key" not in config.text
+    original = httpx.AsyncClient
+
+    def respond(request):
+        assert request.headers["X-API-KEY"] == "private-search-key"
+        return httpx.Response(200, json={"organic": [{"title": "Result", "link": "https://example.org"}]})
+
+    monkeypatch.setattr(
+        server.httpx, "AsyncClient", lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs)
+    )
+    response = client.post("/api/search", json={"query": "example"})
+    assert response.json()["results"][0]["url"] == "https://example.org"
+    assert "private-search-key" not in response.text
+
+
+def test_search_reports_missing_secret(monkeypatch):
+    monkeypatch.setattr(server, "SERPER_KEY", "")
+    assert client.post("/api/search", json={"query": "example"}).status_code == 503

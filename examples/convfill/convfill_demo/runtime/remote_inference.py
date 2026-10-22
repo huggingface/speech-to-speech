@@ -7,6 +7,7 @@ import os
 import queue
 import threading
 import time
+from uuid import uuid4
 
 import httpx
 
@@ -93,6 +94,12 @@ class RemoteInference:
         self.transport = transport
         self._lock = threading.Lock()
         self._active = set()
+
+    def configure_request(self, *, messages=None, tools=None, instructions="", on_tool_call=None):
+        self.context_messages = messages or []
+        self.context_tools = tools or []
+        self.context_instructions = instructions or ""
+        self.on_tool_call = on_tool_call
 
     def begin_turn(self, cancel_event):
         self.cancel_event = cancel_event
@@ -216,17 +223,39 @@ class RemoteInference:
             "top_k": int(self.config.get("top_k", 64)),
             "chat_template_kwargs": {"enable_thinking": thinking},
         }
+        payload["messages"][0]["content"] += "\n" + getattr(self, "context_instructions", "")
+        payload["messages"].extend(getattr(self, "context_messages", []))
+        tools = getattr(self, "context_tools", [])
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+        calls = {}
         seen_text = False
         for event in self.stream("/chat/completions", payload):
             for choice in event.get("choices", []):
-                text = choice.get("delta", {}).get("content") or ""
+                delta = choice.get("delta", {})
+                for call in delta.get("tool_calls") or []:
+                    entry = calls.setdefault(call.get("index", 0), {"id": "", "name": "", "arguments": ""})
+                    entry["id"] += call.get("id") or ""
+                    function = call.get("function") or {}
+                    entry["name"] += function.get("name") or ""
+                    entry["arguments"] += function.get("arguments") or ""
+                text = delta.get("content") or ""
                 safe_text = visible.feed(text)
                 seen_text = seen_text or bool(safe_text.strip())
                 yield from parser.feed(safe_text)
         if not cancel.is_set():
-            if not seen_text:
+            if not seen_text and not calls:
                 raise InferenceError("Reasoner returned no visible knowledge")
             yield from parser.flush()
+            allowed = {tool["function"]["name"] for tool in tools}
+            for call in calls.values():
+                if call["name"] not in allowed or not callable(getattr(self, "on_tool_call", None)):
+                    raise InferenceError("Reasoner requested an unavailable tool")
+                arguments = call["arguments"] or "{}"
+                if not isinstance(json.loads(arguments), dict):
+                    raise InferenceError("Reasoner returned invalid tool arguments")
+                self.on_tool_call(call["name"], arguments, call["id"] or "call_" + uuid4().hex)
 
     def completion(self, token_ids, stop_ids):
         payload = {

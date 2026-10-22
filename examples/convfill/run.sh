@@ -50,7 +50,7 @@ if [ ! -d "$UI_DIR/node_modules" ]; then
 fi
 
 export CONVFILL_PIPELINE_URL="ws://127.0.0.1:${S2S_PORT}/v1/realtime"
-export STARTUP_GREETING="${STARTUP_GREETING:-}"
+export STARTUP_GREETING="${STARTUP_GREETING-Greet the user warmly in one short sentence, then invite them to talk.}"
 
 S2S_PID=""
 UI_PID=""
