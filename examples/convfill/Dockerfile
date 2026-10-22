@@ -1,7 +1,7 @@
 FROM node:24.10.0-bookworm-slim AS browser
 WORKDIR /ui
 COPY demo/package*.json ./
-RUN npm ci --omit=dev --registry=https://registry.npmjs.org
+RUN npm ci --omit=dev --registry=https://registry.npmjs.org --replace-registry-host=always
 
 FROM python:3.12.12-slim-bookworm
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
