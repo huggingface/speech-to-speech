@@ -27,6 +27,20 @@ def _flush_sentences(buf: str) -> tuple[list[str], str]:
     return [p for p in parts[:-1] if p.strip()], parts[-1]
 
 
+def _without_repeated_sentence_prefix(text: str, previous: str) -> str:
+    """Drop exact sentence echoes at a streaming handoff, never paraphrases."""
+
+    def key(value):
+        return re.findall(r"\w+(?:'\w+)*", value.replace("’", "'").casefold())
+
+    prior = [part.strip() for part in _SENTENCE_SPLIT_RE.split(previous.strip()) if part.strip()]
+    incoming = [part.strip() for part in _SENTENCE_SPLIT_RE.split(text.strip()) if part.strip()]
+    # Only a complete sentence with at least three words is an unambiguous echo.
+    while prior and incoming and len(key(incoming[0])) >= 3 and key(prior[-1]) == key(incoming[0]):
+        incoming.pop(0)
+    return " ".join(incoming)
+
+
 # remove faulty Gemma error
 logging.getLogger("transformers.utils.loading_report").setLevel(logging.ERROR)
 
@@ -388,6 +402,13 @@ class ConvFillFrontend:
         )
         yield from self.run_convfill_inference(prompt)
 
+    def prepare_continuation(self, user_text, spoken_prefix):
+        """Resume a tool turn with the earlier Talker prefix in its prompt."""
+        self.reset_turn_state()
+        if spoken_prefix.strip():
+            self.turn_state_manager.add_user_turn(user_text)
+            self.turn_state_manager.add_response(spoken_prefix.strip())
+
     def infer_and_update_state(self, current_thought):
         history = self.dialogue_state_manager.get_history()
         user_in = self.dialogue_state_manager.user_turns[-1]
@@ -397,14 +418,18 @@ class ConvFillFrontend:
             current_thought=current_thought,
             history=history,
         ):
-            pieces.append(fragment)
-            yield fragment
+            previous = " ".join(self.turn_state_manager.responses + pieces)
+            fragment = _without_repeated_sentence_prefix(fragment, previous)
+            if fragment:
+                pieces.append(fragment)
+                yield fragment
         if self.cancel_event.is_set():
             return
         full_response = " ".join(pieces).strip()
         if self.turn_state_manager.user_turn_empty():
             self.turn_state_manager.add_user_turn(user_in)
-        self.turn_state_manager.add_response(full_response)
+        if full_response:
+            self.turn_state_manager.add_response(full_response)
         self.turn_state_manager.add_thought(current_thought)
 
     def get_final_response_and_reset_turn_state(self):

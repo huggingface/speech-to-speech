@@ -7,6 +7,7 @@ import os
 import queue
 import threading
 import time
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import httpx
@@ -224,6 +225,16 @@ class RemoteInference:
             "chat_template_kwargs": {"enable_thinking": thinking},
         }
         payload["messages"][0]["content"] += "\n" + getattr(self, "context_instructions", "")
+        payload["messages"][0]["content"] += (
+            "\nYou supply content to a separate Talker, which already handles acknowledgments and empathy. "
+            "Supply only new useful substance or a necessary follow-up question. "
+            "Do not greet, apologize, acknowledge, announce a search, or repeat the Talker's words. "
+            "For an explicit startup greeting, supply only the greeting itself. "
+            "For latest/current facts, use web_search when available; check result dates and never "
+            "present an old result as the latest. A retrieval date is not the event date. "
+            "If freshness cannot be established, say so instead of inventing a result. "
+            "Today's date is " + datetime.now(timezone.utc).date().isoformat() + "."
+        )
         payload["messages"].extend(getattr(self, "context_messages", []))
         tools = getattr(self, "context_tools", [])
         if tools:

@@ -445,3 +445,28 @@ def test_latest_text_survives_camera_only_user_message():
         )
         == "Describe my camera."
     )
+
+
+def test_tool_round_trip_seeds_only_the_current_spoken_prefix():
+    prepared = []
+
+    class System(_FakeSystem):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.convfill_backend = SimpleNamespace(
+                model_backend=SimpleNamespace(remote=SimpleNamespace(configure_request=lambda **kwargs: None))
+            )
+            self.convfill_frontend = SimpleNamespace(prepare_continuation=lambda *args: prepared.append(args))
+
+    chat = _FakeChat(
+        [
+            {"role": "user", "content": "Old question"},
+            {"role": "assistant", "content": "Do not seed this old answer."},
+            {"role": "tool", "tool_call_id": "old", "content": "old result"},
+            {"role": "user", "content": "Current question"},
+            {"role": "assistant", "content": "Let me check the current result."},
+            {"role": "tool", "tool_call_id": "current", "content": "verified result"},
+        ]
+    )
+    list(_handler(System).process(_request(chat)))
+    assert prepared == [("Current question", "Let me check the current result.")]

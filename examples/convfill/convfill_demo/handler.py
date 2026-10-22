@@ -215,8 +215,13 @@ class ConvFillRealtimeHandler(BaseHandler[LLMIn, LLMOut]):
             self._yielded_fragments = 0
             self._response_key = request.response_key
 
+        continuation_prefix = ""
+
         def run_turn() -> None:
             try:
+                frontend = getattr(self.system, "convfill_frontend", None)
+                if continuation_prefix and frontend is not None:
+                    frontend.prepare_continuation(user_text, continuation_prefix)
                 completed = bool(self.system.run_turn(user_text))
                 events.put(("runner_done", completed))
             except BaseException as exc:
@@ -253,6 +258,20 @@ class ConvFillRealtimeHandler(BaseHandler[LLMIn, LLMOut]):
                     and any(part.get("text", "").strip() for part in content)
                 ):
                     start = index
+            chain = messages[start:]
+            if any(message.get("role") == "tool" for message in chain):
+                # A native tool round trip splits one user turn into multiple
+                # responses. Retain its earlier text so the Talker continues it.
+                spoken = []
+                for message in chain:
+                    if message.get("role") != "assistant":
+                        continue
+                    content = message.get("content") or ""
+                    if isinstance(content, str):
+                        spoken.append(content)
+                    elif isinstance(content, list):
+                        spoken.extend(part.get("text", "") for part in content)
+                continuation_prefix = " ".join(part.strip() for part in spoken if part.strip())
             instructions = (
                 response.instructions
                 if response is not None and response.instructions is not None
@@ -341,7 +360,9 @@ class ConvFillRealtimeHandler(BaseHandler[LLMIn, LLMOut]):
                 # Best-effort dispatched-text prefix. The transport has no
                 # playback acknowledgement: this is NOT verified heard text.
                 # The interruption marker tells the Reasoner it may be partial.
-                heard = self._delivered_text(request.response_key)
+                heard = " ".join(
+                    part for part in (continuation_prefix, self._delivered_text(request.response_key)) if part
+                )
                 if heard:
                     self.system.commit_interrupted_turn(user_text, heard)
                 else:

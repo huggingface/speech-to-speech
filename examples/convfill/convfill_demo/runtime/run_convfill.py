@@ -131,6 +131,11 @@ class ConvFillSystem:
         q = queue.Queue()
 
         cancel = self.cancel_event
+        frontend = getattr(self, "convfill_frontend", None)
+        turn_state = getattr(frontend, "turn_state_manager", None)
+        # A tool result resumes the same utterance. Give its knowledge stream
+        # a short head start rather than immediately emitting a second preamble.
+        filler_not_before = time.monotonic() + (1.0 if getattr(turn_state, "responses", []) else 0.0)
 
         def producer():
             gen = self.convfill_backend.backend_infer()
@@ -163,7 +168,12 @@ class ConvFillSystem:
             # emit filler only when the listener would otherwise hear silence: no thought queued, no frontend inference in flight, and no audio currently playing.
             with self._frontend_inflight_lock:
                 frontend_busy = self._frontend_inflight > 0
-            if self.thought_queue.qsize() == 0 and not frontend_busy and self.audio_in_flight_fn() == 0:
+            if (
+                time.monotonic() >= filler_not_before
+                and self.thought_queue.qsize() == 0
+                and not frontend_busy
+                and self.audio_in_flight_fn() == 0
+            ):
                 yield "<sil>"
                 continue
 

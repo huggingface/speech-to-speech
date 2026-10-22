@@ -349,3 +349,72 @@ def test_cancelled_tool_stream_never_dispatches_call():
     remote.stream = events
     assert list(remote.knowledge("prompt")) == []
     assert calls == []
+
+
+def _frontend_for_handoff():
+    frontend = ConvFillFrontend.__new__(ConvFillFrontend)
+    frontend.cancel_event = threading.Event()
+    frontend.turn_state_manager = TurnStateManager(
+        {"USER_START": "<u>", "ASSN_START": "<a>", "KNOWLEDGE_START": "<k>", "END": "<end>"}
+    )
+    frontend.dialogue_state_manager = DialogueStateManager()
+    frontend.dialogue_state_manager.update_user_state("A synthetic question")
+    return frontend
+
+
+def test_exact_sentence_echo_is_removed_before_speech_and_state_commit():
+    frontend = _frontend_for_handoff()
+    frontend.infer = lambda **kwargs: iter(["I'm sorry to hear that."])
+    assert list(frontend.infer_and_update_state("<sil>")) == ["I'm sorry to hear that."]
+    frontend.infer = lambda **kwargs: iter(["I’m sorry to hear that.", "Would you like to talk about it?"])
+    assert list(frontend.infer_and_update_state("A useful follow-up question.")) == ["Would you like to talk about it?"]
+    _, text, _ = frontend.get_final_response_and_reset_turn_state()
+    assert text == "I'm sorry to hear that. Would you like to talk about it?"
+    assert frontend.dialogue_state_manager.responses == [text]
+
+
+def test_tool_continuation_preserves_prefix_and_commits_one_canonical_turn():
+    frontend = _frontend_for_handoff()
+    frontend.prepare_continuation("A synthetic question", "Let me check that for you.")
+    captured = []
+
+    def infer(**kwargs):
+        captured.append(
+            frontend.turn_state_manager.build_prompt(
+                kwargs["current_user_input"], kwargs["current_thought"], kwargs["history"]
+            )
+        )
+        yield "Let me check that for you."
+        yield "Here is the verified result."
+
+    frontend.infer = infer
+    assert list(frontend.infer_and_update_state("Verified result.")) == ["Here is the verified result."]
+    assert "<a>Let me check that for you. <end><k>Verified result.<end><a>" in captured[0]
+    _, text, _ = frontend.get_final_response_and_reset_turn_state()
+    assert text == "Let me check that for you. Here is the verified result."
+    assert len(frontend.dialogue_state_manager.responses) == 1
+
+
+def test_echo_guard_is_local_and_never_drops_a_changed_answer():
+    from convfill_demo.runtime.convfill_frontend import _without_repeated_sentence_prefix
+
+    trim = _without_repeated_sentence_prefix
+    assert trim("The deadline is Tuesday.", "The deadline is Monday.") == "The deadline is Tuesday."
+    assert trim("That is a good point of view.", "That is a good point.") == "That is a good point of view."
+    assert (
+        trim("The deadline is Monday.", "The deadline is Monday. Another detail follows.") == "The deadline is Monday."
+    )
+    frontend = _frontend_for_handoff()
+    frontend.infer = lambda **kwargs: iter(["Let me check that.", "Let me check that.", "Here is the answer."])
+    assert list(frontend.infer_and_update_state("Fact.")) == ["Let me check that.", "Here is the answer."]
+
+
+def test_fast_tool_continuation_does_not_restart_with_a_filler():
+    class Backend:
+        def backend_infer(self):
+            time.sleep(0.05)
+            yield "The verified result."
+
+    system = _bare_system(Backend())
+    system.convfill_frontend = SimpleNamespace(turn_state_manager=SimpleNamespace(responses=["Let me check that."]))
+    assert list(system.backend_fn()) == ["The verified result."]

@@ -53,10 +53,18 @@ inputs go to the Reasoner; only the Talker’s text reaches TTS. Session instruc
 the Reasoner. Tool-only planning turns do not duplicate the user’s ConvFill conversation turn.
 
 History shows server stage timings after each response. Server E2E ends at first TTS audio,
-not at the end of generation. WebSocket playback additionally reports **Playback E2E** as soon
+not at the end of generation. WebSocket playback additionally shows a compact **First audio** timing disclosure as soon
 as the first non-silent output frame is rendered, including network and playback buffering.
 This uses the browser output-device clock and microphone chunk timestamps: it is an estimate,
 not a physical speaker measurement. Unsupported output clocks, greetings without a speech turn,
 and cancelled playback do not fabricate a measurement. Tool follow-ups share the original
 speech anchor and report only its first audio. Audio dispatch is still not proof of what the
 user heard; this timing does not change interrupted-history guarantees.
+
+The Talker may acknowledge a question while the Reasoner is still working; the
+Reasoner supplies new substantive content, not a second conversational preamble.
+Native tool follow-ups retain the current Talker prefix, and receive a one-second
+knowledge head start before filler scheduling resumes. Exact repeated sentence
+prefixes (three or more words) are suppressed before TTS and state updates. This
+guard does not remove paraphrases, change facts, or deduplicate the whole history.
+Interrupted-history text remains an estimate, not proof of physical playback.
