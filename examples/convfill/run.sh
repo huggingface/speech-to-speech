@@ -84,6 +84,8 @@ fi
   --convfill_mode "$CONVFILL_MODE" \
   --tts "$HF_S2S_TTS" \
   --num_pipelines 1 \
+  --speculative_reopen_ms "${CONVFILL_COMPLETE_HOLD_MS:-500}" \
+  --smart_turn_max_wait_ms "${CONVFILL_INCOMPLETE_HOLD_MS:-1700}" \
   --enable_live_transcription "${speech_args[@]}" &
 S2S_PID=$!
 

@@ -81,3 +81,10 @@ Local Silero v6 detection briefly lowers playback volume on a speech candidate;
 server VAD still confirms cancellation and turn boundaries. The ConvFill gateway
 serves the pinned model/worklet/WASM assets from the browser dependencies copied
 into the image. Model loading is asynchronous, with server-only fallback on failure.
+
+The demo holds assistant output for 500 ms after a Smart Turn complete decision
+and 1700 ms after an incomplete decision, 300 ms below each upstream default.
+Override with `CONVFILL_COMPLETE_HOLD_MS` / `CONVFILL_INCOMPLETE_HOLD_MS`. The
+600 ms incomplete-turn processing delay stays inside the incomplete hold window;
+it is not added afterward. Model generation may overlap these windows, so measured
+residual hold and first-audio latency will vary with inference time.
