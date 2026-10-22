@@ -1,7 +1,7 @@
 # Validation scope
 
-The example, backend registry and realtime pipeline builder pass 154 Python
-regression tests, including 49 example tests. The current demo passes six UI
+The example, backend registry and realtime pipeline builder pass 157 Python
+regression tests, including 52 example tests. The current demo passes six UI
 tests and 32 Agents SDK adapter/playback/timing/viseme tests. Ruff check/format,
 launcher syntax and CLI option checks pass.
 
