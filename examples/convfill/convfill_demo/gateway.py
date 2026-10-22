@@ -28,6 +28,8 @@ PIPELINE_URL = os.environ.get("CONVFILL_PIPELINE_URL", "ws://127.0.0.1:8765/v1/r
 _session_active = False
 DEFAULT_STARTUP_GREETING = "Greet the user warmly in one short sentence, then invite them to talk."
 SERPER_KEY = get_endpoint_api_key("SERPER_API_KEY")
+SEARCH_PROXY_URL = os.environ.get("CONVFILL_SEARCH_URL", "").strip()
+SEARCH_PROXY_KEY = get_endpoint_api_key("CONVFILL_SEARCH_API_KEY")
 STARTUP_GREETING = os.environ.get("STARTUP_GREETING", DEFAULT_STARTUP_GREETING).strip()
 
 logger = logging.getLogger("convfill.speech_demo")
@@ -57,7 +59,7 @@ def healthz() -> dict[str, str]:
 def config(request: Request) -> dict[str, object]:
     scheme = "wss" if request.url.scheme == "https" else "ws"
     return {
-        "search": bool(SERPER_KEY),
+        "search": bool(SERPER_KEY or SEARCH_PROXY_URL),
         "tools": True,
         "lb": False,
         "allowDirect": True,
@@ -79,6 +81,28 @@ async def search(req: SearchRequest):
     query = req.query.strip()
     if not query:
         raise HTTPException(400, "Empty query.")
+    if not SERPER_KEY and SEARCH_PROXY_URL:
+        # An existing server may already hold a non-exportable search secret.
+        # This destination is deploy-pinned, never supplied by the browser.
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.post(
+                    SEARCH_PROXY_URL,
+                    headers={"Authorization": "Bearer " + SEARCH_PROXY_KEY} if SEARCH_PROXY_KEY else {},
+                    json={"query": query},
+                )
+            response.raise_for_status()
+            data = response.json()
+            return {
+                "query": query,
+                "answer": data.get("answer"),
+                "results": [
+                    {key: item.get(key, "") for key in ("title", "snippet", "url")}
+                    for item in (data.get("results") or [])[:5]
+                ],
+            }
+        except (httpx.HTTPError, ValueError):
+            raise HTTPException(502, "Search provider unavailable.")
     key = SERPER_KEY or (req.key or "").strip()
     if not key:
         raise HTTPException(503, "Search is not configured.")

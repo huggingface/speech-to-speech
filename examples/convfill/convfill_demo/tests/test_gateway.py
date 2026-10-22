@@ -164,4 +164,31 @@ def test_default_greeting_and_search_key_stays_server_side(monkeypatch):
 
 def test_search_reports_missing_secret(monkeypatch):
     monkeypatch.setattr(server, "SERPER_KEY", "")
+    monkeypatch.setattr(server, "SEARCH_PROXY_URL", "")
     assert client.post("/api/search", json={"query": "example"}).status_code == 503
+
+
+def test_existing_search_server_keeps_credentials_and_location_private(monkeypatch):
+    import httpx
+
+    monkeypatch.setattr(server, "SERPER_KEY", "")
+    monkeypatch.setattr(server, "SEARCH_PROXY_URL", "https://search.example/api/search")
+    monkeypatch.setattr(server, "SEARCH_PROXY_KEY", "private-proxy-key")
+    original = httpx.AsyncClient
+
+    def respond(request):
+        assert str(request.url) == "https://search.example/api/search"
+        assert request.headers["Authorization"] == "Bearer private-proxy-key"
+        return httpx.Response(
+            200, json={"answer": "Available", "results": [{"url": "https://example.org", "internal": "do not relay"}]}
+        )
+
+    monkeypatch.setattr(
+        server.httpx, "AsyncClient", lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs)
+    )
+    config = client.get("/api/config")
+    assert config.json()["search"] is True
+    assert "search.example" not in config.text and "private-proxy-key" not in config.text
+    result = client.post("/api/search", json={"query": "example"})
+    assert result.json()["answer"] == "Available"
+    assert "internal" not in result.text

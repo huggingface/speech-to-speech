@@ -44,7 +44,9 @@ shared UI, including voice, instructions, audio buffering, noise gate, and conne
 This gateway uses WebSocket transport; WebRTC remains unavailable here.
 
 Web search uses `SERPER_API_KEY` on the UI server. Only its availability is returned to the
-browser. Without it, users can provide their own key in the tools dialog. The camera is opt-in
+browser. Alternatively set `CONVFILL_SEARCH_URL` and `CONVFILL_SEARCH_API_KEY` to reuse
+an existing server-side search proxy whose Serper secret cannot be exported. That URL and
+credential stay on the UI server. Without either option, users can provide a key in the tools dialog. The camera is opt-in
 and requires a multimodal Reasoner. vLLM must enable native tool parsing (the Compose example
 uses `--enable-auto-tool-choice --tool-call-parser gemma4`). Tool arguments, results, and image
 inputs go to the Reasoner; only the Talker’s text reaches TTS. Session instructions also reach
