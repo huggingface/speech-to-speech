@@ -19,6 +19,9 @@ new row (no explicit reset). Logged-in users are keyed by a hashed HF `sub`;
 anonymous users by BOTH a hashed IP and a hashed signed-cookie id, OR-matched
 (spent = max of the two) so clearing one identifier doesn't reset the budget.
 
+The same store caps web searches on the server's Serper key per user per day
+(`take_search`), and lets search check it belongs to a live session.
+
 Storage is SQLite at $USAGE_DB_PATH, else /data (persistent Spaces storage),
 else a /tmp fallback. On /tmp the budget is only per-uptime — flagged in logs.
 """
@@ -43,6 +46,7 @@ FREE_SEC = int(os.environ.get("LIMIT_FREE_SEC", "600"))   # 10 min/day, signed i
 CHUNK_SEC = int(os.environ.get("RESERVE_CHUNK_SEC", "10"))  # reservation granularity
 HEARTBEAT_SEC = int(os.environ.get("HEARTBEAT_SEC", "5"))   # advertised client cadence
 REAP_AFTER_SEC = int(os.environ.get("SESSION_REAP_SEC", "15"))  # silence before sweep
+SEARCH_PER_DAY = int(os.environ.get("LIMIT_SEARCH_PER_DAY", "100"))  # server-key web searches/day
 
 # Stable across restarts or the hashed keys (and signed cookies) rotate and the
 # budget effectively resets. Set it as a Space secret. Falls back to a per-boot
@@ -132,6 +136,14 @@ def init() -> None:
                    last_seen_ts REAL NOT NULL,
                    reserved_sec INTEGER NOT NULL,
                    ended        INTEGER NOT NULL DEFAULT 0
+               )"""
+        )
+        con.execute(
+            """CREATE TABLE IF NOT EXISTS search_daily (
+                   user_key TEXT NOT NULL,
+                   day      TEXT NOT NULL,
+                   count    INTEGER NOT NULL DEFAULT 0,
+                   PRIMARY KEY (user_key, day)
                )"""
         )
     logger.info("Usage limiter ready at %s (anon=%ss free=%ss chunk=%ss)", _db_path, ANON_SEC, FREE_SEC, CHUNK_SEC)
@@ -264,6 +276,39 @@ def sweep() -> None:
             con.execute("UPDATE sessions SET ended=1 WHERE session_id=?", (session_id,))
         if stale:
             logger.debug("swept %d stale session(s)", len(stale))
+
+
+def session_live(session_id: str, keys) -> bool:
+    """Whether `session_id` is a granted, not-yet-ended session of these keys."""
+    if not session_id:
+        return False
+    with _lock, _connect() as con:
+        row = con.execute(
+            "SELECT keys, ended FROM sessions WHERE session_id=?", (session_id,)
+        ).fetchone()
+    return bool(row) and not row[1] and row[0] == ",".join(keys)
+
+
+def take_search(keys) -> bool:
+    """Count one server-key web search against today's cap (OR-matched like the
+    talk budget). False, with nothing counted, once the cap is reached."""
+    day = _today()
+    with _lock, _connect() as con:
+        counts = [
+            con.execute(
+                "SELECT count FROM search_daily WHERE user_key=? AND day=?", (k, day)
+            ).fetchone()
+            for k in keys
+        ]
+        if max((int(c[0]) for c in counts if c), default=0) >= SEARCH_PER_DAY:
+            return False
+        for k in keys:
+            con.execute(
+                """INSERT INTO search_daily (user_key, day, count) VALUES (?, ?, 1)
+                   ON CONFLICT(user_key, day) DO UPDATE SET count = count + 1""",
+                (k, day),
+            )
+        return True
 
 
 def _reconcile(con, keys, day: str, grant_ts: float, reserved: int, end_ts: float) -> None:

@@ -868,6 +868,8 @@ async function execWebSearch(query) {
   const body = { query };
   // Only send a user key when there's no server key (server prefers its own).
   if (!serverSearchKey && userSearchKey) body.key = userSearchKey;
+  // On the Space, the server key only serves searches from a live conversation.
+  if (trackedSessionId) body.sessionId = trackedSessionId;
 
   const res = await fetch("api/search", {
     method: "POST",

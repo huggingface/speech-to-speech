@@ -215,7 +215,10 @@ button, top-right):
 - **Web search** — Google results via Serper.dev, proxied server-side so the key
   never reaches the browser. Set `SERPER_API_KEY` as an env var / Space secret.
   Without it, the tool is disabled unless the user pastes their own key in the
-  Tools panel.
+  Tools panel. On a Space the server key is only spent for signed-in HF users
+  (metered tiers also need a live conversation), capped at
+  `LIMIT_SEARCH_PER_DAY` searches per user per day; a Space without HF sign-in
+  never uses it. Locally the key is unrestricted.
 - **Camera** — while enabled, a live self-view shows bottom-left; when the model
   calls the tool, the current frame is sent to the vision-language model so it can
   see what you're showing it. This needs a vision-language model on the server
@@ -234,6 +237,7 @@ leaves the app unmetered. Tunable via env:
 |-----|---------|------|
 | `LIMIT_ANON_SEC` | `300` | Daily seconds for anonymous visitors (5 min) |
 | `LIMIT_FREE_SEC` | `600` | Daily seconds for signed-in non-PRO users (10 min) |
+| `LIMIT_SEARCH_PER_DAY` | `100` | Daily web searches on the server's Serper key per signed-in user (every tier) |
 | `LB_HF_TOKEN` | _(falls back to user OAuth)_ | Optional Space secret sent in standard `Authorization` to authenticate requests at the HF Inference Endpoint ingress; per-user attribution continues through `X-Reachy-Mini-Authorization` |
 | `UNLIMITED_ORGS` | _(adds to defaults)_ | Extra HF org names whose members get **unlimited** usage, like PRO |
 | `USAGE_HASH_SECRET` | _(random)_ | HMAC secret for hashing identity keys + signing the anon cookie |
