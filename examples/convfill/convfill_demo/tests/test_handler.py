@@ -470,3 +470,34 @@ def test_tool_round_trip_seeds_only_the_current_spoken_prefix():
     )
     list(_handler(System).process(_request(chat)))
     assert prepared == [("Current question", "Let me check the current result.")]
+
+
+def test_echo_only_tool_followup_keeps_prior_response_without_an_error():
+    class System(_FakeSystem):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.prefix = ""
+            self.convfill_backend = SimpleNamespace(
+                model_backend=SimpleNamespace(remote=SimpleNamespace(configure_request=lambda **kwargs: None))
+            )
+            self.convfill_frontend = SimpleNamespace(prepare_continuation=self.prepare)
+
+        def prepare(self, user, prefix):
+            self.prefix = prefix
+
+        def run_turn(self, user):
+            self.dialogue_state_manager.update_user_state(user)
+            self.dialogue_state_manager.commit_turn(user, self.prefix, [])
+            return True
+
+    handler = _handler(System)
+    chat = _FakeChat(
+        [
+            {"role": "user", "content": "Current question"},
+            {"role": "assistant", "content": "Here is the answer."},
+            {"role": "tool", "tool_call_id": "current", "content": "verified result"},
+        ]
+    )
+    output = list(handler.process(_request(chat)))
+    assert len(output) == 1 and output[0].error is None
+    assert handler.system.dialogue_state_manager.responses == ["Here is the answer."]

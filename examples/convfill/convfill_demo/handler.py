@@ -405,7 +405,7 @@ class ConvFillRealtimeHandler(BaseHandler[LLMIn, LLMOut]):
             elif not cancelled and not completed:
                 self.system.dialogue_state_manager.rollback_turn(user_text)
                 error_message = "ConvFill did not complete the response."
-            elif completed and not emitted and not tool_items:
+            elif completed and not emitted and not tool_items and not continuation_prefix:
                 self.system.dialogue_state_manager.rollback_turn(user_text)
                 completed = False
                 error_message = "ConvFill completed without producing a Talker response."
