@@ -1,0 +1,33 @@
+schema_version: 1
+
+# Every model runs in one `transformers serve` process at http://localhost:8000/v1.
+blocks:
+  vad: {kind: vad, backend: silero}
+  stt:
+    kind: stt
+    backend: openai
+    settings:
+      openai_stt_base_url: http://localhost:8000/v1
+      openai_stt_model: openai/whisper-small.en
+  llm:
+    kind: llm
+    backend: chat-completions
+    settings:
+      responses_api_base_url: http://localhost:8000/v1
+      model_name: Qwen/Qwen3-0.6B
+      stream_batch_sentences: 1
+  tts:
+    kind: tts
+    backend: openai
+    settings:
+      openai_tts_base_url: http://localhost:8000/v1
+      openai_tts_model: gradium/phonon-31m-en
+      # Phonon does not stream through /v1/audio/speech yet: request whole WAV replies
+      openai_tts_response_format: wav
+      openai_tts_stream: false
+
+pipelines:
+  transformers-serve:
+    options:
+      enable_live_transcription: false
+    stages: {vad: vad, stt: stt, llm: llm, tts: tts}

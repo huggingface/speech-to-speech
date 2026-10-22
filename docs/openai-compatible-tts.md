@@ -52,6 +52,13 @@ If a server requires an explicit language, pass its expected value, such as
 `--openai_tts_language English` for Qwen3-TTS. The value is forwarded unchanged
 with every speech request; the TTS handler does not infer it from the pipeline.
 
+## Transformers with Gradium Phonon
+
+`transformers serve` can run Gradium Phonon behind `/v1/audio/speech`, and the
+STT and LLM behind its other endpoints. See the
+[transformers serve example](../examples/transformers-serve/README.md) for the
+configuration: Phonon replies are requested as whole WAV files.
+
 ## OpenAI and standard-compatible servers
 
 Standard OpenAI-compatible endpoints do not need the vLLM streaming extension.
