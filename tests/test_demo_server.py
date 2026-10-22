@@ -16,6 +16,34 @@ demo_auth = importlib.import_module("auth")
 demo_server = importlib.import_module("server")
 
 
+@pytest.mark.parametrize("filename", list(demo_server.LOCAL_VAD_ASSETS))
+@pytest.mark.parametrize("bundled", [False, True])
+async def test_local_vad_assets_are_served_with_browser_content_types(monkeypatch, tmp_path, filename, bundled):
+    monkeypatch.setattr(demo_server, "HERE", str(tmp_path))
+    package, media_type = demo_server.LOCAL_VAD_ASSETS[filename]
+    installed = tmp_path / "node_modules" / package / "dist" / filename
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    installed.write_bytes(b"installed asset")
+    if bundled:
+        destination = tmp_path / "vendor" / "local-vad" / filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"bundled asset")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=demo_server.app), base_url="http://test") as client:
+        response = await client.get(f"/vendor/local-vad/{filename}")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(media_type)
+    assert response.content == (b"bundled asset" if bundled else b"installed asset")
+
+
+async def test_local_vad_missing_assets_fail_without_exposing_other_package_files(monkeypatch, tmp_path):
+    monkeypatch.setattr(demo_server, "HERE", str(tmp_path))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=demo_server.app), base_url="http://test") as client:
+        assert (await client.get("/vendor/local-vad/not-an-asset.js")).status_code == 404
+        response = await client.get("/vendor/local-vad/silero_vad_v6.onnx")
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Run npm ci in demo/"
+
+
 def _mock_whoami(monkeypatch, payload):
     calls = []
 

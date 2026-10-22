@@ -15,6 +15,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 COPY --from=agents-sdk /sdk/node_modules/@openai/agents-realtime/dist/bundle/openai-realtime-agents.umd.js /app/vendor/openai-realtime-agents.umd.js
+COPY --from=agents-sdk /sdk/node_modules/@ricky0123/vad-web/dist/bundle.min.js /sdk/node_modules/@ricky0123/vad-web/dist/bundle.min.js.LICENSE.txt /sdk/node_modules/@ricky0123/vad-web/dist/vad.worklet.bundle.min.js /sdk/node_modules/@ricky0123/vad-web/dist/silero_vad_v6.onnx /app/vendor/local-vad/
+COPY --from=agents-sdk /sdk/node_modules/onnxruntime-web/dist/ort.wasm.min.js /sdk/node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs /sdk/node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm /app/vendor/local-vad/
 
 EXPOSE 7860
 
