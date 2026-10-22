@@ -25,7 +25,7 @@ browser connects directly to that URL, shown read-only in Settings.
 Endpoints:
   GET  /api/config           -> { search, lb, allowDirect, s2sUrl, rtc, iceServers, auth }
   GET  /api/me               -> login + tier + remaining budget (LB mode only)
-  POST /api/search           -> { results, answer }  Google via Serper.dev
+  POST /api/search           -> { results, answer }  Google via Serper.dev (gated on a Space)
   POST /api/calls            -> proxies the WebRTC SDP offer to <s2s>/v1/realtime/calls
   POST /api/session          -> proxies <LB>/session: a grant, or a queue ticket
   GET  /api/queue/{id}       -> proxies <LB>/queue/{id}: position, or a grant on claim
@@ -196,6 +196,15 @@ def local_vad_asset(filename: str):
 # Wire HF OAuth before the app serves (no-op unless the OAuth env is present).
 # Sign-in only matters when we're metering (prod Space), so gate it on that.
 AUTH_ENABLED = LIMITER_ENABLED and auth.attach(app)
+# The Serper key is paid for. A Space is public, so there the key is only spent
+# for signed-in HF users (see _search_gate), which needs sign-in to be wired.
+# Off a Space (local dev) there's no one to protect it from.
+SERVER_SEARCH = bool(SERPER_KEY) and (AUTH_ENABLED or not SPACE_ID)
+if SERPER_KEY and not SERVER_SEARCH:
+    logger.warning(
+        "SERPER_API_KEY is set but this Space has no HF sign-in (needs "
+        "LOAD_BALANCER_URL + hf_oauth), so the server key is never used."
+    )
 
 
 @app.on_event("startup")
@@ -221,6 +230,9 @@ class SearchRequest(BaseModel):
     # Optional user-supplied key (fallback when the deploy has no server key).
     # Used for this request only; never stored.
     key: str | None = None
+    # The caller's granted conversation, so a search on the server key can be
+    # tied to a live session. camelCase like the other endpoints' JSON bodies.
+    sessionId: str | None = None
 
 
 @app.get("/api/config")
@@ -230,7 +242,7 @@ def config():
     whether HF sign-in is available, and whether the user may instead set a direct
     s2s server URL. The LB address itself is intentionally NOT included."""
     return {
-        "search": bool(SERPER_KEY),
+        "search": SERVER_SEARCH,
         "lb": bool(LOAD_BALANCER_URL),
         "allowDirect": not LOAD_BALANCER_URL,
         # Deploy-pinned direct s2s URL (empty when unset). Not a secret: the
@@ -272,17 +284,21 @@ async def me(request: Request):
 
 
 @app.post("/api/search")
-async def search(req: SearchRequest):
+async def search(req: SearchRequest, request: Request):
     """Proxy a Google search via Serper.dev. The key stays on the server unless
-    the user brought their own (then theirs is used for this request only)."""
+    the user brought their own (then theirs is used for this request only).
+    Spending the server's key goes through _search_gate first."""
     query = (req.query or "").strip()
     if not query:
         raise HTTPException(status_code=400, detail="Empty query.")
 
-    key = (req.key or "").strip() or SERPER_KEY
+    key = (req.key or "").strip()
     if not key:
-        # No server key and the user didn't supply one — search is unavailable.
-        raise HTTPException(status_code=503, detail="Search is not configured.")
+        if not SERVER_SEARCH:
+            # No usable server key and the user didn't supply one.
+            raise HTTPException(status_code=503, detail="Search is not configured.")
+        await _search_gate(request, req.sessionId or "")
+        key = SERPER_KEY
 
     headers = {"X-API-KEY": key, "Content-Type": "application/json"}
     payload = {"q": query, "num": MAX_RESULTS}
@@ -327,6 +343,28 @@ async def search(req: SearchRequest):
         answer = kg.get("description") or None
 
     return JSONResponse({"query": query, "answer": answer, "results": results})
+
+
+async def _search_gate(request: Request, session_id: str) -> None:
+    """Allow one search on the server's Serper key, or raise.
+
+    On a Space the caller must be a signed-in HF user (an anonymous identity is
+    only an IP + cookie, both cheap to rotate), in a live conversation: the
+    session the LB granted them, still heartbeating. Every tier, PRO included.
+    Everyone also gets at most LIMIT_SEARCH_PER_DAY searches a day. Off a Space
+    nothing is checked. Details are written for the model, which reads them
+    back to the user."""
+    if not SPACE_ID:
+        return
+    if auth.oauth_login_required_reason(request):
+        raise HTTPException(status_code=401, detail="Sign in with Hugging Face to use web search.")
+    tier, keys, _ = auth.resolve_identity(request)
+    if tier == "anon":
+        raise HTTPException(status_code=401, detail="Sign in with Hugging Face to use web search.")
+    if not await asyncio.to_thread(limiter.session_live, session_id, keys):
+        raise HTTPException(status_code=403, detail="Web search only works during a conversation.")
+    if not await asyncio.to_thread(limiter.take_search, keys):
+        raise HTTPException(status_code=429, detail="Daily web search limit reached.")
 
 
 @app.post("/api/calls")
@@ -597,15 +635,20 @@ async def _finalize_grant(data, keys, tier, tracked, set_cookie):
     """Shared grant tail (fast path or queue claim): reserve the first chunk, attach
     the metering fields the client needs, and set the anon cookie."""
     remaining = None
-    if tracked and data.get("session_id"):
+    if LIMITER_ENABLED and data.get("session_id"):
+        # Every grant is recorded so web search can require a live session;
+        # begin() only debits metered tiers.
         await asyncio.to_thread(limiter.begin, data["session_id"], keys, tier)
-        remaining = await asyncio.to_thread(limiter.remaining, keys, tier)
+        if tracked:
+            remaining = await asyncio.to_thread(limiter.remaining, keys, tier)
 
     data.update({
         "tier": tier,
         "limited": tracked,
         "remainingSec": remaining,
-        "heartbeatSec": limiter.HEARTBEAT_SEC,
+        # The client heartbeats every grant while the limiter is on (liveness
+        # for every tier, metering for the limited ones); off, nothing listens.
+        "heartbeatSec": limiter.HEARTBEAT_SEC if LIMITER_ENABLED else None,
     })
     resp = JSONResponse(data)
     if set_cookie:
