@@ -31,6 +31,7 @@ from speech_to_speech.s2s_pipeline import (
     prepare_all_args,
     prepare_module_args,
 )
+from speech_to_speech.speech_languages import SpeechLanguageCapabilities, backend_language_capabilities
 
 
 @dataclass
@@ -84,6 +85,9 @@ def test_session_language_validation_uses_loaded_faster_whisper_capabilities(mod
     handler = SimpleNamespace(model=SimpleNamespace(supported_languages=supported_languages))
 
     assert s2s_pipeline._stt_session_languages(selection, handler) == expected
+    coverage = backend_language_capabilities("stt", "faster-whisper", selection.config, handler)
+    assert coverage.languages == ({"en"} if expected == {"en"} else None)
+    assert coverage.supports_auto is (False if expected == {"en"} else None)
     assert TTS_BACKENDS["qwen3"].kind == "tts"
     assert TTS_BACKENDS["openai"].kind == "tts"
     assert TTS_BACKENDS["supertonic"].required_extra == "supertonic"
@@ -101,6 +105,170 @@ def test_parakeet_session_language_selection_remains_unsupported():
     assert s2s_pipeline._stt_session_languages(selection, SimpleNamespace()) == set()
 
 
+def test_language_coverage_uses_loaded_metadata_and_native_language_tables():
+    from speech_to_speech.STT.parakeet_tdt_handler import SUPPORTED_LANGUAGES, ParakeetTDTSTTHandler
+    from speech_to_speech.TTS.kokoro_handler import KOKORO_NATIVE_LANGUAGES, KokoroTTSHandler
+    from speech_to_speech.TTS.phonon_tts_handler import PhononTTSHandler
+    from speech_to_speech.TTS.pocket_tts_handler import PocketTTSHandler
+    from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
+    from speech_to_speech.TTS.supertonic_tts_handler import SupertonicTTSHandler
+
+    # English-only Distil-Whisper retains its teacher's multilingual decoder tokens.
+    whisper = SimpleNamespace(
+        model=SimpleNamespace(
+            generation_config=SimpleNamespace(is_multilingual=True, lang_to_id={"<|en|>": 1, "<|es|>": 2})
+        )
+    )
+    capability = backend_language_capabilities("stt", "whisper", {}, whisper)
+    assert capability.languages is None
+    assert capability.supports_auto is None
+
+    parakeet = ParakeetTDTSTTHandler.__new__(ParakeetTDTSTTHandler)
+    for model, languages, auto in (
+        ("nvidia/parakeet-tdt-0.6b-v3", set(SUPPORTED_LANGUAGES), True),
+        ("nvidia/parakeet-tdt-0.6b-v2", {"en"}, False),
+        ("/models/custom-parakeet", None, None),
+    ):
+        parakeet.model_name = model
+        capability = backend_language_capabilities("stt", "parakeet-tdt", {}, parakeet)
+        assert capability.languages == languages
+        assert not capability.supports_language_selection
+        assert capability.supports_auto is auto
+
+    pocket = PocketTTSHandler.__new__(PocketTTSHandler)
+    pocket.language = "english"
+    pocket.is_farsi = True
+    assert backend_language_capabilities("tts", "pocket", {}, pocket) == SpeechLanguageCapabilities(
+        frozenset({"fa"}), False, False
+    )
+    phonon = PhononTTSHandler.__new__(PhononTTSHandler)
+    phonon.language = "en"
+    phonon.model = SimpleNamespace(languages=["English", "French"])
+    assert backend_language_capabilities("tts", "phonon", {}, phonon).languages == {"en", "fr"}
+    kokoro = KokoroTTSHandler.__new__(KokoroTTSHandler)
+    assert backend_language_capabilities("tts", "kokoro", {}, kokoro).languages == KOKORO_NATIVE_LANGUAGES
+    qwen = Qwen3TTSHandler.__new__(Qwen3TTSHandler)
+    assert backend_language_capabilities("tts", "qwen3", {}, qwen).languages is None
+    qwen.model = SimpleNamespace(model=SimpleNamespace(get_supported_languages=lambda: ["Auto", "English", "Spanish"]))
+    languages = backend_language_capabilities("tts", "qwen3", {}, qwen).languages
+    assert languages == {"en", "es"}
+    qwen.model = SimpleNamespace(
+        config=SimpleNamespace(talker_config={"codec_language_id": {"german": 5, "beijing_dialect": 6}})
+    )
+    assert backend_language_capabilities("tts", "qwen3", {}, qwen).languages == {"de"}
+    supertonic = SupertonicTTSHandler.__new__(SupertonicTTSHandler)
+    supertonic.lang = "na"
+    capability = backend_language_capabilities("tts", "supertonic", {}, supertonic)
+    assert "na" not in capability.languages
+    assert capability.supports_auto is True
+    assert not backend_language_capabilities("tts", "minimax", {}, SimpleNamespace()).supports_language_selection
+
+
+@pytest.mark.parametrize("declared", [False, True])
+@pytest.mark.parametrize("read_only_metadata", [False, True])
+def test_remote_language_declarations_drive_discovery_and_validation(monkeypatch, declared, read_only_metadata):
+    from starlette.testclient import TestClient
+
+    from speech_to_speech.api.openai_realtime.websocket_router import create_app
+
+    cli = ["--stt", "openai", "--tts", "openai"]
+    if declared:
+        cli += [
+            "--stt_supported_languages",
+            " EN ",
+            "Spanish",
+            "en",
+            "--tts_supported_languages",
+            "English",
+            "French",
+            "--stt_auto_language_supported",
+            "true",
+            "--tts_auto_language_supported",
+            "false",
+        ]
+    args = parse_arguments(cli)
+    prepare_all_args(args)
+    handlers = [SimpleNamespace() for _ in range(6)]
+    if read_only_metadata:
+
+        class Handler:
+            @property
+            def language_capabilities(self):
+                return SpeechLanguageCapabilities()
+
+        handlers[1] = Handler()
+    monkeypatch.setattr(s2s_pipeline, "_build_handlers", lambda **kwargs: handlers)
+    unit = s2s_pipeline._build_pipeline_unit(
+        index=0,
+        stop_event=Event(),
+        module_kwargs=args.module_kwargs,
+        vad_handler_kwargs=args.vad_handler_kwargs,
+        stt_backend=args.stt_backend,
+        llm_backend=args.llm_backend,
+        tts_backend=args.tts_backend,
+    )
+    assert handlers[1].language_capabilities == SpeechLanguageCapabilities()
+    assert handlers[-1].language_capabilities == SpeechLanguageCapabilities()
+    with TestClient(create_app(pool=[unit], stop_event=Event())) as client:
+        capability = client.get("/v1/realtime/capabilities").json()["pipelines"][0]
+        assert capability["stt"]["supports_auto"] is (True if declared else None)
+        assert capability["tts"]["supports_auto"] is (False if declared else None)
+        assert capability["conversation"]["selectable_languages"] == (
+            [{"code": "en", "name": "english"}] if declared else None
+        )
+        with client.websocket_connect("/v1/realtime") as ws:
+            ws.receive_json()
+            for language, expected in (
+                (" English ", "session.updated"),
+                ("es", "error" if declared else "session.updated"),
+            ):
+                ws.send_json(
+                    {
+                        "type": "session.update",
+                        "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": language}}}},
+                    }
+                )
+                result = ws.receive_json()
+                assert result["type"] == expected
+                if expected == "error":
+                    assert "TTS" in result["error"]["message"]
+
+
+@pytest.mark.parametrize("invalid", [["auto"], [" "]])
+def test_language_coverage_declarations_reject_sentinels_before_loading_models(invalid):
+    args = parse_arguments(["--stt_supported_languages", *invalid])
+    with pytest.raises(ValueError, match="Language coverage"):
+        prepare_all_args(args)
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        ["--stt_supported_languages", "en", "fr"],
+        ["--stt_auto_language_supported", "true"],
+    ],
+)
+def test_language_declarations_cannot_contradict_loaded_model_metadata(monkeypatch, declarations):
+    args = parse_arguments(["--stt", "faster-whisper", "--tts", "openai", *declarations])
+    prepare_all_args(args)
+    stt = SimpleNamespace(model=SimpleNamespace(supported_languages=["en"]))
+    monkeypatch.setattr(
+        s2s_pipeline,
+        "_build_handlers",
+        lambda **kwargs: [SimpleNamespace(), stt, *[SimpleNamespace() for _ in range(4)]],
+    )
+    with pytest.raises(ValueError, match="conflicts with the active backend"):
+        s2s_pipeline._build_pipeline_unit(
+            index=0,
+            stop_event=Event(),
+            module_kwargs=args.module_kwargs,
+            vad_handler_kwargs=args.vad_handler_kwargs,
+            stt_backend=args.stt_backend,
+            llm_backend=args.llm_backend,
+            tts_backend=args.tts_backend,
+        )
+
+
 @pytest.mark.parametrize(
     ("model_name", "supported_languages", "accepted"),
     [
@@ -108,16 +276,20 @@ def test_parakeet_session_language_selection_remains_unsupported():
         ("/models/multilingual.en", ["en", "es"], True),
     ],
 )
-def test_faster_whisper_loaded_languages_control_session_update(monkeypatch, model_name, supported_languages, accepted):
+@pytest.mark.parametrize("optional_workers", [False, True])
+def test_faster_whisper_loaded_languages_control_session_update(
+    monkeypatch, model_name, supported_languages, accepted, optional_workers
+):
     args = parse_arguments(
         ["--stt", "faster-whisper", "--tts", "openai", "--faster_whisper_stt_model_name", model_name]
     )
     stt_handler = SimpleNamespace(model=SimpleNamespace(supported_languages=supported_languages))
-    monkeypatch.setattr(
-        s2s_pipeline,
-        "_build_handlers",
-        lambda **_kwargs: [SimpleNamespace(), stt_handler, SimpleNamespace(), SimpleNamespace(), SimpleNamespace()],
-    )
+    handlers = [SimpleNamespace(), stt_handler, *[SimpleNamespace() for _ in range(4)]]
+    if optional_workers:
+        handlers.insert(1, SimpleNamespace())
+        handlers.append(SimpleNamespace())
+        args.module_kwargs.enable_visemes = True
+    monkeypatch.setattr(s2s_pipeline, "_build_handlers", lambda **_kwargs: handlers)
     unit = s2s_pipeline._build_pipeline_unit(
         index=0,
         stop_event=Event(),
@@ -161,7 +333,14 @@ def test_transformers_whisper_session_language_uses_loaded_generation_config(
     monkeypatch.setattr(
         s2s_pipeline,
         "_build_handlers",
-        lambda **_kwargs: [SimpleNamespace(), stt_handler, SimpleNamespace(), SimpleNamespace(), SimpleNamespace()],
+        lambda **_kwargs: [
+            SimpleNamespace(),
+            stt_handler,
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+        ],
     )
     unit = s2s_pipeline._build_pipeline_unit(
         index=0,
@@ -200,7 +379,7 @@ def test_openai_realtime_stt_auto_reset_is_rejected_only_when_setup_hint_cannot_
     if setup_language is not None:
         cli.extend(["--openai_realtime_stt_language", setup_language])
     args = parse_arguments(cli)
-    monkeypatch.setattr(s2s_pipeline, "_build_handlers", lambda **_kwargs: [SimpleNamespace() for _ in range(5)])
+    monkeypatch.setattr(s2s_pipeline, "_build_handlers", lambda **_kwargs: [SimpleNamespace() for _ in range(6)])
     unit = s2s_pipeline._build_pipeline_unit(
         index=0,
         stop_event=Event(),
@@ -300,7 +479,7 @@ def test_phonon_stays_on_cpu_when_global_device_is_set():
 def test_phonon_session_languages_match_fixed_normalizer(monkeypatch, normalizer, expected, enable_visemes):
     args = parse_arguments(["--stt", "openai", "--tts", "phonon", "--phonon_tts_language", normalizer])
     args.module_kwargs.enable_visemes = enable_visemes
-    handlers = [SimpleNamespace(), SimpleNamespace(language=normalizer)]
+    handlers = [SimpleNamespace() for _ in range(5)] + [SimpleNamespace(language=normalizer)]
     if enable_visemes:
         handlers.append(SimpleNamespace())
     monkeypatch.setattr(s2s_pipeline, "_build_handlers", lambda **kwargs: handlers)
