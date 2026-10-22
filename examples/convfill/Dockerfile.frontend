@@ -5,7 +5,7 @@ RUN npm ci --omit=dev --registry=https://registry.npmjs.org --replace-registry-h
 
 # UI, search, and session allocation only. CPU pipelines run in external workers.
 FROM python:3.12.12-slim-bookworm
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 FORWARDED_ALLOW_IPS=*
 WORKDIR /app/demo
 COPY demo/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
