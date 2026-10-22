@@ -7,6 +7,40 @@ conversation state and cancellation while using this checkout’s realtime pipel
 No private repository checkout or commercial model key is required. The Reasoner can call the
 UI’s web search and opt-in camera tools. RAG, MCP, and browser automation remain disabled.
 
+## Hosted multi-session arrangement
+
+For a hosted demo, run this adapter in managed CPU pipeline workers and use the
+same browser/session allocation flow as the main demo:
+
+Browser → UI Space session proxy → load balancer → isolated ConvFill pipeline slot
+→ remote STT / Reasoner / Talker / TTS services.
+
+Use `python -m convfill_demo.pipeline serve <pipeline-config.json>` in each
+worker, with `PYTHONPATH=examples/convfill:src`, `llm_backend=convfill`, and an
+explicit `num_pipelines` budget. Each slot owns its own conversation, inference
+streams, cancellation scope, and delivery ledger. Set `speculative_reopen_ms=500`
+and `smart_turn_max_wait_ms=1700` in the worker config for the demo's shorter
+holds. Install `examples/convfill/requirements.txt` alongside the core runtime.
+
+Build the UI-only image with `examples/convfill/Dockerfile.frontend`, or upload
+with `python examples/convfill/deploy/hf_space.py --repo owner/private-demo
+--frontend-only`. Supply `LOAD_BALANCER_URL` and, for protected ingress,
+`LB_HF_TOKEN` as server-side secrets. The upload token is not implicitly used
+as a service credential. Keep `SERPER_API_KEY` on the UI server and inference
+credentials on workers. The UI image starts no VAD or language-model pipeline.
+
+The shared server provides `/api/session`, queue polling, heartbeat/end calls,
+and optional login/duration metering. The browser connects to its allocated
+worker. Only route sessions to compatible ConvFill workers; a mixed pool may
+otherwise allocate a standard assistant. Worker slots are admission capacity,
+not a measured throughput guarantee for the shared model services.
+
+## Local single-session arrangement
+
+`run.sh` and the original example Dockerfile start the orchestration beside the
+UI for local development. The custom gateway admits one session; this layout
+is not the multi-user hosted deployment described above.
+
 ## Run from this checkout
 
 Use Python 3.11/3.12 and Node 24. From the repository root:

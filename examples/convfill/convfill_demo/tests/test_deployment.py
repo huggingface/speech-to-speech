@@ -64,3 +64,45 @@ def test_hub_token_is_never_an_implicit_inference_key(monkeypatch, private):
         with pytest.raises(ValueError, match="public Space"):
             module.main()
         assert secrets == []
+
+
+def test_frontend_upload_uses_only_explicit_session_service_credentials(monkeypatch):
+    module = uploader()
+    secrets, variables = [], []
+    monkeypatch.setattr(sys, "argv", ["upload", "--repo", "example/private-demo", "--frontend-only"])
+    monkeypatch.setenv("HF_TOKEN", "hub-upload-only")
+    monkeypatch.setenv("LOAD_BALANCER_URL", "https://allocator.example")
+    monkeypatch.setenv("LB_HF_TOKEN", "explicit-service-credential")
+    for stage in ("REASONER", "TALKER", "STT", "TTS"):
+        monkeypatch.delenv("CONVFILL_" + stage + "_URL", raising=False)
+    for name in ("SERPER_API_KEY", "CONVFILL_SEARCH_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+    class Api:
+        def __init__(self, token):
+            assert token == "hub-upload-only"
+
+        def create_repo(self, *args, **kwargs):
+            pass
+
+        def space_info(self, repo):
+            return SimpleNamespace(private=True)
+
+        def add_space_variable(self, *args):
+            variables.append(args)
+
+        def add_space_secret(self, *args):
+            secrets.append(args)
+
+        def upload_folder(self, **kwargs):
+            assert (Path(kwargs["folder_path"]) / "Dockerfile").exists()
+            return SimpleNamespace(oid="test-frontend")
+
+    monkeypatch.setattr(module, "HfApi", Api)
+    monkeypatch.setattr(module.shutil, "copytree", lambda *args, **kwargs: None)
+    module.main()
+    assert secrets == [
+        ("example/private-demo", "LOAD_BALANCER_URL", "https://allocator.example"),
+        ("example/private-demo", "LB_HF_TOKEN", "explicit-service-credential"),
+    ]
+    assert not any("CONVFILL_" in args[1] for args in variables)
