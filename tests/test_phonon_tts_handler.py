@@ -256,6 +256,11 @@ def test_native_failure_closes_stream_and_marks_response_failed():
         ("voice-a", None, None, "voice-a"),
         ("voice-a", "voice-b", None, "voice-b"),
         ("voice-a", "voice-b", "voice-a", "voice-a"),
+        (None, "alloy", None, None),
+        ("voice-a", "alloy", None, "voice-a"),
+        (None, "voice-b", "alloy", None),
+        ("voice-a", "alloy", "voice-b", "voice-b"),
+        ("voice-a", "voice-b", "alloy", "voice-a"),
     ],
 )
 def test_voice_override_precedence(configured, session, response, expected):
@@ -263,14 +268,45 @@ def test_voice_override_precedence(configured, session, response, expected):
     handler.voice = configured
     runtime = RuntimeConfig(session=RealtimeSessionCreateRequest(type="realtime", audio={"output": {"voice": session}}))
     override = RealtimeResponseCreateParams(audio={"output": {"voice": response}}) if response else None
-    list(handler.process(TTSInput(text="Hello", runtime_config=runtime, response=override)))
+    output = list(handler.process(TTSInput(text="Hello", runtime_config=runtime, response=override)))
+    assert len(output) == 1
+    assert handler.queue_out.empty()
     assert requests == [("Hello", expected)]
 
 
-def test_unknown_voice_is_rejected_before_generation():
+@pytest.mark.parametrize(
+    "voice", ["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]
+)
+def test_realtime_voices_use_configured_voice(voice):
+    handler, _, requests = make_handler([np.ones(4, dtype=np.float32)], sample_rate=16000, blocksize=4)
+    handler.voice = "voice-a"
+    override = RealtimeResponseCreateParams(audio={"output": {"voice": voice}})
+    output = list(handler.process(TTSInput(text="Hello", response=override)))
+    assert len(output) == 1 and np.any(output[0])
+    assert handler.queue_out.empty()
+    assert requests == [("Hello", "voice-a")]
+
+
+def test_native_voice_named_like_realtime_voice_takes_precedence():
+    handler, _, requests = make_handler([np.ones(4, dtype=np.float32)], sample_rate=16000, blocksize=4)
+    handler.voice = "voice-a"
+    handler.voices.append("alloy")
+    override = RealtimeResponseCreateParams(audio={"output": {"voice": "alloy"}})
+    assert len(list(handler.process(TTSInput(text="Hello", response=override)))) == 1
+    assert requests == [("Hello", "alloy")]
+
+
+@pytest.mark.parametrize("voice", ["missing", {"id": "voice_123"}])
+@pytest.mark.parametrize("source", ["session", "response"])
+def test_unknown_voice_is_rejected_before_generation(voice, source):
     handler, _, requests = make_handler([])
-    override = RealtimeResponseCreateParams(audio={"output": {"voice": "missing"}})
-    assert list(handler.process(TTSInput(text="Hello", response=override))) == []
+    runtime = RuntimeConfig()
+    override = None
+    if source == "session":
+        runtime.apply_session_update(RealtimeSessionCreateRequest(type="realtime", audio={"output": {"voice": voice}}))
+    else:
+        override = RealtimeResponseCreateParams(audio={"output": {"voice": voice}})
+    assert list(handler.process(TTSInput(text="Hello", runtime_config=runtime, response=override))) == []
     assert isinstance(handler.queue_out.get_nowait(), ResponseFailedEvent)
     assert requests == []
 
