@@ -4,9 +4,9 @@ from dataclasses import dataclass, field
 @dataclass
 class PhononTTSHandlerArguments:
     phonon_tts_model_name: str | None = field(
-        default="gradium/phonon-40m-en",
+        default="gradium/phonon-31m-en",
         metadata={
-            "help": "Phonon checkpoint directory, config.json path, or Hugging Face repo ID. Defaults to gradium/phonon-40m-en (gated, CC BY-NC 4.0)."
+            "help": "Phonon checkpoint directory, config.json path, or Hugging Face repo ID. Defaults to gradium/phonon-31m-en (public, Apache-2.0)."
         },
     )
     phonon_tts_revision: str | None = field(

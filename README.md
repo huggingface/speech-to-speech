@@ -752,7 +752,7 @@ pip install "speech-to-speech[phonon]"
 speech-to-speech local --mac-optimal-settings --tts phonon
 ```
 
-The default checkpoint is [`gradium/phonon-40m-en`](https://huggingface.co/gradium/phonon-40m-en). It is gated: accept its terms on Hugging Face, then set `HF_TOKEN` or run `hf auth login`. `--phonon_tts_model_name` accepts another Hub repo or a local checkpoint directory, which must include its matching `config.json`, `tokenizer.json`, q8 `model.q8.gguf`, and voice embeddings. Besides the checkpoint's own voices, Phonon offers the [Phonon voice catalog](https://huggingface.co/gradium/phonon-voices) voices in the checkpoint's languages (37 for English). A catalog voice downloads on first use. Use `--phonon_tts_voice VOICE_NAME` to select one; omitting it uses the checkpoint's default. Keep private checkpoints outside the repository.
+The default checkpoint is [`gradium/phonon-31m-en`](https://huggingface.co/gradium/phonon-31m-en), a public English model under Apache-2.0. It downloads on first use without a Hugging Face login. `--phonon_tts_model_name` accepts another Hub repo or a local checkpoint directory, which must include its matching `config.json`, `tokenizer.json`, q8 `model.q8.gguf`, and voice embeddings. Besides the checkpoint's own voices, Phonon offers the [Phonon voice catalog](https://huggingface.co/gradium/phonon-voices) voices in the checkpoint's languages (37 for English). A catalog voice downloads on first use. Use `--phonon_tts_voice VOICE_NAME` to select one; omitting it uses the checkpoint's default. Keep private checkpoints outside the repository.
 
 `local --tts phonon` lets you cycle through these voices using the terminal's left/right or up/down arrows. The selected voice is displayed immediately and applied after the current reply finishes, preserving the conversation. This requires an interactive macOS or Linux terminal. The standalone `talk` client can opt in with `--voices Zoey Harper Easton` and select its initial voice with `--voice Zoey`.
 
@@ -760,7 +760,7 @@ Phonon uses four native CPU threads by default, which performed better than the 
 
 Phonon runs on CPU even when STT or the LLM uses a GPU. Native audio is resampled to the pipeline's 16 kHz PCM16 output, and interruption closes the native stream. `--phonon_tts_language` fixes text normalization at startup; use `en` (the default), `fr`, `de`, `es`, `pt`, or `none`. Session language changes are restricted to that configured language. See the [TTS component guide](./src/speech_to_speech/TTS/README.md#10-phonon---tts-phonon) for installation and checkpoint options.
 
-The Phonon 40M weights use [CC BY-NC 4.0](https://huggingface.co/gradium/phonon-40m-en) and are for non-commercial use. [Phonon 31M](https://huggingface.co/gradium/phonon-31m-en) is Apache-2.0 and can be selected with `--phonon_tts_model_name gradium/phonon-31m-en`.
+The Phonon 40M checkpoints, such as [`gradium/phonon-40m-en`](https://huggingface.co/gradium/phonon-40m-en), are gated and use CC BY-NC 4.0, so they are for non-commercial use. To use one, accept its terms on Hugging Face, set `HF_TOKEN` or run `hf auth login`, and pass `--phonon_tts_model_name gradium/phonon-40m-en`.
 
 ## CLI Reference
 
