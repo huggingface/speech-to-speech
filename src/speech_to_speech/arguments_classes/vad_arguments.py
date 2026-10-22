@@ -38,15 +38,21 @@ class VADHandlerArguments:
         },
     )
     min_speech_ms: int = field(
+        default=192,
+        metadata={
+            "help": "Active speech (ms) that opens a new turn while the assistant is silent, so a short word such as 'yes' reaches the transcription. Default is 192 ms."
+        },
+    )
+    barge_in_ms: int = field(
         default=384,
         metadata={
-            "help": "Minimum length of speech segments to be considered valid speech. Measured in milliseconds. Default is 384 ms."
+            "help": "Active speech (ms) that opens a turn while the assistant is speaking and interrupts it. Default is 384 ms."
         },
     )
     min_speech_continuation_ms: int = field(
         default=192,
         metadata={
-            "help": "Hysteresis threshold (ms of active speech) for accepting speech that continues a reopenable turn (soft-ended, uncommitted, within the reopen window). Set to 0 to disable the split and use min_speech_ms. Clamped to [100, min_speech_ms]. New turns and barge-ins always require min_speech_ms. Default and recommended: 192 with min_speech_ms 384."
+            "help": "Hysteresis threshold (ms of active speech) for accepting speech that continues a reopenable turn (soft-ended, uncommitted, within the reopen window). Set to 0 to disable the split and use min_speech_ms. Clamped to [100, min_speech_ms]. New turns require min_speech_ms, barge-ins barge_in_ms. Default: 192."
         },
     )
     max_speech_ms: float = field(
