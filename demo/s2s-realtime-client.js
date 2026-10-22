@@ -1,4 +1,5 @@
 // @ts-check
+import { withSpaceAccess } from "./connection-url.js";
 /**
  * Demo adapter around the official OpenAI Agents SDK RealtimeSession.
  *
@@ -161,7 +162,7 @@ export class S2sRealtimeClient extends EventTarget {
     let url;
     if (this.options.transport === "websocket") {
       if (this._directUrl) {
-        url = this._directUrl;
+        url = withSpaceAccess(this._directUrl);
         this._setStatus("connecting");
       } else {
         if (!this._sessionUrl) throw new Error("No session endpoint or direct URL configured");

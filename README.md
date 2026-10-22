@@ -575,6 +575,9 @@ data URL.
 For a fully local audio-input model on Apple Silicon, see the
 [Gemma 4 12B example](./examples/gemma4-12b-macos/README.md).
 
+For a concurrent Reasoner/Talker voice agent with quantized Gemma and the
+fine-tuned ConvFill checkpoint, see the [hosted ConvFill example](./examples/convfill/README.md).
+
 ## Offline Operation
 
 The pipeline can run without internet access after the dependencies and model assets for the selected components

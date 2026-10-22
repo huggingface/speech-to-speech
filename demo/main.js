@@ -18,7 +18,7 @@
  */
 
 import { S2sRealtimeClient, normalizePlaybackBufferMs } from "./s2s-realtime-client.js?v=audio-24k-v2";
-import { $, truncateError, DEBUG } from "./ui/dom.js";
+import { $, truncateError, errorMessage, DEBUG } from "./ui/dom.js";
 import { ChatView } from "./ui/chat.js";
 import { Account } from "./ui/account.js";
 
@@ -334,6 +334,7 @@ let startupGreeting = "";
 let activeTransport = "ws";
 
 // ── Tool state ──────────────────────────────────────────────────────────────
+let toolsAllowed = true;
 let toolsEnabled = loadTools();
 // Whether the server holds a Serper key (learned from /api/config on load).
 let serverSearchKey = false;
@@ -349,6 +350,7 @@ function searchAvailable() {
 
 /** Tool definitions for the currently-enabled (and usable) tools. */
 function activeToolDefs() {
+  if (!toolsAllowed) return [];
   const defs = [];
   if (toolsEnabled.web_search && searchAvailable()) defs.push(TOOL_DEFS.web_search);
   if (toolsEnabled.camera_snapshot) defs.push(TOOL_DEFS.camera_snapshot);
@@ -898,6 +900,9 @@ async function fetchConfig() {
     const res = await fetch("api/config");
     if (res.ok) {
       const json = await res.json();
+      toolsAllowed = json.tools !== false;
+      toolsBtn.hidden = !toolsAllowed;
+      toolsBtn.style.display = toolsAllowed ? "" : "none";
       serverSearchKey = !!json.search;
       lbMode = !!json.lb;
       // Lock to LB mode only when the deploy reports a load balancer.
@@ -1499,7 +1504,7 @@ async function doStart(audioContext = null) {
     // Non-fatal: the backend reported an error mid-session. Log it, keep the
     // socket and the conversation alive (the model can recover on its own).
     const detail = /** @type {CustomEvent<{ error: unknown }>} */ (e).detail;
-    const msg = detail.error instanceof Error ? detail.error.message : String(detail.error);
+    const msg = errorMessage(detail.error);
     console.warn("[main] server error (non-fatal):", msg);
   });
   c.addEventListener("session", (e) => {
@@ -1673,8 +1678,8 @@ async function teardown() {
 
 /** @param {unknown} err */
 async function onFatalError(err) {
-  console.error("[main] fatal:", err);
-  const message = err instanceof Error ? err.message : String(err);
+  const message = errorMessage(err);
+  console.error("[main] fatal:", message);
   try {
     await teardown();
   } catch (teardownError) {
@@ -1688,11 +1693,12 @@ async function onFatalError(err) {
 setState("idle");
 chat.renderEmptyState();
 initGateArc();
-void fetchConfig();
-// Start the webcam as soon as the user lands (camera tool defaults on), and
-// react to later permission changes (re-grant after a denial re-enables it).
-void autoStartCamera();
-void watchCameraPermission();
+void fetchConfig().then(() => {
+  if (toolsAllowed) {
+    void autoStartCamera();
+    void watchCameraPermission();
+  }
+});
 
 // Reconcile a live session if the tab is closed/hidden mid-call (no teardown).
 window.addEventListener("pagehide", () => { endTrackedSession(); endQueueTicket(); });

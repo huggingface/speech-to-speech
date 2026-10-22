@@ -1,0 +1,28 @@
+{
+  "frontend_model_config_path": "configs/convfill_frontend_configs/convfill_qwen3_0.6B_vllm.json",
+  "backend_model_name": "nvidia/Gemma-4-31B-IT-NVFP4",
+  "backend_model_mode": "vllm",
+  "num_history_turns": 6,
+  "tts_mode": "external",
+  "turn_timeout_s": 90,
+  "shutdown_timeout_s": 3,
+  "reasoner": {
+    "base_url": "http://127.0.0.1:8001/v1",
+    "base_url_env": "CONVFILL_REASONER_URL",
+    "model_env": "CONVFILL_REASONER_MODEL",
+    "api_key_env": "CONVFILL_REASONER_API_KEY",
+    "enable_thinking": false,
+    "max_tokens": 256,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 64,
+    "connect_timeout_s": 10,
+    "read_timeout_s": 15,
+    "request_timeout_s": 45
+  },
+  "modes": {
+    "normal": {
+      "backend_prompt_template_file": "configs/convfill_backend_prompts/convfill_backend_template_conv.txt"
+    }
+  }
+}

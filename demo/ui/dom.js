@@ -30,6 +30,24 @@ export function escHtml(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+/** User-facing error text, including SDK wrappers and opaque browser events.
+ * @param {unknown} error
+ * @returns {string}
+ */
+export function errorMessage(error) {
+  let value = error;
+  const seen = new Set();
+  for (let depth = 0; depth < 5 && value != null; depth += 1) {
+    if (typeof value === "string" && value.trim()) return value;
+    if (typeof value !== "object" || seen.has(value)) break;
+    seen.add(value);
+    const wrapped = /** @type {{message?: unknown, error?: unknown, detail?: {error?: unknown}}} */ (value);
+    if (typeof wrapped.message === "string" && wrapped.message.trim()) return wrapped.message;
+    value = wrapped.error ?? wrapped.detail?.error;
+  }
+  return "Voice connection failed. Reload the Space to refresh access and try again.";
+}
+
 /** Trim a long error message to fit the orb caption. @param {string} text */
 export function truncateError(text) {
   if (text.length <= 90) return text;
