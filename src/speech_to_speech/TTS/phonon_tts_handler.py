@@ -16,6 +16,7 @@ from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception
+from speech_to_speech.pipeline.turn_latency import record_response_e2e, record_response_tts_ttfa
 
 logger = logging.getLogger(__name__)
 PIPELINE_SAMPLE_RATE = 16000
@@ -172,7 +173,20 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
         console.print(f"[green]ASSISTANT: {tts_input.text}")
         started_at = perf_counter()
         first_audio = True
+        first_block = True
         pending = np.empty(0, dtype=np.int16)
+
+        def emit(block: np.ndarray) -> np.ndarray:
+            nonlocal first_block
+            if first_block:
+                first_block = False
+                if tts_input.speech_stopped_at_s is not None:
+                    record_response_e2e(
+                        getattr(self, "turn_latency_store", None),
+                        tts_input.response_key,
+                        max(0.0, perf_counter() - tts_input.speech_stopped_at_s),
+                    )
+            return block
 
         # Closing the context on cancellation, exceptions, or generator.close()
         # stops native generation and joins its worker threads.
@@ -193,7 +207,7 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
                         return
                     block = pending[: self.blocksize]
                     pending = pending[self.blocksize :]
-                    yield block
+                    yield emit(block)
 
             for chunk in audio:
                 if self._is_cancelled(generation, tts_input):
@@ -201,10 +215,11 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 samples = np.asarray(chunk, dtype=np.float32)
                 if first_audio and samples.size:
                     first_audio = False
-                    store = getattr(self, "turn_latency_store", None)
-                    latency = store.get_response(tts_input.response_key) if store else None
-                    if latency is not None:
-                        latency.record_tts_ttfa(perf_counter() - started_at)
+                    record_response_tts_ttfa(
+                        getattr(self, "turn_latency_store", None),
+                        tts_input.response_key,
+                        perf_counter() - started_at,
+                    )
                 converted = resampler.resample_chunk(samples) if resampler is not None else samples
                 yield from blocks(converted)
                 if self._is_cancelled(generation, tts_input):
@@ -217,4 +232,4 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
             if resampler is not None:
                 yield from blocks(resampler.resample_chunk(np.empty(0, dtype=np.float32), last=True))
             if pending.size and not self._is_cancelled(generation, tts_input):
-                yield np.pad(pending, (0, self.blocksize - pending.size))
+                yield emit(np.pad(pending, (0, self.blocksize - pending.size)))

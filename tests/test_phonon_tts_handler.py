@@ -150,6 +150,30 @@ def test_resampling_is_independent_of_native_chunk_boundaries():
     assert stream.closed
 
 
+def test_first_audio_and_speech_e2e_are_recorded(monkeypatch):
+    import speech_to_speech.TTS.phonon_tts_handler as phonon_module
+    from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
+
+    clock = [100.0]
+    monkeypatch.setattr(phonon_module, "perf_counter", lambda: clock[0])
+
+    def samples():
+        clock[0] = 100.05
+        yield np.ones(4, dtype=np.float32)
+        clock[0] = 100.50
+        yield np.ones(4, dtype=np.float32)
+
+    handler, _, _ = make_handler(samples(), sample_rate=16000, blocksize=4)
+    store = handler.turn_latency_store = TurnLatencyStore()
+    tracker = store.get_or_create_response("resp-1", turn_id="turn_1", turn_revision=0)
+    tts_input = TTSInput(
+        text="Hello", response_key="resp-1", turn_id="turn_1", turn_revision=0, speech_stopped_at_s=99.0
+    )
+    assert len(list(handler.process(tts_input))) == 2
+    assert tracker.tts_ttfa_s == pytest.approx(0.05)
+    assert tracker.e2e_s == pytest.approx(1.05)
+
+
 def test_clipping_and_padding_without_resampling():
     handler, _, _ = make_handler([np.array([2, -2, 0.5], dtype=np.float32)], sample_rate=16000, blocksize=4)
     output = list(handler.process(TTSInput(text="Hello")))
