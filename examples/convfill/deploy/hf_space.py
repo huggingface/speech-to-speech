@@ -71,8 +71,11 @@ def main():
                 target / name,
                 ignore=shutil.ignore_patterns("__pycache__", "node_modules", ".venv", "*.pyc", ".env", "*.log"),
             )
+        oauth = "hf_oauth: true\n" if args.frontend_only else ""
         (target / "README.md").write_text(
-            "---\ntitle: ConvFill Gemma Voice Demo\nemoji: 🎙️\ncolorFrom: blue\ncolorTo: green\nsdk: docker\napp_port: 7860\npinned: false\n---\n\nPrivate ConvFill voice demo. See operator deployment settings for the pipeline placement.\n"
+            "---\ntitle: ConvFill Gemma Voice Demo\nemoji: 🎙️\ncolorFrom: blue\ncolorTo: green\nsdk: docker\napp_port: 7860\n"
+            + oauth
+            + "pinned: false\n---\n\nPrivate ConvFill voice demo. See operator deployment settings for the pipeline placement.\n"
         )
         commit = api.upload_folder(
             repo_id=args.repo,
