@@ -7,12 +7,13 @@ import { chromium } from "@playwright/test";
 
 const root = path.resolve(import.meta.dirname, "..");
 
-test("speech-only server config disables tools before camera startup", async (t) => {
+for (const tools of [false, true]) {
+test(`server tools=${tools} restores controls without automatic camera access`, async (t) => {
   const server = createServer(async (req, res) => {
     const name = new URL(req.url, "http://localhost").pathname;
     if (name === "/api/config") {
       res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ tools: false, search: false, lb: false, auth: false,
+      res.end(JSON.stringify({ tools, search: tools, lb: false, auth: false,
         s2sUrl: "ws://localhost:8765/v1/realtime", rtc: false }));
       return;
     }
@@ -46,8 +47,20 @@ test("speech-only server config disables tools before camera startup", async (t)
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
-  await page.waitForFunction(() => document.querySelector("#tools-btn").hidden);
-  assert.equal(await page.locator("#tools-btn").isVisible(), false);
+  await page.waitForFunction((tools) => document.querySelector("#tools-btn").hidden === !tools, tools);
+  assert.equal(await page.locator("#tools-btn").isVisible(), tools);
+  if (tools) {
+    await page.locator("#tools-btn").click();
+    assert.equal(await page.locator("#tool-web").isChecked(), true);
+    assert.equal(await page.locator("#tool-cam").isChecked(), false);
+    assert.equal(await page.locator("#search-key").isDisabled(), true);
+    await page.locator("#tools-close").click();
+    await page.locator("#settings-btn").click();
+    assert.equal(await page.locator("#playback-buffer-ms").isVisible(), true);
+    assert.equal(await page.locator("#instructions").isVisible(), true);
+  }
   assert.deepEqual(await page.evaluate(() => window.mediaRequests), []);
   assert.deepEqual(errors, []);
 });
+
+}
