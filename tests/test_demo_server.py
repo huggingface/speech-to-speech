@@ -410,10 +410,11 @@ async def test_search_on_space_refuses_expired_sign_in(monkeypatch, space_search
     assert space_search == []
 
 
-async def test_metered_search_needs_the_callers_live_session(monkeypatch, space_search):
-    _as(monkeypatch, "free")
-    demo_server.limiter.begin("mine", ["k_alice"], "free")
-    demo_server.limiter.begin("theirs", ["k_bob"], "free")
+@pytest.mark.parametrize("tier", ["free", "pro", "org"])
+async def test_search_needs_the_callers_live_session(monkeypatch, space_search, tier):
+    _as(monkeypatch, tier)
+    demo_server.limiter.begin("mine", ["k_alice"], tier)
+    demo_server.limiter.begin("theirs", ["k_bob"], tier)
 
     for session_id in (None, "unknown", "theirs"):
         with pytest.raises(demo_server.HTTPException) as exc:
@@ -431,28 +432,51 @@ async def test_metered_search_needs_the_callers_live_session(monkeypatch, space_
     assert space_search == ["server-key"]
 
 
-async def test_unlimited_tiers_search_without_a_metered_session(monkeypatch, space_search):
+async def test_search_needs_a_heartbeating_session(monkeypatch, space_search):
     _as(monkeypatch, "pro")
+    demo_server.limiter.begin("mine", ["k_alice"], "pro")
+    later = demo_server.limiter.time.time() + demo_server.limiter.REAP_AFTER_SEC + 1
+    monkeypatch.setattr(demo_server.limiter.time, "time", lambda: later)
 
-    response = await _search()
+    with pytest.raises(demo_server.HTTPException) as exc:
+        await _search("mine")
+    assert exc.value.status_code == 403
 
-    assert response.status_code == 200
-    assert space_search == ["server-key"]
+    assert demo_server.limiter.heartbeat("mine")
+    assert (await _search("mine")).status_code == 200
+
+
+async def test_unlimited_grants_are_recorded_but_never_debited(monkeypatch, space_search):
+    monkeypatch.setattr(demo_server, "LIMITER_ENABLED", True)
+
+    response = await demo_server._finalize_grant({"session_id": "mine"}, ["k_alice"], "org", False, None)
+    later = demo_server.limiter.time.time() + 600
+    monkeypatch.setattr(demo_server.limiter.time, "time", lambda: later)
+    assert demo_server.limiter.heartbeat("mine")
+
+    grant = json.loads(response.body)
+    assert grant["limited"] is False
+    assert grant["heartbeatSec"] == demo_server.limiter.HEARTBEAT_SEC
+    assert demo_server.limiter.session_live("mine", ["k_alice"])
+    # Were it debited, a tier that falls back to "free" would find its budget spent.
+    assert demo_server.limiter.remaining(["k_alice"], "free") == demo_server.limiter.FREE_SEC
 
 
 async def test_server_key_searches_are_capped_per_user_per_day(monkeypatch, space_search):
     monkeypatch.setattr(demo_server.limiter, "SEARCH_PER_DAY", 2)
     _as(monkeypatch, "org")
+    demo_server.limiter.begin("mine", ["k_alice"], "org")
 
-    await _search()
-    await _search()
+    await _search("mine")
+    await _search("mine")
     with pytest.raises(demo_server.HTTPException) as exc:
-        await _search()
+        await _search("mine")
 
     assert exc.value.status_code == 429
     assert space_search == ["server-key", "server-key"]
     _as(monkeypatch, "org", ("k_someone_else",))
-    assert (await _search()).status_code == 200
+    demo_server.limiter.begin("theirs", ["k_someone_else"], "org")
+    assert (await _search("theirs")).status_code == 200
 
 
 async def test_user_supplied_key_skips_the_server_key_gate(monkeypatch, space_search):

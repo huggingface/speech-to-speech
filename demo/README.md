@@ -215,10 +215,10 @@ button, top-right):
 - **Web search** — Google results via Serper.dev, proxied server-side so the key
   never reaches the browser. Set `SERPER_API_KEY` as an env var / Space secret.
   Without it, the tool is disabled unless the user pastes their own key in the
-  Tools panel. On a Space the server key is only spent for signed-in HF users
-  (metered tiers also need a live conversation), capped at
-  `LIMIT_SEARCH_PER_DAY` searches per user per day; a Space without HF sign-in
-  never uses it. Locally the key is unrestricted.
+  Tools panel. On a Space the server key is only spent for a signed-in HF user
+  with a live conversation (every tier), capped at `LIMIT_SEARCH_PER_DAY`
+  searches per user per day; a Space without HF sign-in never uses it. Locally
+  the key is unrestricted.
 - **Camera** — while enabled, a live self-view shows bottom-left; when the model
   calls the tool, the current frame is sent to the vision-language model so it can
   see what you're showing it. This needs a vision-language model on the server

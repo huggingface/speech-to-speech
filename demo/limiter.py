@@ -19,8 +19,9 @@ new row (no explicit reset). Logged-in users are keyed by a hashed HF `sub`;
 anonymous users by BOTH a hashed IP and a hashed signed-cookie id, OR-matched
 (spent = max of the two) so clearing one identifier doesn't reset the budget.
 
-The same store caps web searches on the server's Serper key per user per day
-(`take_search`), and lets search check it belongs to a live session.
+Every granted session is recorded, unlimited tiers included (never debited),
+so web search can require a live one (`session_live`). The same store caps web
+searches on the server's Serper key per user per day (`take_search`).
 
 Storage is SQLite at $USAGE_DB_PATH, else /data (persistent Spaces storage),
 else a /tmp fallback. On /tmp the budget is only per-uptime — flagged in logs.
@@ -191,12 +192,13 @@ def remaining(keys, tier: str) -> "int | None":
 def begin(session_id: str, keys, tier: str) -> int:
     """Reserve the first chunk for a new session and record it. Returns the
     chunk reserved (0 if the budget is already exhausted — the first heartbeat
-    will then expire it). PRO (unlimited) is never tracked; don't call it here."""
+    will then expire it). Unlimited tiers are recorded too, so web search can
+    tell their session is live, but never debited."""
     day = _today()
     budget = budget_for(tier)
     now = time.time()
     with _lock, _connect() as con:
-        avail = budget - _spent_max(con, keys, day) if budget is not None else CHUNK_SEC
+        avail = budget - _spent_max(con, keys, day) if budget is not None else 0
         chunk = max(0, min(CHUNK_SEC, avail))
         if chunk:
             _add(con, keys, day, chunk)
@@ -224,12 +226,16 @@ def heartbeat(session_id: str) -> bool:
         keys = row[0].split(",")
         day, tier, grant_ts, reserved = row[1], row[2], row[3], int(row[4])
         budget = budget_for(tier)
+        if budget is None:
+            # Unlimited: nothing to meter, the heartbeat only shows it's live.
+            con.execute("UPDATE sessions SET last_seen_ts=? WHERE session_id=?", (now, session_id))
+            return True
         elapsed = now - grant_ts
 
         # Grow the reservation one chunk at a time until it covers elapsed + a
         # one-chunk lookahead, or the budget runs dry.
         while reserved < elapsed + CHUNK_SEC:
-            if budget is not None and _spent_max(con, keys, day) >= budget:
+            if _spent_max(con, keys, day) >= budget:
                 break
             _add(con, keys, day, CHUNK_SEC)
             reserved += CHUNK_SEC
@@ -279,14 +285,20 @@ def sweep() -> None:
 
 
 def session_live(session_id: str, keys) -> bool:
-    """Whether `session_id` is a granted, not-yet-ended session of these keys."""
+    """Whether `session_id` is a session granted to these keys that hasn't ended
+    and was heard from (grant or heartbeat) within REAP_AFTER_SEC."""
     if not session_id:
         return False
     with _lock, _connect() as con:
         row = con.execute(
-            "SELECT keys, ended FROM sessions WHERE session_id=?", (session_id,)
+            "SELECT keys, ended, last_seen_ts FROM sessions WHERE session_id=?", (session_id,)
         ).fetchone()
-    return bool(row) and not row[1] and row[0] == ",".join(keys)
+    return (
+        bool(row)
+        and not row[1]
+        and row[0] == ",".join(keys)
+        and row[2] >= time.time() - REAP_AFTER_SEC
+    )
 
 
 def take_search(keys) -> bool:

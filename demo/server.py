@@ -205,9 +205,8 @@ class SearchRequest(BaseModel):
     # Optional user-supplied key (fallback when the deploy has no server key).
     # Used for this request only; never stored.
     key: str | None = None
-    # The caller's granted conversation, so a metered user's search on the
-    # server key can be tied to a live session. camelCase like the other
-    # endpoints' JSON bodies.
+    # The caller's granted conversation, so a search on the server key can be
+    # tied to a live session. camelCase like the other endpoints' JSON bodies.
     sessionId: str | None = None
 
 
@@ -324,11 +323,12 @@ async def search(req: SearchRequest, request: Request):
 async def _search_gate(request: Request, session_id: str) -> None:
     """Allow one search on the server's Serper key, or raise.
 
-    On a Space the caller must be a signed-in HF user: an anonymous identity is
-    only an IP + cookie, both cheap to rotate. A metered user must also be in a
-    live conversation (the session the LB granted them), and everyone gets at
-    most LIMIT_SEARCH_PER_DAY searches a day. Off a Space nothing is checked.
-    Details are written for the model, which reads them back to the user."""
+    On a Space the caller must be a signed-in HF user (an anonymous identity is
+    only an IP + cookie, both cheap to rotate), in a live conversation: the
+    session the LB granted them, still heartbeating. Every tier, PRO included.
+    Everyone also gets at most LIMIT_SEARCH_PER_DAY searches a day. Off a Space
+    nothing is checked. Details are written for the model, which reads them
+    back to the user."""
     if not SPACE_ID:
         return
     if auth.oauth_login_required_reason(request):
@@ -336,9 +336,7 @@ async def _search_gate(request: Request, session_id: str) -> None:
     tier, keys, _ = auth.resolve_identity(request)
     if tier == "anon":
         raise HTTPException(status_code=401, detail="Sign in with Hugging Face to use web search.")
-    if limiter.budget_for(tier) is not None and not await asyncio.to_thread(
-        limiter.session_live, session_id, keys
-    ):
+    if not await asyncio.to_thread(limiter.session_live, session_id, keys):
         raise HTTPException(status_code=403, detail="Web search only works during a conversation.")
     if not await asyncio.to_thread(limiter.take_search, keys):
         raise HTTPException(status_code=429, detail="Daily web search limit reached.")
@@ -612,15 +610,20 @@ async def _finalize_grant(data, keys, tier, tracked, set_cookie):
     """Shared grant tail (fast path or queue claim): reserve the first chunk, attach
     the metering fields the client needs, and set the anon cookie."""
     remaining = None
-    if tracked and data.get("session_id"):
+    if LIMITER_ENABLED and data.get("session_id"):
+        # Every grant is recorded so web search can require a live session;
+        # begin() only debits metered tiers.
         await asyncio.to_thread(limiter.begin, data["session_id"], keys, tier)
-        remaining = await asyncio.to_thread(limiter.remaining, keys, tier)
+        if tracked:
+            remaining = await asyncio.to_thread(limiter.remaining, keys, tier)
 
     data.update({
         "tier": tier,
         "limited": tracked,
         "remainingSec": remaining,
-        "heartbeatSec": limiter.HEARTBEAT_SEC,
+        # The client heartbeats every grant while the limiter is on (liveness
+        # for every tier, metering for the limited ones); off, nothing listens.
+        "heartbeatSec": limiter.HEARTBEAT_SEC if LIMITER_ENABLED else None,
     })
     resp = JSONResponse(data)
     if set_cookie:
