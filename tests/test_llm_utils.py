@@ -29,6 +29,46 @@ def test_remove_unspeechable_keeps_chinese_punctuation() -> None:
     assert remove_unspeechable(text) == text
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "नमस्ते दुनिया",
+        "สวัสดีครับ",
+        "வணக்கம்",
+        "বাংলা ভাষা",
+        "مَرْحَبًا",
+        "cafe\u0301",
+        "Hello, world!",
+        "안녕하세요",
+        "你好。今天天气怎么样？",
+        "café",
+    ],
+    ids=["hindi", "thai", "tamil", "bengali", "arabic", "nfd-latin", "english", "korean", "chinese", "nfc-latin"],
+)
+def test_remove_unspeechable_preserves_unicode_text(text: str) -> None:
+    assert remove_unspeechable(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("☀️", ""),
+        ("❤️", ""),
+        ("1️⃣", "1"),
+        ("✅", ""),
+        ("\ufe00\ufe0f\U000e0100\U000e01ef", ""),
+        ("a\u20dd", "a"),
+    ],
+)
+def test_remove_unspeechable_drops_emoji_marks(text: str, expected: str) -> None:
+    assert remove_unspeechable(text) == expected
+
+
+@pytest.mark.parametrize("delta", ["\u0301", "\u093e"])
+def test_remove_unspeechable_keeps_combining_mark_in_own_streaming_delta(delta: str) -> None:
+    assert remove_unspeechable(delta) == delta
+
+
 # --- language name coverage ---------------------------------------------------------------
 #
 # A language code with no entry in WHISPER_LANGUAGE_TO_LLM_LANGUAGE resolves to a `None`
