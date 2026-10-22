@@ -66,11 +66,11 @@ streams it to the Realtime WebSocket at real-time pace, and writes
 
 As of the pull request:
 
-- Speech is not streamed. The configuration requests whole WAV replies
-  (`openai_tts_response_format: wav`, `openai_tts_stream: false`). With the
-  default `pcm` format, speech-to-speech sends `stream_format=audio`, which the
-  server rejects with `400 This model does not support streaming audio.` Each
-  sentence is therefore heard only once all of it is synthesized.
+- Transformers does not stream TTS yet, so the configuration requests whole WAV
+  replies (`openai_tts_response_format: wav`, `openai_tts_stream: false`). With
+  the default `pcm` format, speech-to-speech sends `stream_format=audio`, which
+  the server rejects with `400 This model does not support streaming audio.`
+  Each sentence is therefore heard only once all of it is synthesized.
 - `voice` is ignored: the assistant always uses the checkpoint's voice, and
   `--openai_tts_voice`, the Realtime `session.audio.output.voice` and the
   script's `--assistant-voice` have no effect. A catalog voice can only be

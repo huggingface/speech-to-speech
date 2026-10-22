@@ -22,7 +22,7 @@ blocks:
     settings:
       openai_tts_base_url: http://localhost:8000/v1
       openai_tts_model: gradium/phonon-31m-en
-      # Phonon does not stream through /v1/audio/speech yet: request whole WAV replies
+      # Transformers does not stream TTS yet: request whole WAV replies
       openai_tts_response_format: wav
       openai_tts_stream: false
 
