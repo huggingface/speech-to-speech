@@ -251,6 +251,8 @@ This installs the package in editable mode. With the environment activated, use 
 | STT | [MLX Audio Whisper](https://github.com/huggingface/mlx-audio) | Apple Silicon | built-in on macOS |
 | STT | [Paraformer](https://github.com/modelscope/FunASR) | CUDA / CPU | `paraformer` |
 | STT | [Qwen3-ASR](https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf) through Transformers | CUDA / CPU, Apple Silicon | built-in |
+| STT | [Moonshine](https://huggingface.co/moonshine-ai/moonshine-base) (`--stt moonshine`, tiny/base/streaming) through Transformers | CUDA / CPU, Apple Silicon | built-in |
+| STT | [Granite Speech 5.0 TurboCTC](https://huggingface.co/ibm-granite/granite-speech-5.0-470m-turboctc) (`--stt granite-ctc`) through Transformers | CUDA / CPU, Apple Silicon | built-in |
 | STT | OpenAI-compatible `/v1/audio/transcriptions` endpoint | local or remote HTTP server | built-in |
 | STT | OpenAI Realtime transcription | hosted or compatible WebSocket server | built-in |
 | STT | vLLM Realtime transcription (experimental) | local or remote vLLM server | built-in |
@@ -612,6 +614,8 @@ Language coverage depends on the STT and TTS backends you pick, not on the pipel
 | STT | Parakeet TDT (default) | 25 European languages |
 | STT | Whisper / Whisper MLX / Faster Whisper | Broad multilingual coverage, depending on the selected Whisper checkpoint |
 | STT | Paraformer | Depends on the selected FunASR checkpoint; the default is Chinese-oriented |
+| STT | Moonshine | English |
+| STT | Granite Speech 5.0 TurboCTC | English, French, German, Spanish, Portuguese, Italian, Japanese (language is configured, not detected) |
 | TTS | Qwen3-TTS (default) | Multilingual, with `--qwen3_tts_language auto` by default |
 | TTS | Kokoro | Multiple language/voice mappings, depending on backend availability |
 | TTS | KittenTTS | English |

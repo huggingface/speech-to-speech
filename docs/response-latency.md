@@ -45,9 +45,9 @@ are added only to terminal responses.
 
 | Stage | Backends with a measured field | Backends with `n/a` pending coverage |
 | --- | --- | --- |
-| `stt` | `parakeet-tdt`, `openai`, `openai-realtime`, `vllm-realtime`, `whisper`, `whisper-mlx`, `mlx-audio-whisper`, `faster-whisper`, `qwen3-asr`, `parakeet-unified`, `nemotron-streaming`, `orukeet`, `paraformer`, `sense-voice` | None of the built-in STT backends (`--stt none` excluded) |
+| `stt` | `parakeet-tdt`, `openai`, `openai-realtime`, `vllm-realtime`, `whisper`, `whisper-mlx`, `mlx-audio-whisper`, `faster-whisper`, `qwen3-asr`, `moonshine`, `granite-ctc`, `parakeet-unified`, `nemotron-streaming`, `orukeet`, `paraformer`, `sense-voice` | None of the built-in STT backends (`--stt none` excluded) |
 | `llm` | `transformers`, `mlx-lm`, `responses-api`, `chat-completions` | None of the built-in LLM backends |
-| `tts_ttfa`, `e2e` | `qwen3`, `openai`, `pocket`, `kokoro`, `facebookMMS`, `chatTTS`, `omnivoice` | `supertonic` |
+| `tts_ttfa`, `e2e` | `qwen3`, `openai`, `drama3`, `pocket`, `kokoro`, `kitten`, `phonon`, `supertonic`, `facebookMMS`, `chatTTS`, `omnivoice` | `minimax` |
 
 `--stt none` deliberately has no STT measurement. Any field is also `n/a`
 when its stage did not run, produced no audio, or its measurement was unavailable.
@@ -79,6 +79,11 @@ that lock is not contended, and hold is omitted entirely when nothing held it.
   OmniVoice likewise returns a full waveform from a blocking `generate` call:
   its TTFA ends when that waveform is available, before reshape, resampling,
   and PCM block assembly.
+  Supertonic also synthesizes a full segment waveform; its TTFA ends when that
+  waveform returns, before resampling and block assembly. Kitten synthesizes
+  each checkpoint-sized text chunk in turn and delivers it before starting the
+  next; its TTFA ends when the first chunk's waveform returns. Phonon streams
+  native chunks; its TTFA ends at the first non-empty native chunk.
 - `e2e` runs from estimated speech end to the first audio block yielded by TTS.
   It includes VAD decision time, Smart Turn analysis, audio enhancement, and
   subsequent processing/hold time before that block. The timestamp is propagated

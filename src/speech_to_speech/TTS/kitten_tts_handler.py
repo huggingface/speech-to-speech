@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from threading import Event
+from time import perf_counter
 from typing import Iterator
 
 import numpy as np
@@ -16,6 +17,7 @@ from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import transcript_for_log
+from speech_to_speech.pipeline.turn_latency import record_response_e2e, record_response_tts_ttfa
 
 logger = logging.getLogger(__name__)
 
@@ -88,8 +90,11 @@ class KittenTTSHandler(BaseHandler[TTSIn, TTSOut]):
         logger.info("KittenTTSHandler warmed up")
 
     def _generate_audio(self, text: str, voice: str) -> np.ndarray:
+        return np.concatenate(list(self._generate_chunks(text, voice)), axis=-1)
+
+    def _generate_chunks(self, text: str, voice: str) -> Iterator[np.ndarray]:
+        """Synthesize one checkpoint-sized text chunk at a time, in order."""
         pending = list(reversed(self._chunk_text(self.model.preprocessor(text))))
-        audio = []
         while pending:
             chunk = pending.pop()
             # Character bounds alone do not bound phonemes: acronyms can expand.
@@ -108,8 +113,7 @@ class KittenTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     raise ValueError("KittenTTS text cannot fit the checkpoint's token limit")
                 pending.extend(reversed(parts))
                 continue
-            audio.append(self.model.generate_single_chunk(text=chunk, voice=voice))
-        return np.concatenate(audio, axis=-1)
+            yield self.model.generate_single_chunk(text=chunk, voice=voice)
 
     def _is_cancelled(self, generation: int | None) -> bool:
         return generation is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(generation)
@@ -138,22 +142,42 @@ class KittenTTSHandler(BaseHandler[TTSIn, TTSOut]):
         console.print(f"[green]ASSISTANT: {text}")
         logger.debug("KittenTTS synthesizing: %s", transcript_for_log(text))
 
-        # Synthesis completes before delivery; every inference fits the token limit.
+        # Each checkpoint-sized chunk is delivered as soon as it is synthesized, so
+        # a long reply does not wait for its last chunk. Samples that do not fill a
+        # block carry over to the next chunk; only the end of the reply is padded.
         # Let BaseHandler report failures through its privacy-safe exception logger.
-        audio_chunk = self._generate_audio(text=text, voice=voice)
-        if self._is_cancelled(cancel_gen):
-            return
-
-        audio = np.asarray(audio_chunk, dtype=np.float32).reshape(-1)
-        audio = resample_poly(audio, up=2, down=3)
-        audio_int16 = np.clip(audio * 32768, -32768, 32767).astype(np.int16)
-
-        n = (len(audio_int16) // self.blocksize) * self.blocksize
-        for i in range(0, n, self.blocksize):
+        store = getattr(self, "turn_latency_store", None)
+        response_key = getattr(tts_input, "response_key", None)
+        speech_stopped_at_s = getattr(tts_input, "speech_stopped_at_s", None)
+        started_at_s = perf_counter()
+        first_chunk = True
+        first_block = True
+        carry = np.zeros(0, dtype=np.int16)
+        for audio_chunk in self._generate_chunks(text=text, voice=voice):
             if self._is_cancelled(cancel_gen):
                 return
-            yield audio_int16[i : i + self.blocksize]
-        if n < len(audio_int16):
+            if first_chunk:
+                # Model audio is available before resampling and block assembly.
+                record_response_tts_ttfa(store, response_key, perf_counter() - started_at_s)
+                first_chunk = False
+
+            audio = np.asarray(audio_chunk, dtype=np.float32).reshape(-1)
+            audio = resample_poly(audio, up=2, down=3)
+            audio_int16 = np.concatenate([carry, np.clip(audio * 32768, -32768, 32767).astype(np.int16)])
+
+            n = (len(audio_int16) // self.blocksize) * self.blocksize
+            for i in range(0, n, self.blocksize):
+                if self._is_cancelled(cancel_gen):
+                    return
+                if first_block:
+                    if speech_stopped_at_s is not None:
+                        record_response_e2e(store, response_key, max(0.0, perf_counter() - speech_stopped_at_s))
+                    first_block = False
+                yield audio_int16[i : i + self.blocksize]
+            carry = audio_int16[n:]
+        if len(carry):
             if self._is_cancelled(cancel_gen):
                 return
-            yield np.pad(audio_int16[n:], (0, self.blocksize - (len(audio_int16) - n)))
+            if first_block and speech_stopped_at_s is not None:
+                record_response_e2e(store, response_key, max(0.0, perf_counter() - speech_stopped_at_s))
+            yield np.pad(carry, (0, self.blocksize - len(carry)))

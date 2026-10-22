@@ -16,6 +16,7 @@ from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception
+from speech_to_speech.pipeline.turn_latency import record_response_e2e
 
 logger = logging.getLogger(__name__)
 PIPELINE_SAMPLE_RATE = 16000
@@ -172,6 +173,7 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
         console.print(f"[green]ASSISTANT: {tts_input.text}")
         started_at = perf_counter()
         first_audio = True
+        first_block = True
         pending = np.empty(0, dtype=np.int16)
 
         # Closing the context on cancellation, exceptions, or generator.close()
@@ -193,7 +195,18 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
                         return
                     block = pending[: self.blocksize]
                     pending = pending[self.blocksize :]
+                    record_first_block()
                     yield block
+
+            def record_first_block() -> None:
+                nonlocal first_block
+                if first_block and tts_input.speech_stopped_at_s is not None:
+                    record_response_e2e(
+                        getattr(self, "turn_latency_store", None),
+                        tts_input.response_key,
+                        max(0.0, perf_counter() - tts_input.speech_stopped_at_s),
+                    )
+                first_block = False
 
             for chunk in audio:
                 if self._is_cancelled(generation, tts_input):
@@ -217,4 +230,5 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
             if resampler is not None:
                 yield from blocks(resampler.resample_chunk(np.empty(0, dtype=np.float32), last=True))
             if pending.size and not self._is_cancelled(generation, tts_input):
+                record_first_block()
                 yield np.pad(pending, (0, self.blocksize - pending.size))

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from math import gcd
 from threading import Event
+from time import perf_counter
 from typing import Iterator
 
 import numpy as np
@@ -14,6 +15,7 @@ from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.turn_latency import record_response_e2e, record_response_tts_ttfa
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +177,10 @@ class SupertonicTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         console.print(f"[green]ASSISTANT: {text}")
 
+        store = getattr(self, "turn_latency_store", None)
+        response_key = getattr(tts_input, "response_key", None)
+        speech_stopped_at_s = getattr(tts_input, "speech_stopped_at_s", None)
+        started_at_s = perf_counter()
         # Supertonic returns (1, num_samples) shaped array at 44.1kHz float32
         wav, _duration = self.tts.synthesize(
             text=text,
@@ -188,6 +194,9 @@ class SupertonicTTSHandler(BaseHandler[TTSIn, TTSOut]):
             logger.info("Supertonic TTS output cancelled (interruption)")
             return
 
+        # The full waveform is available before resampling and block assembly.
+        record_response_tts_ttfa(store, response_key, perf_counter() - started_at_s)
+
         audio = np.asarray(wav, dtype=np.float32).squeeze()
         source_sample_rate = int(getattr(self.tts, "sample_rate", 44100))
         divisor = gcd(source_sample_rate, PIPELINE_SAMPLE_RATE)
@@ -200,12 +209,21 @@ class SupertonicTTSHandler(BaseHandler[TTSIn, TTSOut]):
         # Convert to int16 format expected by the audio pipeline
         audio_int16 = np.clip(audio_16k_float * 32768, -32768, 32767).astype(np.int16)
 
+        first_yielded = True
+
+        def record_first_yield() -> None:
+            nonlocal first_yielded
+            if first_yielded and speech_stopped_at_s is not None:
+                record_response_e2e(store, response_key, max(0.0, perf_counter() - speech_stopped_at_s))
+            first_yielded = False
+
         # Yield in block-aligned chunks so the streamer can handle it smoothly
         n = (len(audio_int16) // self.blocksize) * self.blocksize
         for i in range(0, n, self.blocksize):
             if self._is_cancelled(cancel_gen):
                 logger.info("Supertonic TTS output cancelled (interruption)")
                 return
+            record_first_yield()
             yield audio_int16[i : i + self.blocksize]
 
         # Pad the tail so the audio streamer's fixed-blocksize callback doesn't crash
@@ -214,4 +232,5 @@ class SupertonicTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 logger.info("Supertonic TTS output cancelled (interruption)")
                 return
             tail = audio_int16[n:]
+            record_first_yield()
             yield np.pad(tail, (0, self.blocksize - len(tail)))
