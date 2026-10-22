@@ -59,3 +59,5 @@ def test_local_ttft_precedes_sentence_batching_and_trailing_reply(monkeypatch, t
     assert any(isinstance(output, LLMResponseChunk) and "Hello" in output.text for output in outputs)
     assert tracker.llm_ttft_s == pytest.approx(0.05)
     assert tracker.llm_s == pytest.approx(0.25)
+    assert tracker.llm_total_s == pytest.approx(0.25)
+    assert tracker.llm_rounds == 1

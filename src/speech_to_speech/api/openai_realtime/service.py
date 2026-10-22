@@ -452,6 +452,8 @@ class RealtimeService:
         *,
         turn_id: str | None = None,
         turn_revision: int | None = None,
+        parent_response_key: str | None = None,
+        parent_call_id: str | None = None,
         source: Literal["speech", "client", "tool"] = "speech",
         speech_anchor: SpeechLatencyAnchor | None = None,
     ) -> None:
@@ -460,6 +462,8 @@ class RealtimeService:
             turn_id=turn_id,
             turn_revision=turn_revision,
             session_id=conn_id,
+            parent_response_key=parent_response_key,
+            parent_call_id=parent_call_id,
         )
         tracker.source = source
         if source == "speech" and speech_anchor is None and turn_id is not None:

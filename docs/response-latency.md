@@ -5,7 +5,7 @@ includes its turn, revision, response key, terminal status, and available stage
 durations:
 
 ```text
-Turn turn_3 rev=0 latency: stt=0.18s llm=1.24s tts_ttfa=0.12s e2e=2.01s vad_settle=0.61s vad_decision=0.36s hold=0.24s smart_turn_status=complete status=completed mlx_lock_wait=0.02s[ParakeetSTT-Progressive:0.02s] mlx_lock_hold=0.88s[Qwen3TTS:0.88s]
+Turn turn_3 rev=0 latency: stt=0.18s llm=1.24s llm_total=1.24s llm_rounds=1 tts_ttfa=0.12s e2e=2.01s vad_settle=0.61s vad_decision=0.36s hold=0.24s smart_turn_status=complete status=completed mlx_lock_wait=0.02s[ParakeetSTT-Progressive:0.02s] mlx_lock_hold=0.88s[Qwen3TTS:0.88s]
 ```
 
 The same record is available with `speech-to-speech local` and
@@ -20,7 +20,7 @@ reserved `response.metadata["speech_to_speech.turn_latency"]` key. Realtime
 metadata values are strings, so the value is compact JSON with this schema:
 
 ```json
-{"e2e_s":2.013482,"hold_s":0.24,"llm_s":1.241907,"response_key":"...","smart_status":"complete","source":"speech","status":"completed","stt_s":0.181284,"tts_ttfa_s":0.121775,"turn_id":"turn_3","turn_revision":0,"vad_decision_s":0.36,"version":2}
+{"e2e_s":2.013482,"hold_s":0.24,"llm_rounds":1,"llm_s":1.241907,"llm_total_s":1.241907,"response_key":"...","smart_status":"complete","source":"speech","status":"completed","stt_s":0.181284,"tts_ttfa_s":0.121775,"turn_id":"turn_3","turn_revision":0,"vad_decision_s":0.36,"version":2}
 ```
 
 Version 2 changes `e2e_s` from VAD handoff to **estimated speech end** to
@@ -29,7 +29,7 @@ first generated audio. It renames `smart_wait_s` to `hold_s` and removes
 `mlx_lock_wait_s` from metadata. The demo accepts version 1 records but labels
 their old handoff boundary explicitly instead of presenting them as new E2E.
 Log-only fields from later work (`vad_settle`, `mlx_lock_hold`, `tts=cut`) stay
-out of metadata and the demo so the v2 payload size and schema remain stable.
+out of metadata and the demo.
 
 Durations are seconds; existing fields retain their original precision and
 the new VAD/Smart Turn fields use nanosecond precision in metadata. The
@@ -63,8 +63,23 @@ that lock is not contended, and hold is omitted entirely when nothing held it.
   and ends when the provider's final transcript is received. For local STT
   models, it starts when the handler begins the final transcription and ends
   before its transcript is yielded.
-- `llm` covers full generation, from serialization and provider request through
-  consumption of provider output. It is recorded even if the request fails.
+- `llm` / `llm_s` covers generation for this response key, from serialization
+  through consumption of provider output, including model lock and provider
+  waits. It is recorded even if the request fails.
+- `llm_total_s` sums measured LLM generation durations across the initial request
+  and its tool-result follow-ups. It excludes tool execution and waits between
+  requests. Three generations of 0.7s, 0.9s and 0.8s produce 2.4s total, while
+  the last response's `llm_s` remains 0.8s. Totals use nine decimal places in
+  metadata.
+- `llm_rounds` counts model requests in that chain. A direct answer has one;
+  a tool request followed by an answer has two. Parallel tools within one
+  generation count as one round. Only started requests count, including failed
+  or interrupted requests. Totals include durations measured before the terminal
+  event; cancellation can leave a running request's duration unavailable.
+  Failed or discarded prefetch work does not contribute to replacement replies.
+
+  These optional version 2 fields appear as unavailable in older records.
+  The demo labels `llm_s` as **LLM for this response**.
 - `tts_ttfa` starts when synthesis of the first text segment begins and ends
   when the first provider audio samples arrive. For HTTP TTS, WAV headers are
   excluded, and resampling and output block assembly happen afterward.
@@ -146,6 +161,11 @@ is a new field, and `turn_id` is `null` when a `client` or `tool` record has no
 attributed input turn. Out-of-band responses retain their existing metadata
 behavior. Stages overlap; do not sum them to reconstruct E2E. Configured grace
 and delay and Smart Turn analysis are no longer part of the terminal timing record.
+
+LLM totals follow explicit tool origins within the same session, turn and
+revision, including typed chains without a speech turn. The server retains the
+last 128 successful tool responses' timings per session for delayed follow-ups
+and clears them on session teardown.
 
 Remote timings are measured by this server. They include network transfer and
 provider waits within the operation, so they are not provider-only inference
