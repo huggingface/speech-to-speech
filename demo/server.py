@@ -168,6 +168,31 @@ def agents_sdk_bundle():
         raise HTTPException(status_code=503, detail="Run npm ci in demo/")
     return FileResponse(path, media_type="text/javascript")
 
+
+LOCAL_VAD_ASSETS = {
+    "bundle.min.js": ("@ricky0123/vad-web", "text/javascript"),
+    "vad.worklet.bundle.min.js": ("@ricky0123/vad-web", "text/javascript"),
+    "silero_vad_v6.onnx": ("@ricky0123/vad-web", "application/octet-stream"),
+    "ort.wasm.min.js": ("onnxruntime-web", "text/javascript"),
+    "ort-wasm-simd-threaded.mjs": ("onnxruntime-web", "text/javascript"),
+    "ort-wasm-simd-threaded.wasm": ("onnxruntime-web", "application/wasm"),
+}
+
+
+@app.get("/vendor/local-vad/{filename}", include_in_schema=False)
+def local_vad_asset(filename: str):
+    """Serve pinned local inference assets in development and the Docker image."""
+    asset = LOCAL_VAD_ASSETS.get(filename)
+    if asset is None:
+        raise HTTPException(status_code=404)
+    package, media_type = asset
+    bundled = os.path.join(HERE, "vendor", "local-vad", filename)
+    installed = os.path.join(HERE, "node_modules", package, "dist", filename)
+    path = bundled if os.path.isfile(bundled) else installed
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=503, detail="Run npm ci in demo/")
+    return FileResponse(path, media_type=media_type)
+
 # Wire HF OAuth before the app serves (no-op unless the OAuth env is present).
 # Sign-in only matters when we're metering (prod Space), so gate it on that.
 AUTH_ENABLED = LIMITER_ENABLED and auth.attach(app)

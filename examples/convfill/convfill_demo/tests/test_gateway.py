@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from convfill_demo import gateway as server
@@ -192,3 +193,27 @@ def test_existing_search_server_keeps_credentials_and_location_private(monkeypat
     result = client.post("/api/search", json={"query": "example"})
     assert result.json()["answer"] == "Available"
     assert "internal" not in result.text
+
+
+@pytest.mark.parametrize("filename", list(server.LOCAL_VAD_ASSETS))
+@pytest.mark.parametrize("bundled", [False, True])
+def test_local_vad_assets_are_served_with_browser_content_types(monkeypatch, tmp_path, filename, bundled):
+    monkeypatch.setattr(server, "HERE", tmp_path)
+    package, media_type = server.LOCAL_VAD_ASSETS[filename]
+    installed = tmp_path / "node_modules" / package / "dist" / filename
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    installed.write_bytes(b"installed asset")
+    if bundled:
+        destination = tmp_path / "vendor" / "local-vad" / filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"bundled asset")
+    response = client.get(f"/vendor/local-vad/{filename}")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(media_type)
+    assert response.content == (b"bundled asset" if bundled else b"installed asset")
+
+
+def test_local_vad_missing_assets_fail_without_exposing_other_package_files(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "HERE", tmp_path)
+    assert client.get("/vendor/local-vad/not-an-asset.js").status_code == 404
+    assert client.get("/vendor/local-vad/silero_vad_v6.onnx").status_code == 503

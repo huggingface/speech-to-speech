@@ -35,6 +35,7 @@ const STORAGE_KEYS = {
   searchKey: "s2s.ws.searchKey",
   noiseGate: "s2s.ws.noiseGate",
   playbackBufferMs: "s2s.ws.playbackBufferMs",
+  localVad: "s2s.audio.localVad",
   // "ws" | "webrtc". Not under the historical "s2s.ws." prefix — it selects
   // between the transports rather than configuring the WS one.
   transport: "s2s.transport",
@@ -114,6 +115,7 @@ function loadSettings() {
     instructions: localStorage.getItem(STORAGE_KEYS.instructions) || DEFAULT_INSTRUCTIONS,
     noiseGate: loadGateThreshold(),
     playbackBufferMs: normalizePlaybackBufferMs(localStorage.getItem(STORAGE_KEYS.playbackBufferMs)),
+    localVad: localStorage.getItem(STORAGE_KEYS.localVad) !== "off",
     // Default WebSocket: the proven path stays the first-run experience.
     transport: localStorage.getItem(STORAGE_KEYS.transport) === "webrtc" ? "webrtc" : "ws",
     audioInputId: localStorage.getItem(STORAGE_KEYS.audioInputId) || "",
@@ -141,6 +143,7 @@ function saveSettings(s) {
   localStorage.setItem(STORAGE_KEYS.instructions, s.instructions);
   localStorage.setItem(STORAGE_KEYS.noiseGate, String(s.noiseGate));
   localStorage.setItem(STORAGE_KEYS.playbackBufferMs, String(s.playbackBufferMs));
+  localStorage.setItem(STORAGE_KEYS.localVad, s.localVad ? "on" : "off");
   localStorage.setItem(STORAGE_KEYS.transport, s.transport);
   localStorage.setItem(STORAGE_KEYS.audioInputId, s.audioInputId || "");
   localStorage.setItem(STORAGE_KEYS.audioOutputId, s.audioOutputId || "");
@@ -268,6 +271,8 @@ const gateField = $("#gate-field");
 const playbackBufferField = $("#playback-buffer-field");
 /** @type {HTMLInputElement} */
 const inputPlaybackBuffer = $("#playback-buffer-ms");
+/** @type {HTMLSelectElement} */
+const inputLocalVad = $("#local-vad");
 /** @type {HTMLSelectElement} */
 const inputVoice = $("#voice");
 /** @type {HTMLSelectElement} */
@@ -466,6 +471,7 @@ function openSettings() {
   syncConnectionUi();
   inputVoice.value = settings.voice;
   inputPlaybackBuffer.value = String(settings.playbackBufferMs);
+  inputLocalVad.value = settings.localVad ? "on" : "off";
   inputInstructions.value = settings.instructions;
   syncGateUi();
   updateRestartAvailability();
@@ -1002,6 +1008,7 @@ function readSettingsFromForm() {
     instructions: inputInstructions.value.trim() || DEFAULT_INSTRUCTIONS,
     noiseGate: readGateThreshold(),
     playbackBufferMs: normalizePlaybackBufferMs(inputPlaybackBuffer.value),
+    localVad: inputLocalVad.value !== "off",
     transport: /** @type {"ws" | "webrtc"} */ (
       transportSelectable()
         ? (inputTransport.value === "webrtc" ? "webrtc" : "ws")
@@ -1420,6 +1427,7 @@ async function doStart(audioContext = null) {
   // a still-pending grant just means the snapshot tool isn't ready yet.
 
   const common = {
+    localVad: settings.localVad,
     voice: settings.voice,
     instructions: settings.instructions,
     startupGreeting,

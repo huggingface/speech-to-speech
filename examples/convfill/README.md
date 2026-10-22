@@ -75,3 +75,9 @@ knowledge head start before filler scheduling resumes. Exact repeated sentence
 prefixes (three or more words) are suppressed before TTS and state updates. This
 guard does not remove paraphrases, change facts, or deduplicate the whole history.
 Interrupted-history text remains an estimate, not proof of physical playback.
+
+The shared browser's **Faster interruptions** setting is enabled by default.
+Local Silero v6 detection briefly lowers playback volume on a speech candidate;
+server VAD still confirms cancellation and turn boundaries. The ConvFill gateway
+serves the pinned model/worklet/WASM assets from the browser dependencies copied
+into the image. Model loading is asynchronous, with server-only fallback on failure.
