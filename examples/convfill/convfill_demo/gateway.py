@@ -85,7 +85,7 @@ async def search(req: SearchRequest):
         # An existing server may already hold a non-exportable search secret.
         # This destination is deploy-pinned, never supplied by the browser.
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=15, transport=httpx.AsyncHTTPTransport(retries=2)) as client:
                 response = await client.post(
                     SEARCH_PROXY_URL,
                     headers={"Authorization": "Bearer " + SEARCH_PROXY_KEY} if SEARCH_PROXY_KEY else {},
@@ -101,7 +101,9 @@ async def search(req: SearchRequest):
                     for item in (data.get("results") or [])[:5]
                 ],
             }
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError) as exc:
+            status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            logger.warning("Search proxy unavailable: %s (HTTP %s)", type(exc).__name__, status)
             raise HTTPException(502, "Search provider unavailable.")
     key = SERPER_KEY or (req.key or "").strip()
     if not key:

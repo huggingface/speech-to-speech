@@ -155,7 +155,7 @@ def test_default_greeting_and_search_key_stays_server_side(monkeypatch):
         return httpx.Response(200, json={"organic": [{"title": "Result", "link": "https://example.org"}]})
 
     monkeypatch.setattr(
-        server.httpx, "AsyncClient", lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs)
+        server.httpx, "AsyncClient", lambda **kwargs: original(**{**kwargs, "transport": httpx.MockTransport(respond)})
     )
     response = client.post("/api/search", json={"query": "example"})
     assert response.json()["results"][0]["url"] == "https://example.org"
@@ -184,7 +184,7 @@ def test_existing_search_server_keeps_credentials_and_location_private(monkeypat
         )
 
     monkeypatch.setattr(
-        server.httpx, "AsyncClient", lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs)
+        server.httpx, "AsyncClient", lambda **kwargs: original(**{**kwargs, "transport": httpx.MockTransport(respond)})
     )
     config = client.get("/api/config")
     assert config.json()["search"] is True
