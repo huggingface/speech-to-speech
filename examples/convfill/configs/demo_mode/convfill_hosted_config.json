@@ -22,7 +22,7 @@
   },
   "modes": {
     "normal": {
-      "backend_prompt_template_file": "configs/convfill_backend_prompts/convfill_backend_template_conv.txt"
+      "backend_prompt_template_file": "configs/convfill_backend_prompts/convfill_backend_template_streaming_conv.txt"
     }
   }
 }
