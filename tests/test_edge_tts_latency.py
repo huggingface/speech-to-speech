@@ -125,3 +125,41 @@ def test_phonon_records_e2e_on_first_delivered_block(monkeypatch: pytest.MonkeyP
     assert [len(block) for block in outputs] == [4, 4, 4]
     assert tracker.tts_ttfa_s == pytest.approx(0.3)
     assert tracker.e2e_s == pytest.approx(1.3)
+
+
+def test_kitten_trims_leading_silence_but_keeps_a_short_lead_in() -> None:
+    rate = kitten_module.KITTEN_SAMPLE_RATE
+    audio = np.concatenate([np.zeros(rate // 2, dtype=np.float32), np.full(rate // 10, 0.1, dtype=np.float32)])
+
+    trimmed = kitten_module.trim_leading_silence(audio)
+
+    lead_in = int(kitten_module.LEADING_SILENCE_KEEP_S * rate)
+    assert len(trimmed) == rate // 10 + lead_in
+    assert np.all(trimmed[:lead_in] == 0) and np.all(trimmed[lead_in:] == pytest.approx(0.1))
+    silent = np.zeros(rate // 10, dtype=np.float32)
+    assert len(kitten_module.trim_leading_silence(silent)) == len(silent)
+
+
+def test_kitten_chunks_start_at_speech() -> None:
+    handler = make_kitten(blocksize=4)
+    handler._chunk_text = lambda text: ["Hi."]
+    rate = kitten_module.KITTEN_SAMPLE_RATE
+    handler.model.generate_single_chunk = lambda *, text, voice: np.concatenate(
+        [np.zeros(rate, dtype=np.float32), np.full(rate // 100, 0.1, dtype=np.float32)]
+    )
+
+    (chunk,) = list(handler._generate_chunks("Hi.", "Bruno"))
+
+    assert len(chunk) == rate // 100 + int(kitten_module.LEADING_SILENCE_KEEP_S * rate)
+
+
+def test_phonon_skips_text_without_words_and_keeps_speaking(monkeypatch: pytest.MonkeyPatch) -> None:
+    from speech_to_speech.TTS import phonon_tts_handler as phonon_module
+    from tests.test_phonon_tts_handler import make_handler as make_phonon
+
+    monkeypatch.setattr(phonon_module.console, "print", lambda *_a, **_k: None)
+    handler, _stream, requests = make_phonon(iter([np.full(8, 0.1, dtype=np.float32)]), sample_rate=16000, blocksize=4)
+
+    assert list(handler.process(TTSInput(text='"'))) == []
+    assert requests == []
+    assert [len(block) for block in handler.process(TTSInput(text="Nemo."))] == [4, 4]

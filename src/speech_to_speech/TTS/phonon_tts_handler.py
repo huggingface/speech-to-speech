@@ -139,9 +139,11 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
         generation = tts_input.cancel_generation
         if generation is None and self.cancel_scope is not None:
             generation = self.cancel_scope.generation
+        # Text with nothing to pronounce (a lone closing quote from streamed sentence
+        # splitting) makes Phonon raise; that must not fail the whole response.
         if (
             identity in self._failed_responses
-            or not tts_input.text.strip()
+            or not any(char.isalnum() for char in tts_input.text)
             or self._is_cancelled(generation, tts_input)
         ):
             return

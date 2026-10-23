@@ -23,6 +23,26 @@ logger = logging.getLogger(__name__)
 
 # Legacy Kitten ONNX checkpoints have 512 positions, including boundary tokens.
 KITTEN_MAX_TOKENS = 512
+KITTEN_SAMPLE_RATE = 24000
+# Every Kitten chunk opens with 0.5-0.8 s of near-silence; a reply would start that
+# late and pause that long between sentences. Keep a short lead-in before speech.
+LEADING_SILENCE_DB = -40.0
+LEADING_SILENCE_KEEP_S = 0.04
+
+
+def trim_leading_silence(audio: np.ndarray, sample_rate: int = KITTEN_SAMPLE_RATE) -> np.ndarray:
+    """Drop leading 10 ms frames quieter than LEADING_SILENCE_DB, keeping a short lead-in."""
+    samples = np.asarray(audio, dtype=np.float32).reshape(-1)
+    frame = sample_rate // 100
+    usable = len(samples) // frame * frame
+    if not usable:
+        return samples
+    rms = np.sqrt(np.mean(samples[:usable].reshape(-1, frame) ** 2, axis=1))
+    loud = np.flatnonzero(20 * np.log10(rms + 1e-9) > LEADING_SILENCE_DB)
+    if not len(loud):
+        return samples
+    start = max(0, loud[0] * frame - int(LEADING_SILENCE_KEEP_S * sample_rate))
+    return samples[start:]
 
 
 class KittenTTSHandler(BaseHandler[TTSIn, TTSOut]):
@@ -113,7 +133,7 @@ class KittenTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     raise ValueError("KittenTTS text cannot fit the checkpoint's token limit")
                 pending.extend(reversed(parts))
                 continue
-            yield self.model.generate_single_chunk(text=chunk, voice=voice)
+            yield trim_leading_silence(self.model.generate_single_chunk(text=chunk, voice=voice))
 
     def _is_cancelled(self, generation: int | None) -> bool:
         return generation is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(generation)
