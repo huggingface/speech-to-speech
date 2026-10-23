@@ -153,10 +153,10 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
     )
     parser.add_argument(
         "--echo-cancellation",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=defaults.echo_cancellation,
-        help="Remove speaker playback from the microphone so voice barge-in works on speakers. "
-        "Not needed with headphones or a headset.",
+        help="Remove speaker playback from the microphone (on by default). "
+        "Use --no-echo-cancellation for headphones or a headset. Microphone blocking disables cancellation.",
     )
     parser.add_argument(
         "--log-transcripts",

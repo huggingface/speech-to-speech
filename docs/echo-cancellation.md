@@ -1,9 +1,9 @@
 # Echo cancellation
 
-`--echo-cancellation` makes the packaged `talk` and `local` clients remove
-their own speaker playback from the microphone, so you can interrupt the
-assistant by voice without headphones. It stays off by default; headphones or
-a headset don't need it.
+The packaged `talk` and `local` clients remove their own speaker playback from
+the microphone by default, so you can interrupt the assistant by voice without
+headphones. Use `--no-echo-cancellation` with headphones or a headset, or set
+`runtime.client.echo_cancellation: false` in a configuration file.
 
 ## How it works
 
@@ -27,14 +27,15 @@ Networking and tool execution stay in the parent. Python scripts that call the
 client directly must protect their entry point with `if __name__ == "__main__":`
 so the audio process can start safely.
 
-`--echo-cancellation` cannot be combined with
-`--local_audio_block_mic_during_playback`, which pauses the microphone during
-playback and so disables voice interruptions.
+Microphone blocking (`talk --block-mic-during-playback` or
+`local --local_audio_block_mic_during_playback`) turns cancellation off. It pauses
+capture during playback and prevents voice interruptions.
 
 ## Limits
 
 - Echo cancellation in the packaged client requires `--send-rate` and
-  `--recv-rate` to both be 16 kHz, their default.
+  `--recv-rate` to both be 16 kHz, their default. For other client rates, use
+  `--no-echo-cancellation`.
 - The client does not correct clock drift between separate input and output
   devices.
 - While the assistant speaks, the canceller can turn the user's voice down

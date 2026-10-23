@@ -77,7 +77,7 @@ class RealtimeAudioClientConfig:
     print_json: bool = False
     verbose: bool = False
     block_mic_during_playback: bool = False
-    echo_cancellation: bool = False
+    echo_cancellation: bool = True
     log_transcripts: bool = False
     connection_retry_timeout_s: float = 30.0
     tools: list[dict[str, Any]] = field(default_factory=list)
@@ -87,8 +87,8 @@ class RealtimeAudioClientConfig:
     def __post_init__(self) -> None:
         if not 0 <= self.playback_buffer_ms < float("inf"):
             raise ValueError("playback_buffer_ms must be a finite non-negative number")
-        if self.echo_cancellation and self.block_mic_during_playback:
-            raise ValueError("Echo cancellation cannot be combined with blocking the microphone during playback")
+        if self.block_mic_during_playback:
+            self.echo_cancellation = False
         if any(not isinstance(voice, str) or not voice.strip() for voice in self.voice_choices):
             raise ValueError("voice_choices must contain non-empty voice names")
         self.voice_choices = list(dict.fromkeys(self.voice_choices))
@@ -1151,6 +1151,7 @@ def _run_audio_worker(
     commands: Any,
     stop_event: Any,
     errors: Any,
+    ready: Any,
 ) -> None:
     # The parent handles Ctrl-C and requests orderly stream shutdown.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -1177,6 +1178,7 @@ def _run_audio_worker(
     receiver.start()
     try:
         with _open_audio_streams(config, playback, mic_queue):
+            ready.set()
             parent = multiprocessing.parent_process()
             while not stop_event.wait(0.1):
                 if parent is not None and not parent.is_alive():
@@ -1202,6 +1204,7 @@ class _AudioWorker:
         # Pending playback can be discarded when the worker exits.
         self._commands._ignore_epipe = True  # type: ignore[attr-defined]
         self._stop = context.Event()
+        self._ready = context.Event()
         self.playback = _PlaybackCommands(self._commands)
         self._errors, self._error_sender = context.Pipe(duplex=False)
         # Keep executors and their state in the parent; the worker only needs
@@ -1217,7 +1220,7 @@ class _AudioWorker:
         )
         self._process = context.Process(
             target=_run_audio_worker,
-            args=(worker_config, self.mic_queue, self._commands, self._stop, self._error_sender),
+            args=(worker_config, self.mic_queue, self._commands, self._stop, self._error_sender, self._ready),
             name="realtime-audio",
         )
 
@@ -1315,6 +1318,8 @@ async def _run_audio_session(
             )
 
     async def receive_events() -> None:
+        while worker is not None and not worker._ready.is_set():
+            await asyncio.sleep(0.01)
         while not stop_event.is_set():
             event = await conn.recv()
             tool_calls.handle_event(event)

@@ -1836,7 +1836,7 @@ async def test_open_input_stream_is_closed_when_output_construction_fails(monkey
     with pytest.raises(RuntimeError, match="output construction failed"):
         await audio_client_module._run_audio_session(
             SimpleNamespace(),
-            RealtimeAudioClientConfig(),
+            RealtimeAudioClientConfig(echo_cancellation=False),
             Event(),
         )
 
@@ -1916,7 +1916,9 @@ async def test_audio_session_cancellation_closes_streams_and_stops_receiving(mon
     monkeypatch.setattr(audio_client_module, "_open_audio_streams", streams)
     stop_event = Event()
     session = asyncio.create_task(
-        audio_client_module._run_audio_session(Connection(), RealtimeAudioClientConfig(), stop_event)
+        audio_client_module._run_audio_session(
+            Connection(), RealtimeAudioClientConfig(echo_cancellation=False), stop_event
+        )
     )
     await asyncio.wait_for(receiving.wait(), timeout=1)
     session.cancel()
@@ -1997,9 +1999,11 @@ def test_clean_conversation_has_colors_literal_text_and_no_blank_lines_between_t
     )
 
 
-async def test_ready_waits_for_audio_devices_and_session_acknowledgement(monkeypatch, capsys):
+@pytest.mark.parametrize("echo_cancellation", [False, True])
+async def test_ready_waits_for_audio_devices_and_session_acknowledgement(monkeypatch, capsys, echo_cancellation):
     starts = []
     stop = Event()
+    audio_sent = asyncio.Event()
 
     class Stream:
         def __init__(self, name):
@@ -2016,6 +2020,9 @@ async def test_ready_waits_for_audio_devices_and_session_acknowledgement(monkeyp
 
     class Connection:
         count = 0
+
+        async def send(self, _event):
+            audio_sent.set()
 
         async def recv(self):
             assert starts == ["microphone", "speakers"]
@@ -2038,7 +2045,39 @@ async def test_ready_waits_for_audio_devices_and_session_acknowledgement(monkeyp
             RawOutputStream=lambda **_: Stream("speakers"),
         ),
     )
-    await audio_client_module._run_audio_session(Connection(), RealtimeAudioClientConfig(), stop)
+
+    class Worker:
+        def __init__(self):
+            self.mic_queue = audio_client_module.Queue()
+            self.playback = PlaybackBuffer(16000)
+            self._ready = Event()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        async def wait_for_failure(self):
+            await asyncio.Future()
+
+    worker = Worker()
+    monkeypatch.setattr(audio_client_module, "_AudioWorker", lambda _config: worker)
+    conn = Connection()
+    session = asyncio.create_task(
+        audio_client_module._run_audio_session(
+            conn, RealtimeAudioClientConfig(echo_cancellation=echo_cancellation), stop
+        )
+    )
+    if echo_cancellation:
+        # Input can arrive before the output stream has finished opening.
+        worker.mic_queue.put(bytes(320))
+        await asyncio.wait_for(audio_sent.wait(), 2)
+        assert conn.count == 0
+        assert capsys.readouterr().out == ""
+        starts.extend(["microphone", "speakers"])
+        worker._ready.set()
+    await asyncio.wait_for(session, 2)
 
 
 def test_voice_status_is_rewritten_in_place_below_the_conversation():

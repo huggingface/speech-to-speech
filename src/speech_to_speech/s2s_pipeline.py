@@ -243,6 +243,13 @@ def parse_arguments(
         ]
     )
     parser = HfArgumentParser(tuple(argument_classes), prog=f"speech-to-speech {command}")  # type: ignore[arg-type]
+    if command == "local":
+        parser.add_argument(
+            "--no-echo-cancellation",
+            dest="local_audio_echo_cancellation",
+            action="store_false",
+            default=argparse.SUPPRESS,
+        )
     mac_action = parser._option_string_actions.pop("--mac_optimal_settings")
     mac_action.option_strings = [option for option in mac_action.option_strings if option != "--mac_optimal_settings"]
     if _mac_preset_enabled:

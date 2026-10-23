@@ -70,18 +70,19 @@ def test_local_resolves_backend_specific_playback_buffer_defaults(monkeypatch):
     monkeypatch.setattr("speech_to_speech.s2s_pipeline._build_pipeline_unit", lambda **_kwargs: unit)
 
     cases = [
-        (["--tts", "qwen3"], 0),
-        (["--tts", "openai"], 196),
-        (["--tts", "openai", "--playback-buffer-ms", "0"], 0),
-        (["--tts", "openai", "--playback-buffer-ms", "240"], 240),
+        (["--tts", "qwen3"], 0, True),
+        (["--tts", "openai"], 196, True),
+        (["--tts", "openai", "--playback-buffer-ms", "0", "--no-echo-cancellation"], 0, False),
+        (["--tts", "openai", "--playback-buffer-ms", "240", "--local_audio_block_mic_during_playback"], 240, False),
     ]
-    for argv, expected_buffer_ms in cases:
+    for argv, expected_buffer_ms, expected_echo_cancellation in cases:
         args = parse_arguments(argv, command="local")
         manager = build_local_pipeline(args, Event())
         client = manager.handlers[-1]
 
         assert isinstance(client, RealtimeAudioClient)
         assert client.config.playback_buffer_ms == expected_buffer_ms
+        assert client.config.echo_cancellation is expected_echo_cancellation
 
 
 def test_local_phonon_offers_loaded_voices_and_preserves_configured_voice(monkeypatch):
