@@ -23,6 +23,7 @@ speech-to-speech local --stt whisper --language auto --stt_device cuda
 - `paraformer` → `STT/paraformer_handler.py`
 - `qwen3-asr` → `STT/qwen3_asr_handler.py`
 - `moonshine` → `STT/moonshine_handler.py`
+- `granite-ctc` → `STT/granite_speech_ctc_handler.py`
 - `openai` → `STT/openai_compatible_handler.py`
 
 ## Language Support by Handler
@@ -115,6 +116,18 @@ speech-to-speech local --stt whisper --language auto --stt_device cuda
 - The encoder takes variable-length audio without padding every input to 30 seconds
 - The `streaming-*` checkpoint names select the corresponding Transformers architecture. This handler
   still decodes each VAD snapshot with `generate`; it does not keep a native streaming decoder across snapshots.
+
+### 7c) Granite Speech 5.0 TurboCTC (`--stt granite-ctc`)
+
+- Handler: `GraniteSpeechCTCSTTHandler`
+- Model flag: `--granite_ctc_model_name` (default `ibm-granite/granite-speech-5.0-470m-turboctc`, 470M)
+- Pin `--granite_ctc_revision 947f59af40db9791170a0628cf0f3f4812d720f1` for the earlier English-only release
+- Non-autoregressive CTC decoding; the current multilingual checkpoint outputs punctuated, cased text
+- Language flag: `--granite_ctc_language` (`en`, `fr`, `de`, `es`, `pt`, `it`, `ja`; default `en`). CTC has no
+  language token, so this is the language reported downstream, not a decoding control or language detection.
+  Session language updates are rejected because the annotation is fixed at startup.
+- Decodes each progressive or final VAD snapshot separately; it does not keep a native streaming decoder
+- Uses the built-in Transformers dependency. Device and dtype flags follow the other Torch backends.
 
 ### 8) OpenAI-compatible endpoint (`--stt openai`)
 
@@ -262,6 +275,13 @@ speech-to-speech serve --stt qwen3-asr \
 
 ```bash
 speech-to-speech serve --stt moonshine --moonshine_stt_model_name moonshine-ai/moonshine-tiny
+```
+
+### Granite TurboCTC
+
+```bash
+speech-to-speech serve --stt granite-ctc --granite_ctc_device cpu
+speech-to-speech local --stt granite-ctc --granite_ctc_language fr
 ```
 
 ### Parakeet Unified

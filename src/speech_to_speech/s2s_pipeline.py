@@ -585,6 +585,7 @@ def _stt_session_languages(selection: BackendSelection, handler: Any) -> set[str
         "openai-realtime",
         "vllm-realtime",
         "moonshine",
+        "granite-ctc",
     }:
         return set()
     return None
