@@ -478,6 +478,7 @@ def test_explicit_scope_inventory():
         "print_json",
         "verbose",
         "block_mic_during_playback",
+        "echo_cancellation",
         "log_transcripts",
         "connection_retry_timeout_s",
         "tools",
@@ -486,11 +487,17 @@ def test_explicit_scope_inventory():
     }
 
 
-def test_client_only_skips_server_and_pipeline_environment(document):
+@pytest.mark.parametrize("echo_cancellation", [False, True])
+def test_client_only_skips_server_and_pipeline_environment(document, echo_cancellation):
     document.data["runtime"] = {
         "server": {"port": {"env": "MISSING_PORT"}},
         "log_transcripts": {"env": "LOG_TRANSCRIPTS"},
-        "client": {"api_key": "", "model": "client-model", "playback_buffer_ms": 0},
+        "client": {
+            "api_key": "",
+            "model": "client-model",
+            "playback_buffer_ms": 0,
+            "echo_cancellation": echo_cancellation,
+        },
     }
     document.data["blocks"]["llm"]["settings"] = {"responses_api_api_key": {"env": "MISSING_KEY"}}
     document.data["pipelines"]["primary"]["num_pipelines"] = {"env": "MISSING_COUNT"}
@@ -502,6 +509,7 @@ def test_client_only_skips_server_and_pipeline_environment(document):
     assert result.client["api_key"] == ""
     assert result.client["model"] == "client-model"
     assert result.client["playback_buffer_ms"] == 0
+    assert result.client["echo_cancellation"] is echo_cancellation
     assert result.sources[("runtime", "client", "api_key")] == "file"
     assert not any(path[0] in {"blocks", "pipelines"} for path in result.sources)
     assert document.data == original

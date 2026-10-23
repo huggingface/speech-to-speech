@@ -152,6 +152,13 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
         default=defaults.block_mic_during_playback,
     )
     parser.add_argument(
+        "--echo-cancellation",
+        action=argparse.BooleanOptionalAction,
+        default=defaults.echo_cancellation,
+        help="Remove speaker playback from the microphone (on by default). "
+        "Use --no-echo-cancellation for headphones or a headset. Microphone blocking disables cancellation.",
+    )
+    parser.add_argument(
         "--log-transcripts",
         "--log_transcripts",
         dest="log_transcripts",
@@ -188,6 +195,7 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
         print_json=namespace.print_json,
         verbose=namespace.verbose,
         block_mic_during_playback=namespace.block_mic_during_playback,
+        echo_cancellation=namespace.echo_cancellation,
         log_transcripts=namespace.log_transcripts,
         connection_retry_timeout_s=namespace.connection_retry_timeout_s,
         tools=tools,
