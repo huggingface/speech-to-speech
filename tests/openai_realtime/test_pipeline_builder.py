@@ -84,6 +84,20 @@ def test_local_resolves_backend_specific_playback_buffer_defaults(monkeypatch):
         assert client.config.playback_buffer_ms == expected_buffer_ms
 
 
+def test_local_phonon_offers_loaded_voices_and_preserves_configured_voice(monkeypatch):
+    from speech_to_speech.TTS.phonon_tts_handler import PhononTTSHandler
+
+    handler = PhononTTSHandler.__new__(PhononTTSHandler)
+    handler.voices = ["Maeve", "Zoey", "default"]
+    handler.voice = "Zoey"
+    unit = SimpleNamespace(handlers=[handler])
+    monkeypatch.setattr("speech_to_speech.s2s_pipeline._build_pipeline_unit", lambda **_kwargs: unit)
+    args = parse_arguments(["--tts", "phonon"], command="local")
+    manager = build_local_pipeline(args, Event())
+    assert manager.handlers[-1].config.voice == "Zoey"
+    assert manager.handlers[-1].config.voice_choices == ["default", "Maeve", "Zoey"]
+
+
 def test_failed_handler_setup_cleans_and_preserves_original_error():
     from queue import Queue
 

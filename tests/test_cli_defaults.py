@@ -13,6 +13,7 @@ from speech_to_speech.arguments_classes.language_model_arguments import (
 )
 from speech_to_speech.arguments_classes.local_audio_arguments import LocalAudioArguments
 from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
+from speech_to_speech.arguments_classes.phonon_tts_arguments import PhononTTSHandlerArguments
 from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
 from speech_to_speech.arguments_classes.realtime_server_arguments import RealtimeServerArguments
 from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
@@ -22,6 +23,13 @@ from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
 from speech_to_speech.cli import main, parse_command, parse_talk_arguments
 from speech_to_speech.pipeline.transcript_logging import set_log_transcripts, transcript_for_log
 from speech_to_speech.s2s_pipeline import ParsedArguments, parse_arguments, prepare_all_args, prepare_module_args
+
+
+def test_phonon_defaults_to_public_english_31m_checkpoint():
+    phonon_args = PhononTTSHandlerArguments()
+    assert phonon_args.phonon_tts_model_name == "gradium/phonon-31m-en"
+    assert phonon_args.phonon_tts_language == "en"
+    assert phonon_args.phonon_tts_num_threads == 4
 
 
 def test_release_defaults_match_local_qwen35_parakeet_qwen3_profile():
@@ -474,6 +482,12 @@ def test_talk_accepts_one_full_url_connection_option():
 def test_talk_leaves_api_key_unset_for_sdk_environment_authentication():
     assert parse_talk_arguments([]).api_key is None
     assert parse_talk_arguments(["--api-key", "explicit-secret"]).api_key == "explicit-secret"
+
+
+def test_talk_can_cycle_voices_without_losing_initial_voice():
+    config = parse_talk_arguments(["--voice", "Zoey", "--voices", "Zoey", "Maeve", "Hugh"])
+    assert config.voice == "Zoey"
+    assert config.voice_choices == ["Zoey", "Maeve", "Hugh"]
 
 
 def test_talk_accepts_custom_playback_buffer():

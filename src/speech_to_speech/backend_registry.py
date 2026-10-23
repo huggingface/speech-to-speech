@@ -43,6 +43,7 @@ from speech_to_speech.arguments_classes.parakeet_tdt_arguments import (
 from speech_to_speech.arguments_classes.parakeet_unified_stt_arguments import (
     ParakeetUnifiedSTTHandlerArguments,
 )
+from speech_to_speech.arguments_classes.phonon_tts_arguments import PhononTTSHandlerArguments
 from speech_to_speech.arguments_classes.pocket_tts_arguments import PocketTTSHandlerArguments
 from speech_to_speech.arguments_classes.qwen3_asr_stt_arguments import Qwen3ASRSTTHandlerArguments
 from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
@@ -605,6 +606,19 @@ TTS_BACKENDS = build_backend_registry(
             ),
             config_prefix="pocket_tts",
             required_extra="pocket",
+        ),
+        BackendSpec(
+            "phonon",
+            "tts",
+            PhononTTSHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.TTS.phonon_tts_handler",
+                "PhononTTSHandler",
+                setup_should_listen=True,
+                context_kwargs=True,
+            ),
+            config_prefix="phonon_tts",
+            required_extra="phonon",
         ),
         BackendSpec(
             "kokoro",

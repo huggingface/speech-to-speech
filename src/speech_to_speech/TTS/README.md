@@ -15,6 +15,7 @@ Runtime-supported values in `s2s_pipeline.py`:
 - `chatTTS` → `chatTTS_handler.py`
 - `facebookMMS` → `facebookmms_handler.py`
 - `pocket` → `pocket_tts_handler.py`
+- `phonon` → `phonon_tts_handler.py`
 - `kokoro` → `kokoro_handler.py`
 - `kitten` → `kitten_tts_handler.py`
 - `omnivoice` → `omnivoice_handler.py`
@@ -328,6 +329,29 @@ Install the optional dependency with:
 pip install "speech-to-speech[supertonic]"
 ```
 
+### 10) Phonon (`--tts phonon`)
+
+Primary args prefix: `--phonon_tts_*`
+
+```bash
+pip install "speech-to-speech[phonon]"
+speech-to-speech serve --tts phonon
+```
+
+- Uses the published `ptts==0.4.0` Python bindings on CPU. It streams mono float audio and resamples continuously to 16 kHz PCM16 in 512-sample blocks. GPU flags for other components do not move Phonon off CPU.
+- Defaults to `gradium/phonon-31m-en`, a public English checkpoint under Apache-2.0 that needs no Hub login. A local directory/config path or another Hub repository ID can override it, with `--phonon_tts_revision` when appropriate. The Phonon 40M checkpoints, such as `gradium/phonon-40m-en`, are gated and CC BY-NC 4.0 (non-commercial); accept their Hub terms and log in before the first download. The checkpoint needs its own config, tokenizer JSON, weights and voice files. Keep private checkpoint files outside this repository.
+- `--phonon_tts_quant q8` is the default and loads `model.q8.gguf`. Other formats require matching checkpoint weights.
+- `--phonon_tts_voice VOICE_NAME` selects a checkpoint voice or a [voice catalog](https://huggingface.co/gradium/phonon-voices) voice in the checkpoint's languages; catalog voices download on first use. If the catalog cannot be reached at startup, only checkpoint voices are offered. Omitting it uses the upstream default. Realtime session and response voice overrides accept the same names. Raw reference-audio voice cloning is not exposed by this handler.
+- With multiple voices, the `local` client enables arrow-key voice selection in an interactive macOS or Linux terminal. Left/up selects the previous voice; right/down selects the next. Changes wait until the current response completes and keep the session and conversation intact. The standalone `talk` client accepts `--voices VOICE_NAME ...` to enable the same controls.
+- `--phonon_tts_language en|fr|de|es|pt|none` selects text normalization at startup, not a different model. It cannot change per utterance, so session language selections must match it; `auto` keeps the configured normalizer. Checkpoint language coverage is independent of text normalization.
+- `--phonon_tts_blocksize` changes the number of samples per output block; the output rate stays 16 kHz.
+- `--phonon_tts_num_threads N` sets a positive CPU thread count before loading the model; the default is 4. The native pool is shared process-wide, so this is a startup setting shared by all Phonon pipelines. Four threads performed better than the runtime's twelve-thread default on an Apple M3 Pro in local testing. Tune for your hardware and workload; more threads are not always faster.
+- Interruptions and generator cleanup close the native stream and release its workers. Resampling state is fresh for each utterance, and the model remains loaded across sessions.
+
+For a checkout, install with `pip install -e ".[phonon]"`. An optional real-checkpoint test can be run with `PHONON_TEST_CHECKPOINT=/path/to/checkpoint pytest tests/test_phonon_tts_handler.py`; ordinary tests use a fake runtime and require no weights.
+
+Upstream: [runtime](https://github.com/gradium-ai/xn-ptts/releases/tag/v0.4.0), [Python guide](https://github.com/gradium-ai/xn-ptts/tree/v0.4.0/ptts-pyo3), and [default checkpoint](https://huggingface.co/gradium/phonon-31m-en).
+
 ## Setup
 
 ### Low-latency GPU setup
@@ -346,7 +370,7 @@ speech-to-speech local
 
 Apple Silicon selects MLX automatically. The optional `--mac-optimal-settings` preset also sets MPS device defaults.
 
-`--tts pocket`, `--tts kokoro`, and `--tts omnivoice` are also valid options on macOS.
+`--tts pocket`, `--tts phonon`, `--tts kokoro`, and `--tts omnivoice` are also valid options on macOS.
 
 ## MiniMax
 
