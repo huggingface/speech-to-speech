@@ -106,7 +106,9 @@ The Talker may acknowledge a question while the Reasoner is still working; the
 Reasoner supplies new substantive content, not a second conversational preamble. The hosted normal-mode configuration selects
 `convfill_backend_template_streaming_conv.txt`, whose examples supply the next
 question or fact after the Talker’s acknowledgment. It explicitly excludes a second
-permission, reassurance, or greeting, including paraphrases. The original template
+permission, reassurance, greeting, compliment, praise, or thanks, including
+paraphrases. For social updates it asks for a specific continuation, and avoids
+repeatedly asking the user to evaluate the conversation. The original template
 remains available by configuration. The fine-tuned Talker prompt format and its
 exact-sentence echo guard are unchanged; the initial filler can still sound generic.
 Native tool follow-ups retain the current Talker prefix, and receive a one-second
