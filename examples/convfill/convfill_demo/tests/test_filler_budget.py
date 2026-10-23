@@ -1,4 +1,5 @@
 """Filler budgets must not block knowledge, cancellation or legacy scheduling."""
+
 import json
 import threading
 from pathlib import Path
@@ -88,9 +89,7 @@ def test_unset_budget_preserves_multiple_fillers(configured):
 
 def test_limited_tool_continuation_does_not_add_another_acknowledgment():
     system, backend = limited_system(1)
-    system.convfill_frontend = SimpleNamespace(
-        turn_state_manager=SimpleNamespace(responses=["Let me check that."])
-    )
+    system.convfill_frontend = SimpleNamespace(turn_state_manager=SimpleNamespace(responses=["Let me check that."]))
     backend.release.set()
     assert list(system.backend_fn()) == ["First useful sentence.", "Second useful sentence."]
 
