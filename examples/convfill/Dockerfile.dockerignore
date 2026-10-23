@@ -1,0 +1,17 @@
+.git
+.venv
+**/__pycache__
+**/node_modules
+.pytest_cache
+*.egg-info
+.env
+*.env
+*.log
+*.jsonl
+outputs
+logs
+dist
+build
+web_demo/frontend
+web_demo/backend
+src/tts

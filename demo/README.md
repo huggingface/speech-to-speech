@@ -283,6 +283,8 @@ case-insensitively against the user's organisations from HF OAuth.
 | Voice | Qwen3-TTS speaker name (Aiden, Ryan, Dylan, Eric, Ono_Anna, Serena, Sohee, Uncle_Fu, Vivian) |
 | Instructions | System prompt sent in `session.update` once the connection opens |
 
+For a deployment using another TTS backend, replace the `#voice` options in `index.html` with that backend’s supported voices and mark its default option `selected`. The UI uses that default and replaces saved choices absent from the current menu before starting a conversation. Valid saved choices are preserved.
+
 LocalStorage keys are namespaced `s2s.ws.*` (plus `s2s.transport` for the
 transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
 

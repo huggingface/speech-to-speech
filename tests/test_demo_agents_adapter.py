@@ -38,7 +38,13 @@ const sessions = [];
 class Transport {
   constructor(options) { this.options = options; this.listeners = new Map(); }
   on(name, callback) { this.listeners.set(name, callback); }
-  requestResponse() {}
+  sendMessage(message, _event, options) {
+    if (options.triggerResponse !== false) throw new Error("greeting would start two responses");
+    sessions.at(-1).messages.push(message);
+  }
+  requestResponse(response) {
+    if (response.metadata["speech_to_speech.startup_greeting"] !== "true") throw new Error("greeting marker missing");
+  }
 }
 class WebSocketTransport extends Transport {}
 class WebRtcTransport extends Transport {}
@@ -282,7 +288,13 @@ class RealtimeSession {
   sendMessage(message) { timeline.push(`greeting:${message}`); }
   mute(muted) { track.enabled = !muted; }
 }
-class Transport { on() {} }
+class Transport {
+  on() {}
+  sendMessage(message) { timeline.push(`greeting:${message}`); }
+  requestResponse(response) {
+    if (response.metadata["speech_to_speech.startup_greeting"] !== "true") throw new Error("greeting marker missing");
+  }
+}
 globalThis.OpenAIAgentsRealtime = {
   OpenAIRealtimeWebRTC: Transport,
   RealtimeAgent: class RealtimeAgent {},

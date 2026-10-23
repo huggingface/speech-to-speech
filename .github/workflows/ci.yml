@@ -62,6 +62,31 @@ jobs:
       - name: Pytest
         run: uv run pytest tests/ -x -q
 
+  convfill-example:
+    permissions:
+      contents: read
+    name: Hosted ConvFill example
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: demo/package-lock.json
+      - run: uv sync --group dev
+      - run: uv pip install -r examples/convfill/requirements.txt
+      - run: npm ci --prefix demo --no-audit --no-fund
+      - run: npx --prefix demo playwright install --with-deps chromium
+      - name: Example regressions
+        run: PYTHONPATH=examples/convfill:src uv run pytest examples/convfill/convfill_demo/tests -q
+      - run: uv run ruff check examples/convfill/convfill_demo examples/convfill/scripts examples/convfill/deploy/hf_space.py
+      - run: uv run ruff format --check examples/convfill/convfill_demo examples/convfill/scripts examples/convfill/deploy/hf_space.py
+      - run: npm --prefix demo run test:ui
+
   agents-sdk-websocket:
     permissions:
       contents: read
