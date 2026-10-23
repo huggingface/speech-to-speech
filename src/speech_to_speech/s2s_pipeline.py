@@ -578,9 +578,15 @@ def _stt_session_languages(selection: BackendSelection, handler: Any) -> set[str
         return set() if getattr(generation_config, "is_multilingual", None) is False else None
     if selection.name == "qwen3-asr":
         return set(modules[type(handler).__module__].SUPPORTED_LANGUAGES)
-    if selection.name == "granite-ctc":
-        return set()
-    if selection.name in {"parakeet-tdt", "parakeet-unified", "paraformer", "openai-realtime", "vllm-realtime"}:
+    if selection.name in {
+        "parakeet-tdt",
+        "parakeet-unified",
+        "paraformer",
+        "openai-realtime",
+        "vllm-realtime",
+        "moonshine",
+        "granite-ctc",
+    }:
         return set()
     return None
 
