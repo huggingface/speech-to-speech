@@ -111,6 +111,12 @@ paraphrases. For social updates it asks for a specific continuation, and avoids
 repeatedly asking the user to evaluate the conversation. The original template
 remains available by configuration. The fine-tuned Talker prompt format and its
 exact-sentence echo guard are unchanged; the initial filler can still sound generic.
+The hosted configuration sets `max_filler_phrases` to one per reply, avoiding
+repeated acknowledgments when the Reasoner is delayed. Once that filler finishes,
+the listener may hear silence until useful knowledge arrives. Tool continuations
+with an existing spoken prefix do not schedule another filler. Omit this setting
+(or use null) to retain unlimited filler scheduling; zero disables fillers. Useful
+knowledge continues to stream regardless of the filler budget.
 Native tool follow-ups retain the current Talker prefix, and receive a one-second
 knowledge head start before filler scheduling resumes. Exact repeated sentence
 prefixes (three or more words) are suppressed before TTS and state updates. This

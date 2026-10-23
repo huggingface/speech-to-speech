@@ -43,6 +43,11 @@ class ConvFillConfig:
         self.frontend_device = config.get("frontend_device", "cpu")
         self.frontend_dtype = config.get("frontend_dtype")
         self.reasoner = config.get("reasoner", {})
+        self.max_filler_phrases = config.get("max_filler_phrases")
+        if self.max_filler_phrases is not None and (
+            type(self.max_filler_phrases) is not int or self.max_filler_phrases < 0
+        ):
+            raise ValueError("max_filler_phrases must be a nonnegative integer or null")
         self.turn_timeout_s = float(config.get("turn_timeout_s", 90))
         self.shutdown_timeout_s = float(config.get("shutdown_timeout_s", 3))
         if self.turn_timeout_s <= 0 or self.shutdown_timeout_s <= 0:
@@ -135,7 +140,12 @@ class ConvFillSystem:
         turn_state = getattr(frontend, "turn_state_manager", None)
         # A tool result resumes the same utterance. Give its knowledge stream
         # a short head start rather than immediately emitting a second preamble.
-        filler_not_before = time.monotonic() + (1.0 if getattr(turn_state, "responses", []) else 0.0)
+        has_spoken_prefix = bool(getattr(turn_state, "responses", []))
+        filler_not_before = time.monotonic() + (1.0 if has_spoken_prefix else 0.0)
+        filler_limit = getattr(getattr(self, "convfill_config", None), "max_filler_phrases", None)
+        # A limited reply needs no more acknowledgment after a tool continuation.
+        # Count scheduled phrases so queue/inference races cannot exceed the cap.
+        fillers_emitted = filler_limit if has_spoken_prefix and filler_limit is not None else 0
 
         def producer():
             gen = self.convfill_backend.backend_infer()
@@ -169,11 +179,13 @@ class ConvFillSystem:
             with self._frontend_inflight_lock:
                 frontend_busy = self._frontend_inflight > 0
             if (
-                time.monotonic() >= filler_not_before
+                (filler_limit is None or fillers_emitted < filler_limit)
+                and time.monotonic() >= filler_not_before
                 and self.thought_queue.qsize() == 0
                 and not frontend_busy
                 and self.audio_in_flight_fn() == 0
             ):
+                fillers_emitted += 1
                 yield "<sil>"
                 continue
 

@@ -4,6 +4,7 @@
   "backend_model_mode": "vllm",
   "num_history_turns": 6,
   "tts_mode": "external",
+  "max_filler_phrases": 1,
   "turn_timeout_s": 90,
   "shutdown_timeout_s": 3,
   "reasoner": {
