@@ -22,6 +22,7 @@ speech-to-speech local --stt whisper --language auto --stt_device cuda
 - `orukeet` → `STT/nemo_asr_handler.py`
 - `paraformer` → `STT/paraformer_handler.py`
 - `qwen3-asr` → `STT/qwen3_asr_handler.py`
+- `granite-ctc` → `STT/granite_speech_ctc_handler.py`
 - `openai` → `STT/openai_compatible_handler.py`
 
 ## Language Support by Handler
@@ -102,6 +103,18 @@ speech-to-speech local --stt whisper --language auto --stt_device cuda
   - Progressive (partial) windows are short and fool the language ID, so they reuse the language of the last final turn
   - A forced language is passed on every request and reported as is
 - The required Transformers version supports the prompt and explicit language forcing on all platforms.
+
+### 7b) Granite Speech 5.0 TurboCTC (`--stt granite-ctc`)
+
+- Handler: `GraniteSpeechCTCSTTHandler`
+- Model flag: `--granite_ctc_model_name` (default `ibm-granite/granite-speech-5.0-470m-turboctc`, 470M)
+- Pin `--granite_ctc_revision 947f59af40db9791170a0628cf0f3f4812d720f1` for the earlier English-only release
+- Non-autoregressive CTC decoding; the current multilingual checkpoint outputs punctuated, cased text
+- Language flag: `--granite_ctc_language` (`en`, `fr`, `de`, `es`, `pt`, `it`, `ja`; default `en`). CTC has no
+  language token, so this is the language reported downstream, not a decoding control or language detection.
+  Session language updates are rejected because the annotation is fixed at startup.
+- Decodes each progressive or final VAD snapshot separately; it does not keep a native streaming decoder
+- Uses the built-in Transformers dependency. Device and dtype flags follow the other Torch backends.
 
 ### 8) OpenAI-compatible endpoint (`--stt openai`)
 
@@ -243,6 +256,13 @@ speech-to-speech serve --stt qwen3-asr --qwen3_asr_language fr
 speech-to-speech serve --stt qwen3-asr \
   --qwen3_asr_model_name Qwen/Qwen3-ASR-1.7B-hf \
   --qwen3_asr_prompt "Vocabulary: Quilter, apostle."
+```
+
+### Granite TurboCTC
+
+```bash
+speech-to-speech serve --stt granite-ctc --granite_ctc_device cpu
+speech-to-speech local --stt granite-ctc --granite_ctc_language fr
 ```
 
 ### Parakeet Unified
