@@ -7,8 +7,7 @@ import { chromium } from "@playwright/test";
 
 const root = path.resolve(import.meta.dirname, "..");
 
-for (const tools of [false, true]) {
-test(`server tools=${tools} restores controls without automatic camera access`, async (t) => {
+async function openDemoPage(t, { tools = false, voiceOptions } = {}) {
   const server = createServer(async (req, res) => {
     const name = new URL(req.url, "http://localhost").pathname;
     if (name === "/api/config") {
@@ -25,7 +24,10 @@ test(`server tools=${tools} restores controls without automatic camera access`, 
     const file = path.resolve(root, `.${name === "/" ? "/index.html" : name}`);
     if (!file.startsWith(root + path.sep)) { res.writeHead(403).end(); return; }
     try {
-      const content = await readFile(file);
+      let content = await readFile(file, "utf8");
+      if (file.endsWith("index.html") && voiceOptions) {
+        content = content.replace(/<select id="voice">[\s\S]*?<\/select>/, `<select id="voice">${voiceOptions}</select>`);
+      }
       res.setHeader("Content-Type", file.endsWith(".js") ? "text/javascript" : file.endsWith(".css") ? "text/css" : "text/html");
       res.end(content);
     } catch { res.writeHead(404).end(); }
@@ -46,7 +48,13 @@ test(`server tools=${tools} restores controls without automatic camera access`, 
   });
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.goto(`http://127.0.0.1:${server.address().port}/`);
+  return { page, errors, url: `http://127.0.0.1:${server.address().port}/` };
+}
+
+for (const tools of [false, true]) {
+test(`server tools=${tools} restores controls without automatic camera access`, async (t) => {
+  const { page, errors, url } = await openDemoPage(t, { tools });
+  await page.goto(url);
   await page.waitForFunction((tools) => document.querySelector("#tools-btn").hidden === !tools, tools);
   assert.equal(await page.locator("#tools-btn").isVisible(), tools);
   if (tools) {
@@ -63,4 +71,28 @@ test(`server tools=${tools} restores controls without automatic camera access`, 
   assert.deepEqual(errors, []);
 });
 
+}
+
+for (const [defaultVoice, otherVoice] of [["Aiden", "Vivian"], ["default", "Zoey"]]) {
+  test(`voice settings migrate retired choices and retain valid ${defaultVoice} catalog choices`, async (t) => {
+    const { page, errors, url } = await openDemoPage(t, {
+      voiceOptions: `<option value="${defaultVoice}" selected>${defaultVoice}</option><option value="${otherVoice}">${otherVoice}</option>`,
+    });
+    await page.goto(url);
+    for (const [saved, expected] of [[null, defaultVoice], ["retired-voice", defaultVoice], [otherVoice, otherVoice]]) {
+      await page.evaluate((voice) => {
+        if (voice === null) localStorage.removeItem("s2s.ws.voice");
+        else localStorage.setItem("s2s.ws.voice", voice);
+      }, saved);
+      await page.reload();
+      await page.waitForFunction(() => !document.body.classList.contains("booting"));
+      await page.locator("#settings-btn").click();
+      assert.equal(await page.locator("#voice").inputValue(), expected);
+      if (saved !== null) assert.equal(await page.evaluate(() => localStorage.getItem("s2s.ws.voice")), expected);
+      await page.locator("#voice").selectOption(otherVoice);
+      await page.locator("#settings-save").click();
+      assert.equal(await page.evaluate(() => localStorage.getItem("s2s.ws.voice")), otherVoice);
+    }
+    assert.deepEqual(errors, []);
+  });
 }

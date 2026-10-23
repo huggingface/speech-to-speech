@@ -277,6 +277,7 @@ test("settings persist the reserve, normalize invalid values, and hide it for We
   const field = () => ({ value: "", hidden: false });
   const context = vm.createContext({
     normalizePlaybackBufferMs,
+    $: () => ({ options: [{ value: "Aiden", defaultSelected: true }] }),
     localStorage: { getItem: (key) => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value) },
     allowDirect: true, pinnedUrl: "http://server", rtcAvailable: true,
     transportField: field(), inputTransport: field(), transportHint: field(), gateField: field(),

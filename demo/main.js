@@ -22,7 +22,8 @@ import { $, truncateError, errorMessage, DEBUG } from "./ui/dom.js";
 import { ChatView } from "./ui/chat.js";
 import { Account } from "./ui/account.js";
 
-const DEFAULT_VOICE = "Aiden";
+const VOICE_OPTIONS = Array.from(/** @type {HTMLSelectElement} */ ($("#voice")).options);
+const DEFAULT_VOICE = (VOICE_OPTIONS.find((option) => option.defaultSelected) || VOICE_OPTIONS[0])?.value || "Aiden";
 const DEFAULT_INSTRUCTIONS = "You are a friendly voice assistant.";
 
 const STORAGE_KEYS = {
@@ -109,9 +110,14 @@ const SNAPSHOT_LADDER = /** @type {[number, number][]} */ ([
 ]);
 
 function loadSettings() {
+  // Deployments can use different TTS voice catalogs. Migrate saved voices
+  // that the current picker no longer offers before starting a session.
+  const savedVoice = localStorage.getItem(STORAGE_KEYS.voice);
+  const voice = VOICE_OPTIONS.find((option) => option.value === savedVoice)?.value || DEFAULT_VOICE;
+  if (savedVoice !== null && savedVoice !== voice) localStorage.setItem(STORAGE_KEYS.voice, voice);
   return {
     directUrl: localStorage.getItem(STORAGE_KEYS.directUrl) || "",
-    voice: localStorage.getItem(STORAGE_KEYS.voice) || DEFAULT_VOICE,
+    voice,
     instructions: localStorage.getItem(STORAGE_KEYS.instructions) || DEFAULT_INSTRUCTIONS,
     noiseGate: loadGateThreshold(),
     playbackBufferMs: normalizePlaybackBufferMs(localStorage.getItem(STORAGE_KEYS.playbackBufferMs)),
