@@ -79,6 +79,8 @@ first message of a fresh session. Gemma receives a dedicated assistant greeting
 prompt with thinking off and no tools; its filtered sentence stream goes directly
 to TTS. The completed greeting is stored in both realtime and ConvFill history,
 so the next user turn uses the ordinary Talker/Reasoner path with that context.
+In ConvFill history its user line is the neutral marker `[call connected]`, not the
+hidden greeting instruction, so the instruction is never presented as user speech.
 Cancellation, stream deadlines, and error propagation use the same handler controls. Set `STARTUP_GREETING` to customize
 its instruction, or set it to an empty string to disable it. The gear menu uses the current
 shared UI, including voice, instructions, audio buffering, noise gate, and connection settings.

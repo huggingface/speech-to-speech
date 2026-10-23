@@ -25,6 +25,10 @@ from .delivery import DeliveryLedgerQueue
 
 logger = logging.getLogger(__name__)
 
+# Stands in for the greeting's hidden instruction in ConvFill history, so later
+# prompts keep the spoken greeting without presenting the instruction as user speech.
+GREETING_MARKER = "[call connected]"
+
 _TurnEvent = tuple[str, Any]
 _SystemFactory = Callable[..., Any]
 
@@ -202,7 +206,7 @@ class ConvFillRealtimeHandler(BaseHandler[LLMIn, LLMOut]):
         cancel = threading.Event()
         self.system.cancel_event = cancel
         remote.begin_turn(cancel)
-        self.system.dialogue_state_manager.update_user_state(prompt)
+        self.system.dialogue_state_manager.update_user_state(GREETING_MARKER)
         parts = []
         for sentence in remote.greeting(prompt, instructions=instructions):
             if cancel.is_set():
@@ -215,7 +219,7 @@ class ConvFillRealtimeHandler(BaseHandler[LLMIn, LLMOut]):
             return False
         if not parts:
             raise RuntimeError("Direct startup greeting produced no visible text")
-        self.system.dialogue_state_manager.commit_turn(prompt, " ".join(parts), [])
+        self.system.dialogue_state_manager.commit_turn(GREETING_MARKER, " ".join(parts), [])
         return True
 
     def process(self, request: LLMIn) -> Iterator[LLMOut]:
@@ -252,6 +256,8 @@ class ConvFillRealtimeHandler(BaseHandler[LLMIn, LLMOut]):
         direct_greeting = self._is_startup_greeting(request)
         if direct_greeting:
             self._greeting_attempted = True
+        # The user line this turn occupies in ConvFill history, for rollback and commit.
+        history_text = GREETING_MARKER if direct_greeting else user_text
         session = request.runtime_config.session
         response = request.response
         instructions = (
@@ -411,9 +417,9 @@ class ConvFillRealtimeHandler(BaseHandler[LLMIn, LLMOut]):
                     part for part in (continuation_prefix, self._delivered_text(request.response_key)) if part
                 )
                 if heard:
-                    self.system.commit_interrupted_turn(user_text, heard)
+                    self.system.commit_interrupted_turn(history_text, heard)
                 else:
-                    self.system.discard_pending_turn(user_text)
+                    self.system.discard_pending_turn(history_text)
                 completed = False
 
             if completed and emitted and tool_items:
@@ -425,7 +431,7 @@ class ConvFillRealtimeHandler(BaseHandler[LLMIn, LLMOut]):
                     [assistant],
                 )
                 if recorded is None:
-                    self.system.dialogue_state_manager.rollback_turn(user_text)
+                    self.system.dialogue_state_manager.rollback_turn(history_text)
                     completed = False
                 else:
                     request.runtime_config.chat.trim_if_needed()
@@ -442,7 +448,7 @@ class ConvFillRealtimeHandler(BaseHandler[LLMIn, LLMOut]):
 
             error_message = None
             if error is not None:
-                self.system.dialogue_state_manager.rollback_turn(user_text)
+                self.system.dialogue_state_manager.rollback_turn(history_text)
                 completed = False
                 logger.error(
                     "ConvFill realtime turn failed",
@@ -450,16 +456,16 @@ class ConvFillRealtimeHandler(BaseHandler[LLMIn, LLMOut]):
                 )
                 error_message = "ConvFill inference failed. Please try again."
             elif not cancelled and not completed:
-                self.system.dialogue_state_manager.rollback_turn(user_text)
+                self.system.dialogue_state_manager.rollback_turn(history_text)
                 error_message = "ConvFill did not complete the response."
             elif completed and not emitted and not tool_items and not continuation_prefix:
-                self.system.dialogue_state_manager.rollback_turn(user_text)
+                self.system.dialogue_state_manager.rollback_turn(history_text)
                 completed = False
                 error_message = "ConvFill completed without producing a Talker response."
 
             if tool_items and completed:
                 # The tool follow-up reuses the same user input. Do not duplicate a filler-only turn.
-                self.system.dialogue_state_manager.rollback_turn(user_text)
+                self.system.dialogue_state_manager.rollback_turn(history_text)
             if tracker is not None:
                 tracker.record_llm(time.perf_counter() - self._turn_started_at)
             output = EndOfResponse(

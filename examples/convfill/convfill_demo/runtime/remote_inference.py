@@ -268,6 +268,8 @@ class RemoteInference:
             "\nYou supply content to a separate Talker, which already handles acknowledgments and empathy. "
             "Supply only new useful substance or a necessary follow-up question. "
             "Do not greet, apologize, acknowledge, announce a search, or repeat the Talker's words. "
+            "The Talker starts speaking before you and answers small talk, such as how it is doing, itself; "
+            "for small talk, supply only one short, specific follow-up question, never a pleasantry or an offer to help. "
             "For an explicit startup greeting, supply only the greeting itself. "
             "For latest/current facts, use web_search when available; check result dates and never "
             "present an old result as the latest. A retrieval date is not the event date. "
