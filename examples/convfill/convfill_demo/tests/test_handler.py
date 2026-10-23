@@ -565,6 +565,7 @@ def test_marked_startup_greeting_uses_only_reasoner_and_preserves_followup_histo
     ]
     assert output[-1].error is None
     assert len(handler.system.remote.calls) == 1 and handler.system.normal_calls == []
+    assert handler.system.dialogue_state_manager.user_turns == ["[call connected]"]
     assert handler.system.dialogue_state_manager.responses == ["Hello! What would you like to talk about?"]
     assert chat.provisional
     chat.messages.extend(
@@ -576,6 +577,7 @@ def test_marked_startup_greeting_uses_only_reasoner_and_preserves_followup_histo
     assert list(handler.process(_request(chat)))[-1].error is None
     assert handler.system.normal_calls == ["A regular follow-up."]
     assert "Hello!" in handler.system.backend_transcripts[-1]
+    assert "Greet the user." not in handler.system.backend_transcripts[-1]
     handler.on_session_end()
     assert handler._greeting_attempted is False
 
