@@ -383,6 +383,9 @@ class RealtimeService:
         self.stt_auto_reset_supported: bool = True
         self._conns: dict[str, ConnState] = {}
         self.total_usage = GlobalUsageMetrics()
+        # Thread-safe callback that wakes the realtime send loop when a state
+        # transition may release held output (set via set_state_waker, #692).
+        self._state_waker: Callable[[], None] | None = None
 
         self.history = HistoryHandler(self)
         self.audio = AudioHandler(self)
@@ -550,6 +553,21 @@ class RealtimeService:
     def handle_response_cancel(self, conn_id: str) -> list[ServerEvent]:
         return self.response.handle_response_cancel(conn_id)
 
+    def set_state_waker(self, wake: Callable[[], None]) -> None:
+        """Register a thread-safe callback that wakes the realtime send loop.
+
+        Called whenever a state transition may release output held on this
+        service (response announcements, pending-response clearing) without a
+        new queue write, so an event-driven send loop never misses it (#692).
+        """
+        self._state_waker = wake
+        self.response.set_state_waker(wake)
+
+    def _wake_state(self) -> None:
+        wake = self._state_waker
+        if wake is not None:
+            wake()
+
     def finish_response(
         self,
         conn_id: str,
@@ -557,7 +575,9 @@ class RealtimeService:
         reason: _StatusReason | None = None,
         response_key: str | None = None,
     ) -> list[ServerEvent]:
-        return self.response.finish_response(conn_id, status, reason, response_key=response_key)
+        events = self.response.finish_response(conn_id, status, reason, response_key=response_key)
+        self._wake_state()
+        return events
 
     def close_pending_responses(self, conn_id: str) -> None:
         """Cancel queued responses without losing usage already reported by their LMs."""

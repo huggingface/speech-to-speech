@@ -8,8 +8,38 @@ from openai.types.realtime.realtime_audio_config_input import RealtimeAudioConfi
 from openai.types.realtime.realtime_audio_config_output import RealtimeAudioConfigOutput
 from openai.types.realtime.realtime_audio_formats import AudioPCM
 
+from speech_to_speech.api.openai_realtime.pipeline_unit import NotifyingQueue, OutputSignal, PipelineUnit
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.api.openai_realtime.service import RealtimeService
+from speech_to_speech.pipeline.cancel_scope import CancelScope
+
+
+def make_pipeline_unit(*, index: int = 0, service: RealtimeService | None = None) -> PipelineUnit:
+    """Build a unit whose output queues wake the event-driven send loop (#692)."""
+    text_prompt_queue: Queue = Queue()
+    should_listen = ThreadingEvent()
+    should_listen.set()
+    if service is None:
+        service = RealtimeService(text_prompt_queue=text_prompt_queue, should_listen=should_listen)
+    output_signal = OutputSignal()
+    text_signal = OutputSignal()
+    state_signal = OutputSignal()
+    service.set_state_waker(state_signal.notify_threadsafe)
+    return PipelineUnit(
+        index=index,
+        service=service,
+        cancel_scope=CancelScope(),
+        should_listen=should_listen,
+        response_playing=ThreadingEvent(),
+        input_queue=Queue(),
+        output_queue=NotifyingQueue(signal=output_signal),
+        text_output_queue=NotifyingQueue(signal=text_signal),
+        text_prompt_queue=text_prompt_queue,
+        output_signal=output_signal,
+        text_signal=text_signal,
+        state_signal=state_signal,
+        handlers=[],
+    )
 
 
 def _session_16k() -> RealtimeSessionCreateRequest:

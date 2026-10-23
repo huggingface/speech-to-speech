@@ -192,6 +192,16 @@ class ResponseHandler(RealtimeBaseHandler):
         # output. Any other per-response override requires a fresh generation.
         return set(fields).issubset({"metadata"})
 
+    _state_waker = None  # Set via set_state_waker; wakes the async send loop (#692).
+
+    def set_state_waker(self, wake) -> None:
+        """Register a thread-safe callback fired when held output may release."""
+        self._state_waker = wake
+
+    def _wake_state(self) -> None:
+        if self._state_waker is not None:
+            self._state_waker()
+
     def is_response_output_blocked(self, conn_id: str, response_key: str | None) -> bool:
         """Return whether output must remain private from the client."""
         st = self._state(conn_id)
@@ -207,6 +217,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st = self._state(conn_id)
         if response_key is not None and st.response_created_pending_key == response_key:
             st.response_created_pending_key = None
+            self._wake_state()
 
     def maybe_start_tool_followup_prefetch(self, conn_id: str) -> bool:
         """Speculatively generate after every tool output, without opening a response."""
