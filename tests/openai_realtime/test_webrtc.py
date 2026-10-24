@@ -41,7 +41,7 @@ from aiortc.rtp import RtcpPacket, RtcpRrPacket, RtcpSrPacket, RtpPacket, is_rtc
 from starlette.testclient import TestClient  # noqa: E402
 
 import speech_to_speech.api.openai_realtime.websocket_router as router_module  # noqa: E402
-from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit  # noqa: E402
+from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit, SessionState  # noqa: E402
 from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService  # noqa: E402
 from speech_to_speech.api.openai_realtime.transports import SessionTransport  # noqa: E402
 from speech_to_speech.api.openai_realtime.webrtc_session import (  # noqa: E402
@@ -656,6 +656,59 @@ class TestWebRTCDispatch:
         ]
         with pytest.raises(Empty):
             unit.output_queue.get_nowait()
+
+    async def test_output_audio_buffer_clear_drops_stashed_audio(self):
+        unit = _make_unit()
+        conn_id = unit.service.register()
+        transport = _FakeTransport()
+        unit.session = SessionState(session_id=conn_id, transport=transport)
+        unit.session.pending_output_item = b"\x01\x00" * 512
+
+        await router_module._dispatch_client_event(
+            unit,
+            conn_id,
+            {"type": "output_audio_buffer.clear"},
+            transport,
+            transport_kind="webrtc",
+        )
+
+        assert unit.session.pending_output_item is None
+
+    async def test_output_audio_buffer_clear_keeps_stashed_bookkeeping(self):
+        unit = _make_unit()
+        conn_id = unit.service.register()
+        transport = _FakeTransport()
+        done_event = AssistantResponseDoneEvent(response_key="response_1")
+        unit.session = SessionState(session_id=conn_id, transport=transport)
+        unit.session.pending_output_item = done_event
+
+        await router_module._dispatch_client_event(
+            unit,
+            conn_id,
+            {"type": "output_audio_buffer.clear"},
+            transport,
+            transport_kind="webrtc",
+        )
+
+        assert unit.session.pending_output_item is done_event
+
+    async def test_output_audio_buffer_clear_ignores_other_session_stash(self):
+        unit = _make_unit()
+        conn_id = unit.service.register()
+        transport = _FakeTransport()
+        unit.session = SessionState(session_id="replacement", transport=transport)
+        stashed = b"\x01\x00" * 512
+        unit.session.pending_output_item = stashed
+
+        await router_module._dispatch_client_event(
+            unit,
+            conn_id,
+            {"type": "output_audio_buffer.clear"},
+            transport,
+            transport_kind="webrtc",
+        )
+
+        assert unit.session.pending_output_item is stashed
 
     async def test_output_audio_buffer_clear_rejected_over_websocket(self):
         unit = _make_unit()

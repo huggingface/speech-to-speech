@@ -454,6 +454,17 @@ async def _dispatch_client_event(
             )
             return
         _flush_queue(unit.output_queue, preserve=_keep_non_audio_output)
+        # The send loop may have stashed an audio chunk it pulled while batching;
+        # it is consumed before the queue, so drop it too. Only touch the session
+        # that sent the clear so a delayed event can't hit a replacement session.
+        session = unit.session
+        if (
+            session is not None
+            and session.session_id == session_id
+            and session.pending_output_item is not None
+            and not _keep_non_audio_output(session.pending_output_item)
+        ):
+            session.pending_output_item = None
         transport.discard_pending_audio()
 
     elif isinstance(event, SessionUpdateEvent):
