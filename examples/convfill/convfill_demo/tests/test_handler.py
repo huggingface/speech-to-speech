@@ -565,6 +565,7 @@ def test_marked_startup_greeting_uses_only_reasoner_and_preserves_followup_histo
     ]
     assert output[-1].error is None
     assert len(handler.system.remote.calls) == 1 and handler.system.normal_calls == []
+    assert handler.system.remote.calls[0][0] == "Greet the user."
     assert handler.system.dialogue_state_manager.user_turns == ["[call connected]"]
     assert handler.system.dialogue_state_manager.responses == ["Hello! What would you like to talk about?"]
     assert chat.provisional
@@ -611,3 +612,27 @@ def test_direct_greeting_cancellation_closes_stream_and_discards_stale_text():
     assert len(remaining) == 1 and isinstance(remaining[0], EndOfResponse)
     assert handler.system.remote.cancelled and handler.system.normal_calls == []
     assert handler.system.dialogue_state_manager.user_turns == []
+
+
+def test_cancelled_greeting_keeps_dispatched_prefix_under_neutral_marker():
+    scope = CancelScope()
+    handler = _handler(_GreetingSystem, cancel_scope=scope)
+    ledger = DeliveryLedgerQueue()
+    handler.set_delivery_ledger(ledger)
+    handler.system.remote.wait_for_cancel = True
+    chat = _FakeChat([{"role": "user", "content": "Greet the user."}])
+    output = handler.process(_greeting_request(chat))
+
+    assert next(output).text == "Hello!"
+    _deliver(ledger, "Hello!")
+    scope.cancel()
+    remaining = list(output)
+
+    assert len(remaining) == 1 and isinstance(remaining[0], EndOfResponse)
+    assert handler.system.remote.cancelled and handler.system.normal_calls == []
+    state = handler.system.dialogue_state_manager
+    assert state.user_turns == ["[call connected]"]
+    assert state.responses == ["Hello! [interrupted by the user]"]
+    assert "Greet the user." not in state.get_transcript()
+    assert "What would you like to talk about?" not in state.get_transcript()
+    assert handler.system.remote.calls[0][0] == "Greet the user."
