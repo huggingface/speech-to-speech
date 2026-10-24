@@ -27,6 +27,7 @@ classifiers = [
 ]
 dependencies = [
     "anyio>=4.0,<5",
+    "certifi>=2026.10.19",
     "fastapi>=0.115.0",
     "huggingface-hub>=0.34.0",
     "httpx>=0.28.0",
@@ -140,6 +141,7 @@ dev = [
 asyncio_mode = "auto"
 
 [tool.uv]
+required-version = ">=0.13.4"
 package = true
 prerelease = "allow"
 
