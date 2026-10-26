@@ -30,9 +30,7 @@ This pipeline runs in production as the conversation backend for thousands of [R
 
 ## Quickstart
 
-Use CPython 3.11–3.14 (3.11 recommended). Follow the
-[certificate security update steps](docs/certificate-security.md) for the new
-environment before installing packages with an older pip:
+Use CPython 3.11–3.14 (3.11 recommended):
 
 ```bash
 python3 -m venv .venv
@@ -142,11 +140,6 @@ clients after TTS. Enable it with `--enable_visemes`; see the
 [viseme guide](src/speech_to_speech/STV/README.md) for client events and timing.
 
 ## Installation
-
-Use `pip>=26.2.2` or `uv>=0.13.4` and `certifi>=2026.10.19` following the
-[eMudhra / emSign security advisory](https://discuss.python.org/t/information-for-python-users-regarding-emudhra-emsign-ca-certificate-security-incident/109576).
-See [updating existing environments and container images](docs/certificate-security.md)
-before installing packages with an older tool.
 
 `pip install speech-to-speech` (see the [Quickstart](#quickstart)) includes everything the default pipeline needs:
 
