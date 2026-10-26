@@ -765,7 +765,7 @@ For sentence-streamed conversation, `--phonon_tts_max_trailing_silence_ms 120` c
 shorten the quiet tail of each utterance while retaining a brief natural pause.
 This is optional: omitting it preserves native audio. It recognizes quiet audio
 below -60 dBFS RMS in 10 ms windows, preserves leading audio and internal pauses,
-and retains at least the configured tail (minimum 40 ms). Trimming is limited to
+and keeps up to the configured quiet tail (minimum setting 40 ms). Trimming is limited to
 one second per utterance; final PCM block padding can add up to 32 ms. Speech is
 streamed immediately; only excess quiet samples are held until the utterance ends
 or speech resumes. It cannot remove a delay caused by late model text or a slow
