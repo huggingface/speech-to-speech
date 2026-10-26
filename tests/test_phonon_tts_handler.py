@@ -18,7 +18,7 @@ from speech_to_speech.pipeline.console import conversation_output
 from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, AudioOutput, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-from speech_to_speech.TTS.phonon_tts_handler import PhononTTSHandler
+from speech_to_speech.TTS.phonon_tts_handler import PhononTTSHandler, _TrailingSilenceTrimmer
 from tests.turns import reopen
 
 
@@ -69,6 +69,7 @@ def make_handler(samples, *, sample_rate=24000, blocksize=512):
         ({"model_name": "/models/test", "num_threads": 0}, "num_threads must be positive"),
         ({"model_name": "/models/test", "num_threads": -1}, "num_threads must be positive"),
         ({"model_name": "/models/test", "language": "xx"}, "Unsupported Phonon normalization language"),
+        ({"model_name": "/models/test", "max_trailing_silence_ms": 39}, "must be at least 40"),
     ],
 )
 def test_invalid_setup_fails_before_importing_runtime(monkeypatch, kwargs, error):
@@ -318,3 +319,91 @@ def test_supplied_checkpoint_generates_pipeline_audio():
     output = list(handler.process(TTSInput(text="Hello. This is a local speech test.")))
     assert output and all(block.shape == (512,) and block.dtype == np.int16 for block in output)
     assert np.max(np.abs(np.concatenate(output).astype(np.int32))) > 0
+
+
+@pytest.mark.parametrize("split", [False, True])
+def test_opt_in_tail_trim_keeps_speech_and_a_short_pause(split):
+    speech = np.full(1600, 0.1, dtype=np.float32)
+    quiet = np.full(8000, 0.0001, dtype=np.float32)
+    samples = np.concatenate((speech, quiet))
+    chunks = [samples[:77], samples[77:1703], samples[1703:]] if split else [samples]
+    handler, stream, _ = make_handler(chunks, sample_rate=16000, blocksize=160)
+    handler.max_trailing_silence_ms = 120
+
+    audio = np.concatenate(list(handler.process(TTSInput(text="A short sentence."))))
+
+    assert audio.size == 1600 + 1920
+    expected = np.clip(samples[: audio.size] * 32768, -32768, 32767).astype(np.int16)
+    np.testing.assert_array_equal(audio, expected)
+    assert stream.closed
+
+
+def test_tail_trim_preserves_leading_audio_internal_pauses_and_quiet_speech():
+    leading = np.zeros(3200, dtype=np.float32)
+    speech = np.full(1600, 0.002, dtype=np.float32)
+    internal = np.zeros(6400, dtype=np.float32)
+    tail = np.zeros(8000, dtype=np.float32)
+    samples = np.concatenate((leading, speech, internal, speech, tail))
+    handler, _, _ = make_handler([samples], sample_rate=16000, blocksize=160)
+    handler.max_trailing_silence_ms = 120
+
+    audio = np.concatenate(list(handler.process(TTSInput(text="Quiet speech with an internal pause."))))
+
+    expected = np.clip(samples[: len(samples) - len(tail) + 1920] * 32768, -32768, 32767).astype(np.int16)
+    np.testing.assert_array_equal(audio, expected)
+
+
+@pytest.mark.parametrize("sample_rate", [16000, 24000])
+def test_tail_trim_is_independent_of_native_chunks_and_resampling(sample_rate):
+    samples = np.concatenate(
+        (np.sin(np.arange(sample_rate // 5) * 0.1).astype(np.float32) * 0.2, np.zeros(sample_rate // 2, np.float32))
+    )
+    outputs = []
+    for chunks in ([samples], [samples[:1], samples[1:501], samples[501:-3], samples[-3:]]):
+        handler, _, _ = make_handler(chunks, sample_rate=sample_rate)
+        handler.max_trailing_silence_ms = 120
+        outputs.append(np.concatenate(list(handler.process(TTSInput(text="A sentence.")))))
+    np.testing.assert_array_equal(outputs[0], outputs[1])
+
+
+def test_tail_trim_does_not_delay_the_first_voiced_block():
+    visited = []
+
+    def samples():
+        visited.append("first chunk")
+        yield np.ones(1024, dtype=np.float32)
+        visited.append("second chunk")
+        yield np.zeros(8000, dtype=np.float32)
+
+    handler, stream, _ = make_handler(samples(), sample_rate=16000)
+    handler.max_trailing_silence_ms = 120
+    output = handler.process(TTSInput(text="A sentence."))
+
+    assert next(output).size == 512
+    assert visited == ["first chunk"]
+    output.close()
+    assert stream.closed
+
+
+def test_tail_trim_cancellation_drops_held_quiet_audio_and_closes_stream():
+    handler, stream, _ = make_handler(
+        [np.ones(1600, np.float32), np.zeros(8000, np.float32)], sample_rate=16000, blocksize=160
+    )
+    handler.max_trailing_silence_ms = 120
+    output = handler.process(TTSInput(text="A sentence."))
+    next(output)
+    handler.cancel_scope.cancel()
+
+    assert list(output) == []
+    assert stream.closed
+
+
+def test_tail_trim_bounds_pending_memory_and_preserves_all_quiet_output():
+    trimmer = _TrailingSilenceTrimmer(16000, 120)
+    quiet = np.zeros(160000, dtype=np.float32)
+    np.testing.assert_array_equal(np.concatenate(list(trimmer.push(quiet))), quiet)
+    list(trimmer.push(np.ones(160, np.float32)))
+    list(trimmer.push(quiet))
+    assert trimmer.pending.size <= 16000
+    list(trimmer.finish())
+    assert trimmer.pending.size == 0

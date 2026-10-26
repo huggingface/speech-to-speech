@@ -761,6 +761,16 @@ The default checkpoint is [`gradium/phonon-31m-en`](https://huggingface.co/gradi
 
 Phonon uses four native CPU threads by default, which performed better than the runtime's twelve-thread default on an Apple M3 Pro in local testing. Use `--phonon_tts_num_threads N` to tune it at startup; the setting is shared by all Phonon pipelines in the process.
 
+For sentence-streamed conversation, `--phonon_tts_max_trailing_silence_ms 120` can
+shorten the quiet tail of each utterance while retaining a brief natural pause.
+This is optional: omitting it preserves native audio. It recognizes quiet audio
+below -60 dBFS RMS in 10 ms windows, preserves leading audio and internal pauses,
+and retains at least the configured tail (minimum 40 ms). Trimming is limited to
+one second per utterance; final PCM block padding can add up to 32 ms. Speech is
+streamed immediately; only excess quiet samples are held until the utterance ends
+or speech resumes. It cannot remove a delay caused by late model text or a slow
+synthesizer, and very quiet recordings may need native audio instead.
+
 Phonon runs on CPU even when STT or the LLM uses a GPU. Native audio is resampled to the pipeline's 16 kHz PCM16 output, and interruption closes the native stream. `--phonon_tts_language` fixes text normalization at startup; use `en` (the default), `fr`, `de`, `es`, `pt`, or `none`. Session language changes are restricted to that configured language. See the [TTS component guide](./src/speech_to_speech/TTS/README.md#10-phonon---tts-phonon) for installation and checkpoint options.
 
 The Phonon 40M checkpoints, such as [`gradium/phonon-40m-en`](https://huggingface.co/gradium/phonon-40m-en), are gated and use CC BY-NC 4.0, so they are for non-commercial use. To use one, accept its terms on Hugging Face, set `HF_TOKEN` or run `hf auth login`, and pass `--phonon_tts_model_name gradium/phonon-40m-en`.

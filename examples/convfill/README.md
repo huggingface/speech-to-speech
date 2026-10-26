@@ -20,7 +20,10 @@ worker, with `PYTHONPATH=examples/convfill:src`, `llm_backend=convfill`, and an
 explicit `num_pipelines` budget. Each slot owns its own conversation, inference
 streams, cancellation scope, and delivery ledger. Set `speculative_reopen_ms=500`
 and `smart_turn_max_wait_ms=1700` in the worker config for the demo's shorter
-holds. Install `examples/convfill/requirements.txt` alongside the core runtime.
+holds. Install `examples/convfill/requirements.txt` alongside the core runtime. With
+local Phonon, opt into `phonon_tts_max_trailing_silence_ms=120` to shorten native
+quiet tails between separately streamed Talker sentences. This leaves the shared
+Phonon default unchanged and retains leading audio and internal pauses.
 
 Build the UI-only image with `examples/convfill/Dockerfile.frontend`, or upload
 with `python examples/convfill/deploy/hf_space.py --repo owner/private-demo
