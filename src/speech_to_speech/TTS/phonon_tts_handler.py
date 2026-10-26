@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import logging
 from threading import Event
-from time import perf_counter
 from typing import Any, Iterator, cast
 
 import numpy as np
 import soxr
 
-from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.events import ResponseFailedEvent
@@ -16,14 +14,14 @@ from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception
-from speech_to_speech.pipeline.turn_latency import record_response_e2e, record_response_tts_ttfa
+from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
 
 logger = logging.getLogger(__name__)
 PIPELINE_SAMPLE_RATE = 16000
 PHONON_NORMALIZATION_LANGUAGES = frozenset({"en", "fr", "de", "es", "pt", "none"})
 
 
-class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
+class PhononTTSHandler(BaseTTSHandler):
     """Stream a supplied Phonon checkpoint through the native CPU runtime."""
 
     def setup(
@@ -115,7 +113,7 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
     def _is_cancelled(self, generation: int | None, tts_input: TTSInput) -> bool:
         return (
             self.stop_event.is_set()
-            or (generation is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(generation))
+            or self._is_stale(generation)
             or (
                 self.speculative_turns is not None
                 and not self.speculative_turns.is_latest(tts_input.turn_id, tts_input.turn_revision)
@@ -171,21 +169,12 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
     def _synthesize(self, tts_input: TTSInput, generation: int | None) -> Iterator[TTSOut]:
         voice = self._resolve_voice(tts_input)
         console.print(f"[green]ASSISTANT: {tts_input.text}")
-        started_at = perf_counter()
+        timer = self._latency_timer(tts_input, also_cancelled=lambda: self._is_cancelled(generation, tts_input))
         first_audio = True
-        first_block = True
         pending = np.empty(0, dtype=np.int16)
 
         def emit(block: np.ndarray) -> np.ndarray:
-            nonlocal first_block
-            if first_block:
-                first_block = False
-                if tts_input.speech_stopped_at_s is not None:
-                    record_response_e2e(
-                        getattr(self, "turn_latency_store", None),
-                        tts_input.response_key,
-                        max(0.0, perf_counter() - tts_input.speech_stopped_at_s),
-                    )
+            timer.first_yield()
             return block
 
         # Closing the context on cancellation, exceptions, or generator.close()
@@ -215,11 +204,7 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 samples = np.asarray(chunk, dtype=np.float32)
                 if first_audio and samples.size:
                     first_audio = False
-                    record_response_tts_ttfa(
-                        getattr(self, "turn_latency_store", None),
-                        tts_input.response_key,
-                        perf_counter() - started_at,
-                    )
+                    timer.first_provider_audio()
                 converted = resampler.resample_chunk(samples) if resampler is not None else samples
                 yield from blocks(converted)
                 if self._is_cancelled(generation, tts_input):

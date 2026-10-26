@@ -13,18 +13,16 @@ from __future__ import annotations
 import logging
 from sys import platform
 from threading import Event
-from time import perf_counter
 from typing import Any, Iterator, Optional
 
 import numpy as np
 
-from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-from speech_to_speech.pipeline.turn_latency import record_response_e2e, record_response_tts_ttfa
+from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
 from speech_to_speech.utils.mlx_lock import MLXLockContext
 from speech_to_speech.utils.utils import resolve_device
 
@@ -78,7 +76,7 @@ KOKORO_LANG_DEFAULT_VOICES = {
 KOKORO_NATIVE_LANGUAGES = frozenset({"en", "ja", "zh", "fr", "es", "it", "pt", "hi"})
 
 
-class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
+class KokoroTTSHandler(BaseTTSHandler):
     """
     Handles Text-to-Speech using Kokoro TTS model.
 
@@ -289,24 +287,6 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         else:
             yield from self._process_kokoro(text, language_code, pinned_voice=voice, tts_input=tts_input)
 
-    def _record_tts_ttfa(self, tts_input: TTSInput | None, started_at_s: float, first_audio_at_s: float) -> None:
-        if tts_input is None:
-            return
-        record_response_tts_ttfa(
-            getattr(self, "turn_latency_store", None),
-            tts_input.response_key,
-            first_audio_at_s - started_at_s,
-        )
-
-    def _record_e2e(self, tts_input: TTSInput | None) -> None:
-        if tts_input is None or tts_input.speech_stopped_at_s is None:
-            return
-        record_response_e2e(
-            getattr(self, "turn_latency_store", None),
-            tts_input.response_key,
-            max(0.0, perf_counter() - tts_input.speech_stopped_at_s),
-        )
-
     def _lang_and_voice_for(self, language_code: str, pinned_voice: Optional[str] = None) -> tuple[str, str]:
         """Pick the Kokoro language and voice for a reply in ``language_code``.
 
@@ -357,9 +337,7 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
             console.print(f"[green]ASSISTANT: {llm_sentence}")
 
-            started_at_s = perf_counter()
-            first_provider = True
-            first_yielded = True
+            timer = self._latency_timer(tts_input, gen)
 
             # Generate audio using the preloaded pipeline directly
             # This avoids the voice reload that happens in model.generate()
@@ -372,11 +350,9 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     continue
                 # result.audio is an mx.array with shape (1, samples), convert to numpy and squeeze
                 audio = np.array(result.audio, dtype=np.float32).squeeze(0)
-                if first_provider and audio.size:
+                if audio.size:
                     # Provider samples, before silence trim / resample / block assembly.
-                    if gen is None or self.cancel_scope is None or not self.cancel_scope.is_stale(gen):
-                        self._record_tts_ttfa(tts_input, started_at_s, perf_counter())
-                    first_provider = False
+                    timer.first_provider_audio()
 
                 # Trim silence from start and end of audio
                 # Kokoro generates ~250ms of silence at the start and variable silence at the end
@@ -403,16 +379,14 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
                 # Yield audio in fixed-size chunks
                 for i in range(0, len(audio), self.blocksize):
-                    if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
+                    if self._is_stale(gen):
                         logger.info("TTS generation cancelled (interruption)")
                         return
                     chunk = audio[i : i + self.blocksize]
                     # Pad the last chunk if necessary
                     if len(chunk) < self.blocksize:
                         chunk = np.pad(chunk, (0, self.blocksize - len(chunk)))
-                    if first_yielded:
-                        self._record_e2e(tts_input)
-                        first_yielded = False
+                    timer.first_yield()
                     logger.debug(f"TTS yielding audio chunk: {len(chunk)} samples")
                     yield chunk
 
@@ -445,9 +419,7 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         console.print(f"[green]ASSISTANT: {llm_sentence}")
 
-        started_at_s = perf_counter()
-        first_provider = True
-        first_yielded = True
+        timer = self._latency_timer(tts_input, gen)
 
         # Generate audio using Kokoro
         # The pipeline yields tuples of (graphemes, phonemes, audio)
@@ -460,11 +432,9 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 audio = np.array(audio, dtype=np.float32)
             else:
                 audio = audio.astype(np.float32)
-            if first_provider and audio.size:
+            if audio.size:
                 # Provider samples, before resample / block assembly.
-                if gen is None or self.cancel_scope is None or not self.cancel_scope.is_stale(gen):
-                    self._record_tts_ttfa(tts_input, started_at_s, perf_counter())
-                first_provider = False
+                timer.first_provider_audio()
 
             # Kokoro outputs at 24kHz, resample to 16kHz for the pipeline
             # Using scipy's polyphase resampling (fast and high quality)
@@ -476,16 +446,14 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
             # Yield audio in fixed-size chunks
             for i in range(0, len(audio), self.blocksize):
-                if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
+                if self._is_stale(gen):
                     logger.info("TTS generation cancelled (interruption)")
                     return
                 chunk = audio[i : i + self.blocksize]
                 # Pad the last chunk if necessary
                 if len(chunk) < self.blocksize:
                     chunk = np.pad(chunk, (0, self.blocksize - len(chunk)))
-                if first_yielded:
-                    self._record_e2e(tts_input)
-                    first_yielded = False
+                timer.first_yield()
                 yield chunk
 
     def on_session_end(self) -> None:

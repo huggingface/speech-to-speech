@@ -9,13 +9,13 @@ from typing import Iterator
 import numpy as np
 from scipy.signal import resample_poly
 
-from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import transcript_for_log
+from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 KITTEN_MAX_TOKENS = 512
 
 
-class KittenTTSHandler(BaseHandler[TTSIn, TTSOut]):
+class KittenTTSHandler(BaseTTSHandler):
     def setup(
         self,
         should_listen: Event,
@@ -111,9 +111,6 @@ class KittenTTSHandler(BaseHandler[TTSIn, TTSOut]):
             audio.append(self.model.generate_single_chunk(text=chunk, voice=voice))
         return np.concatenate(audio, axis=-1)
 
-    def _is_cancelled(self, generation: int | None) -> bool:
-        return generation is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(generation)
-
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         speculative_turns = self.speculative_turns
         if isinstance(tts_input, EndOfResponse):
@@ -141,7 +138,7 @@ class KittenTTSHandler(BaseHandler[TTSIn, TTSOut]):
         # Synthesis completes before delivery; every inference fits the token limit.
         # Let BaseHandler report failures through its privacy-safe exception logger.
         audio_chunk = self._generate_audio(text=text, voice=voice)
-        if self._is_cancelled(cancel_gen):
+        if self._is_stale(cancel_gen):
             return
 
         audio = np.asarray(audio_chunk, dtype=np.float32).reshape(-1)
@@ -150,10 +147,10 @@ class KittenTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         n = (len(audio_int16) // self.blocksize) * self.blocksize
         for i in range(0, n, self.blocksize):
-            if self._is_cancelled(cancel_gen):
+            if self._is_stale(cancel_gen):
                 return
             yield audio_int16[i : i + self.blocksize]
         if n < len(audio_int16):
-            if self._is_cancelled(cancel_gen):
+            if self._is_stale(cancel_gen):
                 return
             yield np.pad(audio_int16[n:], (0, self.blocksize - (len(audio_int16) - n)))
