@@ -16,6 +16,37 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 MIN_ASSISTANT_CONFIDENCE_GAP = 0.1
+# Orukeet's text detector includes Greek in addition to Parakeet TDT v3's 25 languages.
+ORUKEET_TEXT_DETECTION_LANGUAGES = (
+    "en",
+    "de",
+    "fr",
+    "es",
+    "it",
+    "pt",
+    "nl",
+    "pl",
+    "ru",
+    "uk",
+    "cs",
+    "sk",
+    "hu",
+    "ro",
+    "bg",
+    "el",
+    "hr",
+    "sl",
+    "sr",
+    "da",
+    "no",
+    "sv",
+    "fi",
+    "et",
+    "lv",
+    "lt",
+)
+PARAKEET_TDT_LANGUAGES = tuple(code for code in ORUKEET_TEXT_DETECTION_LANGUAGES if code != "el")
+
 _LINGUA_CODE_MAP = {"no": "nb"}
 _WARMUP_TEXTS = (
     "This sentence warms the language detector before the first response.",
