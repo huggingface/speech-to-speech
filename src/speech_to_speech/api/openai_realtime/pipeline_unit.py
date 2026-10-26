@@ -33,12 +33,19 @@ class OutputSignal:
             self._event.set()
 
     def notify_threadsafe(self) -> None:
-        """Wake the send loop from any thread. Safe before the loop binds."""
+        """Wake the send loop, tolerating notifications before startup or after shutdown."""
         loop = self._loop
         if loop is None:
             self._missed = True
             return
-        loop.call_soon_threadsafe(self._event.set)
+        try:
+            loop.call_soon_threadsafe(self._event.set)
+        except RuntimeError:
+            # The server loop can close before a worker emits its final output.
+            # Catch the scheduling race as well as an already closed loop.
+            if not loop.is_closed():
+                raise
+            self._missed = True
 
     async def wait(self) -> None:
         await self._event.wait()

@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from queue import Empty
+from queue import Empty, Queue
 from threading import Event as ThreadingEvent
 from unittest.mock import Mock
 
@@ -30,9 +30,11 @@ from speech_to_speech.api.openai_realtime.websocket_router import (
     _wait_for_pipeline_output,
     create_app,
 )
+from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.configured_runtime import ConfiguredRuntime
 from speech_to_speech.pipeline.control import SESSION_END, is_control_message
 from speech_to_speech.pipeline.events import SpeechStartedEvent, TokenUsageEvent
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, AudioOutput
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
 from tests.openai_realtime.conftest import make_pipeline_unit
 
 
@@ -85,6 +87,91 @@ async def test_output_signal_notify_from_worker_thread_wakes_waiter():
 
     threading.Thread(target=signal.notify_threadsafe, daemon=True).start()
     await asyncio.wait_for(wait_task, timeout=0.5)
+
+
+@pytest.mark.parametrize("close_during_notify", [False, True])
+def test_notifying_queue_put_survives_loop_close(monkeypatch, close_during_notify):
+    signal = OutputSignal()
+    loop = asyncio.new_event_loop()
+    signal.bind_loop(loop)
+    queue = NotifyingQueue(signal=signal)
+    schedule = loop.call_soon_threadsafe
+
+    if close_during_notify:
+
+        def close_then_schedule(callback):
+            loop.close()
+            return schedule(callback)
+
+        monkeypatch.setattr(loop, "call_soon_threadsafe", close_then_schedule)
+    else:
+        loop.close()
+
+    try:
+        queue.put(PIPELINE_END)
+        assert queue.get_nowait() == PIPELINE_END
+        assert queue.empty()
+    finally:
+        loop.close()
+
+
+def test_output_signal_preserves_runtime_errors_from_open_loop(monkeypatch):
+    signal = OutputSignal()
+    loop = asyncio.new_event_loop()
+    signal.bind_loop(loop)
+
+    def fail_to_schedule(callback):
+        raise RuntimeError("scheduling failed")
+
+    monkeypatch.setattr(loop, "call_soon_threadsafe", fail_to_schedule)
+    try:
+        with pytest.raises(RuntimeError, match="scheduling failed"):
+            signal.notify_threadsafe()
+    finally:
+        loop.close()
+
+
+def test_configured_shutdown_allows_worker_cleanup_after_server_loop_closes():
+    stop_event = ThreadingEvent()
+    ready = ThreadingEvent()
+    loop_closed = ThreadingEvent()
+    unit = make_pipeline_unit()
+    app = create_app(pool=[unit], stop_event=stop_event)
+
+    class LateWorker(BaseHandler):
+        def cleanup(self):
+            # BaseHandler.run must still enqueue PIPELINE_END after cleanup.
+            assert loop_closed.wait(2.0)
+
+    class Server:
+        def run(self):
+            async def serve():
+                async with app.router.lifespan_context(app):
+                    # Let the send loop bind its signals before stopping.
+                    await asyncio.sleep(0)
+                    ready.set()
+                    await asyncio.to_thread(stop_event.wait)
+
+            try:
+                asyncio.run(serve())
+            finally:
+                loop_closed.set()
+
+    worker = LateWorker(stop_event, Queue(), unit.output_queue)
+    server = Server()
+    runtime = ConfiguredRuntime(ThreadingEvent())
+    runtime.server = server
+    runtime._events = [stop_event]
+    runtime._handlers = [worker, server]
+    try:
+        runtime.start()
+        assert ready.wait(2.0)
+    finally:
+        runtime.stop()
+
+    assert runtime.state == "stopped"
+    assert runtime._failure is None
+    assert unit.output_queue.get_nowait() == PIPELINE_END
 
 
 @pytest.mark.asyncio
