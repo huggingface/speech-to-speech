@@ -8,6 +8,7 @@ import speech_to_speech.pipeline.speculative_turns as speculative_module
 import speech_to_speech.utils.mlx_lock as mlx_lock
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.turn_latency import (
+    TTSResponseTimer,
     TurnLatencyStore,
     TurnLatencyTracker,
     bind_active_turn_latency_tracker,
@@ -326,3 +327,30 @@ def test_log_platform_and_export_fields(monkeypatch):
         "tts_ttfa_s",
         "hold_s",
     }
+
+
+def test_tts_response_timer_records_each_field_once(monkeypatch) -> None:
+    store = TurnLatencyStore()
+    tracker = store.get_or_create_response("resp_t", turn_id="turn_t", turn_revision=0)
+    clock = iter([10.0, 10.5, 11.0, 12.0, 13.0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: next(clock))
+
+    timer = TTSResponseTimer(store, "resp_t", speech_stopped_at_s=9.0)  # started_at_s = 10.0
+    assert timer.first_provider_audio() is True  # 10.5 - 10.0
+    assert timer.first_provider_audio() is False  # later segments never overwrite
+    assert timer.first_yield() == 2.0  # 11.0 - 9.0
+    assert timer.first_yield() is None
+    assert tracker.tts_ttfa_s == 0.5
+    assert tracker.e2e_s == 2.0
+
+
+def test_tts_response_timer_cancelled_output_records_nothing_and_stays_armed() -> None:
+    store = TurnLatencyStore()
+    tracker = store.get_or_create_response("resp_c", turn_id="turn_c", turn_revision=0)
+    cancelled = True
+    timer = TTSResponseTimer(store, "resp_c", speech_stopped_at_s=0.0, is_cancelled=lambda: cancelled)
+
+    assert timer.first_provider_audio() is False
+    assert timer.first_yield() is None
+    assert tracker.tts_ttfa_s is None
+    assert tracker.e2e_s is None

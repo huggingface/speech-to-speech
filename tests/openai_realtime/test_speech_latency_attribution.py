@@ -17,7 +17,6 @@ from speech_to_speech.pipeline.events import (
 )
 from speech_to_speech.pipeline.messages import AssistantToolCallPart, LLMResponseChunk, TTSInput
 from speech_to_speech.pipeline.turn_latency import TURN_LATENCY_METADATA_KEY
-from speech_to_speech.TTS import openai_compatible_handler as tts_module
 from tests.test_openai_tts_handler import _FakeSpeechOperation, _openai_tts_handler
 from tests.test_response_overrides import _RecordingLocalHandler
 
@@ -49,7 +48,7 @@ def create(service, conn_id, response=None):
 def audio(service, conn_id, request, monkeypatch, clock):
     handler = _openai_tts_handler(monkeypatch)
     handler.turn_latency_store = service.turn_latency_store
-    monkeypatch.setattr(tts_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     _FakeSpeechOperation.startup_action = lambda: clock.__setitem__(0, clock[0] + 0.25)
     processor = LMOutputProcessor.__new__(LMOutputProcessor)
     processor.setup(text_output_queue=service.text_prompt_queue)
