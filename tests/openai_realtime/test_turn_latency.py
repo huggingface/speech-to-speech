@@ -39,7 +39,7 @@ from speech_to_speech.pipeline.messages import (
     VADAudio,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-from speech_to_speech.pipeline.turn_latency import TURN_LATENCY_METADATA_KEY, bind_active_turn_latency_tracker
+from speech_to_speech.pipeline.turn_latency import TURN_LATENCY_METADATA_KEY
 from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
@@ -87,7 +87,7 @@ def test_chattts_first_audio_reaches_terminal_response(
     request = _queue_turn(service, conn_id)
     service.response._ensure_response(conn_id, request.response_key)
     clock = [10.0]
-    monkeypatch.setattr(chattts_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     handler = _chattts_handler(handler_type, stream=stream, chunks=[])
     handler.cancel_scope = CancelScope()
     handler.turn_latency_store = service.turn_latency_store
@@ -216,9 +216,13 @@ def test_vad_decision_reaches_terminal_response_metadata(service, conn_id, final
     assert request.speech_stopped_at_s == pytest.approx(9.968)
     # Use the production first-audio recorder with the timestamp that traversed VAD/STT/service.
     monkeypatch.setattr(qwen3_tts_module, "perf_counter", lambda: 11.0)
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: 11.0)
     tts = object.__new__(Qwen3TTSHandler)
-    with bind_active_turn_latency_tracker(service.turn_latency_store.get_response(request.response_key)):
-        tts._log_first_audio_latency(TTSInput(text="Hello", speech_stopped_at_s=request.speech_stopped_at_s))
+    tts.turn_latency_store = service.turn_latency_store
+    tts_input = TTSInput(
+        text="Hello", response_key=request.response_key, speech_stopped_at_s=request.speech_stopped_at_s
+    )
+    tts._log_first_audio_latency(tts_input, tts._latency_timer(tts_input))
     service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=request.response_key))
     done = service.finish_response(conn_id, response_key=request.response_key)[-1]
     payload = json.loads(done.response.metadata[TURN_LATENCY_METADATA_KEY])
@@ -593,7 +597,7 @@ def test_mms_segments_reach_terminal_latency_metadata_and_cleanup(
 ):
     request = _queue_turn(service, conn_id)
     clock = [10.0]
-    monkeypatch.setattr(mms_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     monkeypatch.setattr(mms_module.console, "print", lambda *args, **kwargs: None)
     waveform = torch.linspace(-0.2, 0.2, 600).unsqueeze(0)
 
@@ -666,6 +670,7 @@ def test_multiple_qwen_segments_keep_first_audio_timings_in_terminal_log(service
 
     monkeypatch.setattr(qwen3_tts_module, "platform", "darwin")
     monkeypatch.setattr(qwen3_tts_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", load_model)
     monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
     handler = object.__new__(Qwen3TTSHandler)
@@ -916,3 +921,55 @@ def test_qwen3_asr_final_stt_reaches_response_log_without_progressive_time(servi
     assert lines[0].endswith(f"response_key={response.response_key}")
     assert service.turn_latency_store._pending_turn == {}
     assert service.turn_latency_store._trackers == {}
+
+
+def test_qwen_tts_ttfa_excludes_mlx_lock_wait_but_e2e_includes_it(service, conn_id, monkeypatch):
+    request = _queue_turn(service, conn_id)
+    clock = [10.0]
+
+    class _SlowLock:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            clock[0] += 5.0  # waiting for another handler to release the MLX lock
+            return True
+
+        def __exit__(self, *exc):
+            return False
+
+    def generate_custom_voice(**kwargs):
+        clock[0] += 0.25
+        yield SimpleNamespace(audio=np.full(512, 0.1, dtype=np.float32), sample_rate=16000)
+
+    def load_model(self, model_name):
+        self.model = SimpleNamespace(
+            config=SimpleNamespace(tts_model_type="custom_voice"), generate_custom_voice=generate_custom_voice
+        )
+
+    monkeypatch.setattr(qwen3_tts_module, "platform", "darwin")
+    monkeypatch.setattr(qwen3_tts_module, "MLXLockContext", _SlowLock)
+    monkeypatch.setattr(qwen3_tts_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
+    monkeypatch.setattr(Qwen3TTSHandler, "_setup_mlx", load_model)
+    monkeypatch.setattr(Qwen3TTSHandler, "warmup", lambda self: None)
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.setup(Event())
+    handler.queue_in = Queue()
+    handler.turn_latency_store = service.turn_latency_store
+
+    output = list(
+        handler.process(
+            TTSInput(
+                text="First sentence.",
+                response_key=request.response_key,
+                turn_id=request.turn_id,
+                turn_revision=request.turn_revision,
+                speech_stopped_at_s=8.0,
+            )
+        )
+    )
+    assert len(output) == 1
+    tracker = service.turn_latency_store.get_response(request.response_key)
+    assert tracker.tts_ttfa_s == pytest.approx(0.25)
+    assert tracker.e2e_s == pytest.approx(10.0 + 5.0 + 0.25 - 8.0)

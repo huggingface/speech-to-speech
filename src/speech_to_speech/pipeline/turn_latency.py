@@ -6,7 +6,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Literal
+from time import perf_counter
+from typing import Callable, Literal
 
 TurnLatencyStatus = Literal["completed", "cancelled", "failed", "incomplete"]
 TURN_LATENCY_METADATA_KEY = "speech_to_speech.turn_latency"
@@ -418,3 +419,74 @@ def record_response_e2e(
     """Publish eligible speech E2E; return whether a first sample was recorded."""
     tracker = store.get_response(response_key) if store is not None else None
     return tracker.record_e2e(seconds) if tracker is not None else False
+
+
+class TTSResponseTimer:
+    """Per-synthesis bookkeeping for the two TTS latency fields.
+
+    The handler decides *where* the boundaries are (first provider audio, first
+    yielded block); the timer owns the rest: first-write-wins, suppression once
+    the output is cancelled or stale, and the ``speech_stopped_at_s`` clamp.
+    ``started_at_s`` is taken at construction, so create it right before
+    provider work starts, or call ``mark_start`` once the real start is known
+    (for example after acquiring a lock the handler does not want to measure).
+    """
+
+    def __init__(
+        self,
+        store: TurnLatencyStore | None,
+        response_key: str | None,
+        speech_stopped_at_s: float | None,
+        is_cancelled: Callable[[], bool] | None = None,
+    ) -> None:
+        self._store = store
+        self._response_key = response_key
+        self._speech_stopped_at_s = speech_stopped_at_s
+        self._is_cancelled = is_cancelled
+        self._provider_done = False
+        self._yield_done = False
+        self.started_at_s = perf_counter()
+
+    def _cancelled(self) -> bool:
+        return self._is_cancelled is not None and self._is_cancelled()
+
+    @property
+    def has_tracker(self) -> bool:
+        """Whether the response still has a live tracker to publish into."""
+        return self._store is not None and self._store.get_response(self._response_key) is not None
+
+    def mark_start(self, at_s: float | None = None) -> None:
+        """Re-anchor the synthesis start used for ``tts_ttfa``."""
+        self.started_at_s = perf_counter() if at_s is None else at_s
+
+    def speech_stop_elapsed_s(self) -> float | None:
+        """Unclamped seconds since speech stopped, or None when unknown."""
+        if self._speech_stopped_at_s is None:
+            return None
+        return perf_counter() - self._speech_stopped_at_s
+
+    def first_provider_audio(self, at_s: float | None = None) -> bool:
+        """Record synthesis start to first model/provider audio; once per timer."""
+        if self._provider_done or self._cancelled():
+            return False
+        self._provider_done = True
+        now = perf_counter() if at_s is None else at_s
+        record_response_tts_ttfa(self._store, self._response_key, now - self.started_at_s)
+        return True
+
+    def first_yield(self, *, ignore_cancel: bool = False) -> float | None:
+        """Record speech stop to first yielded block.
+
+        Returns the recorded seconds, or None when nothing was recorded (already
+        done, cancelled, unknown speech stop, or the response is not tracked).
+        ``ignore_cancel`` is for callers that yield the block regardless of a
+        cancel flag that flipped after their own last check.
+        """
+        if self._yield_done or (not ignore_cancel and self._cancelled()):
+            return None
+        self._yield_done = True
+        elapsed_s = self.speech_stop_elapsed_s()
+        if elapsed_s is None:
+            return None
+        latency_s = max(0.0, elapsed_s)
+        return latency_s if record_response_e2e(self._store, self._response_key, latency_s) else None

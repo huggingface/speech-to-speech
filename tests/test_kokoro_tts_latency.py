@@ -34,7 +34,7 @@ def _native_handler(monkeypatch: pytest.MonkeyPatch, *, stream) -> KokoroTTSHand
 def test_kokoro_records_ttfa_at_first_provider_chunk_and_preserves_first_audio(monkeypatch):
     """TTFA is provider audio before resample; later segments must not overwrite."""
     clock = [100.0]
-    monkeypatch.setattr(kokoro_handler, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
 
     def stream():
         clock[0] = 100.05
@@ -88,7 +88,7 @@ def test_kokoro_records_ttfa_at_first_provider_chunk_and_preserves_first_audio(m
 def test_kokoro_mlx_records_ttfa_before_silence_trim(monkeypatch):
     """MLX TTFA uses provider audio arrival, not post-trim yield time."""
     clock = [50.0]
-    monkeypatch.setattr(kokoro_handler, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     monkeypatch.setattr(kokoro_handler, "platform", "darwin")
     monkeypatch.setattr(KokoroTTSHandler, "warmup", lambda self: None)
     monkeypatch.setattr(kokoro_handler.console, "print", lambda *_args, **_kwargs: None)

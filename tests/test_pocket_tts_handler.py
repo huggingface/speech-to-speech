@@ -388,6 +388,7 @@ def test_pocket_records_ttfa_at_first_provider_chunk_and_preserves_first_audio(m
     from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 
     clock = [100.0]
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     monkeypatch.setattr(pocket_module, "perf_counter", lambda: clock[0])
 
     handler, _ = _farsi_handler()
@@ -455,6 +456,7 @@ def test_farsi_ttfa_precedes_buffering_and_ignores_generated_pauses(monkeypatch,
     from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 
     clock = [100.0]
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     monkeypatch.setattr(pocket_module, "perf_counter", lambda: clock[0])
     handler, _ = _farsi_handler()
     handler.phonemizer = lambda text: "" if text == "حذف" else "salAm"

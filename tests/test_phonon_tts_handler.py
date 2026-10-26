@@ -151,11 +151,10 @@ def test_resampling_is_independent_of_native_chunk_boundaries():
 
 
 def test_first_audio_and_speech_e2e_are_recorded(monkeypatch):
-    import speech_to_speech.TTS.phonon_tts_handler as phonon_module
     from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 
     clock = [100.0]
-    monkeypatch.setattr(phonon_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
 
     def samples():
         clock[0] = 100.05
