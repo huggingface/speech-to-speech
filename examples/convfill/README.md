@@ -27,7 +27,11 @@ with `python examples/convfill/deploy/hf_space.py --repo owner/private-demo
 --frontend-only`. Supply `LOAD_BALANCER_URL` and, for protected ingress,
 `LB_HF_TOKEN` as server-side secrets. The upload token is not implicitly used
 as a service credential. Keep `SERPER_API_KEY` on the UI server and inference
-credentials on workers. The UI image starts no VAD or language-model pipeline.
+credentials on workers. The UI image starts no VAD or language-model pipeline. To permit guests,
+set `ALLOW_GUEST_SESSIONS=1` and `LIMIT_ANON_SEC=300` on the metered UI Space.
+Guest allocations use the server-side `LB_HF_TOKEN`; signed-in requests retain
+their visitor identity. The shared UI's daily IP/cookie budget and heartbeat
+cutoff apply. See `demo/README.md` for persistence and enforcement limitations.
 
 The shared server provides `/api/session`, queue polling, heartbeat/end calls,
 and optional login/duration metering. The browser connects to its allocated

@@ -51,10 +51,10 @@ def main():
             args.repo, "CONVFILL_STT_MODEL", os.environ.get("CONVFILL_STT_MODEL", "Qwen/Qwen3-ASR-1.7B")
         )
         api.add_space_variable(args.repo, "CONVFILL_LOG_CONTENT", "0")
-    for name in ("CONVFILL_SEARCH_URL", "STARTUP_GREETING"):
+    for name in ("CONVFILL_SEARCH_URL", "STARTUP_GREETING", "ALLOW_GUEST_SESSIONS", "LIMIT_ANON_SEC"):
         if name in os.environ:
             api.add_space_variable(args.repo, name, os.environ[name])
-    for name in ("SERPER_API_KEY", "CONVFILL_SEARCH_API_KEY"):
+    for name in ("SERPER_API_KEY", "CONVFILL_SEARCH_API_KEY", "USAGE_HASH_SECRET"):
         if os.environ.get(name):
             api.add_space_secret(args.repo, name, os.environ[name])
     with tempfile.TemporaryDirectory(prefix="convfill-space-") as temporary:

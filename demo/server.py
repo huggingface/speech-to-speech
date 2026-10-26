@@ -84,6 +84,10 @@ if SPEECH_TO_SPEECH_URL:
 # but nothing is metered: no budget, no reservations, no sign-in gating.
 SPACE_ID = os.environ.get("SPACE_ID", "").strip()
 LIMITER_ENABLED = bool(LOAD_BALANCER_URL) and bool(SPACE_ID)
+# Explicit opt-in for metered guests behind a load balancer that requires a
+# verified application credential. Never enable service-backed guests without
+# the deployed Space's duration limiter.
+ALLOW_GUEST_SESSIONS = os.environ.get("ALLOW_GUEST_SESSIONS", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _parse_ice_servers(raw: str) -> list:
@@ -480,7 +484,10 @@ def _load_balancer_headers(request: Request | None = None) -> dict[str, str]:
     signed-in visitor's OAuth token remains in the Reachy-specific header so the
     load-balancer app can validate and attribute that user after ingress consumes
     the standard Authorization header. When no service token is configured, a
-    signed-in user's token authenticates both hops; anonymous use remains allowed.
+    signed-in user's token authenticates both hops. An explicitly enabled,
+    metered guest uses the service credential for allocation only; the guest's
+    own IP/cookie budget is still enforced before a grant. Service credentials
+    are never included in the browser's response.
     """
     headers = {
         "Content-Type": "application/json",
@@ -492,6 +499,8 @@ def _load_balancer_headers(request: Request | None = None) -> dict[str, str]:
         headers["Authorization"] = f"Bearer {gateway_token}"
     if user_token:
         headers["X-Reachy-Mini-Authorization"] = f"Bearer {user_token}"
+    elif request is not None and ALLOW_GUEST_SESSIONS and LIMITER_ENABLED and LB_HF_TOKEN:
+        headers["X-Reachy-Mini-Authorization"] = f"Bearer {LB_HF_TOKEN}"
     return headers
 
 

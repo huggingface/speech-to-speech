@@ -73,6 +73,9 @@ def test_frontend_upload_uses_only_explicit_session_service_credentials(monkeypa
     monkeypatch.setenv("HF_TOKEN", "hub-upload-only")
     monkeypatch.setenv("LOAD_BALANCER_URL", "https://allocator.example")
     monkeypatch.setenv("LB_HF_TOKEN", "explicit-service-credential")
+    monkeypatch.setenv("ALLOW_GUEST_SESSIONS", "1")
+    monkeypatch.setenv("LIMIT_ANON_SEC", "300")
+    monkeypatch.setenv("USAGE_HASH_SECRET", "explicit-cookie-signing-secret")
     for stage in ("REASONER", "TALKER", "STT", "TTS"):
         monkeypatch.delenv("CONVFILL_" + stage + "_URL", raising=False)
     for name in ("SERPER_API_KEY", "CONVFILL_SEARCH_API_KEY"):
@@ -104,5 +107,8 @@ def test_frontend_upload_uses_only_explicit_session_service_credentials(monkeypa
     assert secrets == [
         ("example/private-demo", "LOAD_BALANCER_URL", "https://allocator.example"),
         ("example/private-demo", "LB_HF_TOKEN", "explicit-service-credential"),
+        ("example/private-demo", "USAGE_HASH_SECRET", "explicit-cookie-signing-secret"),
     ]
+    assert ("example/private-demo", "ALLOW_GUEST_SESSIONS", "1") in variables
+    assert ("example/private-demo", "LIMIT_ANON_SEC", "300") in variables
     assert not any("CONVFILL_" in args[1] for args in variables)
