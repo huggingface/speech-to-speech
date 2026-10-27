@@ -13,6 +13,7 @@ import pytest
 from openai.types.realtime import RealtimeSessionCreateRequest, ResponseCreateEvent, SessionUpdateEvent
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from scipy.io import wavfile
+from scipy.signal import resample_poly
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.api.openai_realtime.service import RealtimeService
@@ -512,7 +513,7 @@ def test_pending_response_uses_selection_at_response_create(monkeypatch):
     ]
 
 
-@pytest.mark.parametrize(("backend", "sample_rate"), [("openai", 24000), ("drama3", 44100)])
+@pytest.mark.parametrize(("backend", "sample_rate"), [("openai", 24000), ("openai", 44100), ("drama3", 44100)])
 def test_openai_tts_streaming_resampler_is_chunk_invariant_and_anti_aliased(monkeypatch, backend, sample_rate):
     handler = _openai_tts_handler(monkeypatch, backend=backend)
     duration_s = 0.2
@@ -536,6 +537,29 @@ def test_openai_tts_streaming_resampler_is_chunk_invariant_and_anti_aliased(monk
     np.testing.assert_array_equal(passband_streamed, passband_single)
     assert np.sqrt(np.mean(passband_streamed.astype(np.float64) ** 2)) > 10000
     assert np.sqrt(np.mean(stopband_streamed.astype(np.float64) ** 2)) < 500
+
+
+@pytest.mark.parametrize("final_with_input", [False, True])
+def test_openai_tts_44100_resampler_matches_whole_signal(final_with_input):
+    samples = np.random.default_rng(44100).integers(-32768, 32768, size=4411).astype(np.float64)
+    # Full-scale plateaus also exercise saturation after filtering.
+    samples[1500:1700] = 32767
+    samples[1700:1900] = -32768
+    resampler = tts_module._StreamingFIRResampler(44100, 16000)
+    chunks = np.array_split(samples, [1, 1477, 2953])
+    parts = [resampler.push(chunk) for chunk in chunks[:-1]]
+    parts.append(resampler.push(chunks[-1], final=final_with_input))
+    # Pin per-push availability as well as the complete signal's numerical result.
+    assert [part.size for part in parts] == [0, 526, 536, 539 if final_with_input else 529]
+    if not final_with_input:
+        assert resampler.push(np.empty(0)).size == 0
+        tail = resampler.push(np.empty(0), final=True)
+        assert tail.size == 10
+        parts.append(tail)
+    output = np.concatenate(parts)
+    reference = np.clip(np.round(resample_poly(samples, 16000, 44100)), -32768, 32767).astype(np.int16)
+    assert output.dtype == np.int16
+    np.testing.assert_allclose(output.astype(np.int32), reference.astype(np.int32), rtol=0, atol=1)
 
 
 def test_openai_tts_vllm_stream_extension_is_opt_in(monkeypatch):
@@ -1026,11 +1050,12 @@ def test_openai_tts_reopened_during_startup_suppresses_old_revision(monkeypatch)
     assert _FakeSpeechOperation.instances[0].cancelled is True
 
 
-@pytest.mark.parametrize("backend", ["openai", "drama3"])
-def test_openai_tts_cancellation_stops_publication_and_closes_operation(monkeypatch, backend):
+@pytest.mark.parametrize(("backend", "sample_rate"), [("openai", 24000), ("openai", 44100), ("drama3", 44100)])
+def test_openai_tts_cancellation_stops_publication_and_closes_operation(monkeypatch, backend, sample_rate):
     cancel_scope = CancelScope()
     handler = _openai_tts_handler(monkeypatch, backend=backend, cancel_scope=cancel_scope)
 
+    handler.sample_rate = sample_rate
     generation = handler.process(TTSInput(text="Hello", cancel_generation=cancel_scope.generation))
     first = next(generation)
     cancel_scope.cancel()
@@ -1040,9 +1065,10 @@ def test_openai_tts_cancellation_stops_publication_and_closes_operation(monkeypa
     assert _FakeSpeechOperation.instances[0].cancelled is True
 
 
-@pytest.mark.parametrize("backend", ["openai", "drama3"])
-def test_openai_tts_session_teardown_stops_publication_and_closes_operation(monkeypatch, backend):
+@pytest.mark.parametrize(("backend", "sample_rate"), [("openai", 24000), ("openai", 44100), ("drama3", 44100)])
+def test_openai_tts_session_teardown_stops_publication_and_closes_operation(monkeypatch, backend, sample_rate):
     handler = _openai_tts_handler(monkeypatch, backend=backend)
+    handler.sample_rate = sample_rate
     generation = handler.process(TTSInput(text="Hello"))
     first = next(generation)
     operation = _FakeSpeechOperation.instances[0]

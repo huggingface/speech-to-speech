@@ -13,7 +13,7 @@ from typing import Any, Iterator, cast
 
 import httpx
 import numpy as np
-from scipy.signal import firwin, lfilter
+from scipy.signal import firwin, upfirdn
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
@@ -258,13 +258,12 @@ class _StreamingFIRResampler:
         self._up = target_rate // gcd
         self._down = source_rate // gcd
         self._input_samples = 0
-        self._upsampled_samples = 0
         self._output_samples = 0
         self._finalized = False
+        self._history = np.empty(0, dtype=np.float64)
 
         if self._up == self._down:
             self._taps = np.ones(1, dtype=np.float64)
-            self._filter_state = np.empty(0, dtype=np.float64)
             self._delay = 0
             return
 
@@ -278,7 +277,6 @@ class _StreamingFIRResampler:
             )
             * self._up
         )
-        self._filter_state = np.zeros(self._taps.size - 1, dtype=np.float64)
         self._delay = (self._taps.size - 1) // 2
 
     def push(self, samples: np.ndarray, *, final: bool = False) -> np.ndarray:
@@ -286,47 +284,36 @@ class _StreamingFIRResampler:
             raise RuntimeError("resampler has already been finalized")
 
         incoming = np.asarray(samples, dtype=np.float64).reshape(-1)
+        # History starts on an input-sample boundary in the global upsampled grid.
+        origin = (self._input_samples - self._history.size) * self._up
         self._input_samples += incoming.size
         if self._up == self._down:
-            if final:
-                self._finalized = True
+            self._finalized = final
             return self._to_int16(incoming)
 
-        output_parts: list[np.ndarray] = []
-        if incoming.size:
-            upsampled = np.zeros(incoming.size * self._up, dtype=np.float64)
-            upsampled[:: self._up] = incoming
-            output_parts.append(self._filter_and_decimate(upsampled))
-
+        source = np.concatenate((self._history, incoming))
         if final:
-            self._finalized = True
-            # Flush the FIR tail so the centered final samples are not truncated.
-            output_parts.append(self._filter_and_decimate(np.zeros(self._taps.size - 1, dtype=np.float64)))
+            target_total = (self._input_samples * self._up + self._down - 1) // self._down
+        else:
+            # Emit only samples whose centered FIR has all its required input.
+            target_total = max(0, (self._input_samples * self._up - self._delay + self._down - 1) // self._down)
+        count = target_total - self._output_samples
+        if count and source.size:
+            # Align the local polyphase grid with delay + k * down globally.
+            prepad = (origin - self._delay) % self._down
+            taps = np.pad(self._taps, (prepad, 0)) if prepad else self._taps
+            filtered = upfirdn(taps, source, up=self._up, down=self._down)
+            start = (self._delay + self._output_samples * self._down - origin + prepad) // self._down
+            output = filtered[start : start + count]
+        else:
+            output = np.empty(0, dtype=np.float64)
 
-        output = np.concatenate(output_parts) if output_parts else np.empty(0, dtype=np.float64)
-        target_total = (self._input_samples * self.target_rate + self.source_rate - 1) // self.source_rate
-        remaining = max(0, target_total - self._output_samples)
-        if output.size > remaining:
-            output = output[:remaining]
+        # Keep only the FIR's input support, copying to release the full chunk.
+        history_size = (self._taps.size - 1 + self._up - 1) // self._up + 1
+        self._history = source[-history_size:].copy() if not final else np.empty(0, dtype=np.float64)
         self._output_samples += output.size
+        self._finalized = final
         return self._to_int16(output)
-
-    def _filter_and_decimate(self, upsampled: np.ndarray) -> np.ndarray:
-        filtered, self._filter_state = lfilter(
-            self._taps,
-            np.ones(1, dtype=np.float64),
-            upsampled,
-            zi=self._filter_state,
-        )
-        global_start = self._upsampled_samples
-        self._upsampled_samples += upsampled.size
-        minimum_index = max(global_start, self._delay)
-        phase = (minimum_index - self._delay) % self._down
-        first_index = minimum_index if phase == 0 else minimum_index + self._down - phase
-        local_start = first_index - global_start
-        if local_start >= filtered.size:
-            return np.empty(0, dtype=np.float64)
-        return filtered[local_start :: self._down]
 
     @staticmethod
     def _to_int16(samples: np.ndarray) -> np.ndarray:
