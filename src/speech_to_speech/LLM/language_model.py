@@ -135,6 +135,7 @@ class StreamContext(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    stream_exhausted: bool = False
     cancelled: bool = False
     stopped: bool = False
     raw_generated_text: str = ""
@@ -257,14 +258,17 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         """Close the MLX generator to release resources immediately."""
         token_iter.close()
 
-    def _finish_transformers_generation(self, thread: Thread) -> None:
-        """Signal the stopping criteria, drain the streamer, and join the thread."""
+    def _finish_transformers_generation(self, thread: Thread, ctx: StreamContext) -> None:
+        """Stop generation, drain unfinished output, and join the thread."""
         self._cancel_criteria.cancel()
-        try:
-            for _ in self.streamer:
+        # TextIteratorStreamer consumes its end marker once; reading again waits
+        # for its queue timeout even though generation has already finished.
+        if not ctx.stream_exhausted:
+            try:
+                for _ in self.streamer:
+                    pass
+            except Empty:
                 pass
-        except Empty:
-            pass
         thread.join(timeout=5.0)
 
     # ------------------------------------------------------------------
@@ -494,6 +498,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             try:
                 token = next(token_iter)
             except StopIteration:
+                ctx.stream_exhausted = True
                 break
             except Empty:
                 if self._check_stop(gen, ctx):
@@ -855,7 +860,7 @@ class LanguageModelHandler(BaseLanguageModelHandler):
             thread = Thread(target=_locked_pipe)
             thread.start()
             yield from self._stream_tokens(self.streamer, gen, language_code, ctx, runtime_config, response)
-            self._finish_transformers_generation(thread)
+            self._finish_transformers_generation(thread, ctx)
             if self.device == "mps":
                 torch.mps.empty_cache()
 
@@ -1050,7 +1055,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             thread = Thread(target=_locked_generate)
             thread.start()
             yield from self._stream_tokens(self.streamer, gen, language_code, ctx, runtime_config, response)
-            self._finish_transformers_generation(thread)
+            self._finish_transformers_generation(thread, ctx)
             if self.device == "mps":
                 torch.mps.empty_cache()
 
