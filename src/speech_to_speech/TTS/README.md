@@ -24,6 +24,7 @@ Runtime-supported values in `s2s_pipeline.py`:
 - `drama3` → `drama3_handler.py`
 - `supertonic` → `supertonic_tts_handler.py`
 - `minimax` → `minimax_tts_handler.py`
+- `none` → `model_speech_handler.py`, which plays the speech a speaking LLM generates (see [Speech-to-Speech Model](../../../README.md#speech-to-speech-model-no-stt-or-tts))
 
 Deprecated TTS implementations, including MeloTTS, live in [`../../../archive/TTS`](../../../archive/TTS) and are no longer wired into `s2s_pipeline.py`.
 

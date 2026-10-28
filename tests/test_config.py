@@ -199,6 +199,14 @@ def test_bypass_and_capabilities(document):
     with pytest.raises(ConfigurationError):
         validate_config(document)
     document.data["pipelines"]["primary"].pop("options")
+    document.data["blocks"]["llm"]["backend"] = "lfm-audio"
+    with pytest.raises(ConfigurationError, match="speaking LLM backend"):
+        validate_config(document)
+    document.data["blocks"]["tts"]["backend"] = "none"
+    validate_config(document)
+    document.data["blocks"]["llm"]["backend"] = "chat-completions"
+    with pytest.raises(ConfigurationError, match="speaking LLM backend"):
+        validate_config(document)
     document.data["blocks"]["llm"]["backend"] = "responses-api"
     with pytest.raises(ConfigurationError):
         validate_config(document)
@@ -255,6 +263,10 @@ def test_registry_equivalence_and_scope_coverage(document):
             doc.data["blocks"][kind]["backend"] = name
             if kind == "stt" and name == "none":
                 doc.data["blocks"]["llm"]["backend"] = "chat-completions"
+            if kind == "llm" and spec.capabilities.generates_speech:
+                doc.data["blocks"]["tts"]["backend"] = "none"
+            if kind == "tts" and name == "none":
+                doc.data["blocks"]["llm"]["backend"] = "lfm-audio"
             result = resolve_config(doc)
             assert result.pipelines["primary"].stages[kind].selection.config == spec.normalize(spec.config_type())
 
