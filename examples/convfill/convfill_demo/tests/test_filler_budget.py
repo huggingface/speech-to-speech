@@ -87,13 +87,6 @@ def test_unset_budget_preserves_multiple_fillers(configured):
     assert backend.closed.wait(1)
 
 
-def test_limited_tool_continuation_does_not_add_another_acknowledgment():
-    system, backend = limited_system(1)
-    system.convfill_frontend = SimpleNamespace(turn_state_manager=SimpleNamespace(responses=["Let me check that."]))
-    backend.release.set()
-    assert list(system.backend_fn()) == ["First useful sentence.", "Second useful sentence."]
-
-
 @pytest.mark.parametrize("value", [-1, True, 1.5, "1"])
 def test_invalid_filler_budget_fails_before_model_setup(tmp_path, value):
     config = json.loads(CONFIG_PATH.read_text())

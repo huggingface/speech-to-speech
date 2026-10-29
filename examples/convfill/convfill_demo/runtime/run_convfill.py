@@ -1,5 +1,3 @@
-# IMPORTANT: Install the package first with `pip install -e .` from the repo root
-
 import json
 import queue
 import threading
@@ -40,8 +38,6 @@ class ConvFillConfig:
         self.tts_model_path = config.get("tts_model_path")
         self.task_specific_config = config.get("task_specific_config", None)
         self.mode = config["mode"]
-        self.frontend_device = config.get("frontend_device", "cpu")
-        self.frontend_dtype = config.get("frontend_dtype")
         self.reasoner = config.get("reasoner", {})
         self.max_filler_phrases = config.get("max_filler_phrases")
         if self.max_filler_phrases is not None and (
@@ -61,8 +57,6 @@ class ConvFillSystem:
         dialogue_state_manager=None,
         on_thought=None,
         on_response_fragment=None,
-        on_rag_context=None,
-        on_mcp_context=None,
         on_turn_complete=None,
         on_frontend_inference=None,
         on_phrase_start=None,
@@ -93,10 +87,6 @@ class ConvFillSystem:
         self._frontend_inflight = 0
         self._frontend_inflight_lock = threading.Lock()
 
-        # Reasoner knowledge consumed by a turn that was cut short. Stashed by
-        # run_frontend so commit_interrupted_turn can keep it.
-        self._interrupted_thoughts = []
-
         # setup frontend, backend, dialogue state
         print("[LOG] Setting up Dialogue State Manager\n")
         if dialogue_state_manager is not None:
@@ -120,32 +110,21 @@ class ConvFillSystem:
             ),
             mode=self.convfill_config.mode,
             task_specific_config=self.convfill_config.task_specific_config,
-            on_rag_context=on_rag_context,
-            on_mcp_context=on_mcp_context,
         )
 
         print("[LOG] Setting up ConvFill Frontend\n")
         self.convfill_frontend = ConvFillFrontend(
             model_config_path=self.convfill_config.frontend_model_config_path,
             dialogue_state_manager=self.dialogue_state_manager,
-            device=self.convfill_config.frontend_device,
-            dtype=self.convfill_config.frontend_dtype,
         )
 
     def backend_fn(self):
         q = queue.Queue()
 
         cancel = self.cancel_event
-        frontend = getattr(self, "convfill_frontend", None)
-        turn_state = getattr(frontend, "turn_state_manager", None)
-        # A tool result resumes the same utterance. Give its knowledge stream
-        # a short head start rather than immediately emitting a second preamble.
-        has_spoken_prefix = bool(getattr(turn_state, "responses", []))
-        filler_not_before = time.monotonic() + (1.0 if has_spoken_prefix else 0.0)
         filler_limit = getattr(getattr(self, "convfill_config", None), "max_filler_phrases", None)
-        # A limited reply needs no more acknowledgment after a tool continuation.
         # Count scheduled phrases so queue/inference races cannot exceed the cap.
-        fillers_emitted = filler_limit if has_spoken_prefix and filler_limit is not None else 0
+        fillers_emitted = 0
 
         def producer():
             gen = self.convfill_backend.backend_infer()
@@ -180,7 +159,6 @@ class ConvFillSystem:
                 frontend_busy = self._frontend_inflight > 0
             if (
                 (filler_limit is None or fillers_emitted < filler_limit)
-                and time.monotonic() >= filler_not_before
                 and self.thought_queue.qsize() == 0
                 and not frontend_busy
                 and self.audio_in_flight_fn() == 0
@@ -253,11 +231,11 @@ class ConvFillSystem:
             except queue.Empty:
                 continue
         if self.cancel_event.is_set():
-            self._interrupted_thoughts = self.convfill_frontend.get_thoughts_and_reset_turn_state()
+            self.convfill_frontend.reset_turn_state()
             return
         with self._commit_lock:
             if self.cancel_event.is_set():
-                self._interrupted_thoughts = self.convfill_frontend.get_thoughts_and_reset_turn_state()
+                self.convfill_frontend.reset_turn_state()
                 return
             user_turn, final_response, final_thoughts = self.convfill_frontend.get_final_response_and_reset_turn_state()
             if self.on_turn_complete is not None:
@@ -316,33 +294,12 @@ class ConvFillSystem:
             if self.cancel_event.is_set():
                 self._drain_turn_queues()
                 return False
-            self._interrupted_thoughts = []
             return True
         finally:
             self._turn_lock.release()
 
-    def commit_interrupted_turn(self, user_input, heard_text):
-        """Keep a best-effort dispatched prefix, marked as interrupted."""
-        marked = f"{heard_text.strip()} [interrupted by the user]".strip()
-        thoughts = list(self._interrupted_thoughts)
-        self._interrupted_thoughts = []
-
-        dsm = self.dialogue_state_manager
-        if dsm.user_turns and dsm.user_turns[-1] == user_input and len(dsm.responses) == len(dsm.user_turns):
-            # Cancellation raced the commit: replace the full response with the
-            # heard prefix, keeping the thoughts that were already recorded.
-            if not thoughts and dsm.thoughts:
-                thoughts = list(dsm.thoughts[-1])
-            dsm.rollback_turn(user_input)
-            dsm.update_user_state(user_input)
-
-        committed = dsm.commit_turn(user_input, marked, thoughts)
-        self._drain_turn_queues()
-        return committed
-
     def discard_pending_turn(self, user_input):
-        """Drop a cancelled turn entirely; nothing of it was heard."""
-        self._interrupted_thoughts = []
+        """Drop a cancelled turn entirely, as the core pipeline does."""
         removed = self.dialogue_state_manager.rollback_turn(user_input)
         self._drain_turn_queues()
         return removed
@@ -376,7 +333,6 @@ class ConvFillSystem:
         """Clear all per-session dialogue and in-flight turn state."""
         self.cancel_turn()
         self.convfill_frontend.reset_turn_state()
-        self._interrupted_thoughts = []
         self.dialogue_state_manager.reset()
         self._drain_turn_queues()
         self.done_event.clear()

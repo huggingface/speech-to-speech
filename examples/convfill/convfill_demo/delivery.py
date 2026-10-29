@@ -1,19 +1,14 @@
-"""A pipeline output queue that records what the transport dequeued for dispatch.
+"""A pipeline output queue that records what leaves it.
 
-Hugging Face's realtime send loop pulls every assistant text event and every
-audio chunk off ``PipelineUnit.output_queue`` with ``get_nowait()``. Subclassing
-that queue and observing each dequeue gives ConvFill two facts it cannot get
-anywhere else:
+The realtime send loop pulls every assistant text event and audio chunk off
+``PipelineUnit.output_queue``. Observing each dequeue lets ConvFill estimate
+when the listener would otherwise hear silence, so ``<sil>`` fillers follow
+playback rather than the coarse ``response_playing`` event, which stays set for
+a whole response.
 
-* which Talker sentences were handed to the client for a given response key, so
-  an interrupted turn can retain a best-effort dispatched prefix, and
-* how much audio has been dispatched, so ``<sil>`` filler scheduling can be
-  driven by an estimated playback duration rather than Hugging Face's coarse
-  ``response_playing`` event, which stays set for a whole response.
-
-Barge-in flushes drain ``q.queue`` directly under ``q.mutex`` without calling
-``get()``. That path stays intact here: only ``get`` is overridden, and the
-underlying deque and mutex are untouched.
+A dequeue is not proof of dispatch: barge-in flushes and held or stale output
+also leave through ``get()``. The ledger therefore drives filler timing only;
+it is never treated as the text a listener heard.
 """
 
 from __future__ import annotations
@@ -24,42 +19,15 @@ import time
 from queue import Queue
 from typing import Any
 
+from speech_to_speech.api.openai_realtime.service import PIPELINE_SAMPLE_RATE
+from speech_to_speech.api.openai_realtime.websocket_router import _is_audio_done, _is_pipeline_end, _to_audio_bytes
 from speech_to_speech.pipeline.events import AssistantOutputEvent
 from speech_to_speech.pipeline.messages import AudioOutput
 
-try:  # Prefer upstream's own payload helpers so the accounting cannot drift.
-    from speech_to_speech.api.openai_realtime.websocket_router import (
-        _is_audio_done as _hf_is_audio_done,
-    )
-    from speech_to_speech.api.openai_realtime.websocket_router import (
-        _is_pipeline_end as _hf_is_pipeline_end,
-    )
-    from speech_to_speech.api.openai_realtime.websocket_router import (
-        _to_audio_bytes as _hf_to_audio_bytes,
-    )
-except ImportError:  # pragma: no cover - only if upstream renames its helpers
-    _hf_is_audio_done = None
-    _hf_is_pipeline_end = None
-    _hf_to_audio_bytes = None
-
 logger = logging.getLogger(__name__)
 
-# Pipeline audio is 24 kHz mono signed 16-bit PCM.
-AUDIO_SAMPLE_RATE_HZ = 24000
-_AUDIO_BYTES_PER_SECOND = AUDIO_SAMPLE_RATE_HZ * 2
-
-_SENTINEL_PAYLOADS = (b"__RESPONSE_DONE__", b"END")
-
-
-def _payload(item: Any) -> Any:
-    return item.audio if isinstance(item, AudioOutput) else item
-
-
-def _is_sentinel(item: Any) -> bool:
-    if _hf_is_audio_done is not None and _hf_is_pipeline_end is not None:
-        return bool(_hf_is_audio_done(item) or _hf_is_pipeline_end(item))
-    payload = _payload(item)
-    return isinstance(payload, bytes) and payload in _SENTINEL_PAYLOADS
+# Output queue audio is pipeline-rate mono PCM16; the client rate is applied later.
+_AUDIO_BYTES_PER_SECOND = PIPELINE_SAMPLE_RATE * 2
 
 
 def audio_duration_s(item: Any) -> float:
@@ -69,14 +37,10 @@ def audio_duration_s(item: Any) -> float:
             return 0.0
     elif not isinstance(item, (bytes, bytearray)) and not hasattr(item, "tobytes"):
         return 0.0
-    if _is_sentinel(item):
+    if _is_audio_done(item) or _is_pipeline_end(item):
         return 0.0
     try:
-        if _hf_to_audio_bytes is not None:
-            raw = _hf_to_audio_bytes(item)
-        else:  # pragma: no cover - fallback for a renamed upstream helper
-            payload = _payload(item)
-            raw = payload.tobytes() if hasattr(payload, "tobytes") else payload
+        raw = _to_audio_bytes(item)
     except (TypeError, AttributeError):
         return 0.0
     if not isinstance(raw, (bytes, bytearray)):
@@ -97,7 +61,7 @@ def _event_texts(item: AssistantOutputEvent) -> list[str]:
 
 
 class DeliveryLedgerQueue(Queue):
-    """A pipeline output queue that ledgers everything the send loop dequeues."""
+    """A pipeline output queue that ledgers everything taken from it."""
 
     def __init__(self, maxsize: int = 0) -> None:
         super().__init__(maxsize)
@@ -107,8 +71,7 @@ class DeliveryLedgerQueue(Queue):
         self._delivered: dict[str, list[str]] = {}
         self._playhead = time.monotonic()
 
-    # ``get_nowait`` funnels through ``get``, and so does the send loop's batch
-    # drain, so this is the single observation point for dispatched output.
+    # ``get_nowait`` funnels through ``get``, so this observes every dequeue.
     def get(self, block: bool = True, timeout: float | None = None) -> Any:
         item = super().get(block, timeout)
         try:
@@ -134,7 +97,7 @@ class DeliveryLedgerQueue(Queue):
             self._playhead = max(self._playhead, now) + duration
 
     def delivered_text(self, response_key: str | None) -> list[str]:
-        """Assistant sentences dispatched to the client for *response_key*."""
+        """Assistant sentences taken from the queue for *response_key*."""
         if response_key is None:
             return []
         with self._ledger_lock:

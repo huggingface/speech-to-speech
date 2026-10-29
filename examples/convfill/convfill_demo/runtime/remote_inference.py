@@ -8,11 +8,8 @@ import queue
 import threading
 import time
 from datetime import datetime, timezone
-from uuid import uuid4
 
 import httpx
-
-from convfill_demo.keys import get_endpoint_api_key
 
 
 class InferenceError(RuntimeError):
@@ -85,7 +82,7 @@ class RemoteInference:
         self.model = os.environ.get(config.get("model_env", ""), config.get("model", ""))
         if not self.model:
             raise ValueError("Remote inference requires a model")
-        self.api_key = get_endpoint_api_key(config.get("api_key_env"))
+        self.api_key = os.environ.get(config.get("api_key_env") or "", "")
         self.connect_timeout = float(config.get("connect_timeout_s", 10))
         self.read_timeout = float(config.get("read_timeout_s", 15))
         self.request_timeout = float(config.get("request_timeout_s", 60))
@@ -96,11 +93,8 @@ class RemoteInference:
         self._lock = threading.Lock()
         self._active = set()
 
-    def configure_request(self, *, messages=None, tools=None, instructions="", on_tool_call=None):
-        self.context_messages = messages or []
-        self.context_tools = tools or []
+    def configure_request(self, *, instructions=""):
         self.context_instructions = instructions or ""
-        self.on_tool_call = on_tool_call
 
     def begin_turn(self, cancel_event):
         self.cancel_event = cancel_event
@@ -199,45 +193,6 @@ class RemoteInference:
                 threading.Thread(target=response.close, daemon=True).start()
             worker.join(timeout=0.2)
 
-    def greeting(self, prompt, instructions=""):
-        """Startup-only direct assistant text. Never enters the knowledge/Talker path."""
-        from .conversational_stream_parser import ConversationalStreamParser
-
-        cancel = self.cancel_event
-        parser, visible = ConversationalStreamParser(), VisibleTextFilter()
-        payload = {
-            "model": self.model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (instructions or "") + "\nYou are opening a voice conversation. "
-                    "Return only a brief, natural spoken greeting that invites the user to talk. "
-                    "Do not explain greetings, add stage directions, provide factual knowledge, "
-                    "call tools, or include internal reasoning.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            "stream": True,
-            "max_tokens": min(int(self.config.get("max_tokens", 256)), 96),
-            "temperature": float(self.config.get("temperature", 1.0)),
-            "top_p": float(self.config.get("top_p", 0.95)),
-            "top_k": int(self.config.get("top_k", 64)),
-            "chat_template_kwargs": {"enable_thinking": False},
-        }
-        seen_text = False
-        for event in self.stream("/chat/completions", payload):
-            for choice in event.get("choices", []):
-                delta = choice.get("delta") or {}
-                if delta.get("tool_calls"):
-                    raise InferenceError("Startup greeting attempted a tool call")
-                text = visible.feed(delta.get("content") or "")
-                seen_text = seen_text or bool(text.strip())
-                yield from parser.feed(text)
-        if not cancel.is_set():
-            if not seen_text:
-                raise InferenceError("Reasoner returned no visible greeting")
-            yield from parser.flush()
-
     def knowledge(self, prompt):
         from .conversational_stream_parser import ConversationalStreamParser
 
@@ -268,44 +223,21 @@ class RemoteInference:
             "\nYou supply content to a separate Talker, which already handles acknowledgments and empathy. "
             "Supply only new useful substance or a necessary follow-up question. "
             "Do not greet, apologize, acknowledge, announce a search, or repeat the Talker's words. "
-            "For an explicit startup greeting, supply only the greeting itself. "
-            "For latest/current facts, use web_search when available; check result dates and never "
-            "present an old result as the latest. A retrieval date is not the event date. "
-            "If freshness cannot be established, say so instead of inventing a result. "
+            "If you cannot establish that a current fact is fresh, say so instead of inventing a result. "
             "Today's date is " + datetime.now(timezone.utc).date().isoformat() + "."
         )
-        payload["messages"].extend(getattr(self, "context_messages", []))
-        tools = getattr(self, "context_tools", [])
-        if tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = "auto"
-        calls = {}
         seen_text = False
         for event in self.stream("/chat/completions", payload):
             for choice in event.get("choices", []):
                 delta = choice.get("delta", {})
-                for call in delta.get("tool_calls") or []:
-                    entry = calls.setdefault(call.get("index", 0), {"id": "", "name": "", "arguments": ""})
-                    entry["id"] += call.get("id") or ""
-                    function = call.get("function") or {}
-                    entry["name"] += function.get("name") or ""
-                    entry["arguments"] += function.get("arguments") or ""
                 text = delta.get("content") or ""
                 safe_text = visible.feed(text)
                 seen_text = seen_text or bool(safe_text.strip())
                 yield from parser.feed(safe_text)
         if not cancel.is_set():
-            if not seen_text and not calls:
+            if not seen_text:
                 raise InferenceError("Reasoner returned no visible knowledge")
             yield from parser.flush()
-            allowed = {tool["function"]["name"] for tool in tools}
-            for call in calls.values():
-                if call["name"] not in allowed or not callable(getattr(self, "on_tool_call", None)):
-                    raise InferenceError("Reasoner requested an unavailable tool")
-                arguments = call["arguments"] or "{}"
-                if not isinstance(json.loads(arguments), dict):
-                    raise InferenceError("Reasoner returned invalid tool arguments")
-                self.on_tool_call(call["name"], arguments, call["id"] or "call_" + uuid4().hex)
 
     def completion(self, token_ids, stop_ids):
         payload = {

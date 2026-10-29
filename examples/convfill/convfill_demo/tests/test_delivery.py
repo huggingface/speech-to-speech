@@ -7,8 +7,11 @@ import time
 from queue import Empty, Queue
 from types import SimpleNamespace
 
-from convfill_demo.delivery import AUDIO_SAMPLE_RATE_HZ, DeliveryLedgerQueue
+import numpy as np
+
+from convfill_demo.delivery import DeliveryLedgerQueue, audio_duration_s
 from convfill_demo.pipeline import _attach_audio_state
+from speech_to_speech.api.openai_realtime.service import PIPELINE_SAMPLE_RATE
 from speech_to_speech.pipeline.events import AssistantOutputEvent
 from speech_to_speech.pipeline.messages import (
     AUDIO_RESPONSE_DONE,
@@ -23,7 +26,7 @@ def _text_event(text: str, response_key: str = "response-one") -> AssistantOutpu
 
 
 def _audio(seconds: float, response_key: str = "response-one") -> AudioOutput:
-    samples = int(AUDIO_SAMPLE_RATE_HZ * seconds)
+    samples = int(PIPELINE_SAMPLE_RATE * seconds)
     return AudioOutput(audio=b"\x00\x00" * samples, response_key=response_key)
 
 
@@ -46,6 +49,12 @@ def test_delivered_text_is_recorded_per_response_key():
     ledger.clear_response("response-one")
     assert ledger.delivered_text("response-one") == []
     assert ledger.delivered_text("response-two") == ["Other response."]
+
+
+def test_durations_use_the_pipeline_sample_rate():
+    # The output queue carries pipeline-rate PCM16; the client rate is applied later.
+    assert audio_duration_s(_audio(3.0)) == 3.0
+    assert audio_duration_s(AudioOutput(audio=np.zeros(PIPELINE_SAMPLE_RATE, dtype=np.int16))) == 1.0
 
 
 def test_audio_advances_the_playhead_and_expires_after_its_duration():
@@ -85,21 +94,6 @@ def test_sentinels_and_control_items_carry_no_playback_time():
         except Empty:
             break
     assert ledger.audio_playing() is False
-
-
-def test_a_direct_queue_flush_records_nothing():
-    """HF's ``_flush_queue`` barge-in path drains ``q.queue`` under ``q.mutex``."""
-    ledger = DeliveryLedgerQueue()
-    ledger.put(_text_event("Never delivered."))
-    ledger.put(_audio(5.0))
-
-    with ledger.mutex:
-        ledger.queue.clear()
-
-    assert ledger.delivered_text("response-one") == []
-    assert ledger.audio_playing() is False
-    assert ledger.pending_audio() is False
-    assert ledger.empty() is True
 
 
 class _FakeAdapter:

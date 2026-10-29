@@ -142,9 +142,8 @@ def test_background_failure_reaches_run_turn_and_rolls_back_history():
     assert system.dialogue_state_manager.responses == []
 
 
-@pytest.mark.parametrize("method", ["knowledge", "greeting"])
 @pytest.mark.parametrize("cancel", [True, False])
-def test_socket_stall_is_bounded_and_cancel_does_not_flush_partial_text(cancel, method):
+def test_socket_stall_is_bounded_and_cancel_does_not_flush_partial_text(cancel):
     started, release = threading.Event(), threading.Event()
 
     class Handler(BaseHTTPRequestHandler):
@@ -175,7 +174,7 @@ def test_socket_stall_is_bounded_and_cancel_does_not_flush_partial_text(cancel, 
 
     def run():
         try:
-            output.extend(getattr(remote, method)("prompt"))
+            output.extend(remote.knowledge("prompt"))
         except InferenceError as exc:
             errors.append(exc)
 
@@ -304,54 +303,6 @@ def test_talker_stops_on_a_turn_boundary_split_across_chunks():
     assert closed.is_set()
 
 
-def test_streamed_tools_keep_arguments_out_of_knowledge_and_preserve_context():
-    requests, calls = [], []
-
-    def respond(request):
-        requests.append(json.loads(request.content))
-        return httpx.Response(
-            200,
-            content=sse(
-                chat(
-                    tool_calls=[
-                        {"index": 0, "id": "call_1", "function": {"name": "web_search", "arguments": '{"query":'}}
-                    ]
-                ),
-                chat(tool_calls=[{"index": 0, "function": {"arguments": '"weather"}'}}]),
-            ),
-        )
-
-    remote = RemoteInference({"base_url": "http://model/v1", "model": "gemma"}, transport=httpx.MockTransport(respond))
-    messages = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}]}]
-    remote.configure_request(
-        messages=messages,
-        tools=[{"type": "function", "function": {"name": "web_search", "parameters": {"type": "object"}}}],
-        instructions="Be brief.",
-        on_tool_call=lambda *args: calls.append(args),
-    )
-    assert list(remote.knowledge("prompt")) == []
-    assert calls == [("web_search", '{"query":"weather"}', "call_1")]
-    assert requests[0]["messages"][-1] == messages[0]
-    assert "Be brief." in requests[0]["messages"][0]["content"]
-    assert requests[0]["tool_choice"] == "auto"
-
-
-def test_cancelled_tool_stream_never_dispatches_call():
-    remote = RemoteInference({"base_url": "http://model/v1", "model": "gemma"})
-    calls = []
-    remote.configure_request(
-        tools=[{"function": {"name": "web_search"}}], on_tool_call=lambda *args: calls.append(args)
-    )
-
-    def events(*args):
-        yield chat(tool_calls=[{"index": 0, "function": {"name": "web_search", "arguments": "{}"}}])
-        remote.cancel_event.set()
-
-    remote.stream = events
-    assert list(remote.knowledge("prompt")) == []
-    assert calls == []
-
-
 def _frontend_for_handoff():
     frontend = ConvFillFrontend.__new__(ConvFillFrontend)
     frontend.cancel_event = threading.Event()
@@ -374,26 +325,18 @@ def test_exact_sentence_echo_is_removed_before_speech_and_state_commit():
     assert frontend.dialogue_state_manager.responses == [text]
 
 
-def test_tool_continuation_preserves_prefix_and_commits_one_canonical_turn():
-    frontend = _frontend_for_handoff()
-    frontend.prepare_continuation("A synthetic question", "Let me check that for you.")
-    captured = []
+def test_session_instructions_reach_the_reasoner():
+    requests = []
 
-    def infer(**kwargs):
-        captured.append(
-            frontend.turn_state_manager.build_prompt(
-                kwargs["current_user_input"], kwargs["current_thought"], kwargs["history"]
-            )
-        )
-        yield "Let me check that for you."
-        yield "Here is the verified result."
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, content=sse(chat("A useful fact. ")))
 
-    frontend.infer = infer
-    assert list(frontend.infer_and_update_state("Verified result.")) == ["Here is the verified result."]
-    assert "<a>Let me check that for you. <end><k>Verified result.<end><a>" in captured[0]
-    _, text, _ = frontend.get_final_response_and_reset_turn_state()
-    assert text == "Let me check that for you. Here is the verified result."
-    assert len(frontend.dialogue_state_manager.responses) == 1
+    remote = RemoteInference({"base_url": "http://model/v1", "model": "gemma"}, transport=httpx.MockTransport(respond))
+    remote.configure_request(instructions="Be brief.")
+    assert list(remote.knowledge("prompt")) == ["A useful fact."]
+    assert "Be brief." in requests[0]["messages"][0]["content"]
+    assert "tools" not in requests[0] and len(requests[0]["messages"]) == 2
 
 
 def test_echo_guard_is_local_and_never_drops_a_changed_answer():
@@ -408,48 +351,3 @@ def test_echo_guard_is_local_and_never_drops_a_changed_answer():
     frontend = _frontend_for_handoff()
     frontend.infer = lambda **kwargs: iter(["Let me check that.", "Let me check that.", "Here is the answer."])
     assert list(frontend.infer_and_update_state("Fact.")) == ["Let me check that.", "Here is the answer."]
-
-
-def test_fast_tool_continuation_does_not_restart_with_a_filler():
-    class Backend:
-        def backend_infer(self):
-            time.sleep(0.05)
-            yield "The verified result."
-
-    system = _bare_system(Backend())
-    system.convfill_frontend = SimpleNamespace(turn_state_manager=SimpleNamespace(responses=["Let me check that."]))
-    assert list(system.backend_fn()) == ["The verified result."]
-
-
-def test_direct_greeting_filters_thoughts_and_does_not_use_knowledge_or_tools():
-    requests = []
-
-    def respond(request):
-        requests.append(json.loads(request.content))
-        return httpx.Response(
-            200,
-            content=sse(
-                chat(None),
-                chat("", reasoning_content="private"),
-                chat("<think>hidden</think>Hello! "),
-                chat("What would you like to talk about?"),
-            ),
-        )
-
-    remote = RemoteInference(
-        {"base_url": "http://model/v1", "model": "gemma", "enable_thinking": True},
-        transport=httpx.MockTransport(respond),
-    )
-    remote.configure_request(
-        tools=[{"type": "function", "function": {"name": "web_search"}}],
-        messages=[{"role": "user", "content": "Do not include old context"}],
-    )
-    assert list(remote.greeting("Greet the user.", instructions="Be friendly.")) == [
-        "Hello!",
-        "What would you like to talk about?",
-    ]
-    payload = requests[0]
-    assert "tools" not in payload and payload["chat_template_kwargs"] == {"enable_thinking": False}
-    assert "Supply concise factual" not in payload["messages"][0]["content"]
-    assert "Be friendly." in payload["messages"][0]["content"]
-    assert len(payload["messages"]) == 2 and payload["max_tokens"] <= 96
