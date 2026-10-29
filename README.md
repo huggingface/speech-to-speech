@@ -874,6 +874,10 @@ The latest supported v3.2 CPU checkpoint downloads from the Hugging Face Hub on 
 `--smart_turn_model_path /path/to/model.onnx` to use a local model, or `--no_smart_turn` to disable Smart Turn.
 Smart Turn is enabled by default for server sessions and the packaged local client.
 
+Applications that own their VAD and turn policy can install the
+[standalone Smart Turn analyzer](packages/smart-turn/README.md) without the
+conversation pipeline. Both installations use the same analyzer implementation.
+
 Tune the completion cutoff with `--smart_turn_threshold` (default `0.5`). A higher threshold makes ambiguous
 pauses more likely to use the longer speculative response grace.
 

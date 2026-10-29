@@ -5,9 +5,17 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      package_path:
+        description: "Project directory: . for the framework, or packages/<component>"
+        type: string
+        default: "."
 
 permissions:
   contents: read
+
+env:
+  PACKAGE_PATH: ${{ inputs.package_path || '.' }}
 
 jobs:
   build:
@@ -22,10 +30,20 @@ jobs:
         with:
           version: "latest"
           enable-cache: false
+      - name: Validate project path
+        run: |
+          if [[ "$PACKAGE_PATH" != "." && ! "$PACKAGE_PATH" =~ ^packages/[a-z0-9-]+$ ]]; then
+            echo "::error::Expected . or packages/<component>."
+            exit 1
+          fi
       - name: Build distributions
-        run: uv build
+        run: uv build "$PACKAGE_PATH" --out-dir dist
       - name: Check package metadata
         run: uvx twine check --strict dist/*
+      - name: Verify declared dependencies before publishing
+        run: |
+          wheel=$(find dist -name '*.whl' -print -quit)
+          uv run --isolated --no-project --with "$wheel" python -c "import importlib.metadata"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist
@@ -36,7 +54,6 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/project/speech-to-speech/
     permissions:
       contents: read
       id-token: write

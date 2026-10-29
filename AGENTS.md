@@ -10,6 +10,12 @@
 
 PyPI publishing is handled by GitHub Actions in `.github/workflows/publish.yml`. The workflow runs on pushed tags that match `v*`, builds the package with `uv build`, checks the artifacts with `twine check --strict`, and publishes through the configured `pypi` environment.
 
+Manual runs can select `package_path=packages/<component>` to publish a standalone
+component. Tag releases still select the framework. Publish required components
+first: the workflow verifies that the selected wheel's declared dependencies can
+be installed before it reaches the publishing job. Each distribution needs its
+own HF-controlled PyPI project and trusted publisher configuration.
+
 To prepare a release:
 
 1. Confirm the intended version is not already published on PyPI.

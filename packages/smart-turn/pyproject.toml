@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=77.0.3", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "speech-to-speech-smart-turn"
+version = "0.1.0"
+description = "Headless Smart Turn v3.2 inference from Hugging Face speech-to-speech"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = [
+    "huggingface-hub>=0.34.0",
+    "numpy>=1.26.0",
+    "onnxruntime>=1.17.0",
+    "scipy>=1.10.0",
+    "transformers>=4.57.6,<6",
+]
+
+[dependency-groups]
+dev = ["pytest", "ruff", "mypy"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["hf_s2s_smart_turn*"]
+
+[tool.setuptools.package-data]
+hf_s2s_smart_turn = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]

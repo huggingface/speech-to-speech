@@ -47,6 +47,7 @@ dependencies = [
     "pywebrtc-audio>=0.2.0,<0.3",
     "soundfile>=0.13.0; platform_system == 'Darwin'",
     "soxr>=0.3.2",
+    "speech-to-speech-smart-turn==0.1.0",
     "torch==2.11.0; platform_system == 'Darwin'",
     "torch>=2.4.0; platform_system != 'Darwin'",
     "torchaudio==2.11.0; platform_system == 'Darwin'",
@@ -145,6 +146,9 @@ asyncio_mode = "auto"
 required-version = ">=0.13.4"
 package = true
 prerelease = "allow"
+
+[tool.uv.sources]
+speech-to-speech-smart-turn = { path = "packages/smart-turn" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
