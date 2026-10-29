@@ -68,8 +68,10 @@ class ResponsesApiLanguageModelHandlerArguments(LanguageModelBaseArguments):
     responses_api_request_timeout_s: float = field(
         default=20.0,
         metadata={
-            "help": "Read timeout in seconds for chat completion requests to the OpenAI-compatible API. "
-            "The timeout bounds the wait for the upstream model to start answering, so agent-style backends "
-            "that run tools before replying may need 60-120. Default is 20.0."
+            "help": "Timeout in seconds for each request to the OpenAI-compatible API, including warmup and history "
+            "compaction. It bounds every wait for data: the first response bytes and each gap between streamed "
+            "chunks; the connect timeout stays capped at 10s. The OpenAI SDK retries a timed-out turn request "
+            "twice, so a provider that never responds takes about 3x this value before the fallback reply. Raise "
+            "it for slow upstreams such as agent servers that run tools before replying. Default is 20.0."
         },
     )
