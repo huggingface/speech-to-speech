@@ -121,6 +121,28 @@ jobs:
           name: dist
           path: dist/*
 
+  qwen-vllm-headless:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.14"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "latest"
+      - run: uv sync --project packages/qwen-vllm-stt --group dev
+      - run: uv run --project packages/qwen-vllm-stt ruff check packages/qwen-vllm-stt
+      - run: uv run --project packages/qwen-vllm-stt ruff format --check packages/qwen-vllm-stt
+      - run: uv run --project packages/qwen-vllm-stt mypy packages/qwen-vllm-stt/src
+      - run: uv run --project packages/qwen-vllm-stt pytest -q packages/qwen-vllm-stt/tests
+      - run: uv build packages/qwen-vllm-stt --out-dir packages/qwen-vllm-stt/dist
+      - run: uvx twine check --strict packages/qwen-vllm-stt/dist/*
+
   # Optional OmniVoice compatibility checks live in omnivoice.yml.
   # Keep these checks focused on the default installation on every PR.
   install-smoke:

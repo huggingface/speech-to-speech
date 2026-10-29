@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=77.0.3", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "speech-to-speech-qwen-vllm"
+version = "0.1.0"
+description = "Headless stateful Qwen3-ASR inference for speech-to-speech"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = ["numpy>=1.26"]
+
+[project.optional-dependencies]
+vllm = ["qwen-asr[vllm]>=0.0.6,<0.1"]
+
+[dependency-groups]
+dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hf_s2s_qwen_vllm = ["py.typed"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 120
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]

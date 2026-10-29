@@ -10,6 +10,11 @@ speech-to-speech local --stt whisper --language auto --stt_device cuda
 
 `--stt openai`, `openai-realtime`, and `vllm-realtime` send audio to a separate server or provider; see the [STT endpoint guide](../../../docs/openai-compatible-stt.md).
 
+Applications that own their VAD and turn boundary can use the
+[standalone stateful Qwen3-ASR/vLLM engine](../../../packages/qwen-vllm-stt/README.md).
+It exposes per-stream partials and explicit commits without the conversation
+pipeline; it does not change the backends below.
+
 ## Available STT Modes (`--stt`)
 
 - `whisper` → `STT/whisper_stt_handler.py`
