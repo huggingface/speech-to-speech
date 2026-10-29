@@ -375,6 +375,205 @@ async def test_queue_rejects_locally_expired_oauth_before_polling(monkeypatch):
     }
 
 
+@pytest.fixture
+def space_search(monkeypatch, tmp_path):
+    """A deployed Space with a server Serper key, a fresh usage DB, and a fake
+    Serper that records which key each request spent."""
+    serper_keys = []
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, url, headers=None, json=None):
+            serper_keys.append(headers["X-API-KEY"])
+            return httpx.Response(200, json={"organic": [{"title": "t", "link": "u"}]})
+
+    monkeypatch.setattr(demo_server, "SPACE_ID", "smolagents/hf-realtime-voice")
+    monkeypatch.setattr(demo_server, "SERPER_KEY", "server-key")
+    monkeypatch.setattr(demo_server, "SERVER_SEARCH", True)
+    monkeypatch.setattr(demo_server.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(demo_server.auth, "oauth_login_required_reason", lambda request: None)
+    monkeypatch.setenv("USAGE_DB_PATH", str(tmp_path / "usage.sqlite3"))
+    monkeypatch.setattr(demo_server.limiter, "_db_path", None)
+    demo_server.limiter.init()
+    return serper_keys
+
+
+def _as(monkeypatch, tier, keys=("k_alice",)):
+    monkeypatch.setattr(demo_server.auth, "resolve_identity", lambda request: (tier, list(keys), None))
+
+
+async def _search(session_id=None, key=None):
+    req = demo_server.SearchRequest.model_validate({"query": "weather", "sessionId": session_id, "key": key})
+    return await demo_server.search(req, object())
+
+
+async def test_search_on_space_refuses_anonymous_callers(monkeypatch, space_search):
+    _as(monkeypatch, "anon", ("k_ip", "k_cookie"))
+
+    with pytest.raises(demo_server.HTTPException) as exc:
+        await _search()
+
+    assert exc.value.status_code == 401
+    assert space_search == []
+
+
+async def test_search_on_space_refuses_expired_sign_in(monkeypatch, space_search):
+    monkeypatch.setattr(demo_server.auth, "oauth_login_required_reason", lambda request: "token_expired")
+    monkeypatch.setattr(
+        demo_server.auth,
+        "resolve_identity",
+        lambda request: pytest.fail("expired OAuth must not resolve as anonymous"),
+    )
+
+    with pytest.raises(demo_server.HTTPException) as exc:
+        await _search()
+
+    assert exc.value.status_code == 401
+    assert space_search == []
+
+
+@pytest.mark.parametrize("tier", ["free", "pro", "org"])
+async def test_search_needs_the_callers_live_session(monkeypatch, space_search, tier):
+    _as(monkeypatch, tier)
+    demo_server.limiter.begin("mine", ["k_alice"], tier)
+    demo_server.limiter.begin("theirs", ["k_bob"], tier)
+
+    for session_id in (None, "unknown", "theirs"):
+        with pytest.raises(demo_server.HTTPException) as exc:
+            await _search(session_id)
+        assert exc.value.status_code == 403
+
+    response = await _search("mine")
+    assert response.status_code == 200
+    assert space_search == ["server-key"]
+
+    demo_server.limiter.end("mine")
+    with pytest.raises(demo_server.HTTPException) as exc:
+        await _search("mine")
+    assert exc.value.status_code == 403
+    assert space_search == ["server-key"]
+
+
+async def test_search_needs_a_heartbeating_session(monkeypatch, space_search):
+    _as(monkeypatch, "pro")
+    demo_server.limiter.begin("mine", ["k_alice"], "pro")
+    _advance(monkeypatch, demo_server.limiter.REAP_AFTER_SEC + 1)
+
+    with pytest.raises(demo_server.HTTPException) as exc:
+        await _search("mine")
+    assert exc.value.status_code == 403
+
+    assert demo_server.limiter.heartbeat("mine")
+    assert (await _search("mine")).status_code == 200
+
+
+def _advance(monkeypatch, seconds):
+    later = demo_server.limiter.time.time() + seconds
+    monkeypatch.setattr(demo_server.limiter.time, "time", lambda: later)
+
+
+async def test_unlimited_search_recovers_after_a_sweep(monkeypatch, space_search):
+    _as(monkeypatch, "pro")
+    demo_server.limiter.begin("mine", ["k_alice"], "pro")
+    _advance(monkeypatch, demo_server.limiter.REAP_AFTER_SEC * 2 + 1)
+    demo_server.limiter.sweep()
+
+    with pytest.raises(demo_server.HTTPException) as exc:
+        await _search("mine")
+    assert exc.value.status_code == 403
+
+    assert demo_server.limiter.heartbeat("mine")
+    assert (await _search("mine")).status_code == 200
+
+    demo_server.limiter.end("mine")
+    assert not demo_server.limiter.heartbeat("mine")
+    with pytest.raises(demo_server.HTTPException) as exc:
+        await _search("mine")
+    assert exc.value.status_code == 403
+
+
+def test_sweep_still_reaps_silent_metered_sessions(monkeypatch, space_search):
+    demo_server.limiter.begin("mine", ["k_alice"], "free")
+    _advance(monkeypatch, demo_server.limiter.REAP_AFTER_SEC * 2 + 1)
+    demo_server.limiter.sweep()
+
+    assert not demo_server.limiter.heartbeat("mine")
+
+
+async def test_unlimited_grants_are_recorded_but_never_debited(monkeypatch, space_search):
+    monkeypatch.setattr(demo_server, "LIMITER_ENABLED", True)
+
+    response = await demo_server._finalize_grant({"session_id": "mine"}, ["k_alice"], "org", False, None)
+    _advance(monkeypatch, 600)
+    assert demo_server.limiter.heartbeat("mine")
+
+    grant = json.loads(response.body)
+    assert grant["limited"] is False
+    assert grant["heartbeatSec"] == demo_server.limiter.HEARTBEAT_SEC
+    assert demo_server.limiter.session_live("mine", ["k_alice"])
+    # Were it debited, a tier that falls back to "free" would find its budget spent.
+    assert demo_server.limiter.remaining(["k_alice"], "free") == demo_server.limiter.FREE_SEC
+
+
+async def test_server_key_searches_are_capped_per_user_per_day(monkeypatch, space_search):
+    monkeypatch.setattr(demo_server.limiter, "SEARCH_PER_DAY", 2)
+    _as(monkeypatch, "org")
+    demo_server.limiter.begin("mine", ["k_alice"], "org")
+
+    await _search("mine")
+    await _search("mine")
+    with pytest.raises(demo_server.HTTPException) as exc:
+        await _search("mine")
+
+    assert exc.value.status_code == 429
+    assert space_search == ["server-key", "server-key"]
+    _as(monkeypatch, "org", ("k_someone_else",))
+    demo_server.limiter.begin("theirs", ["k_someone_else"], "org")
+    assert (await _search("theirs")).status_code == 200
+
+
+async def test_user_supplied_key_skips_the_server_key_gate(monkeypatch, space_search):
+    _as(monkeypatch, "anon", ("k_ip", "k_cookie"))
+
+    response = await _search(key="their-key")
+
+    assert response.status_code == 200
+    assert space_search == ["their-key"]
+
+
+async def test_server_key_is_never_spent_without_server_search(monkeypatch, space_search):
+    monkeypatch.setattr(demo_server, "SERVER_SEARCH", False)
+
+    with pytest.raises(demo_server.HTTPException) as exc:
+        await _search()
+
+    assert exc.value.status_code == 503
+    assert space_search == []
+    assert demo_server.config()["search"] is False
+
+
+async def test_local_search_is_not_gated(monkeypatch, space_search):
+    monkeypatch.setattr(demo_server, "SPACE_ID", "")
+    monkeypatch.setattr(
+        demo_server.auth,
+        "resolve_identity",
+        lambda request: pytest.fail("local search must not resolve an identity"),
+    )
+
+    response = await _search()
+
+    assert response.status_code == 200
+    assert space_search == ["server-key"]
+
+
 def test_websocket_client_classifies_session_401_as_login_required():
     node = shutil.which("node")
     if node is None:

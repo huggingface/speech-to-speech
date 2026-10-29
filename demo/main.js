@@ -882,6 +882,8 @@ async function execWebSearch(query) {
   const body = { query };
   // Only send a user key when there's no server key (server prefers its own).
   if (!serverSearchKey && userSearchKey) body.key = userSearchKey;
+  // On the Space, the server key only serves searches from a live session.
+  if (trackedSessionId) body.sessionId = trackedSessionId;
 
   const res = await fetch("api/search", {
     method: "POST",
@@ -1480,6 +1482,9 @@ async function doStart(audioContext = null) {
     if (info?.sessionId) {
       trackedSessionId = info.sessionId;
       trackedTier = info.tier || "anon";
+      // Heartbeat while the user decides to join, or the server reaps the
+      // granted session as abandoned.
+      if (info.heartbeatSec) startHeartbeat(info.heartbeatSec, !!info.limited);
     }
     startJoinCountdown(expiresSec);
   });
@@ -1528,12 +1533,13 @@ async function doStart(audioContext = null) {
     // A slot was granted — we're out of the queue; drop the ticket reference so
     // teardown doesn't try to leave a line we already left.
     queuedTicketId = "";
-    // A metered tier (anon / free): heartbeat so the server can extend the
-    // reservation and tell us when the daily budget runs out. PRO isn't limited.
-    if (info.limited && info.sessionId) {
+    // Heartbeat every granted session: it shows the server the conversation is
+    // live (web search requires that), and for a metered tier (anon / free) it
+    // extends the reservation and tells us when the daily budget runs out.
+    if (info.sessionId && info.heartbeatSec) {
       trackedSessionId = info.sessionId;
       trackedTier = info.tier || "anon";
-      startHeartbeat(info.heartbeatSec || 5);
+      startHeartbeat(info.heartbeatSec, !!info.limited);
     }
   });
   c.addEventListener("input-level", (e) => {
@@ -1554,10 +1560,11 @@ async function doStart(audioContext = null) {
 
 // ── Conversation-time heartbeat ─────────────────────────────────────────────
 
-/** Ping the server every `sec` seconds so it can meter the live session; when
- *  it reports the daily budget is spent, cut the call and show the limit modal.
- *  @param {number} sec */
-function startHeartbeat(sec) {
+/** Ping the server every `sec` seconds so it knows the session is live and can
+ *  meter it; when it reports a metered session's daily budget is spent, cut the
+ *  call and show the limit modal.
+ *  @param {number} sec @param {boolean} limited */
+function startHeartbeat(sec, limited) {
   stopHeartbeat();
   heartbeatTimer = window.setInterval(async () => {
     if (!trackedSessionId) return;
@@ -1569,7 +1576,7 @@ function startHeartbeat(sec) {
         keepalive: true,
       });
       const json = await res.json().catch(() => ({}));
-      if (json.expired) await onLimitReached();
+      if (json.expired && limited) await onLimitReached();
     } catch (err) {
       // A transient network blip shouldn't kill the call; the next tick retries.
       if (DEBUG) console.debug("[ui] heartbeat failed:", err);
