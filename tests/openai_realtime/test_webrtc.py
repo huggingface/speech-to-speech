@@ -19,7 +19,7 @@ import asyncio
 import base64
 import json
 import time
-from queue import Empty, Queue
+from queue import Empty
 from threading import Event as ThreadingEvent
 from unittest.mock import AsyncMock, Mock
 
@@ -41,8 +41,7 @@ from aiortc.rtp import RtcpPacket, RtcpRrPacket, RtcpSrPacket, RtpPacket, is_rtc
 from starlette.testclient import TestClient  # noqa: E402
 
 import speech_to_speech.api.openai_realtime.websocket_router as router_module  # noqa: E402
-from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit  # noqa: E402
-from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService  # noqa: E402
+from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES  # noqa: E402
 from speech_to_speech.api.openai_realtime.transports import SessionTransport  # noqa: E402
 from speech_to_speech.api.openai_realtime.webrtc_session import (  # noqa: E402
     AUDIO_PTIME,
@@ -52,7 +51,6 @@ from speech_to_speech.api.openai_realtime.webrtc_session import (  # noqa: E402
     PipelineAudioTrack,
     WebRTCSession,
 )
-from speech_to_speech.pipeline.cancel_scope import CancelScope  # noqa: E402
 from speech_to_speech.pipeline.events import (  # noqa: E402
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
@@ -66,6 +64,7 @@ from speech_to_speech.pipeline.messages import (  # noqa: E402
     AssistantToolCallPart,
     AudioOutput,
 )
+from tests.openai_realtime.conftest import make_pipeline_unit  # noqa: E402
 
 from .test_openai_client import _ServerEnv  # noqa: E402
 
@@ -79,23 +78,8 @@ RECV_TIMEOUT_S = 1.0
 # ---------------------------------------------------------------------------
 
 
-def _make_unit() -> PipelineUnit:
-    text_prompt_queue: Queue = Queue()
-    should_listen = ThreadingEvent()
-    should_listen.set()
-    service = RealtimeService(text_prompt_queue=text_prompt_queue, should_listen=should_listen)
-    return PipelineUnit(
-        index=0,
-        service=service,
-        cancel_scope=CancelScope(),
-        should_listen=should_listen,
-        response_playing=ThreadingEvent(),
-        input_queue=Queue(),
-        output_queue=Queue(),
-        text_output_queue=Queue(),
-        text_prompt_queue=text_prompt_queue,
-        handlers=[],
-    )
+def _make_unit():
+    return make_pipeline_unit()
 
 
 class _FakeTransport(SessionTransport):
