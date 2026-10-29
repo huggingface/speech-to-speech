@@ -2,16 +2,6 @@
   "model_name": "Qwen/Qwen3-0.6B",
   "backend": "vllm",
   "convfill_hf_pretrained_path": "vysri/Qwen-0.6B-ConvFill",
-  "convfill_hf_mlx_pretrained_path": "vysri/Qwen-0.6B-ConvFill_mlx_q8",
-  "inference_params": {
-    "enable_thinking": false
-  },
-  "add_special_tokens": true,
-  "special_tokens": {
-    "additional_special_tokens": [
-      "<sil>"
-    ]
-  },
   "boundary_tokens": {
     "USER_START": "<|im_start|>user\n",
     "KNOWLEDGE_START": "<|im_start|>knowledge\n",

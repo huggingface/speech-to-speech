@@ -4,31 +4,12 @@ from collections.abc import Sequence
 from queue import Empty
 from typing import Any
 
-import nltk
+from speech_to_speech.api.openai_realtime.audio_client import run_realtime_audio_client
+from speech_to_speech.cli import parse_command, parse_talk_arguments
 
-# The pinned HF revision checks this tagger under ``tokenizers/`` even though
-# NLTK installs it under ``taggers/``. Redirect only that lookup while HF's
-# pipeline module initializes so an installed asset does not trigger a network
-# download on every launch.
-_nltk_find = nltk.data.find
-
-
-def _find_hf_nltk_asset(resource_name: str, *args: Any, **kwargs: Any) -> Any:
-    if resource_name == "tokenizers/averaged_perceptron_tagger_eng":
-        resource_name = "taggers/averaged_perceptron_tagger_eng"
-    return _nltk_find(resource_name, *args, **kwargs)
-
-
-nltk.data.find = _find_hf_nltk_asset
-try:
-    from speech_to_speech.api.openai_realtime.audio_client import run_realtime_audio_client
-    from speech_to_speech.cli import parse_command, parse_talk_arguments
-finally:
-    nltk.data.find = _nltk_find
-
-from .backend import register_convfill_backend  # noqa: E402
-from .delivery import DeliveryLedgerQueue  # noqa: E402
-from .handler import ConvFillRealtimeHandler  # noqa: E402
+from .backend import register_convfill_backend
+from .delivery import DeliveryLedgerQueue
+from .handler import ConvFillRealtimeHandler
 
 
 def _attach_audio_state(manager: Any) -> Any:
@@ -36,13 +17,13 @@ def _attach_audio_state(manager: Any) -> Any:
 
     Every assistant text event and audio chunk the realtime send loop dispatches
     is dequeued from this queue, so subclassing it is the only place ConvFill can
-    observe what the browser was actually sent. ``build_pipeline`` returns before
+    estimate playback for its silence scheduler. ``build_pipeline`` returns before
     ``ThreadManager.start`` launches any handler thread, so the swap happens while
     the queue is quiescent.
     """
     realtime_server = next((handler for handler in manager.handlers if hasattr(handler, "pool")), None)
     if realtime_server is None:
-        raise RuntimeError("Could not locate Hugging Face RealtimeServer in the pipeline manager.")
+        raise RuntimeError("Could not locate the RealtimeServer in the pipeline manager.")
     for unit in realtime_server.pool:
         adapter = next(
             (handler for handler in unit.handlers if isinstance(handler, ConvFillRealtimeHandler)),
@@ -76,19 +57,16 @@ def main(argv: Sequence[str] | None = None) -> None:
     # Register only in this opt-in entry point, before the pipeline creates its
     # argument dataclasses. Importing delivery helpers must not change defaults.
     register_convfill_backend()
-    nltk.data.find = _find_hf_nltk_asset
-    try:
-        from speech_to_speech import s2s_pipeline
-    finally:
-        nltk.data.find = _nltk_find
+    # Imported here: the pipeline module checks NLTK assets at import time.
+    from speech_to_speech import s2s_pipeline
+
     command, command_args = parse_command(argv)
     if command == "talk":
         run_realtime_audio_client(parse_talk_arguments(command_args))
         return
 
-    # The pinned upstream builder owns the full VAD/STT/TTS/realtime stack. A
-    # narrow wrapper swaps in the delivery ledger ConvFill needs to schedule
-    # <sil> fillers and to keep an interrupted turn in history.
+    # The builder owns the full VAD/STT/TTS/realtime stack. A narrow wrapper
+    # swaps in the delivery ledger ConvFill needs to schedule <sil> fillers.
     original_build_pipeline = s2s_pipeline.build_pipeline
 
     def build_pipeline_with_convfill(*args: Any, **kwargs: Any) -> Any:

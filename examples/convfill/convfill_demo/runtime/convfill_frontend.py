@@ -1,19 +1,10 @@
 import json
-import logging
 import os
-import queue
 import re
 import threading
 import time
 
-import torch
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    StoppingCriteria,
-    StoppingCriteriaList,
-    TextIteratorStreamer,
-)
+from transformers import AutoTokenizer
 
 from convfill_demo.runtime.turn_state_manager import TurnStateManager
 
@@ -41,23 +32,11 @@ def _without_repeated_sentence_prefix(text: str, previous: str) -> str:
     return " ".join(incoming)
 
 
-# remove faulty Gemma error
-logging.getLogger("transformers.utils.loading_report").setLevel(logging.ERROR)
-
-# proceess-wide cache
-_MODEL_CACHE: dict = {}
-_MODEL_CACHE_LOCK = threading.Lock()
-
-_DTYPE_NAMES = {
-    "bf16": torch.bfloat16,
-}
-
-
 class ConvFillFrontend:
-    def __init__(self, model_config_path, dialogue_state_manager, device: str = "cpu", dtype: str | None = None):
+    """The fine-tuned Talker, served by vLLM through raw completions."""
+
+    def __init__(self, model_config_path, dialogue_state_manager):
         self.model_config_path = model_config_path
-        self.device = device
-        self.dtype = dtype
 
         with open(model_config_path, "r") as f:
             model_config = json.load(f)
@@ -65,16 +44,13 @@ class ConvFillFrontend:
         self.model_config = model_config
 
         self.boundary_tokens = self.model_config["boundary_tokens"]
-        self.special_tokens = self.model_config["special_tokens"]
-        self.add_special_tokens = self.model_config["add_special_tokens"]
         self.model_name = self.model_config["model_name"]
-
-        # backend defaults to mlx
-        self.backend = self.model_config.get("backend", "mlx")
+        if self.model_config.get("backend") != "vllm":
+            raise ValueError(f"{model_config_path} must use the vllm Talker backend")
 
         self.cancel_event = threading.Event()
         self.remote = None
-        self.model, self.tokenizer = self.load_model()
+        self.tokenizer = self.load_tokenizer()
         self.turn_state_manager = TurnStateManager(boundary_tokens=self.boundary_tokens)
         self.dialogue_state_manager = dialogue_state_manager
         self.last_generate_ms: float | None = None
@@ -85,55 +61,15 @@ class ConvFillFrontend:
     def get_boundary_tokens(self):
         return self.boundary_tokens
 
-    def load_model(self):
-        if self.backend == "vllm":
-            from .remote_inference import RemoteInference
+    def load_tokenizer(self):
+        from .remote_inference import RemoteInference
 
-            checkpoint = self.model_config["convfill_hf_pretrained_path"]
-            revision = self.model_config.get("revision", "main")
-            tokenizer = AutoTokenizer.from_pretrained(checkpoint, revision=revision)
-            self._validate_remote_tokenizer(tokenizer)
-            self.remote = RemoteInference({"model": checkpoint, **self.model_config.get("remote", {})})
-            return None, tokenizer
-        if self.backend == "mlx":
-            model_checkpoint_path = self.model_config.get("convfill_hf_mlx_pretrained_path")
-        else:
-            model_checkpoint_path = self.model_config.get("convfill_hf_pretrained_path")
-
-        if not model_checkpoint_path:
-            field_name = "convfill_hf_mlx_pretrained_path" if self.backend == "mlx" else "convfill_hf_pretrained_path"
-            raise ValueError(f"{self.model_config_path} is missing {field_name}")
-
-        config_dtype = self.model_config.get("torch_dtype")
-        if self.dtype is not None:
-            resolved_dtype = _DTYPE_NAMES[self.dtype]
-        elif config_dtype is not None:
-            resolved_dtype = _DTYPE_NAMES[config_dtype]
-        else:
-            resolved_dtype = torch.bfloat16
-
-        cache_key = (
-            model_checkpoint_path,
-            self.backend,
-            bool(self.add_special_tokens),
-            json.dumps(self.special_tokens, sort_keys=True) if self.special_tokens else "",
-            self.device,
-            str(resolved_dtype),
-        )
-        with _MODEL_CACHE_LOCK:
-            cached = _MODEL_CACHE.get(cache_key)
-            if cached is not None:
-                model, tokenizer = cached
-                print("[MODEL SETUP] REUSING CACHED MODEL", self.model_name, flush=True)
-                return model, tokenizer
-
-            if self.backend == "mlx":
-                model, tokenizer = self._load_mlx(model_checkpoint_path)
-            else:
-                model, tokenizer = self._load_hf(model_checkpoint_path, resolved_dtype)
-
-            _MODEL_CACHE[cache_key] = (model, tokenizer)
-            return model, tokenizer
+        checkpoint = self.model_config["convfill_hf_pretrained_path"]
+        revision = self.model_config.get("revision", "main")
+        tokenizer = AutoTokenizer.from_pretrained(checkpoint, revision=revision)
+        self._validate_remote_tokenizer(tokenizer)
+        self.remote = RemoteInference({"model": checkpoint, **self.model_config.get("remote", {})})
+        return tokenizer
 
     def _validate_remote_tokenizer(self, tokenizer):
         expected = self.model_config.get("expected_token_ids", {})
@@ -164,175 +100,12 @@ class ConvFillFrontend:
         ]
         yield from self.remote.completion(ids, sorted(set(stop_ids)))
 
-    def _load_hf(self, model_checkpoint_path, resolved_dtype):
-        model = AutoModelForCausalLM.from_pretrained(
-            model_checkpoint_path,
-            torch_dtype=resolved_dtype,
-        )
-        tokenizer = AutoTokenizer.from_pretrained(model_checkpoint_path)
-        print("[MODEL SETUP] LOADED HF MODEL", self.model_name, "dtype:", resolved_dtype, flush=True)
-        print("[MODEL SETUP] LOADED WEIGHTS FROM", model_checkpoint_path, flush=True)
-
-        current_vocab = model.get_input_embeddings().weight.shape[0]
-
-        if tokenizer.pad_token is None:
-            tokenizer.add_special_tokens({"pad_token": "<pad>"})
-        print("[MODEL SETUP] PAD TOKEN ID:", tokenizer.pad_token_id, flush=True)
-
-        if self.add_special_tokens:
-            tokenizer.add_special_tokens(self.special_tokens)
-        print("[MODEL SETUP] ADDED SPECIAL TOKENS:", self.special_tokens, flush=True)
-
-        if len(tokenizer) != current_vocab:
-            model.resize_token_embeddings(len(tokenizer))
-            model.tie_weights()
-
-        model.to(self.device)
-        model.tie_weights()
-        model.eval()
-        print(f"[MODEL SETUP] MOVED MODEL TO DEVICE: {self.device}", flush=True)
-
-        # warmup
-        with torch.no_grad():
-            warmup_ids = tokenizer("hello", return_tensors="pt")["input_ids"].to(self.device)
-            model.generate(
-                input_ids=warmup_ids,
-                max_new_tokens=8,
-                do_sample=False,
-                pad_token_id=tokenizer.pad_token_id,
-            )
-        print("[MODEL SETUP] WARMED UP", self.model_name, flush=True)
-        return model, tokenizer
-
-    def _load_mlx(self, model_checkpoint_path):
-        import mlx_lm
-
-        model, tokenizer = mlx_lm.load(model_checkpoint_path)
-        print("[MODEL SETUP] LOADED MLX MODEL", self.model_name, flush=True)
-        print("[MODEL SETUP] LOADED WEIGHTS FROM", model_checkpoint_path, flush=True)
-
-        if self.add_special_tokens:
-            for tok in self.special_tokens.get("additional_special_tokens", []):
-                ids = tokenizer.encode(tok, add_special_tokens=False)
-                assert len(ids) == 1, (
-                    f"Special token {tok!r} did not survive MLX conversion as a "
-                    f"single token id (got {ids}). Re-run convert_to_mlx_q8 or "
-                    f"check the source checkpoint's tokenizer."
-                )
-
-        # register the END boundary as an extra stop so generation halts
-        end_tok = self.boundary_tokens["END"].strip()
-        try:
-            tokenizer.add_eos_token(end_tok)
-        except Exception as e:
-            print(f"[MODEL SETUP] WARNING: could not register extra EOS {end_tok!r}: {e}", flush=True)
-
-        # warmup
-        _ = mlx_lm.generate(model, tokenizer, prompt="hello", max_tokens=4, verbose=False)
-        print("[MODEL SETUP] WARMED UP", self.model_name, flush=True)
-        return model, tokenizer
-
     def reset_turn_state(self):
         self.turn_state_manager.reset()
 
-    def get_thoughts_and_reset_turn_state(self):
-        """Return this turn's consumed thoughts and drop the partial turn.
-
-        Used when a turn is interrupted: the response the user heard is decided
-        by the transport, but the Reasoner knowledge that produced it is only
-        known here.
-        """
-        thoughts = list(self.turn_state_manager.thoughts)
-        self.reset_turn_state()
-        return thoughts
-
-    def _iter_hf_chunks(self, prompt):
-        encoded = self.tokenizer(prompt, return_tensors="pt", padding=False, truncation=False)
-        input_ids = encoded["input_ids"].to(self.device)
-        pad_id = self.tokenizer.pad_token_id
-
-        streamer = TextIteratorStreamer(
-            self.tokenizer,
-            skip_prompt=True,
-            skip_special_tokens=False,
-            timeout=1.0,
-        )
-        cancel = self.cancel_event
-        generation_stop = threading.Event()
-
-        class Cancelled(StoppingCriteria):
-            def __call__(self, input_ids, scores, **kwargs):
-                return cancel.is_set() or generation_stop.is_set()
-
-        gen_kwargs = dict(
-            stopping_criteria=StoppingCriteriaList([Cancelled()]),
-            input_ids=input_ids,
-            max_new_tokens=256,
-            do_sample=False,
-            top_p=None,
-            top_k=None,
-            pad_token_id=pad_id,
-            streamer=streamer,
-        )
-
-        gen_error: list[BaseException] = []
-
-        def _run_generate():
-            try:
-                with torch.no_grad():
-                    self.model.generate(**gen_kwargs)
-            except BaseException as exc:
-                gen_error.append(exc)
-            finally:
-                try:
-                    streamer.end()
-                except Exception:
-                    pass
-
-        thread = threading.Thread(target=_run_generate, daemon=True)
-        thread.start()
-
-        try:
-            count = 0
-            while not cancel.is_set():
-                try:
-                    chunk = next(streamer)
-                except queue.Empty:
-                    if not thread.is_alive():
-                        break
-                    continue
-                except StopIteration:
-                    break
-                if chunk:
-                    count += 1
-                yield chunk, count
-        finally:
-            generation_stop.set()
-            thread.join(timeout=2.0)
-            if thread.is_alive():
-                raise TimeoutError("Transformers Talker did not stop")
-            if gen_error:
-                raise gen_error[0]
-
-    def _iter_mlx_chunks(self, prompt):
-        import mlx_lm
-
-        n = 0
-        for resp in mlx_lm.stream_generate(self.model, self.tokenizer, prompt=prompt, max_tokens=256):
-            if self.cancel_event.is_set():
-                break
-            n = resp.generation_tokens
-            yield resp.text, n
-
     def run_convfill_inference(self, prompt):
         end_tok = self.boundary_tokens["END"].strip()
-
-        if self.backend == "vllm":
-            chunk_iter = self._iter_remote_chunks(prompt)
-        elif self.backend == "mlx":
-            chunk_iter = self._iter_mlx_chunks(prompt)
-        else:
-            chunk_iter = self._iter_hf_chunks(prompt)
+        chunk_iter = self._iter_remote_chunks(prompt)
 
         t0 = time.perf_counter()
         self.last_first_token_ms = None
@@ -401,13 +174,6 @@ class ConvFillFrontend:
             history=history,
         )
         yield from self.run_convfill_inference(prompt)
-
-    def prepare_continuation(self, user_text, spoken_prefix):
-        """Resume a tool turn with the earlier Talker prefix in its prompt."""
-        self.reset_turn_state()
-        if spoken_prefix.strip():
-            self.turn_state_manager.add_user_turn(user_text)
-            self.turn_state_manager.add_response(spoken_prefix.strip())
 
     def infer_and_update_state(self, current_thought):
         history = self.dialogue_state_manager.get_history()
