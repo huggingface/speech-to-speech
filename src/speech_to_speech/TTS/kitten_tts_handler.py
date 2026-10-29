@@ -8,11 +8,11 @@ from time import perf_counter
 from typing import Iterator
 
 import numpy as np
-from rich.console import Console
 from scipy.signal import resample_poly
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -20,7 +20,6 @@ from speech_to_speech.pipeline.transcript_logging import transcript_for_log
 from speech_to_speech.pipeline.turn_latency import record_response_e2e, record_response_tts_ttfa
 
 logger = logging.getLogger(__name__)
-console = Console()
 
 # Legacy Kitten ONNX checkpoints have 512 positions, including boundary tokens.
 KITTEN_MAX_TOKENS = 512

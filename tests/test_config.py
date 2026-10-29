@@ -53,6 +53,15 @@ def test_load_resolve_selection_defaults_and_independence(document):
     assert document.data == original
 
 
+def test_configured_client_accepts_voice_choices(document):
+    from speech_to_speech.configured_runtime import build_configured_client
+
+    document.data["runtime"] = {"client": {"voice": "Zoey", "voice_choices": ["Zoey", "Maeve"]}}
+    validate_config(document)
+    client = build_configured_client(resolve_config(document, include_client=True))
+    assert client.voice == "Zoey" and client.voice_choices == ["Zoey", "Maeve"]
+
+
 @pytest.mark.parametrize("names", [[], "primary", ["primary", "primary"], ["unknown"]])
 def test_invalid_selection(document, names):
     with pytest.raises(ConfigurationError):
@@ -465,7 +474,9 @@ def test_explicit_scope_inventory():
         "output_device",
         "instructions",
         "voice",
+        "voice_choices",
         "print_json",
+        "verbose",
         "block_mic_during_playback",
         "log_transcripts",
         "connection_retry_timeout_s",

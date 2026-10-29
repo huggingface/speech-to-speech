@@ -19,8 +19,7 @@ from openai.types.realtime import RealtimeConversationItemFunctionCall, Realtime
 from starlette.testclient import TestClient
 
 import speech_to_speech.api.openai_realtime.websocket_router as router_module
-from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
-from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService
+from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES
 from speech_to_speech.api.openai_realtime.tool_followup import (
     TOOL_FOLLOWUP_COVERED,
     TOOL_FOLLOWUP_METADATA_KEY,
@@ -30,7 +29,6 @@ from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.LLM.chat import make_assistant_message, make_user_message
 from speech_to_speech.LLM.language_model import LanguageModelHandler
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
-from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
@@ -60,6 +58,7 @@ from speech_to_speech.pipeline.messages import (
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
+from tests.openai_realtime.conftest import make_pipeline_unit
 from tests.test_response_overrides import _RecordingLocalHandler
 from tests.turns import reopen
 
@@ -168,42 +167,19 @@ def setup():
     service unregistered) must drain SESSION_END themselves — see
     `_simulate_session_end_drain` below.
     """
-    text_prompt_queue: Queue = Queue()
-    should_listen = ThreadingEvent()
-    should_listen.set()
-    service = RealtimeService(
-        text_prompt_queue=text_prompt_queue,
-        should_listen=should_listen,
-    )
-    input_queue: Queue = Queue()
-    output_queue: Queue = Queue()
-    text_output_queue: Queue = Queue()
+    unit = make_pipeline_unit()
     stop_event = ThreadingEvent()
-    response_playing = ThreadingEvent()
-    cancel_scope = CancelScope()
-    unit = PipelineUnit(
-        index=0,
-        service=service,
-        cancel_scope=cancel_scope,
-        should_listen=should_listen,
-        response_playing=response_playing,
-        input_queue=input_queue,
-        output_queue=output_queue,
-        text_output_queue=text_output_queue,
-        text_prompt_queue=text_prompt_queue,
-        handlers=[],
-    )
     app = create_app(pool=[unit], stop_event=stop_event)
     return (
         app,
-        service,
-        input_queue,
-        output_queue,
-        text_output_queue,
-        should_listen,
+        unit.service,
+        unit.input_queue,
+        unit.output_queue,
+        unit.text_output_queue,
+        unit.should_listen,
         stop_event,
-        response_playing,
-        cancel_scope,
+        unit.response_playing,
+        unit.cancel_scope,
     )
 
 
@@ -624,7 +600,12 @@ class TestClientEventDispatch:
                 output_queue.put(_pcm_bytes(256))
                 output_queue.put(AssistantOutputEvent(text="stale"))
                 ws.send_json({"type": "response.cancel"})
-                assert ws.receive_json()["type"] == "response.done"
+                # Event-driven wakeup (#692) can deliver a chunk that already left
+                # the queue before cancel runs; drain until the cancel terminal.
+                while True:
+                    event = ws.receive_json()
+                    if event["type"] == "response.done":
+                        break
                 time.sleep(0.1)
                 assert output_queue.empty()
                 assert text_output_queue.empty()
@@ -1939,22 +1920,8 @@ class TestDrainRelease:
 # ===================================================================
 
 
-def _make_unit(index: int) -> PipelineUnit:
-    text_prompt_queue: Queue = Queue()
-    should_listen = ThreadingEvent()
-    should_listen.set()
-    return PipelineUnit(
-        index=index,
-        service=RealtimeService(text_prompt_queue=text_prompt_queue, should_listen=should_listen),
-        cancel_scope=CancelScope(),
-        should_listen=should_listen,
-        response_playing=ThreadingEvent(),
-        input_queue=Queue(),
-        output_queue=Queue(),
-        text_output_queue=Queue(),
-        text_prompt_queue=text_prompt_queue,
-        handlers=[],
-    )
+def _make_unit(index: int):
+    return make_pipeline_unit(index=index)
 
 
 class TestPool:

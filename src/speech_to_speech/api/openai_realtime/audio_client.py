@@ -26,6 +26,7 @@ from urllib.parse import urlsplit, urlunsplit
 from jsonschema import SchemaError, ValidationError
 from jsonschema.validators import validator_for
 from openai import AsyncOpenAI
+from rich.console import Console
 
 from speech_to_speech.api.openai_realtime.tool_followup import (
     TOOL_FOLLOWUP_COVERED,
@@ -34,6 +35,7 @@ from speech_to_speech.api.openai_realtime.tool_followup import (
     TOOL_INPUT_METADATA_KEY,
     tool_call_ids,
 )
+from speech_to_speech.api.openai_realtime.voice_controls import VoiceSelection, arrow_steps, has_terminal_arrows
 from speech_to_speech.pipeline.transcript_logging import log_exception
 
 logger = logging.getLogger(__name__)
@@ -67,7 +69,9 @@ class RealtimeAudioClientConfig:
     output_device: Optional[int] = None
     instructions: Optional[str] = None
     voice: Optional[str] = None
+    voice_choices: list[str] = field(default_factory=list)
     print_json: bool = False
+    verbose: bool = False
     block_mic_during_playback: bool = False
     log_transcripts: bool = False
     connection_retry_timeout_s: float = 30.0
@@ -78,6 +82,18 @@ class RealtimeAudioClientConfig:
     def __post_init__(self) -> None:
         if not 0 <= self.playback_buffer_ms < float("inf"):
             raise ValueError("playback_buffer_ms must be a finite non-negative number")
+        if any(not isinstance(voice, str) or not voice.strip() for voice in self.voice_choices):
+            raise ValueError("voice_choices must contain non-empty voice names")
+        self.voice_choices = list(dict.fromkeys(self.voice_choices))
+        if self.voice_choices:
+            if self.voice and self.voice not in self.voice_choices:
+                self.voice_choices.insert(0, self.voice)
+            self.voice = self.voice or self.voice_choices[0]
+
+    @property
+    def conversation_only(self) -> bool:
+        """Use the clean display unless diagnostics or raw events were requested."""
+        return not (self.verbose or self.print_json)
 
 
 def load_realtime_tool_module(module_name: str) -> tuple[list[dict[str, Any]], ToolExecutor, bool]:
@@ -285,7 +301,10 @@ class PlaybackBuffer:
 
 
 class _FriendlyEventRenderer:
-    def __init__(self) -> None:
+    def __init__(self, *, conversation_only: bool = False, console: Console | None = None) -> None:
+        self.conversation_only = conversation_only
+        self.console = console or Console(highlight=False, markup=False, soft_wrap=True)
+        self.ready_announced = False
         # Input transcription events can arrive out of order across items.
         self.user_transcript_by_item: dict[str | None, str] = {}
         self.user_snapshot_by_item: dict[str | None, str] = {}
@@ -293,9 +312,56 @@ class _FriendlyEventRenderer:
         self.saw_user_speech = False
         self.live_assistant_stream: _AssistantTranscriptStream | None = None
         self.streamed_assistant_transcripts: set[_AssistantTranscriptStream] = set()
+        self.status = ""
+        self.status_visible = False
+
+    def print_conversation(self, text: str, *, style: str, end: str = "\n") -> None:
+        self._clear_status()
+        if self.conversation_only:
+            self.console.print(text, style=style, end=end, markup=False, highlight=False, soft_wrap=True)
+        else:
+            print(text, end=end, flush=True)
+        if end == "\n":
+            self._draw_status()
+
+    def show_status(self, text: str) -> None:
+        """Keep one status line below the conversation, rewritten in place on a terminal."""
+        if not (self.conversation_only and self.console.is_terminal):
+            self.print_conversation(text, style="cyan")
+            return
+        # A wrapped line could not be cleared in place.
+        self.status = text[: max(1, self.console.width - 1)]
+        self._draw_status()
+
+    def clear_status(self) -> None:
+        self._clear_status()
+        self.status = ""
+
+    def _clear_status(self) -> None:
+        if self.status_visible:
+            self.console.file.write("\r\x1b[2K")
+            self.console.file.flush()
+            self.status_visible = False
+
+    def _draw_status(self) -> None:
+        # Wait for a streamed assistant line to finish before taking the cursor line.
+        if not self.status or self.live_assistant_stream is not None:
+            return
+        self._clear_status()
+        self.console.print(self.status, style="cyan", end="", markup=False, highlight=False, soft_wrap=True)
+        self.status_visible = True
+
+    def announce_ready(self) -> None:
+        if self.conversation_only and not self.ready_announced:
+            self.print_conversation("Ready — start speaking.", style="cyan")
+            self.ready_announced = True
 
     def render_live_user_text(self, text: str, *, final: bool = False) -> None:
         line = f"USER: {text}"
+        if self.conversation_only:
+            if final:
+                self.print_conversation(line, style="yellow")
+            return
         padded = line + (" " * max(0, self.live_user_width - len(line)))
         if final:
             print(f"\r{padded}", flush=True)
@@ -330,10 +396,10 @@ class _FriendlyEventRenderer:
             delta = delta.lstrip()
             if not delta:
                 return
-            print("ASSISTANT: ", end="", flush=True)
+            self.print_conversation("ASSISTANT: ", style="green", end="")
             self.live_assistant_stream = stream_key
         self.streamed_assistant_transcripts.add(stream_key)
-        print(delta, end="", flush=True)
+        self.print_conversation(delta, style="green", end="")
 
     def render_assistant_text_done(self, event: Any) -> None:
         stream_key = self._assistant_stream_key(event)
@@ -344,12 +410,12 @@ class _FriendlyEventRenderer:
             return
         self.clear_live_user_text()
         self.finish_live_assistant_text()
-        print(f"ASSISTANT: {event.transcript or ''}", flush=True)
+        self.print_conversation(f"ASSISTANT: {event.transcript or ''}", style="green")
 
     def finish_live_assistant_text(self) -> None:
         if self.live_assistant_stream is not None:
-            print("", flush=True)
             self.live_assistant_stream = None
+            self.print_conversation("", style="green")
 
     def reset_assistant_text(self) -> None:
         self.finish_live_assistant_text()
@@ -378,13 +444,28 @@ def handle_server_event(
         except Exception:
             print(f"EVENT: {event}", flush=True)
 
+    if renderer.conversation_only and event.type in {
+        "speech_to_speech.input_audio_transcription.snapshot",
+        "conversation.item.input_audio_transcription.delta",
+    }:
+        # Only the final transcript belongs in this display. Hidden partials must
+        # not end an assistant line or leave drafts in redirected terminal output.
+        return
+
     if event.type == "session.created":
         renderer.finish_live_assistant_text()
-        print("Connected.", flush=True)
+        if not renderer.conversation_only:
+            print("Connected.", flush=True)
+    elif event.type == "session.updated":
+        if renderer.conversation_only:
+            renderer.announce_ready()
+        else:
+            renderer.finish_live_assistant_text()
+            print(f"EVENT: {event.type}", flush=True)
     elif event.type == "input_audio_buffer.speech_started":
         renderer.finish_live_assistant_text()
         playback.clear()
-        if renderer.saw_user_speech:
+        if renderer.saw_user_speech and not renderer.conversation_only:
             print("", flush=True)
         renderer.saw_user_speech = True
     elif event.type == "input_audio_buffer.speech_stopped":
@@ -426,11 +507,12 @@ def handle_server_event(
             if error
             else "Input audio transcription failed"
         )
-        print(f"ERROR: {err_type}: {err_msg}", flush=True)
+        renderer.print_conversation(f"ERROR: {err_type}: {err_msg}", style="red")
     elif event.type == "response.created":
         renderer.clear_live_user_text()
         renderer.finish_live_assistant_text()
-        print("ASSISTANT: <response started>", flush=True)
+        if not renderer.conversation_only:
+            print("ASSISTANT: <response started>", flush=True)
     elif event.type in {"response.output_item.added", "response.output_item.done"}:
         return
     elif event.type == "response.output_audio.delta":
@@ -438,34 +520,40 @@ def handle_server_event(
     elif event.type == "response.output_audio.done":
         playback.finish()
         renderer.finish_live_assistant_text()
-        print("ASSISTANT: <audio done>", flush=True)
+        if not renderer.conversation_only:
+            print("ASSISTANT: <audio done>", flush=True)
     elif event.type == "response.output_audio_transcript.delta":
         renderer.render_assistant_text_delta(event)
     elif event.type == "response.output_audio_transcript.done":
         renderer.render_assistant_text_done(event)
     elif event.type == "response.function_call_arguments.done":
-        renderer.finish_live_assistant_text()
-        print(
-            f"TOOL: {event.name} call_id={event.call_id} arguments={event.arguments}",
-            flush=True,
-        )
+        if not renderer.conversation_only:
+            renderer.finish_live_assistant_text()
+            print(
+                f"TOOL: {event.name} call_id={event.call_id} arguments={event.arguments}",
+                flush=True,
+            )
     elif event.type == "response.done":
         renderer.finish_assistant_response(getattr(event.response, "id", None))
         if event.response.status == "cancelled":
             playback.clear()
         else:
             playback.finish()
-        print(f"ASSISTANT: <response {event.response.status}>", flush=True)
+        if not renderer.conversation_only:
+            print(f"ASSISTANT: <response {event.response.status}>", flush=True)
+        elif event.response.status not in {"completed", "cancelled"}:
+            renderer.print_conversation(f"ERROR: response {event.response.status}", style="red")
     elif event.type == "output_audio_buffer.cleared":
         playback.clear()
     elif event.type == "error":
         renderer.clear_live_user_text()
         renderer.finish_live_assistant_text()
-        print(f"ERROR: {event.error.type}: {event.error.message}", flush=True)
+        renderer.print_conversation(f"ERROR: {event.error.type}: {event.error.message}", style="red")
     else:
-        renderer.clear_live_user_text()
-        renderer.finish_live_assistant_text()
-        print(f"EVENT: {event.type}", flush=True)
+        if not renderer.conversation_only:
+            renderer.clear_live_user_text()
+            renderer.finish_live_assistant_text()
+            print(f"EVENT: {event.type}", flush=True)
 
 
 @dataclass(frozen=True)
@@ -929,8 +1017,24 @@ async def _run_audio_session(
 
     mic_queue: Queue[bytes] = Queue(maxsize=128)
     playback = PlaybackBuffer(config.recv_rate, startup_buffer_ms=config.playback_buffer_ms)
-    renderer = _FriendlyEventRenderer()
+    renderer = _FriendlyEventRenderer(conversation_only=config.conversation_only)
     tool_calls = _ToolCallCoordinator(conn, config)
+
+    voices = VoiceSelection(conn, config, renderer.show_status) if len(config.voice_choices) > 1 else None
+
+    async def select_voices() -> None:
+        assert voices is not None
+        try:
+            keys = arrow_steps()
+            try:
+                async for step in keys:
+                    await voices.select(step)
+            finally:
+                await keys.aclose()
+        except (OSError, ValueError, NotImplementedError):
+            logger.debug("Terminal arrow controls unavailable", exc_info=True)
+        # No terminal or stdin EOF must not disconnect a working audio session.
+        await _wait_for_stop(stop_event)
 
     def callback_recv(outdata: Any, _frames: int, _time_info: Any, status: Any) -> None:
         if status:
@@ -964,6 +1068,8 @@ async def _run_audio_session(
         while not stop_event.is_set():
             event = await conn.recv()
             tool_calls.handle_event(event)
+            if voices is not None:
+                await voices.handle_event(event)
             handle_server_event(
                 event,
                 playback=playback,
@@ -973,6 +1079,7 @@ async def _run_audio_session(
 
     opened_streams: list[Any] = []
     started_streams: list[Any] = []
+    tasks: set[asyncio.Task[Any]] = set()
     try:
         input_stream = sd.RawInputStream(
             samplerate=config.send_rate,
@@ -1003,6 +1110,13 @@ async def _run_audio_session(
             asyncio.create_task(_wait_for_stop(stop_event)),
             asyncio.create_task(tool_calls.wait_for_failure()),
         }
+        if voices is not None:
+            voices.announce()
+            if has_terminal_arrows():
+                renderer.print_conversation(
+                    "Use ←/→ or ↑/↓ to change voice; changes apply between replies. Ctrl+C stops.", style="cyan"
+                )
+                tasks.add(asyncio.create_task(select_voices()))
 
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         stop_event.set()
@@ -1014,9 +1128,14 @@ async def _run_audio_session(
                 raise task.exception()  # type: ignore[misc]
     finally:
         stop_event.set()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await tool_calls.close()
         renderer.clear_live_user_text()
         renderer.reset_assistant_text()
+        renderer.clear_status()
         for stream in reversed(started_streams):
             try:
                 stream.stop()
@@ -1074,6 +1193,10 @@ async def listen_and_play_realtime(
 def run_realtime_audio_client(config: RealtimeAudioClientConfig) -> None:
     """Run the audio client until SIGINT, SIGTERM, disconnect, or an error."""
 
+    from speech_to_speech.pipeline.console import conversation_output
+
+    if not config.conversation_only:
+        logging.basicConfig(level=logging.INFO)
     stop_event = Event()
     previous_handlers: dict[signal.Signals, Any] = {}
 
@@ -1085,7 +1208,8 @@ def run_realtime_audio_client(config: RealtimeAudioClientConfig) -> None:
         signal.signal(sig, request_shutdown)
 
     try:
-        asyncio.run(listen_and_play_realtime(config, stop_event=stop_event))
+        with conversation_output(config.conversation_only):
+            asyncio.run(listen_and_play_realtime(config, stop_event=stop_event))
     except KeyboardInterrupt:
         stop_event.set()
     finally:

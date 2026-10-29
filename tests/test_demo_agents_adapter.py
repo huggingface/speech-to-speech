@@ -129,6 +129,7 @@ async function setupAudio(captureConfig) {
     audioWorklet: { async addModule(url) { modules.push(url); } },
     createMediaStreamSource() { return { connect() {} }; },
     createAnalyser: analyser,
+    createGain() { return { connect() {} }; },
   };
   globalThis.AudioWorkletNode = class AudioWorkletNode {
     constructor(_context, name, options) {

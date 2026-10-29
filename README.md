@@ -30,7 +30,7 @@ This pipeline runs in production as the conversation backend for thousands of [R
 
 ## Quickstart
 
-Use Python 3.10+ (3.11 recommended):
+Use CPython 3.11–3.14 (3.11 recommended):
 
 ```bash
 python3 -m venv .venv
@@ -41,7 +41,43 @@ speech-to-speech local
 
 Then talk: speak, pause, and the assistant answers through your speakers. Stop with `Ctrl+C`. The first run downloads the models, so give it a few minutes. Use headphones so the assistant does not hear itself, or add `--local_audio_block_mic_during_playback`.
 
+By default, `local` and `talk` show final user transcripts and streaming assistant
+replies once, hiding backend transcript copies, routine logs, tool details, and protocol
+events. User messages are yellow and assistant replies are green in a color-capable
+terminal. Startup shows `Loading models…`, followed by `Ready — start speaking.` once
+the audio devices are running and the session is configured. Routine model-loading
+output is hidden; startup failures show their diagnostics. Runtime warnings and errors
+remain visible.
+
+For diagnostic output, add `--verbose`:
+
+```bash
+speech-to-speech local --verbose
+```
+
+Use `--verbose --log_level debug` for more detailed local logs. Raw event output
+(`local --local_audio_print_json` or `talk --print-json`) also enables diagnostic output.
+
 On Ubuntu, first install the audio libraries with `sudo apt-get install libportaudio2 libsndfile1`. The default Linux Qwen3-TTS wheel targets CUDA 12.8 and Ubuntu 24.04; see the [CUDA note](#cuda-note-for-qwen3-tts) for other systems. On Windows, activate the environment with `.venv\Scripts\Activate.ps1`.
+
+The default installation has the following CI coverage:
+
+| Platform | Supported CPython versions | Checks |
+|---|---|---|
+| Linux | 3.11, 3.12, 3.13, 3.14 | Full test suite and installed package smoke test |
+| Apple Silicon macOS | 3.11, 3.12, 3.13, 3.14 | Installed package smoke test |
+
+Optional model backends can have narrower Python requirements. Windows is not
+covered by this compatibility matrix. Python 3.10 is no longer supported following
+its end of life on October 1, 2026.
+
+Kokoro is optional on every platform. On macOS, its Misaki dependency requires
+Python <3.13, so use Python 3.11 or 3.12 with `speech-to-speech[kokoro]`.
+The default Qwen3-TTS backend does not require Misaki. Python 3.15 is not yet
+supported on any platform: ONNX Runtime lacks CPython 3.15 wheels, and the pinned macOS PyTorch
+release also lacks them. Newer Python versions will be added after the default
+dependencies and CI checks pass; the package's `requires-python` lower bound does
+not promise compatibility with future Python releases.
 
 The command picks local models for your platform:
 
@@ -82,6 +118,7 @@ It listens at `ws://127.0.0.1:8765/v1/realtime`. Connect with:
 * [Multi-language support](#multi-language-support)
 * [OmniVoice](#omnivoice)
 * [Pocket TTS](#pocket-tts)
+* [Phonon TTS](#phonon-tts)
 * [CLI reference](#cli-reference)
 * [Contributing](#contributing)
 * [Star history](#star-history)
@@ -150,6 +187,15 @@ pip install "qwentts-cpp-python==0.3.1+cpu" \
 pip install speech-to-speech
 ```
 
+On **DGX Spark (Linux ARM64, CUDA 13)**, the default CUDA 12 wheel can fail with `libcudart.so.12` missing. From the repository root, sync dependencies, then install the CUDA 13 ARM64 wheel and launch with `--no-sync` as shown below. Plain `uv run` or `uv sync` can replace this wheel; reinstall it after syncing.
+
+```bash
+uv sync
+uv pip install --python .venv/bin/python --no-deps \
+  "https://huggingface.co/datasets/andito/qwentts-cpp-python-wheels/resolve/main/whl/cu130/qwentts_cpp_python-0.5.0%2Bcu130-py3-none-manylinux_2_39_aarch64.whl"
+uv run --no-sync speech-to-speech serve
+```
+
 To use the previous CUDA-graphs implementation instead of GGML, pass `--qwen3_tts_backend torch`.
 
 ### Optional Components
@@ -157,9 +203,10 @@ To use the previous CUDA-graphs implementation instead of GGML, pass `--qwen3_tt
 Optional components are installed with pip extras:
 
 ```bash
-pip install "speech-to-speech[kokoro]"          # Kokoro-82M TTS on non-macOS
+pip install "speech-to-speech[kokoro]"          # Kokoro-82M TTS (macOS: Python 3.11–3.12)
 pip install "speech-to-speech[kitten]"          # KittenTTS
 pip install "speech-to-speech[pocket]"          # Pocket TTS
+pip install "speech-to-speech[phonon]"          # Phonon TTS (checkpoint supplied separately)
 pip install "speech-to-speech[chattts]"         # ChatTTS
 pip install "speech-to-speech[omnivoice]"       # OmniVoice TTS (CUDA, Intel XPU, or Apple Silicon)
 pip install "speech-to-speech[faster-whisper]"  # Faster Whisper STT
@@ -211,13 +258,15 @@ This installs the package in editable mode. With the environment activated, use 
 | LLM | [Transformers](https://huggingface.co/models?pipeline_tag=text-generation&sort=trending) (default elsewhere) | supported accelerators / CPU | built-in |
 | LLM | OpenAI-compatible API (`responses-api`, `chat-completions`) | optional hosted providers or self-hosted servers | built-in |
 | TTS | [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) (default) | GGML / CUDA on Linux, mlx-audio on macOS | built-in |
-| TTS | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | CUDA / CPU, Apple Silicon | `kokoro` on non-macOS; built-in on macOS |
+| TTS | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | CUDA / CPU, Apple Silicon | `kokoro` (macOS: Python 3.11–3.12) |
 | TTS | [KittenTTS](https://github.com/KittenML/KittenTTS) | CPU | `kitten` |
 | TTS | [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) | CPU / CUDA | `pocket` |
+| TTS | [Phonon](https://github.com/gradium-ai/xn-ptts) | CPU (including Apple Silicon) | `phonon` |
 | TTS | [ChatTTS](https://github.com/2noise/ChatTTS) | CUDA / CPU | `chattts` |
 | TTS | [OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) | CUDA / Intel XPU / Apple Silicon | `omnivoice` |
 | TTS | [MMS TTS](https://huggingface.co/docs/transformers/model_doc/mms) | CUDA / CPU | built-in |
 | TTS | OpenAI-compatible `/v1/audio/speech` endpoint | local or remote HTTP server | built-in |
+| TTS | [Fish Audio Drama-3](https://huggingface.co/fishaudio/drama-3) (`--tts drama3`) | SGLang Omni on a local or remote GPU host | built-in client |
 | TTS | [MiniMax](https://platform.minimax.io/docs/api-reference/speech-t2a-http) | hosted HTTP streaming | built-in |
 
 Optional [streaming speaker diarization](./examples/streaming-diarization/README.md)
@@ -268,7 +317,7 @@ The packaged client can opt in to local Python tools with `talk --tool-module <m
 
 On macOS, `local` and `serve` already run all three models through MLX. The optional `--mac-optimal-settings` preset also makes MPS the default device for supported components. It only sets defaults: explicit `--device`, component-device flags such as `--qwen3_tts_device`, and `--stt`, `--llm_backend`, `--model_name`, and `--tts` all win.
 
-`--tts pocket`, `--tts kokoro`, `--tts omnivoice`, and `--tts kitten` are also valid on macOS.
+`--tts pocket`, `--tts phonon`, `--tts kokoro`, `--tts omnivoice`, and `--tts kitten` are also valid on macOS.
 
 To compare the MLX quantization variants locally:
 
@@ -693,6 +742,25 @@ to 24000 does not enable native-rate playback.
 
 The model weights use [CC-BY-NC-4.0](https://huggingface.co/mehdi-hf/pocket-tts-farsi-v2)
 and are for non-commercial use.
+
+## Phonon TTS
+
+Phonon from Gradium streams speech locally through the Rust-backed `ptts` Python runtime. Install the optional extra:
+
+```bash
+pip install "speech-to-speech[phonon]"
+speech-to-speech local --mac-optimal-settings --tts phonon
+```
+
+The default checkpoint is [`gradium/phonon-31m-en`](https://huggingface.co/gradium/phonon-31m-en), a public English model under Apache-2.0. It downloads on first use without a Hugging Face login. `--phonon_tts_model_name` accepts another Hub repo or a local checkpoint directory, which must include its matching `config.json`, `tokenizer.json`, q8 `model.q8.gguf`, and voice embeddings. Besides the checkpoint's own voices, Phonon offers the [Phonon voice catalog](https://huggingface.co/gradium/phonon-voices) voices in the checkpoint's languages (37 for English). A catalog voice downloads on first use. Use `--phonon_tts_voice VOICE_NAME` to select one; omitting it uses the checkpoint's default. Keep private checkpoints outside the repository.
+
+`local --tts phonon` lets you cycle through these voices using the terminal's left/right or up/down arrows. The selected voice is displayed immediately and applied after the current reply finishes, preserving the conversation. This requires an interactive macOS or Linux terminal. The standalone `talk` client can opt in with `--voices Zoey Harper Easton` and select its initial voice with `--voice Zoey`.
+
+Phonon uses four native CPU threads by default, which performed better than the runtime's twelve-thread default on an Apple M3 Pro in local testing. Use `--phonon_tts_num_threads N` to tune it at startup; the setting is shared by all Phonon pipelines in the process.
+
+Phonon runs on CPU even when STT or the LLM uses a GPU. Native audio is resampled to the pipeline's 16 kHz PCM16 output, and interruption closes the native stream. `--phonon_tts_language` fixes text normalization at startup; use `en` (the default), `fr`, `de`, `es`, `pt`, or `none`. Session language changes are restricted to that configured language. See the [TTS component guide](./src/speech_to_speech/TTS/README.md#10-phonon---tts-phonon) for installation and checkpoint options.
+
+The Phonon 40M checkpoints, such as [`gradium/phonon-40m-en`](https://huggingface.co/gradium/phonon-40m-en), are gated and use CC BY-NC 4.0, so they are for non-commercial use. To use one, accept its terms on Hugging Face, set `HF_TOKEN` or run `hf auth login`, and pass `--phonon_tts_model_name gradium/phonon-40m-en`.
 
 ## CLI Reference
 

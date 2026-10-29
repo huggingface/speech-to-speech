@@ -35,6 +35,27 @@ speech-to-speech local \
   --openai_stt_model Qwen/Qwen3-ASR-1.7B
 ```
 
+### Bounded long turns (opt-in)
+
+Add `--openai_stt_max_window_s 120` to limit every transcription upload to
+two minutes of audio. The same setting is available in a configured STT block.
+The value must be finite and at least one second, and should be below your
+server's duration and upload limits. Leaving it unset preserves whole-turn uploads.
+
+The handler uses VAD's
+[progressive audio snapshots](../src/speech_to_speech/VAD/README.md#progressive-audio-snapshots)
+to transcribe bounded windows while speech continues. Completed text is reused
+across reopened speech; at turn end, remaining audio is transcribed and the full
+transcript assembled. Internal cuts do not trigger an assistant response.
+
+Cuts use a quiet point up to five seconds before the limit, without overlapping
+or discarding audio. They stay bounded even without silence, but can split words
+and affect recognition.
+
+Processing also works with live captions disabled; `--enable_live_transcription`
+controls partial transcript output. VAD still retains turn audio, so this option
+does not bound its memory usage.
+
 ## OpenAI-hosted transcription
 
 The same backend can call OpenAI's hosted

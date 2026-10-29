@@ -192,7 +192,11 @@ def _validate_default_handler_imports() -> None:
 
 def _validate_runtime_dependency_imports() -> None:
     importlib.import_module("transformers.models.nemotron3_diarization.modeling_nemotron3_diarization")
-    if sys.platform != "darwin":
+    if sys.platform == "darwin":
+        # Exercise the actual default MLX model module without downloading weights.
+        # Kokoro's optional phonemization dependencies must not be needed here.
+        importlib.import_module("mlx_audio.tts.models.qwen3_tts")
+    else:
         importlib.import_module("faster_qwen3_tts")
     if os.environ.get("SPEECH_TO_SPEECH_SMOKE_EXTRA") == "omnivoice":
         omnivoice = importlib.import_module("omnivoice")
@@ -247,7 +251,7 @@ def main() -> None:
         "websockets",
     ]
     if sys.platform == "darwin":
-        required_modules.extend(["miniaudio", "mlx", "mlx_audio", "mlx_lm", "misaki", "soundfile", "spacy"])
+        required_modules.extend(["miniaudio", "mlx", "mlx_audio", "mlx_lm", "soundfile"])
     else:
         required_modules.extend(["faster_qwen3_tts", "nano_parakeet"])
     if os.environ.get("SPEECH_TO_SPEECH_SMOKE_EXTRA") == "omnivoice":

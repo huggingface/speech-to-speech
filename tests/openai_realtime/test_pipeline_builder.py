@@ -44,6 +44,7 @@ def test_local_composes_loopback_client_with_same_server_builder(monkeypatch):
     args.realtime_server_kwargs.host = "192.0.2.10"
     args.realtime_server_kwargs.port = 9876
     args.local_audio_kwargs.local_audio_playback_buffer_ms = 240
+    args.local_audio_kwargs.verbose = True
     pipeline_handler = object()
     unit = SimpleNamespace(handlers=[pipeline_handler])
     monkeypatch.setattr("speech_to_speech.s2s_pipeline._build_pipeline_unit", lambda **_kwargs: unit)
@@ -61,6 +62,7 @@ def test_local_composes_loopback_client_with_same_server_builder(monkeypatch):
     assert client.config.url == f"ws://127.0.0.1:{server.port}/v1/realtime"
     assert client.config.api_key == "local"
     assert client.config.playback_buffer_ms == 240
+    assert client.config.conversation_only is False
 
 
 def test_local_resolves_backend_specific_playback_buffer_defaults(monkeypatch):
@@ -80,6 +82,20 @@ def test_local_resolves_backend_specific_playback_buffer_defaults(monkeypatch):
 
         assert isinstance(client, RealtimeAudioClient)
         assert client.config.playback_buffer_ms == expected_buffer_ms
+
+
+def test_local_phonon_offers_loaded_voices_and_preserves_configured_voice(monkeypatch):
+    from speech_to_speech.TTS.phonon_tts_handler import PhononTTSHandler
+
+    handler = PhononTTSHandler.__new__(PhononTTSHandler)
+    handler.voices = ["Maeve", "Zoey", "default"]
+    handler.voice = "Zoey"
+    unit = SimpleNamespace(handlers=[handler])
+    monkeypatch.setattr("speech_to_speech.s2s_pipeline._build_pipeline_unit", lambda **_kwargs: unit)
+    args = parse_arguments(["--tts", "phonon"], command="local")
+    manager = build_local_pipeline(args, Event())
+    assert manager.handlers[-1].config.voice == "Zoey"
+    assert manager.handlers[-1].config.voice_choices == ["default", "Maeve", "Zoey"]
 
 
 def test_failed_handler_setup_cleans_and_preserves_original_error():
