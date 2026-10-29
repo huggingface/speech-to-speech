@@ -1,4 +1,0 @@
-# Run Caddy on the same host as the gateway, or adjust its private address.
-{$DEMO_HOST} {
-    reverse_proxy 127.0.0.1:7860
-}
