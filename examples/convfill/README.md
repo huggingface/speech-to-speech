@@ -1,146 +1,98 @@
-# Hosted ConvFill speech-to-speech
+# ConvFill
 
-Browser microphone → VAD → STT → concurrent Gemma Reasoner / ConvFill Talker → TTS → browser.
-Ordinary conversation speaks only the fine-tuned Talker. The explicitly marked startup
-greeting streams Gemma directly into TTS, bypassing the Talker and fillers. This opt-in example retains ConvFill’s filler scheduler,
-conversation state and cancellation while using this checkout’s realtime pipeline and `demo/` UI.
-No private repository checkout or commercial model key is required. The Reasoner can call the
-UI’s web search and opt-in camera tools. RAG, MCP, and browser automation remain disabled.
+[ConvFill](https://arxiv.org/abs/2511.07397) pairs a small fine-tuned Talker,
+which starts answering immediately, with a larger Reasoner that streams
+knowledge in parallel. This example registers ConvFill as an opt-in LLM backend:
 
-## Hosted multi-session arrangement
+Microphone → VAD → STT → Gemma Reasoner + ConvFill Talker → TTS → speaker.
 
-For a hosted demo, run this adapter in managed CPU pipeline workers and use the
-same browser/session allocation flow as the main demo:
+Only the Talker's text is spoken. The Reasoner is `nvidia/Gemma-4-31B-IT-NVFP4`
+with thinking disabled, and the Talker is the original
+[`vysri/Qwen-0.6B-ConvFill`](https://huggingface.co/vysri/Qwen-0.6B-ConvFill)
+checkpoint and tokenizer. Nothing changes for pipelines that do not select
+`--llm_backend convfill`.
 
-Browser → UI Space session proxy → load balancer → isolated ConvFill pipeline slot
-→ remote STT / Reasoner / Talker / TTS services.
+## Serve the models
 
-Use `python -m convfill_demo.pipeline serve <pipeline-config.json>` in each
-worker, with `PYTHONPATH=examples/convfill:src`, `llm_backend=convfill`, and an
-explicit `num_pipelines` budget. Each slot owns its own conversation, inference
-streams, cancellation scope, and delivery ledger. Set `speculative_reopen_ms=500`
-and `smart_turn_max_wait_ms=1700` in the worker config for the demo's shorter
-holds. Install `examples/convfill/requirements.txt` alongside the core runtime. With
-local Phonon, opt into `phonon_tts_max_trailing_silence_ms=120` to shorten native
-quiet tails between separately streamed Talker sentences. This leaves the shared
-Phonon default unchanged and retains leading audio and internal pauses.
+Run two vLLM servers so both models stay resident and generate concurrently,
+for example on separate GPUs (or set `--gpu-memory-utilization` so both fit):
 
-Build the UI-only image with `examples/convfill/Dockerfile.frontend`, or upload
-with `python examples/convfill/deploy/hf_space.py --repo owner/private-demo
---frontend-only`. Supply `LOAD_BALANCER_URL` and, for protected ingress,
-`LB_HF_TOKEN` as server-side secrets. The upload token is not implicitly used
-as a service credential. Keep `SERPER_API_KEY` on the UI server and inference
-credentials on workers. The UI image starts no VAD or language-model pipeline. To permit guests,
-set `ALLOW_GUEST_SESSIONS=1` and `LIMIT_ANON_SEC=300` on the metered UI Space.
-Guest allocations use the server-side `LB_HF_TOKEN`; signed-in requests retain
-their visitor identity. The shared UI's daily IP/cookie budget and heartbeat
-cutoff apply. See `demo/README.md` for persistence and enforcement limitations.
+```bash
+vllm serve nvidia/Gemma-4-31B-IT-NVFP4 --revision 4135a98a9b728a548947683219633b25682223ac \
+  --quantization modelopt --reasoning-parser gemma4 --max-model-len 8192 --generation-config vllm --port 8001
+```
 
-The shared server provides `/api/session`, queue polling, heartbeat/end calls,
-and optional login/duration metering. The browser connects to its allocated
-worker. Only route sessions to compatible ConvFill workers; a mixed pool may
-otherwise allocate a standard assistant. Worker slots are admission capacity,
-not a measured throughput guarantee for the shared model services.
+```bash
+vllm serve vysri/Qwen-0.6B-ConvFill --revision 9195fc16f0ba56743d956f0fab5eed2386665aff \
+  --max-model-len 4096 --generation-config vllm --port 8002
+```
 
-## Local single-session arrangement
+The Talker receives serialized token IDs on raw `/v1/completions`; no chat
+template is applied. Set `CONVFILL_REASONER_URL` and `CONVFILL_TALKER_URL`
+(including `/v1`) if the servers are elsewhere, and `CONVFILL_REASONER_API_KEY`
+or `CONVFILL_TALKER_API_KEY` if they require a key.
 
-`run.sh` and the original example Dockerfile start the orchestration beside the
-UI for local development. The custom gateway admits one session; this layout
-is not the multi-user hosted deployment described above.
+## Run
 
-## Run from this checkout
-
-Use Python 3.11/3.12 and Node 24. From the repository root:
+From the repository root, with Python 3.11 or 3.12:
 
 ```bash
 uv sync --group dev
 uv pip install -r examples/convfill/requirements.txt
-npm ci --prefix demo
-uv run python -m nltk.downloader -d .venv/share/nltk_data punkt_tab averaged_perceptron_tagger_eng
-# Export the four endpoint URLs and server-side keys in deploy/.env.example.
-bash examples/convfill/run.sh
 ```
 
-Open http://localhost:7860 and allow microphone access. Ctrl+C stops both processes.
-The Reasoner defaults to `nvidia/Gemma-4-31B-IT-NVFP4`, with thinking disabled.
-The Talker uses the original `vysri/Qwen-0.6B-ConvFill` checkpoint and tokenizer.
-Two vLLM instances keep both resident and generating concurrently. Deployment instructions,
-explicit context/memory budgets and recorded validation follow in `deploy/`.
+Start the pipeline with any STT and TTS backends. This uses OpenAI-compatible
+speech services:
+
+```bash
+PYTHONPATH=examples/convfill:src uv run python -m convfill_demo.pipeline serve \
+  --llm_backend convfill \
+  --stt openai --openai_stt_base_url "$STT_URL" --openai_stt_model Qwen/Qwen3-ASR-1.7B \
+  --tts openai --openai_tts_base_url "$TTS_URL" --openai_tts_model Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
+  --openai_tts_voice aiden --openai_tts_stream true \
+  --speculative_reopen_ms 500 --smart_turn_max_wait_ms 1700
+```
+
+Then open the [web demo](../../demo/README.md) against it:
+
+```bash
+npm ci --prefix demo
+uv pip install -r demo/requirements.txt
+SPEECH_TO_SPEECH_URL=ws://localhost:8765/v1/realtime STARTUP_GREETING= \
+  uv run uvicorn --app-dir demo server:app --port 7860
+```
+
+`STARTUP_GREETING=` disables the demo's hidden greeting prompt, which ConvFill
+would otherwise answer as a user turn. ConvFill ignores session tools, so the
+demo's web search and camera tools have no effect; session instructions reach
+the Reasoner.
+
+For several concurrent sessions, pass `--num_pipelines N`. Each slot keeps its
+own ConvFill conversation and cancellation state. The demo's load-balancer mode
+can route sessions to such workers; see the demo README.
+
+## Behavior
+
+- **Fillers.** While knowledge is late, the Talker speaks a filler phrase.
+  `max_filler_phrases` in `configs/demo_mode/convfill_hosted_config.json` allows
+  one per reply; remove it (or use `null`) for unlimited fillers, as in the
+  original ConvFill, or set `0` to disable them. Fillers wait until the estimated
+  playback of dispatched audio has finished; there is no client acknowledgement.
+- **Echoes.** An exact repeated sentence of three or more words at a Talker
+  handoff is dropped before speech. Paraphrases are kept.
+- **Interruptions.** As in the core pipeline, a cancelled reply leaves no
+  ConvFill history.
+- **Holds.** The flags above hold output for 500 ms after a complete Smart Turn
+  decision and 1700 ms after an incomplete one, 300 ms below the defaults.
 
 ## Tests
 
 ```bash
 PYTHONPATH=examples/convfill:src uv run pytest examples/convfill/convfill_demo/tests -q
-npm --prefix demo run test:ui
 ```
 
-The runtime and adapter are adapted from the MIT-licensed ConvFill inference implementation
-(copyright 2026 Vidya Srinivas; see `LICENSE.convfill`). They are kept in this example rather than
-importing a private repository. This example reuses the current browser sources; only hosted normal-mode Reasoner support is included.
-
-## Greeting, tools, settings, and timings
-
-The demo sends a short greeting after connection. Its response carries
-`speech_to_speech.startup_greeting=true`, which the adapter honors only for the
-first message of a fresh session. Gemma receives a dedicated assistant greeting
-prompt with thinking off and no tools; its filtered sentence stream goes directly
-to TTS. The completed greeting is stored in both realtime and ConvFill history,
-so the next user turn uses the ordinary Talker/Reasoner path with that context.
-In ConvFill history its user line is the neutral marker `[call connected]`, not the
-hidden greeting instruction, so the instruction is never presented as user speech.
-Cancellation, stream deadlines, and error propagation use the same handler controls. Set `STARTUP_GREETING` to customize
-its instruction, or set it to an empty string to disable it. The gear menu uses the current
-shared UI, including voice, instructions, audio buffering, noise gate, and connection settings.
-This gateway uses WebSocket transport; WebRTC remains unavailable here.
-
-Web search uses `SERPER_API_KEY` on the UI server. Only its availability is returned to the
-browser. Alternatively set `CONVFILL_SEARCH_URL` and `CONVFILL_SEARCH_API_KEY` to reuse
-an existing server-side search proxy whose Serper secret cannot be exported. That URL and
-credential stay on the UI server. Without either option, users can provide a key in the tools dialog. The camera is opt-in
-and requires a multimodal Reasoner. vLLM must enable native tool parsing (the Compose example
-uses `--enable-auto-tool-choice --tool-call-parser gemma4`). Tool arguments, results, and image
-inputs go to the Reasoner; only the Talker’s text reaches TTS. Session instructions also reach
-the Reasoner. Tool-only planning turns do not duplicate the user’s ConvFill conversation turn.
-
-History shows server stage timings after each response. Server E2E ends at first TTS audio,
-not at the end of generation. WebSocket playback additionally shows a compact **First audio** timing disclosure as soon
-as the first non-silent output frame is rendered, including network and playback buffering.
-This uses the browser output-device clock and microphone chunk timestamps: it is an estimate,
-not a physical speaker measurement. Unsupported output clocks, greetings without a speech turn,
-and cancelled playback do not fabricate a measurement. Tool follow-ups share the original
-speech anchor and report only its first audio. Audio dispatch is still not proof of what the
-user heard; this timing does not change interrupted-history guarantees.
-
-The Talker may acknowledge a question while the Reasoner is still working; the
-Reasoner supplies new substantive content, not a second conversational preamble. The hosted normal-mode configuration selects
-`convfill_backend_template_streaming_conv.txt`, whose examples supply the next
-question or fact after the Talker’s acknowledgment. It explicitly excludes a second
-permission, reassurance, greeting, compliment, praise, or thanks, including
-paraphrases. For social updates it asks for a specific continuation, and avoids
-repeatedly asking the user to evaluate the conversation. The original template
-remains available by configuration. The fine-tuned Talker prompt format and its
-exact-sentence echo guard are unchanged; the initial filler can still sound generic.
-The hosted configuration sets `max_filler_phrases` to one per reply, avoiding
-repeated acknowledgments when the Reasoner is delayed. Once that filler finishes,
-the listener may hear silence until useful knowledge arrives. Tool continuations
-with an existing spoken prefix do not schedule another filler. Omit this setting
-(or use null) to retain unlimited filler scheduling; zero disables fillers. Useful
-knowledge continues to stream regardless of the filler budget.
-Native tool follow-ups retain the current Talker prefix, and receive a one-second
-knowledge head start before filler scheduling resumes. Exact repeated sentence
-prefixes (three or more words) are suppressed before TTS and state updates. This
-guard does not remove paraphrases, change facts, or deduplicate the whole history.
-Interrupted-history text remains an estimate, not proof of physical playback.
-
-The shared browser's **Faster interruptions** setting is enabled by default.
-Local Silero v6 detection briefly lowers playback volume on a speech candidate;
-server VAD still confirms cancellation and turn boundaries. The ConvFill gateway
-serves the pinned model/worklet/WASM assets from the browser dependencies copied
-into the image. Model loading is asynchronous, with server-only fallback on failure.
-
-The demo holds assistant output for 500 ms after a Smart Turn complete decision
-and 1700 ms after an incomplete decision, 300 ms below each upstream default.
-Override with `CONVFILL_COMPLETE_HOLD_MS` / `CONVFILL_INCOMPLETE_HOLD_MS`. The
-600 ms incomplete-turn processing delay stays inside the incomplete hold window;
-it is not added afterward. Model generation may overlap these windows, so measured
-residual hold and first-audio latency will vary with inference time.
+The runtime is adapted from the MIT-licensed
+[ConvFill implementation](https://github.com/vysri/conversational-infill)
+(copyright 2026 Vidya Srinivas; see `LICENSE.convfill`). It is copied here
+because the upstream package installs as a top-level `src` package and requires
+Python older than 3.12.

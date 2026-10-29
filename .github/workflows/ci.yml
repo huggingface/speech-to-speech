@@ -63,29 +63,25 @@ jobs:
         run: uv run pytest tests/ -x -q
 
   convfill-example:
+    name: ConvFill example
+    env:
+      UV_PYTHON: "3.12"
     permissions:
       contents: read
-    name: Hosted ConvFill example
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          python-version: "3.12"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: demo/package-lock.json
+          version: "latest"
       - run: uv sync --group dev
       - run: uv pip install -r examples/convfill/requirements.txt
-      - run: npm ci --prefix demo --no-audit --no-fund
-      - run: npx --prefix demo playwright install --with-deps chromium
-      - name: Example regressions
+      - name: NLTK data (punkt_tab for sent_tokenize)
+        run: uv run python -c "import nltk; nltk.download('punkt_tab')"
+      - run: uv run ruff check examples/convfill/convfill_demo
+      - run: uv run ruff format --check examples/convfill/convfill_demo
+      - name: Example tests
         run: PYTHONPATH=examples/convfill:src uv run pytest examples/convfill/convfill_demo/tests -q
-      - run: uv run ruff check examples/convfill/convfill_demo examples/convfill/scripts examples/convfill/deploy/hf_space.py
-      - run: uv run ruff format --check examples/convfill/convfill_demo examples/convfill/scripts examples/convfill/deploy/hf_space.py
-      - run: npm --prefix demo run test:ui
 
   agents-sdk-websocket:
     permissions:
