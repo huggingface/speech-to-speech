@@ -6,7 +6,7 @@ import { worklet } from "./playback-helpers.mjs";
 
 // Exercise the pinned SDK's parsing, event ordering, session, and transport.
 // Only the socket and audio device are deterministic in-process stand-ins.
-async function fixture(bufferMs = 1200, sampleRate = 48_000, options = {}) {
+async function fixture(bufferMs = 1200, sampleRate = 48_000) {
   const sent = [];
   const socket = new class extends EventTarget {
     send(data) { sent.push(JSON.parse(data)); }
@@ -23,7 +23,7 @@ async function fixture(bufferMs = 1200, sampleRate = 48_000, options = {}) {
   };
   const client = new S2sRealtimeClient({
     transport: "websocket", directUrl: "ws://test", playbackBufferMs: bufferMs,
-    micStream: { getAudioTracks: () => [{}] }, voice: "coral", instructions: "Test.", ...options,
+    micStream: { getAudioTracks: () => [{}] }, voice: "coral", instructions: "Test.",
   });
   const acknowledgements = [];
   const output = worklet((message) => acknowledgements.push(message), sampleRate);
@@ -234,40 +234,4 @@ test("the pinned SDK forwards viseme extension events to avatar consumers", asyn
   });
   assert.equal(detail?.response_id, "a");
   assert.deepEqual(detail?.visemes, [{ viseme: 21, start_s: 0, end_s: 0.1 }]);
-});
-
-
-test("SDK reports first non-silent playback while generation is still active", async (t) => {
-  const f = await fixture(0);
-  t.after(() => f.client.close());
-  const events = [];
-  f.client.addEventListener("playback-latency", event => events.push(event.detail));
-  f.client._ctx = { getOutputTimestamp: () => ({ contextTime: 0, performanceTime: 2000 }), close: async () => {} };
-  f.client._playbackLatency.capture(48000, 1000);
-  f.receive({ type: "input_audio_buffer.speech_stopped", item_id: "user", audio_end_ms: 1000 });
-  f.start();
-  f.audio(2400);
-  assert.equal(events.length, 0);
-  f.output.render(128);
-  f.acknowledge();
-  assert.equal(events.length, 1);
-  assert.equal(events[0].responseId, "a");
-  assert.ok(events[0].seconds >= 1 && events[0].seconds < 1.01);
-  f.output.render(128);
-  f.acknowledge();
-  assert.equal(events.length, 1);
-  f.audioDone();
-  f.done();
-});
-
-
-test("startup greeting creates exactly one explicitly marked response", async (t) => {
-  const f = await fixture(0, 48000, { startupGreeting: "Greet the user." });
-  t.after(() => f.client.close());
-  const inputs = f.sent.filter(event => event.type === "conversation.item.create");
-  assert.equal(inputs.length, 1);
-  assert.equal(inputs[0].item.content[0].text, "Greet the user.");
-  const responses = f.sent.filter(event => event.type === "response.create");
-  assert.equal(responses.length, 1);
-  assert.deepEqual(responses[0].response.metadata, { "speech_to_speech.startup_greeting": "true" });
 });

@@ -47,30 +47,23 @@ test("history shows per-response server timings on desktop and phone", async (t)
         } : {}, output: [] },
       });
       chat.onTranscript({ role: "assistant", text: "The sky looks blue because air scatters blue light more strongly.", partial: false, responseId: "r1" });
-      chat.onPlaybackLatency({ responseId: "r1", seconds: 1.11 });
-      if (!document.querySelector(".hist-timings summary")) throw new Error("Playback timing must appear before response.done");
       finish("r1", timing);
       chat._openPanel();
     }, timing);
     await page.evaluate(() => document.querySelector(".chat-panel-inner").getAnimations().forEach((animation) => animation.finish()));
     assert.equal(await page.locator(".hist-msg.assistant").count(), 1);
-    assert.equal(await page.locator(".playback-e2e").count(), 0);
-    assert.equal(await page.locator(".hist-timings").count(), 1);
     const summary = page.locator(".hist-timings summary").first();
-    assert.match(await summary.textContent(), /First audio1.11 s/);
-    assert.equal(await page.locator(".hist-timings").getAttribute("open"), null);
-    if (process.env.S2S_UI_SCREENSHOTS) await page.screenshot({ path: `${process.env.S2S_UI_SCREENSHOTS}/first-audio-${width}.png` });
+    assert.match(await summary.textContent(), /E2E 1.61 s/);
     await summary.focus();
     await page.keyboard.press("Enter");
     assert.equal(await page.locator(".hist-timings").first().getAttribute("open"), "");
     assert.match(await page.locator(".hist-timings dl").innerText(), /0.00 s/);
-    assert.match(await page.locator(".hist-timings dl").innerText(), /1.61 s/);
     assert.deepEqual(await page.locator(".hist-timings dt").allTextContents(), [
-      "Browser first audio", "Server first audio", "VAD end decision", "Smart Turn decision", "Transcription",
+      "E2E time", "VAD end decision", "Smart Turn decision", "Transcription",
       "Response generation", "Voice synthesis to first audio", "Hold time before response",
     ]);
     assert.match(await page.locator(".hist-timings dl").innerText(), /Hold time before response/);
-    assert.match(await page.locator(".hist-timings").innerText(), /excludes browser playback/);
+    assert.match(await page.locator(".hist-timings").innerText(), /excluding browser playback/);
     await page.waitForFunction(() => {
       const box = document.querySelector(".hist-timings summary").getBoundingClientRect();
       return box.right <= innerWidth;

@@ -575,8 +575,8 @@ data URL.
 For a fully local audio-input model on Apple Silicon, see the
 [Gemma 4 12B example](./examples/gemma4-12b-macos/README.md).
 
-For a concurrent Reasoner/Talker voice agent with quantized Gemma and the
-fine-tuned ConvFill checkpoint, see the [hosted ConvFill example](./examples/convfill/README.md).
+For a Talker/Reasoner voice agent that pairs the fine-tuned ConvFill checkpoint
+with a Gemma Reasoner, see the [ConvFill example](./examples/convfill/README.md).
 
 ## Offline Operation
 
@@ -760,16 +760,6 @@ The default checkpoint is [`gradium/phonon-31m-en`](https://huggingface.co/gradi
 `local --tts phonon` lets you cycle through these voices using the terminal's left/right or up/down arrows. The selected voice is displayed immediately and applied after the current reply finishes, preserving the conversation. This requires an interactive macOS or Linux terminal. The standalone `talk` client can opt in with `--voices Zoey Harper Easton` and select its initial voice with `--voice Zoey`.
 
 Phonon uses four native CPU threads by default, which performed better than the runtime's twelve-thread default on an Apple M3 Pro in local testing. Use `--phonon_tts_num_threads N` to tune it at startup; the setting is shared by all Phonon pipelines in the process.
-
-For sentence-streamed conversation, `--phonon_tts_max_trailing_silence_ms 120` can
-shorten the quiet tail of each utterance while retaining a brief natural pause.
-This is optional: omitting it preserves native audio. It recognizes quiet audio
-below -60 dBFS RMS in 10 ms windows, preserves leading audio and internal pauses,
-and keeps up to the configured quiet tail (minimum setting 40 ms). Trimming is limited to
-one second per utterance; final PCM block padding can add up to 32 ms. Speech is
-streamed immediately; only excess quiet samples are held until the utterance ends
-or speech resumes. It cannot remove a delay caused by late model text or a slow
-synthesizer, and very quiet recordings may need native audio instead.
 
 Phonon runs on CPU even when STT or the LLM uses a GPU. Native audio is resampled to the pipeline's 16 kHz PCM16 output, and interruption closes the native stream. `--phonon_tts_language` fixes text normalization at startup; use `en` (the default), `fr`, `de`, `es`, `pt`, or `none`. Session language changes are restricted to that configured language. See the [TTS component guide](./src/speech_to_speech/TTS/README.md#10-phonon---tts-phonon) for installation and checkpoint options.
 

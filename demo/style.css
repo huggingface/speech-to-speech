@@ -2728,16 +2728,10 @@ body.cam-on .footer {
 }
 .hist-timings summary {
   min-height: 44px;
-  padding: 10px 0;
+  padding: 12px 0;
   box-sizing: border-box;
   cursor: pointer;
   touch-action: manipulation;
-  list-style: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: fit-content;
-  max-width: 100%;
 }
 .hist-timings summary:focus-visible {
   outline: 2px solid var(--text-dim);
@@ -2758,26 +2752,3 @@ body.cam-on .footer {
 }
 .hist-timings p { margin: 8px 0; line-height: 1.5; }
 .hist-timings .timing-status { color: var(--text); }
-
-.hist-timings summary::-webkit-details-marker { display: none; }
-.hist-timings summary::after {
-  content: "";
-  width: 5px;
-  height: 5px;
-  border-right: 1px solid currentColor;
-  border-bottom: 1px solid currentColor;
-  transform: rotate(45deg) translateY(-2px);
-  margin-left: 3px;
-}
-.hist-timings[open] summary::after { transform: rotate(225deg) translate(-1px, -1px); }
-.hist-timings .timing-value {
-  font-variant-numeric: tabular-nums;
-  color: var(--text);
-  font-weight: 500;
-  white-space: nowrap;
-}
-.hist-timings[open] {
-  border-top: 1px solid var(--border);
-  padding-top: 2px;
-}
-.hist-timings .timing-note { font-size: 11px; max-width: 48ch; }

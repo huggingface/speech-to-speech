@@ -1,5 +1,4 @@
 // @ts-check
-import { withSpaceAccess } from "./connection-url.js";
 /**
  * Demo adapter around the official OpenAI Agents SDK RealtimeSession.
  *
@@ -47,7 +46,6 @@ import { withSpaceAccess } from "./connection-url.js";
  * @property {(call: {name: string, arguments: string, callId: string}) => Promise<{output: string, image?: string}>} [executeTool]
  */
 
-import { PlaybackLatency } from "./playback-latency.js";
 import { readTurnLatency } from "./turn-latency.js";
 import { extractResponseTranscript, trimTrailingSlash } from "./ws/codec.js";
 import { OrbVisualiser, VIS_FFT_SIZE } from "./ws/orb-visualizer.js";
@@ -127,7 +125,6 @@ export class S2sRealtimeClient extends EventTarget {
     this._playbackThreshold = Math.ceil(AUDIO_SAMPLE_RATE * normalizePlaybackBufferMs(options.playbackBufferMs) / 1000);
     this._resetPlaybackBuffer();
     this._playbackItems = new Map();
-    this._playbackLatency = new PlaybackLatency(AUDIO_SAMPLE_RATE);
     this._playbackInterruptions = new Map();
     this._playbackClearId = 0;
     this._micAnalyser = null;
@@ -170,7 +167,7 @@ export class S2sRealtimeClient extends EventTarget {
     let url;
     if (this.options.transport === "websocket") {
       if (this._directUrl) {
-        url = withSpaceAccess(this._directUrl);
+        url = this._directUrl;
         this._setStatus("connecting");
       } else {
         if (!this._sessionUrl) throw new Error("No session endpoint or direct URL configured");
@@ -252,10 +249,7 @@ export class S2sRealtimeClient extends EventTarget {
     const greeting = this.options.startupGreeting?.trim();
     if (greeting) {
       this._responseRequested = true;
-      this._transport.sendMessage(greeting, {}, { triggerResponse: false });
-      this._transport.requestResponse({
-        metadata: { "speech_to_speech.startup_greeting": "true" },
-      });
+      this._session.sendMessage(greeting);
     }
     this.setMuted(this._muted);
     this._setStatus("connected");
@@ -337,7 +331,7 @@ export class S2sRealtimeClient extends EventTarget {
     if (this.options.transport === "websocket") {
       const base = new URL("./worklets/", import.meta.url);
       await ctx.audioWorklet.addModule(versionedAudioWorkletUrl("mic-capture.js", base));
-      await ctx.audioWorklet.addModule(versionedAudioWorkletUrl("audio-playback.js", base) + "&playback_start=1");
+      await ctx.audioWorklet.addModule(versionedAudioWorkletUrl("audio-playback.js", base));
       const capture = new AudioWorkletNode(ctx, "mic-capture", {
         numberOfInputs: 1,
         numberOfOutputs: 0,
@@ -514,7 +508,6 @@ export class S2sRealtimeClient extends EventTarget {
   }
 
   _interruptPlayback() {
-    this._playbackLatency.interrupt();
     if (this.options.transport !== "websocket") return;
     const clearId = ++this._playbackClearId;
     this._playbackInterruptions.set(clearId, this._playbackItems);
@@ -527,12 +520,6 @@ export class S2sRealtimeClient extends EventTarget {
   }
 
   _onPlaybackMessage(message) {
-    if (message?.kind === "started") {
-      const item = this._playbackItems.get(message.key);
-      const timing = this._playbackLatency.rendered(item?.responseId, message.audioTime, this._ctx);
-      if (timing && !this._closed) this.dispatchEvent(new CustomEvent("playback-latency", { detail: timing }));
-      return;
-    }
     if (message?.kind !== "cleared") return;
     const items = this._playbackInterruptions.get(message.clearId);
     this._playbackInterruptions.delete(message.clearId);
@@ -561,7 +548,6 @@ export class S2sRealtimeClient extends EventTarget {
   /** @param {ArrayBuffer} buffer */
   _onMicChunk(buffer) {
     if (!this._session || this._muted || this._status === "connecting") return;
-    this._playbackLatency.capture(buffer.byteLength, performance.now());
     this._session.sendAudio(buffer);
     this._userAudioRecorder.append(buffer);
   }
@@ -583,13 +569,12 @@ export class S2sRealtimeClient extends EventTarget {
         this._playbackAudioKey = key;
         if (!this._playbackItems.has(key)) {
           this._playbackItems.set(key, {
-            itemId: event.item_id, contentIndex: event.content_index, samples: 0, responseId: event.response_id,
+            itemId: event.item_id, contentIndex: event.content_index, samples: 0,
           });
         }
         break;
       }
       case "input_audio_buffer.speech_started": {
-        this._playbackLatency.interrupt();
         // WebSocket calls interrupt() after dispatching this raw event.
         if (this.options.transport !== "websocket") this._clearPlayback();
         const itemId = typeof event.item_id === "string" ? event.item_id : "";
@@ -605,7 +590,6 @@ export class S2sRealtimeClient extends EventTarget {
         break;
       }
       case "input_audio_buffer.speech_stopped": {
-        this._playbackLatency.speechStopped(Number(event.audio_end_ms));
         const itemId = typeof event.item_id === "string" ? event.item_id : "";
         if (this.options.transport === "websocket") {
           const recording = this._userAudioRecorder.speechStopped({
@@ -621,7 +605,6 @@ export class S2sRealtimeClient extends EventTarget {
       case "response.created":
         this._responseRequested = false;
         this._activeResponseId = event.response?.id ?? "";
-        this._playbackLatency.responseCreated(this._activeResponseId);
         if (this.options.transport === "websocket") this._resetPlaybackBuffer(this._activeResponseId);
         if (this._status === "connected" || this._status === "user-speaking") this._setStatus("processing");
         break;

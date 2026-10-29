@@ -69,10 +69,6 @@ export class ChatView {
     // ── Assistant transcript state (keyed by response_id) ──────────────────
     /** @type {Map<string, { bubble: HTMLElement, hist: HTMLElement }>} */
     this._asstByResp = new Map();
-    this._playbackTimings = new Map();
-    this._serverTimingByHist = new WeakMap();
-    this._playbackTimingByHist = new WeakMap();
-    this._responseHistory = new Map();
 
     // ── Ephemeral bubble auto-dismiss ──────────────────────────────────────
     // Per-element expiry (epoch ms). A bubble fades once its expiry passes —
@@ -311,8 +307,6 @@ export class ChatView {
     this._audioUrls.clear();
     this._userAudioByItem.clear();
     this._userHistByItem.clear();
-    this._playbackTimings.clear();
-    this._responseHistory.clear();
     this.renderEmptyState();
     this._chatBadge.classList.remove("visible");
   }
@@ -370,9 +364,9 @@ export class ChatView {
     el.innerHTML = `
       <div class="hist-role">Tool call</div>
       <button class="hist-tool-header" aria-expanded="false">
-        <svg aria-hidden="true" focusable="false" class="hist-tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${WRENCH_PATH}</svg>
+        <svg class="hist-tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${WRENCH_PATH}</svg>
         <span class="hist-tool-name">${escHtml(name)}</span>
-        <svg aria-hidden="true" focusable="false" class="hist-tool-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+        <svg class="hist-tool-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
       </button>
       <div class="hist-tool-body">
         <div class="hist-tool-label">Input</div>
@@ -432,8 +426,6 @@ export class ChatView {
     this._activeUserItemId = "";
     this._assistantDismissedUserItemId = "";
     this._asstByResp.clear();
-    this._playbackTimings.clear();
-    this._responseHistory.clear();
   }
 
   // ── Client event handlers ─────────────────────────────────────────────────
@@ -526,7 +518,6 @@ export class ChatView {
       if (!entry) {
         const bubble = this._spawnBubble("assistant", d.text);
         this._asstByResp.set(rid, { bubble, hist: this._appendHistMsg("assistant", d.text, false) });
-        this._renderPlaybackTiming(rid, this._asstByResp.get(rid).hist);
         this._bumpDismiss(bubble);
       } else {
         this._updateBubbleText(entry.bubble, d.text);
@@ -621,11 +612,6 @@ export class ChatView {
       this._markUnread();
     }
 
-    if (hist) {
-      this._responseHistory.set(responseId, hist);
-      if (this._responseHistory.size > 128) this._responseHistory.delete(this._responseHistory.keys().next().value);
-      this._renderPlaybackTiming(responseId, hist);
-    }
     if (status === "cancelled") {
       // Keep every transcript that was received — mark it interrupted rather
       // than erasing it. If the `*.transcript.done` never fired, build the row
@@ -647,83 +633,47 @@ export class ChatView {
     this._asstByResp.delete(responseId);
   }
 
-  onPlaybackLatency(detail) {
-    if (!detail.responseId || !Number.isFinite(detail.seconds) || detail.seconds < 0) return;
-    this._playbackTimings.set(detail.responseId, detail.seconds);
-    if (this._playbackTimings.size > 128) this._playbackTimings.delete(this._playbackTimings.keys().next().value);
-    const hist = this._asstByResp.get(detail.responseId)?.hist || this._responseHistory.get(detail.responseId);
-    if (hist) this._renderPlaybackTiming(detail.responseId, hist);
-  }
-
-  _renderPlaybackTiming(responseId, hist) {
-    const seconds = this._playbackTimings.get(responseId);
-    if (seconds === undefined) return;
-    this._playbackTimingByHist.set(hist, seconds);
-    this._renderTimingCard(hist);
-    this._markUnread();
-  }
-
   /** @param {HTMLElement} hist @param {import("../turn-latency.js").TurnLatency} timing */
   _appendTimings(hist, timing) {
-    this._serverTimingByHist.set(hist, timing);
-    this._renderTimingCard(hist);
-  }
-
-  /** Keep first playback and server stages in one quiet, collapsed disclosure. */
-  _renderTimingCard(hist) {
-    const timing = this._serverTimingByHist.get(hist);
-    const playback = this._playbackTimingByHist.get(hist);
+    /** @param {number|null|undefined} seconds */
     const format = (seconds) => seconds == null ? "Unavailable" : `${seconds.toFixed(2)} s`;
-    let details = hist.querySelector(".hist-timings");
-    if (!details) {
-      details = document.createElement("details");
-      details.className = "hist-timings";
-      hist.appendChild(details);
-    }
-    // Reuse the disclosure, so response.done never collapses a user's selection.
-    details.replaceChildren();
+    const details = document.createElement("details");
+    details.className = "hist-timings";
     const summary = document.createElement("summary");
-    const label = document.createElement("span");
-    label.className = "timing-label";
-    label.textContent = playback !== undefined ? "First audio" : timing?.e2e_s != null ? "Server first audio" : "Timing details";
-    const value = document.createElement("span");
-    value.className = "timing-value";
-    value.textContent = playback !== undefined ? format(playback) : timing?.e2e_s != null ? format(timing.e2e_s) : "";
-    summary.append(label, value);
-    summary.title = playback !== undefined
-      ? "Estimated speech end to first non-silent browser output, including network and playback buffering."
-      : "Server measurements; expand for stage details.";
+    summary.textContent = timing.e2e_s === null
+      ? "Server timings"
+      : `Server timings · ${timing.version === 2 ? "E2E" : "First audio"} ${format(timing.e2e_s)}`;
     details.appendChild(summary);
+    const status = document.createElement("p");
+    status.className = "timing-status";
+    status.textContent = ({ completed: "Completed", cancelled: "Interrupted", failed: "Failed", incomplete: "Incomplete" })[timing.status];
+    details.appendChild(status);
     const list = document.createElement("dl");
-    const stages = [];
-    if (playback !== undefined) stages.push(["Browser first audio", playback]);
-    if (timing) stages.push(
-      [timing.version === 2 ? "Server first audio" : "VAD handoff to first audio", timing.e2e_s],
+    /** @type {[string, number|null|undefined|string][]} */
+    const stages = [
+      [timing.version === 2 ? "E2E time" : "VAD handoff to first audio", timing.e2e_s],
       ["VAD end decision", timing.vad_decision_s],
       ["Smart Turn decision", timing.smart_status],
       ["Transcription", timing.stt_s],
       ["Response generation", timing.llm_s],
       ["Voice synthesis to first audio", timing.tts_ttfa_s],
       ["Hold time before response", timing.version === 2 ? timing.hold_s : timing.smart_wait_s],
-    );
-    for (const [text, measurement] of stages) {
+    ];
+    for (const [label, value] of stages) {
       const term = document.createElement("dt");
-      term.textContent = text;
+      term.textContent = label;
       const description = document.createElement("dd");
-      description.textContent = typeof measurement === "string" ? measurement : format(measurement);
+      description.textContent = typeof value === "string" ? value : format(value);
       list.append(term, description);
     }
     details.appendChild(list);
     const note = document.createElement("p");
-    note.className = "timing-note";
-    note.textContent = "Browser timing estimates output-device rendering, not physical speaker playback. Server first audio excludes browser playback. Stages overlap and do not add up.";
+    note.textContent = timing.version === 2
+      ? "E2E: estimated speech end to first generated audio, excluding browser playback. Stages overlap and do not add up."
+      : "First audio: VAD handoff to generated audio, excluding browser playback. Stages overlap and do not add up.";
     details.appendChild(note);
-    if (timing?.status && timing.status !== "completed") {
-      const status = document.createElement("p");
-      status.className = "timing-status";
-      status.textContent = ({ cancelled: "Interrupted", failed: "Failed", incomplete: "Incomplete" })[timing.status] || timing.status;
-      details.appendChild(status);
-    }
+    hist.querySelector(".hist-timings")?.remove();
+    hist.appendChild(details);
     this._scrollToBottom();
   }
 

@@ -211,10 +211,7 @@ Three modes, picked by env (`/api/config` tells the client which one is active):
   address never reaches the browser; the Settings URL field is hidden. On
   OAuth-enabled Spaces, the proxy forwards the signed-in user's HF access token
   to the LB through `X-Reachy-Mini-Authorization` so the backend can attribute
-  usage. The token stays server-side. By default, anonymous requests include no
-  application credential. Set `ALLOW_GUEST_SESSIONS=1` on a metered Space to
-  allocate guests through its server-side `LB_HF_TOKEN` while preserving their
-  separate IP/cookie time budgets.
+  usage. The token stays server-side; anonymous requests include no credential.
 
 | `SPEECH_TO_SPEECH_URL` | `LOAD_BALANCER_URL` | `SPACE_ID` | Connection | URL field | Transport | Metering |
 |:---:|:---:|:---:|---|---|---|---|
@@ -264,23 +261,11 @@ leaves the app unmetered. Tunable via env:
 | Env | Default | What |
 |-----|---------|------|
 | `LIMIT_ANON_SEC` | `300` | Daily seconds for anonymous visitors (5 min) |
-| `ALLOW_GUEST_SESSIONS` | `0` | Opt in to service-authenticated guest allocation on a metered Space; requires `LB_HF_TOKEN`. Signed-in attribution is unchanged. |
 | `LIMIT_FREE_SEC` | `600` | Daily seconds for signed-in non-PRO users (10 min) |
 | `LIMIT_SEARCH_PER_DAY` | `100` | Daily web searches on the server's Serper key per signed-in user (every tier) |
 | `LB_HF_TOKEN` | _(falls back to user OAuth)_ | Optional Space secret sent in standard `Authorization` to authenticate requests at the HF Inference Endpoint ingress; per-user attribution continues through `X-Reachy-Mini-Authorization` |
 | `UNLIMITED_ORGS` | _(adds to defaults)_ | Extra HF org names whose members get **unlimited** usage, like PRO |
 | `USAGE_HASH_SECRET` | _(random)_ | HMAC secret for hashing identity keys + signing the anon cookie |
-
-Guest allocation still requires the Space's server-side `LB_HF_TOKEN`; it never
-returns this credential to the browser or relaxes load-balancer authentication.
-The load balancer attributes guest allocations to that service account, so its
-existing per-account admission limits are shared by guests. The UI meters each
-guest separately using the existing signed cookie and IP keys, and ends the
-conversation when its heartbeat reports the budget exhausted. A Space must be
-public for visitors without a Hugging Face account to reach the UI. Set a stable
-`USAGE_HASH_SECRET`; SQLite needs persistent storage for budgets to survive a
-Space rebuild. The existing client-heartbeat limiter is not a hard server-side
-WebSocket disconnect mechanism.
 
 PRO members are always unlimited. Members of `cerebras`, `HuggingFaceM4`,
 `smolagents`, and `pollen-robotics` are unlimited out of the box (shown as
@@ -297,8 +282,6 @@ case-insensitively against the user's organisations from HF OAuth.
 | Speakers | Output device for assistant audio. Chrome/Edge can switch live via `AudioContext.setSinkId`; other browsers keep the system default. |
 | Voice | Qwen3-TTS speaker name (Aiden, Ryan, Dylan, Eric, Ono_Anna, Serena, Sohee, Uncle_Fu, Vivian) |
 | Instructions | System prompt sent in `session.update` once the connection opens |
-
-For a deployment using another TTS backend, replace the `#voice` options in `index.html` with that backend’s supported voices and mark its default option `selected`. The UI uses that default and replaces saved choices absent from the current menu before starting a conversation. Valid saved choices are preserved.
 
 LocalStorage keys are namespaced `s2s.ws.*` (plus `s2s.transport` for the
 transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).

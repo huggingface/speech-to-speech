@@ -18,12 +18,11 @@
  */
 
 import { S2sRealtimeClient, normalizePlaybackBufferMs } from "./s2s-realtime-client.js?v=audio-24k-v2";
-import { $, truncateError, errorMessage, DEBUG } from "./ui/dom.js";
+import { $, truncateError, DEBUG } from "./ui/dom.js";
 import { ChatView } from "./ui/chat.js";
 import { Account } from "./ui/account.js";
 
-const VOICE_OPTIONS = Array.from(/** @type {HTMLSelectElement} */ ($("#voice")).options);
-const DEFAULT_VOICE = (VOICE_OPTIONS.find((option) => option.defaultSelected) || VOICE_OPTIONS[0])?.value || "Aiden";
+const DEFAULT_VOICE = "Aiden";
 const DEFAULT_INSTRUCTIONS = "You are a friendly voice assistant.";
 
 const STORAGE_KEYS = {
@@ -110,14 +109,9 @@ const SNAPSHOT_LADDER = /** @type {[number, number][]} */ ([
 ]);
 
 function loadSettings() {
-  // Deployments can use different TTS voice catalogs. Migrate saved voices
-  // that the current picker no longer offers before starting a session.
-  const savedVoice = localStorage.getItem(STORAGE_KEYS.voice);
-  const voice = VOICE_OPTIONS.find((option) => option.value === savedVoice)?.value || DEFAULT_VOICE;
-  if (savedVoice !== null && savedVoice !== voice) localStorage.setItem(STORAGE_KEYS.voice, voice);
   return {
     directUrl: localStorage.getItem(STORAGE_KEYS.directUrl) || "",
-    voice,
+    voice: localStorage.getItem(STORAGE_KEYS.voice) || DEFAULT_VOICE,
     instructions: localStorage.getItem(STORAGE_KEYS.instructions) || DEFAULT_INSTRUCTIONS,
     noiseGate: loadGateThreshold(),
     playbackBufferMs: normalizePlaybackBufferMs(localStorage.getItem(STORAGE_KEYS.playbackBufferMs)),
@@ -159,16 +153,16 @@ function saveSettings(s) {
 function loadTools() {
   try {
     const raw = JSON.parse(localStorage.getItem(STORAGE_KEYS.tools) || "{}");
-    // Search requires a configured key; camera access is opt-in.
+    // Both tools default ON (web search still only activates when a key exists).
     // We never call getUserMedia on page load — the camera only actually starts
     // on a user gesture (conversation start), so a default-on flag doesn't
     // silently resume the webcam; an explicit saved `false` is respected.
     return {
       web_search: raw.web_search ?? true,
-      camera_snapshot: raw.camera_snapshot ?? false,
+      camera_snapshot: raw.camera_snapshot ?? true,
     };
   } catch {
-    return { web_search: true, camera_snapshot: false };
+    return { web_search: true, camera_snapshot: true };
   }
 }
 
@@ -345,7 +339,6 @@ let startupGreeting = "";
 let activeTransport = "ws";
 
 // ── Tool state ──────────────────────────────────────────────────────────────
-let toolsAllowed = true;
 let toolsEnabled = loadTools();
 // Whether the server holds a Serper key (learned from /api/config on load).
 let serverSearchKey = false;
@@ -361,7 +354,6 @@ function searchAvailable() {
 
 /** Tool definitions for the currently-enabled (and usable) tools. */
 function activeToolDefs() {
-  if (!toolsAllowed) return [];
   const defs = [];
   if (toolsEnabled.web_search && searchAvailable()) defs.push(TOOL_DEFS.web_search);
   if (toolsEnabled.camera_snapshot) defs.push(TOOL_DEFS.camera_snapshot);
@@ -914,9 +906,6 @@ async function fetchConfig() {
     const res = await fetch("api/config");
     if (res.ok) {
       const json = await res.json();
-      toolsAllowed = json.tools !== false;
-      toolsBtn.hidden = !toolsAllowed;
-      toolsBtn.style.display = toolsAllowed ? "" : "none";
       serverSearchKey = !!json.search;
       lbMode = !!json.lb;
       // Lock to LB mode only when the deploy reports a load balancer.
@@ -1511,7 +1500,6 @@ async function doStart(audioContext = null) {
     chat.onUserAudio(detail);
   });
 
-  c.addEventListener("playback-latency", (e) => chat.onPlaybackLatency(e.detail));
   c.addEventListener("response-finished", (e) => {
     const detail = /** @type {CustomEvent<{ responseId: string; status: string; audible?: boolean; transcript?: string; latency?: import("./turn-latency.js").TurnLatency | null }>} */ (e).detail;
     chat.onResponseFinished(detail);
@@ -1524,7 +1512,7 @@ async function doStart(audioContext = null) {
     // Non-fatal: the backend reported an error mid-session. Log it, keep the
     // socket and the conversation alive (the model can recover on its own).
     const detail = /** @type {CustomEvent<{ error: unknown }>} */ (e).detail;
-    const msg = errorMessage(detail.error);
+    const msg = detail.error instanceof Error ? detail.error.message : String(detail.error);
     console.warn("[main] server error (non-fatal):", msg);
   });
   c.addEventListener("session", (e) => {
@@ -1700,8 +1688,8 @@ async function teardown() {
 
 /** @param {unknown} err */
 async function onFatalError(err) {
-  const message = errorMessage(err);
-  console.error("[main] fatal:", message);
+  console.error("[main] fatal:", err);
+  const message = err instanceof Error ? err.message : String(err);
   try {
     await teardown();
   } catch (teardownError) {
@@ -1715,12 +1703,11 @@ async function onFatalError(err) {
 setState("idle");
 chat.renderEmptyState();
 initGateArc();
-void fetchConfig().then(() => {
-  if (toolsAllowed) {
-    void autoStartCamera();
-    void watchCameraPermission();
-  }
-});
+void fetchConfig();
+// Start the webcam as soon as the user lands (camera tool defaults on), and
+// react to later permission changes (re-grant after a denial re-enables it).
+void autoStartCamera();
+void watchCameraPermission();
 
 // Reconcile a live session if the tab is closed/hidden mid-call (no teardown).
 window.addEventListener("pagehide", () => { endTrackedSession(); endQueueTicket(); });

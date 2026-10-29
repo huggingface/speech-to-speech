@@ -33,7 +33,6 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
     this._stepRatio = this._inputRate / sampleRate;
     this._queue = [];
     this._playedByItem = new Map();
-    this._startedKeys = new Set();
     this._readIdx = 0;
     this._fracPos = 0;
     this._playing = false;
@@ -70,7 +69,6 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
             this.port.postMessage({ kind: "cleared", clearId: data.clearId, played: [...this._playedByItem] });
           }
           this._playedByItem.clear();
-          this._startedKeys.clear();
           this._queue.length = 0;
           this._readIdx = 0;
           this._fracPos = 0;
@@ -132,7 +130,6 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
 
     for (let i = 0; i < out.length; i++) {
       let sample = 0;
-      const renderedKey = this._queue[0]?.key;
 
       if (this._playing) {
         const v = this._readInterpolated();
@@ -169,11 +166,6 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
         this._totalPlayed += 1;
       }
 
-      if (renderedKey && Math.abs(sample) > 1e-7 && !this._startedKeys.has(renderedKey)) {
-        this._startedKeys.add(renderedKey);
-        this.port.postMessage({ kind: "started", key: renderedKey,
-          audioTime: (typeof currentTime === "number" ? currentTime : 0) + i / sampleRate });
-      }
       out[i] = sample;
       if (stereo) stereo[i] = sample;
     }

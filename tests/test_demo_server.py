@@ -4,13 +4,11 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta
-from http.cookies import SimpleCookie
 from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
-from starlette.requests import Request
 
 DEMO_DIR = Path(__file__).resolve().parents[1] / "demo"
 sys.path.insert(0, str(DEMO_DIR))
@@ -680,139 +678,3 @@ if (!root.innerHTML.includes("signin-pill")) {
         capture_output=True,
         text=True,
     )
-
-
-@pytest.mark.parametrize("metered,service_token", [(False, "hf_service_token"), (True, "")])
-def test_guest_service_auth_requires_metering_and_service_credential(monkeypatch, metered, service_token):
-    monkeypatch.setattr(demo_server, "ALLOW_GUEST_SESSIONS", True)
-    monkeypatch.setattr(demo_server, "LIMITER_ENABLED", metered)
-    monkeypatch.setattr(demo_server, "LB_HF_TOKEN", service_token)
-    monkeypatch.setattr(demo_server.auth, "current_access_token", lambda request: None)
-
-    assert "X-Reachy-Mini-Authorization" not in demo_server._load_balancer_headers(object())
-
-
-def test_guest_opt_in_preserves_signed_in_visitor_attribution(monkeypatch):
-    monkeypatch.setattr(demo_server, "ALLOW_GUEST_SESSIONS", True)
-    monkeypatch.setattr(demo_server, "LIMITER_ENABLED", True)
-    monkeypatch.setattr(demo_server, "LB_HF_TOKEN", "hf_service_token")
-    monkeypatch.setattr(demo_server.auth, "current_access_token", lambda request: "hf_visitor_token")
-
-    headers = demo_server._load_balancer_headers(object())
-
-    assert headers["Authorization"] == "Bearer hf_service_token"
-    assert headers["X-Reachy-Mini-Authorization"] == "Bearer hf_visitor_token"
-
-
-def _guest_request(cookie=None, payload=None):
-    headers = [(b"cookie", f"s2s_anon={cookie}".encode())] if cookie else []
-
-    async def receive():
-        return {"type": "http.request", "body": json.dumps(payload or {}).encode(), "more_body": False}
-
-    return Request(
-        {
-            "type": "http",
-            "method": "POST",
-            "scheme": "https",
-            "path": "/api/session",
-            "headers": headers,
-            "client": ("203.0.113.9", 1234),
-            "server": ("demo.example", 443),
-            "query_string": b"",
-        },
-        receive,
-    )
-
-
-@pytest.fixture
-def guest_demo(monkeypatch, tmp_path):
-    limiter = demo_server.limiter
-    monkeypatch.setattr(demo_server, "ALLOW_GUEST_SESSIONS", True)
-    monkeypatch.setattr(demo_server, "LIMITER_ENABLED", True)
-    monkeypatch.setattr(demo_server, "LB_HF_TOKEN", "hf_guest_service_secret")
-    monkeypatch.setattr(demo_server, "LOAD_BALANCER_URL", "https://allocator.example")
-    monkeypatch.setattr(demo_server.auth, "current_oauth", lambda request: None)
-    monkeypatch.setattr(limiter, "_resolve_db_path", lambda: tmp_path / "usage.sqlite3")
-    monkeypatch.setattr(limiter, "_db_path", None)
-    monkeypatch.setattr(limiter, "_HASH_SECRET", b"test-cookie-signing-secret")
-    monkeypatch.setattr(limiter, "ANON_SEC", 300)
-    monkeypatch.setattr(limiter, "CHUNK_SEC", 10)
-    clock = {"now": 1000.0}
-    monkeypatch.setattr(limiter.time, "time", lambda: clock["now"])
-    limiter.init()
-    calls = []
-
-    def allocator(request):
-        calls.append(request)
-        assert request.headers["Authorization"] == "Bearer hf_guest_service_secret"
-        assert request.headers["X-Reachy-Mini-Authorization"] == "Bearer hf_guest_service_secret"
-        return httpx.Response(
-            200,
-            json={
-                "state": "granted",
-                "session_id": f"guest-{len(calls)}",
-                "connect_url": "wss://worker.example/v1/realtime?token=temporary",
-            },
-        )
-
-    client_type = httpx.AsyncClient
-    monkeypatch.setattr(
-        demo_server.httpx,
-        "AsyncClient",
-        lambda **kwargs: client_type(transport=httpx.MockTransport(allocator), **kwargs),
-    )
-    return clock, calls
-
-
-async def test_guest_gets_five_minutes_then_heartbeat_expires_and_reconnect_is_denied(guest_demo):
-    clock, calls = guest_demo
-    first = await demo_server.session(_guest_request())
-    data = json.loads(first.body)
-    assert first.status_code == 200
-    assert data["tier"] == "anon" and data["limited"] is True
-    assert data["remainingSec"] == 290
-    assert demo_server.limiter.budget_for(data["tier"]) == 300
-    assert b"hf_guest_service_secret" not in first.body
-    cookie = SimpleCookie(first.headers["set-cookie"])["s2s_anon"].value
-
-    for elapsed in range(5, 300, 5):
-        clock["now"] = 1000.0 + elapsed
-        assert await demo_server.session_heartbeat(_guest_request(cookie, {"sessionId": data["session_id"]})) == {
-            "expired": False
-        }
-    clock["now"] = 1300.0
-    assert await demo_server.session_heartbeat(_guest_request(cookie, {"sessionId": data["session_id"]})) == {
-        "expired": True
-    }
-    assert (await demo_server.session(_guest_request(cookie))).status_code == 402
-    assert (await demo_server.session(_guest_request())).status_code == 402  # Cookie deletion keeps the IP budget.
-    assert len(calls) == 1
-
-
-async def test_guest_queue_claim_uses_same_service_auth_and_reserves_guest_budget(guest_demo):
-    _, calls = guest_demo
-    response = await demo_server.queue_status("ticket", _guest_request())
-
-    assert response.status_code == 200
-    assert json.loads(response.body)["limited"] is True
-    assert json.loads(response.body)["tier"] == "anon"
-    assert json.loads(response.body)["remainingSec"] == 290
-    assert calls[0].url.path == "/queue/ticket"
-    assert b"hf_guest_service_secret" not in response.body
-
-
-def test_guest_reservation_never_exceeds_a_partially_spent_budget(guest_demo):
-    clock, _ = guest_demo
-    limiter = demo_server.limiter
-    keys = ["ip-budget", "cookie-budget"]
-    with limiter._lock, limiter._connect() as con:
-        limiter._add(con, keys, limiter._today(), 287)
-    assert limiter.begin("last-thirteen-seconds", keys, "anon") == 10
-    clock["now"] += 12
-    assert limiter.heartbeat("last-thirteen-seconds") is True
-    clock["now"] += 1
-    assert limiter.heartbeat("last-thirteen-seconds") is False
-    assert limiter.remaining(keys, "anon") == 0
-    with limiter._lock, limiter._connect() as con:
-        assert limiter._spent_max(con, keys, limiter._today()) == 300
