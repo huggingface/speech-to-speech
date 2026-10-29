@@ -400,12 +400,14 @@ def test_tail_trim_is_independent_of_native_chunks_and_resampling(sample_rate):
     np.testing.assert_array_equal(outputs[0], outputs[1])
 
 
-def test_tail_trim_does_not_delay_the_first_voiced_block():
+# 512 samples end mid-way through a 10 ms window; the block must not wait for it.
+@pytest.mark.parametrize("first_chunk", [512, 1024])
+def test_tail_trim_does_not_delay_the_first_voiced_block(first_chunk):
     visited = []
 
     def samples():
         visited.append("first chunk")
-        yield np.ones(1024, dtype=np.float32)
+        yield np.ones(first_chunk, dtype=np.float32)
         visited.append("second chunk")
         yield np.zeros(8000, dtype=np.float32)
 
@@ -431,6 +433,20 @@ def test_tail_trim_cancellation_drops_held_quiet_audio_and_closes_stream():
 
     assert list(output) == []
     assert stream.closed
+
+
+def test_tail_trim_forwards_incomplete_windows_unless_they_may_be_excess_quiet():
+    trimmer = _TrailingSilenceTrimmer(16000, 40)  # Keeps 640 quiet samples.
+
+    def forwarded(samples):
+        return sum(part.size for part in trimmer.push(samples.astype(np.float32)))
+
+    assert forwarded(np.ones(512)) == 512  # Three windows and part of a fourth.
+    assert forwarded(np.ones(128)) == 128
+    assert forwarded(np.zeros(100)) == 100  # Inside the tail budget.
+    assert forwarded(np.zeros(900)) == 540  # The rest of the budget.
+    assert trimmer.pending.size == 320
+    assert trimmer.partial.size == 40
 
 
 def test_tail_trim_bounds_pending_memory_and_preserves_all_quiet_output():

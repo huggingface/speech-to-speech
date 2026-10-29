@@ -42,6 +42,6 @@ class PhononTTSHandlerArguments:
     phonon_tts_max_trailing_silence_ms: int | None = field(
         default=None,
         metadata={
-            "help": "Opt-in quiet-tail limit per Phonon utterance in milliseconds (minimum 40). Keeps speech and internal pauses; omit to preserve native audio. Try 120 for sentence-streamed speech."
+            "help": "Opt-in target for each Phonon utterance's quiet tail in milliseconds (minimum 40); at most one second is removed per utterance. Keeps speech and internal pauses; omit to preserve native audio. Try 120 for sentence-streamed speech."
         },
     )

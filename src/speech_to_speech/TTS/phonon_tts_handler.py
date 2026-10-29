@@ -30,7 +30,9 @@ class _TrailingSilenceTrimmer:
     """Keep a short quiet tail; restore every held sample if speech resumes.
 
     Only samples after observed speech are held, so leading audio is unchanged.
-    The pending tail is capped at one second to bound memory for abnormal output.
+    Every other sample is forwarded by the push that supplies it, even before its
+    10 ms window is complete. The pending tail is capped at one second to bound
+    memory for abnormal output, so at most one second is removed per utterance.
     """
 
     def __init__(self, sample_rate: int, keep_ms: int):
@@ -38,11 +40,17 @@ class _TrailingSilenceTrimmer:
         self.keep_samples = round(sample_rate * keep_ms / 1000)
         self.max_pending = sample_rate
         self.partial = np.empty(0, dtype=np.float32)
+        self.forwarded = 0
         self.pending = np.empty(0, dtype=np.float32)
         self.quiet_kept = 0
         self.saw_speech = False
 
+    def _keep_budget(self) -> int:
+        return max(0, self.keep_samples - self.quiet_kept)
+
     def _frame(self, samples: np.ndarray) -> Iterator[np.ndarray]:
+        # push() may already have forwarded the start of this window.
+        forwarded, self.forwarded = self.forwarded, 0
         quiet = float(np.mean(samples.astype(np.float64) ** 2)) <= 1e-6  # -60 dBFS RMS.
         if not quiet or not self.saw_speech:
             if self.pending.size:
@@ -50,12 +58,13 @@ class _TrailingSilenceTrimmer:
                 self.pending = np.empty(0, dtype=np.float32)
             self.quiet_kept = 0
             self.saw_speech |= not quiet
-            yield samples
+            if forwarded < samples.size:
+                yield samples[forwarded:]
             return
-        keep = min(samples.size, max(0, self.keep_samples - self.quiet_kept))
-        if keep:
-            yield samples[:keep]
-            self.quiet_kept += keep
+        keep = min(samples.size, self._keep_budget())
+        if keep > forwarded:
+            yield samples[forwarded:keep]
+        self.quiet_kept += keep
         self.pending = np.concatenate((self.pending, samples[keep:]))
         excess = self.pending.size - self.max_pending
         if excess > 0:
@@ -68,6 +77,12 @@ class _TrailingSilenceTrimmer:
         for start in range(0, end, self.frame_size):
             yield from self._frame(self.partial[start : start + self.frame_size])
         self.partial = self.partial[end:].copy()
+        # The incomplete window is kept whether or not it turns out quiet when it
+        # fits the remaining tail budget (nothing is pending then), so forward it.
+        ready = self.partial.size if not self.saw_speech else min(self.partial.size, self._keep_budget())
+        if ready > self.forwarded:
+            yield self.partial[self.forwarded : ready]
+            self.forwarded = ready
 
     def finish(self) -> Iterator[np.ndarray]:
         if self.partial.size:
