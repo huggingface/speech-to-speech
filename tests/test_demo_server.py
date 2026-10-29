@@ -506,6 +506,23 @@ def test_sweep_still_reaps_silent_metered_sessions(monkeypatch, space_search):
     assert not demo_server.limiter.heartbeat("mine")
 
 
+def test_reservation_never_exceeds_a_partially_spent_budget(monkeypatch, space_search):
+    limiter = demo_server.limiter
+    keys = ["k_ip", "k_cookie"]
+    with limiter._lock, limiter._connect() as con:
+        limiter._add(con, keys, limiter._today(), limiter.ANON_SEC - 13)
+
+    assert limiter.begin("mine", keys, "anon") == limiter.CHUNK_SEC
+    _advance(monkeypatch, 12)
+    assert limiter.heartbeat("mine")  # reserves the last 3 s, not a full chunk
+    _advance(monkeypatch, 3)
+    assert not limiter.heartbeat("mine")
+
+    assert limiter.remaining(keys, "anon") == 0
+    with limiter._lock, limiter._connect() as con:
+        assert limiter._spent_max(con, keys, limiter._today()) == limiter.ANON_SEC
+
+
 async def test_unlimited_grants_are_recorded_but_never_debited(monkeypatch, space_search):
     monkeypatch.setattr(demo_server, "LIMITER_ENABLED", True)
 
