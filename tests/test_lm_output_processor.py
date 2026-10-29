@@ -2,6 +2,7 @@ from queue import Queue
 from threading import Event, Thread
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 from openai.types.realtime import RealtimeSessionCreateRequest
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
@@ -485,6 +486,33 @@ def test_text_event_precedes_optional_tts_input(modalities, text, expect_tts):
     assert outputs[0].text == text
     assert outputs[0].cancel_generation == 7
     assert [isinstance(output, TTSInput) for output in outputs] == [False, *([True] if expect_tts else [])]
+
+
+@pytest.mark.parametrize("modalities", [["audio"], ["text"]])
+def test_model_speech_follows_its_text_only_when_audio_is_wanted(modalities):
+    _, processor = _tracked_processor()
+    speech = np.arange(4, dtype="<i2")
+
+    outputs = list(
+        processor.process(
+            LLMResponseChunk(
+                text="hello",
+                audio=speech,
+                turn_id="turn_1",
+                turn_revision=0,
+                response=RealtimeResponseCreateParams(output_modalities=modalities),
+            )
+        )
+    )
+
+    assert isinstance(outputs[0], AssistantOutputEvent)
+    spoken = [output for output in outputs if isinstance(output, TTSInput) and output.audio is not None]
+    if modalities == ["text"]:
+        assert spoken == []
+    else:
+        assert outputs[-1] is spoken[0]
+        assert spoken[0].text == ""
+        assert spoken[0].audio is speech
 
 
 def test_llm_output_language_flag_warms_detector_and_routes_detected_code(monkeypatch):

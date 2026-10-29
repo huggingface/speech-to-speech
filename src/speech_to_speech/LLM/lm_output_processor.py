@@ -302,6 +302,19 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 response_key=response_key,
                 prefetch_transaction=lm_output.prefetch_transaction,
             )
+        if lm_output.audio is not None and lm_output.audio.size and response_wants_audio(lm_output.response):
+            yield TTSInput(
+                text="",
+                audio=lm_output.audio,
+                runtime_config=lm_output.runtime_config,
+                response=lm_output.response,
+                turn_id=lm_output.turn_id,
+                turn_revision=lm_output.turn_revision,
+                speech_stopped_at_s=lm_output.speech_stopped_at_s,
+                cancel_generation=lm_output.cancel_generation,
+                response_key=response_key,
+                prefetch_transaction=lm_output.prefetch_transaction,
+            )
 
     def on_session_end(self) -> None:
         self._reset_response()

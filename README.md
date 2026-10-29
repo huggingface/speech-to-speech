@@ -215,6 +215,7 @@ pip install "speech-to-speech[paraformer]"      # Paraformer STT through FunASR
 pip install "speech-to-speech[fireredvad]"      # FireRed streaming VAD
 pip install "speech-to-speech[nemo]"            # Parakeet Unified, Nemotron, and Orukeet STT through NeMo
 pip install "speech-to-speech[mlx-lm]"          # mlx-vlm support for vision models on macOS
+pip install "speech-to-speech[lfm-audio]"       # LFM3-Audio speech-to-speech model (Linux / Windows)
 ```
 
 Deprecated implementations, including MeloTTS, live in [`archive/`](./archive) and are no longer wired into the CLI.
@@ -257,6 +258,7 @@ This installs the package in editable mode. With the environment activated, use 
 | LLM | [mlx-lm](https://github.com/ml-explore/mlx-lm) (default on macOS) | Apple Silicon | built-in on macOS |
 | LLM | [Transformers](https://huggingface.co/models?pipeline_tag=text-generation&sort=trending) (default elsewhere) | supported accelerators / CPU | built-in |
 | LLM | OpenAI-compatible API (`responses-api`, `chat-completions`) | optional hosted providers or self-hosted servers | built-in |
+| LLM + TTS | [LFM3-Audio](https://huggingface.co/LiquidAI/LFM3-Audio-2B) speech-to-speech model (`--llm_backend lfm-audio --tts none`) | CUDA | `lfm-audio` |
 | TTS | [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) (default) | GGML / CUDA on Linux, mlx-audio on macOS | built-in |
 | TTS | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | CUDA / CPU, Apple Silicon | `kokoro` (macOS: Python 3.11–3.12) |
 | TTS | [KittenTTS](https://github.com/KittenML/KittenTTS) | CPU | `kitten` |
@@ -574,6 +576,29 @@ data URL.
 
 For a fully local audio-input model on Apple Silicon, see the
 [Gemma 4 12B example](./examples/gemma4-12b-macos/README.md).
+
+### Speech-to-Speech Model (No STT or TTS)
+
+[LFM3-Audio](https://huggingface.co/LiquidAI/LFM3-Audio-2B) hears the user's
+audio and speaks its reply itself, so it replaces STT, the LLM and TTS. VAD and
+turn detection still decide when the user has finished:
+
+```bash
+pip install "speech-to-speech[lfm-audio]"
+speech-to-speech serve --stt none --llm_backend lfm-audio --tts none
+```
+
+The model streams text and speech together. Clients receive its text as the
+assistant transcript and its 24 kHz speech, resampled to the pipeline rate, as
+the audio. `--tts none` only works with a model that speaks, and `lfm-audio`
+only works with `--tts none`. `--stt` may still name a recognizer, in which
+case the model answers the transcript instead of the audio.
+
+The backend loads through Transformers and needs a GPU for real-time replies; it
+uses about 5 GB of GPU memory. It does not support tools yet and ignores any the
+session declares. Only the newest user turn keeps its audio; earlier turns keep
+the model's replies and a placeholder. The weights use the
+[LFM Open License](https://huggingface.co/LiquidAI/LFM3-Audio-2B/blob/main/LICENSE).
 
 ## Offline Operation
 
