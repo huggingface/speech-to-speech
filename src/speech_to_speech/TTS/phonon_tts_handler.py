@@ -26,6 +26,71 @@ OPENAI_REALTIME_VOICES = frozenset(
 )
 
 
+class _TrailingSilenceTrimmer:
+    """Keep a short quiet tail; restore every held sample if speech resumes.
+
+    Only samples after observed speech are held, so leading audio is unchanged.
+    Every other sample is forwarded by the push that supplies it, even before its
+    10 ms window is complete. The pending tail is capped at one second to bound
+    memory for abnormal output, so at most one second is removed per utterance.
+    """
+
+    def __init__(self, sample_rate: int, keep_ms: int):
+        self.frame_size = max(1, sample_rate // 100)
+        self.keep_samples = round(sample_rate * keep_ms / 1000)
+        self.max_pending = sample_rate
+        self.partial = np.empty(0, dtype=np.float32)
+        self.forwarded = 0
+        self.pending = np.empty(0, dtype=np.float32)
+        self.quiet_kept = 0
+        self.saw_speech = False
+
+    def _keep_budget(self) -> int:
+        return max(0, self.keep_samples - self.quiet_kept)
+
+    def _frame(self, samples: np.ndarray) -> Iterator[np.ndarray]:
+        # push() may already have forwarded the start of this window.
+        forwarded, self.forwarded = self.forwarded, 0
+        quiet = float(np.mean(samples.astype(np.float64) ** 2)) <= 1e-6  # -60 dBFS RMS.
+        if not quiet or not self.saw_speech:
+            if self.pending.size:
+                yield self.pending
+                self.pending = np.empty(0, dtype=np.float32)
+            self.quiet_kept = 0
+            self.saw_speech |= not quiet
+            if forwarded < samples.size:
+                yield samples[forwarded:]
+            return
+        keep = min(samples.size, self._keep_budget())
+        if keep > forwarded:
+            yield samples[forwarded:keep]
+        self.quiet_kept += keep
+        self.pending = np.concatenate((self.pending, samples[keep:]))
+        excess = self.pending.size - self.max_pending
+        if excess > 0:
+            yield self.pending[:excess]
+            self.pending = self.pending[excess:].copy()
+
+    def push(self, samples: np.ndarray) -> Iterator[np.ndarray]:
+        self.partial = np.concatenate((self.partial, samples))
+        end = self.partial.size - self.partial.size % self.frame_size
+        for start in range(0, end, self.frame_size):
+            yield from self._frame(self.partial[start : start + self.frame_size])
+        self.partial = self.partial[end:].copy()
+        # The incomplete window is kept whether or not it turns out quiet when it
+        # fits the remaining tail budget (nothing is pending then), so forward it.
+        ready = self.partial.size if not self.saw_speech else min(self.partial.size, self._keep_budget())
+        if ready > self.forwarded:
+            yield self.partial[self.forwarded : ready]
+            self.forwarded = ready
+
+    def finish(self) -> Iterator[np.ndarray]:
+        if self.partial.size:
+            yield from self._frame(self.partial)
+        self.partial = np.empty(0, dtype=np.float32)
+        self.pending = np.empty(0, dtype=np.float32)
+
+
 class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
     """Stream a supplied Phonon checkpoint through the native CPU runtime."""
 
@@ -39,6 +104,7 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
         quant: str = "q8",
         blocksize: int = 512,
         num_threads: int | None = None,
+        max_trailing_silence_ms: int | None = None,
         gen_kwargs: dict[str, Any] | None = None,
         cancel_scope: CancelScope | None = None,
         speculative_turns: SpeculativeTurnTracker | None = None,
@@ -51,6 +117,8 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
             raise ValueError("blocksize must be positive")
         if num_threads is not None and num_threads <= 0:
             raise ValueError("num_threads must be positive")
+        if max_trailing_silence_ms is not None and max_trailing_silence_ms < 40:
+            raise ValueError("max_trailing_silence_ms must be at least 40, or omitted to disable trimming")
         language = language.strip().lower()
         if language not in PHONON_NORMALIZATION_LANGUAGES:
             raise ValueError(
@@ -67,6 +135,7 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.voice = voice
         self.language = language
         self.blocksize = blocksize
+        self.max_trailing_silence_ms = max_trailing_silence_ms
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
         self._failed_responses: set[tuple[int | None, str | None, str | None, int | None]] = set()
@@ -182,6 +251,8 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
         first_audio = True
         first_block = True
         pending = np.empty(0, dtype=np.int16)
+        tail_ms = self.max_trailing_silence_ms
+        trimmer = _TrailingSilenceTrimmer(PIPELINE_SAMPLE_RATE, tail_ms) if tail_ms is not None else None
 
         def emit(block: np.ndarray) -> np.ndarray:
             nonlocal first_block
@@ -216,6 +287,13 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     pending = pending[self.blocksize :]
                     yield emit(block)
 
+            def trimmed_blocks(samples: np.ndarray) -> Iterator[np.ndarray]:
+                if trimmer is None:
+                    yield from blocks(samples)
+                    return
+                for retained in trimmer.push(samples):
+                    yield from blocks(retained)
+
             for chunk in audio:
                 if self._is_cancelled(generation, tts_input):
                     return
@@ -228,7 +306,7 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
                         perf_counter() - started_at,
                     )
                 converted = resampler.resample_chunk(samples) if resampler is not None else samples
-                yield from blocks(converted)
+                yield from trimmed_blocks(converted)
                 if self._is_cancelled(generation, tts_input):
                     return
 
@@ -237,6 +315,9 @@ class PhononTTSHandler(BaseHandler[TTSIn, TTSOut]):
             if first_audio:
                 raise RuntimeError("Phonon returned no audio")
             if resampler is not None:
-                yield from blocks(resampler.resample_chunk(np.empty(0, dtype=np.float32), last=True))
+                yield from trimmed_blocks(resampler.resample_chunk(np.empty(0, dtype=np.float32), last=True))
+            if trimmer is not None:
+                for retained in trimmer.finish():
+                    yield from blocks(retained)
             if pending.size and not self._is_cancelled(generation, tts_input):
                 yield emit(np.pad(pending, (0, self.blocksize - pending.size)))

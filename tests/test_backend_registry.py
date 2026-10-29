@@ -236,8 +236,8 @@ def test_omnivoice_tts_backend_is_registered_as_optional():
     assert spec.required_extra == "omnivoice"
 
 
-@pytest.mark.parametrize(("num_threads", "expected_threads"), [(None, 4), (2, 2)])
-def test_phonon_cli_and_registry_construct_native_handler(monkeypatch, num_threads, expected_threads):
+@pytest.mark.parametrize(("num_threads", "expected_threads", "tail_ms"), [(None, 4, None), (2, 2, 120)])
+def test_phonon_cli_and_registry_construct_native_handler(monkeypatch, num_threads, expected_threads, tail_ms):
     from speech_to_speech.TTS.phonon_tts_handler import PhononTTSHandler
 
     loaded = []
@@ -264,6 +264,7 @@ def test_phonon_cli_and_registry_construct_native_handler(monkeypatch, num_threa
             "256",
         ]
         + (["--phonon_tts_num_threads", str(num_threads)] if num_threads is not None else [])
+        + (["--phonon_tts_max_trailing_silence_ms", str(tail_ms)] if tail_ms is not None else [])
     )
     assert args.tts_backend.spec.required_extra == "phonon"
     assert args.tts_backend.config == {
@@ -274,10 +275,12 @@ def test_phonon_cli_and_registry_construct_native_handler(monkeypatch, num_threa
         "quant": "q8",
         "blocksize": 256,
         "num_threads": expected_threads,
+        "max_trailing_silence_ms": tail_ms,
         "gen_kwargs": {},
     }
     handler = create_backend_handler(args.tts_backend, _context())
     assert isinstance(handler, PhononTTSHandler)
+    assert handler.max_trailing_silence_ms == tail_ms
     assert loaded == [{"config": "/models/test", "revision": "revision", "lang": "fr", "quant": "q8", "device": "cpu"}]
     assert thread_counts == [expected_threads]
 
