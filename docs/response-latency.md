@@ -76,9 +76,11 @@ that lock is not contended, and hold is omitted entirely when nothing held it.
   on the selected device, before CPU copying, resampling, and PCM block assembly.
   A language-model reload is excluded from MMS TTFA but remains inside E2E;
   low TTFA alone therefore does not imply that all delay was upstream of TTS.
-  Kitten likewise returns a full waveform from blocking ONNX synthesis: its
-  TTFA ends when that waveform is available, before `resample_poly` and PCM
-  block assembly.
+  Kitten synthesizes ONNX waveforms in blocking calls. Its TTFA ends when the
+  first nonempty model waveform is available, before synthesis of later internal
+  chunks, concatenation, `resample_poly`, and PCM block assembly. The measurement
+  is published only if synthesis completes with usable, uncancelled output;
+  E2E still includes all synthesis and assembly before the first yielded block.
 - `e2e` runs from estimated speech end to the first audio block yielded by TTS.
   It includes VAD decision time, Smart Turn analysis, audio enhancement, and
   subsequent processing/hold time before that block. The timestamp is propagated

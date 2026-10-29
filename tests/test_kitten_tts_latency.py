@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -20,8 +22,13 @@ def _handler(*, cancel_scope: CancelScope | None = None) -> KittenTTSHandler:
     handler.blocksize = 512
     handler.cancel_scope = cancel_scope
     handler.speculative_turns = None
-    handler._generate_audio = lambda text, voice: _waveform()  # type: ignore[method-assign]
-    handler._resolve_voice = lambda _tts_input: "Bruno"  # type: ignore[method-assign]
+    handler._chunk_text = lambda text: [text]
+    handler.model = SimpleNamespace(
+        preprocessor=lambda text: text,
+        _prepare_inputs=lambda text, voice: {"input_ids": np.zeros((1, 3), dtype=np.int64)},
+        generate_single_chunk=lambda text, voice: _waveform(),
+    )
+    handler._resolve_voice = lambda _tts_input: "Bruno"
     return handler
 
 
@@ -46,7 +53,7 @@ def test_records_ttfa_before_resample_and_e2e_on_first_yield(monkeypatch: pytest
         clock[0] = 100.12
         return _waveform()
 
-    handler._generate_audio = generate  # type: ignore[method-assign]
+    handler.model.generate_single_chunk = generate
     store = handler.turn_latency_store = TurnLatencyStore()
     tracker = store.get_or_create_response("resp-1", turn_id="turn_1", turn_revision=0)
 
@@ -81,7 +88,7 @@ def test_preserves_first_audio_across_later_segments(monkeypatch: pytest.MonkeyP
         return _waveform()
 
     handler = _handler()
-    handler._generate_audio = first_generate  # type: ignore[method-assign]
+    handler.model.generate_single_chunk = first_generate
     store = handler.turn_latency_store = TurnLatencyStore()
     tracker = store.get_or_create_response("resp-1", turn_id="turn_1", turn_revision=0)
 
@@ -106,7 +113,7 @@ def test_preserves_first_audio_across_later_segments(monkeypatch: pytest.MonkeyP
         clock[0] = 80.50
         return _waveform()
 
-    handler._generate_audio = later_generate  # type: ignore[method-assign]
+    handler.model.generate_single_chunk = later_generate
     list(
         handler.process(
             TTSInput(
@@ -128,7 +135,7 @@ def test_empty_audio_leaves_latency_unset(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(kitten_module, "perf_counter", lambda: clock[0])
 
     handler = _handler()
-    handler._generate_audio = lambda text, voice: np.array([], dtype=np.float32)  # type: ignore[method-assign]
+    handler.model.generate_single_chunk = lambda text, voice: np.array([], dtype=np.float32)
     store = handler.turn_latency_store = TurnLatencyStore()
     tracker = store.get_or_create_response("resp-3", turn_id="turn_3", turn_revision=0)
 
@@ -161,7 +168,7 @@ def test_cancelled_or_discarded_audio_cannot_record_another_response(
             store.discard_response("old")
         return _waveform()
 
-    handler._generate_audio = generate  # type: ignore[method-assign]
+    handler.model.generate_single_chunk = generate
     output = handler.process(TTSInput(text="hello", response_key="old", speech_stopped_at_s=9.0))
     if cancel_at == "after_first":
         assert next(output).shape == (512,)
@@ -180,3 +187,33 @@ def test_cancelled_or_discarded_audio_cannot_record_another_response(
         assert tracker.e2e_s is None
     assert other.tts_ttfa_s is None
     assert other.e2e_s is None
+
+
+@pytest.mark.parametrize("stop_at", ["later_generation", "resample"])
+def test_cancel_after_first_model_chunk_preserves_timing_boundaries(monkeypatch, stop_at):
+    clock = [10.0]
+    monkeypatch.setattr(kitten_module, "perf_counter", lambda: clock[0])
+    handler = _handler(cancel_scope=CancelScope())
+    handler._chunk_text = lambda text: ["first", "second"]
+    store = handler.turn_latency_store = TurnLatencyStore()
+    tracker = store.get_or_create_response("response")
+
+    def generate(text, voice):
+        clock[0] = 10.1 if text == "first" else 10.6
+        if text == "second" and stop_at == "later_generation":
+            handler.cancel_scope.cancel()
+        return _waveform()
+
+    def resample(audio, *, up, down):
+        handler.cancel_scope.cancel()
+        return audio
+
+    handler.model.generate_single_chunk = generate
+    monkeypatch.setattr(kitten_module, "resample_poly", resample)
+    assert list(handler.process(TTSInput(text="Hello", response_key="response", speech_stopped_at_s=9.0))) == []
+    assert tracker.e2e_s is None
+    if stop_at == "later_generation":
+        assert tracker.tts_ttfa_s is None
+    else:
+        # Synthesis was eligible when recorded; cancellation prevented delivery.
+        assert tracker.tts_ttfa_s == pytest.approx(0.1)
