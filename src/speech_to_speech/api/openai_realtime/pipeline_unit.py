@@ -27,6 +27,9 @@ class OutputSignal:
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Bind the sending loop and replay any notification that arrived early."""
+        # An asyncio.Event belongs to the first loop that waits on it. A fresh
+        # one keeps the unit usable when a later server lifespan runs a new loop.
+        self._event = asyncio.Event()
         self._loop = loop
         if self._missed:
             self._missed = False
@@ -131,12 +134,9 @@ class PipelineUnit(BaseModel):
     output_queue: Queue
     text_output_queue: Queue
     text_prompt_queue: Queue
-    # Level-triggered wakeups for the async send loop (#692): queue puts fire
-    # the output/text signals via NotifyingQueue; state transitions that may
-    # release held output fire the state signal.
+    # Level-triggered wakeup for the async send loop (#692), fired by puts on
+    # output_queue and text_output_queue (both NotifyingQueue).
     output_signal: OutputSignal
-    text_signal: OutputSignal
-    state_signal: OutputSignal
     handlers: list[Any]
 
     session: Optional[SessionState] = None

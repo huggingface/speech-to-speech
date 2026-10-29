@@ -24,7 +24,6 @@ from speech_to_speech.api.openai_realtime.websocket_router import (
     SEND_LOOP_HOLD_RETRY_S,
     SEND_LOOP_WAIT_TIMEOUT_S,
     _dispatch_client_event,
-    _flush_cancelled_output,
     _flush_queue,
     _send_loop_wait_timeout,
     _wait_for_pipeline_output,
@@ -33,7 +32,7 @@ from speech_to_speech.api.openai_realtime.websocket_router import (
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.configured_runtime import ConfiguredRuntime
 from speech_to_speech.pipeline.control import SESSION_END, is_control_message
-from speech_to_speech.pipeline.events import SpeechStartedEvent, TokenUsageEvent
+from speech_to_speech.pipeline.events import SpeechStartedEvent
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
 from tests.openai_realtime.conftest import make_pipeline_unit
 
@@ -76,6 +75,23 @@ async def test_output_signal_replays_notify_before_bind_loop():
     assert not wait_task.done()
     signal.notify_threadsafe()
     await asyncio.wait_for(wait_task, timeout=0.1)
+
+
+def test_output_signal_rebinds_to_a_new_event_loop():
+    """A unit reused by a later server lifespan must wait, not spin."""
+    signal = OutputSignal()
+
+    async def wait_then_wake():
+        signal.bind_loop(asyncio.get_running_loop())
+        signal.clear()
+        # The first run binds the event to its loop by blocking on it.
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(signal.wait(), timeout=0.01)
+        signal.notify_threadsafe()
+        await asyncio.wait_for(signal.wait(), timeout=0.5)
+
+    asyncio.run(wait_then_wake())
+    asyncio.run(wait_then_wake())
 
 
 @pytest.mark.asyncio
@@ -194,9 +210,8 @@ async def test_notifying_queue_put_wakes_bound_signal():
 @pytest.mark.asyncio
 async def test_wait_for_pipeline_output_returns_on_queue_put_without_full_timeout():
     unit = make_pipeline_unit()
-    for signal in (unit.output_signal, unit.text_signal, unit.state_signal):
-        signal.bind_loop(asyncio.get_running_loop())
-        signal.clear()
+    unit.output_signal.bind_loop(asyncio.get_running_loop())
+    unit.output_signal.clear()
 
     wait_task = asyncio.create_task(_wait_for_pipeline_output(unit))
     await asyncio.sleep(0)
@@ -223,8 +238,8 @@ def test_send_loop_wait_timeout_is_long_when_idle_and_short_when_held():
 
 
 @pytest.mark.asyncio
-async def test_state_waker_releases_held_audio_without_another_queue_write(monkeypatch):
-    """Buffered TTS waiting on response.created must wake via state_signal (#692)."""
+async def test_held_audio_releases_after_response_created_without_another_queue_write(monkeypatch):
+    """Buffered TTS waiting on response.created is re-checked on the hold retry (#692)."""
     unit = make_pipeline_unit()
     transport = RecordingTransport()
     session_id = unit.service.register()
@@ -235,8 +250,8 @@ async def test_state_waker_releases_held_audio_without_another_queue_write(monke
     st.current_response_key = "rk_1"
     st.response_created_pending_key = "rk_1"
     unit.output_queue.put(AudioOutput(audio=_pcm_bytes(256), response_key="rk_1"))
-    # A missing state signal must fail instead of passing via the hold timer.
-    monkeypatch.setattr(router_module, "SEND_LOOP_HOLD_RETRY_S", 5.0)
+    # The idle safety net must not be what releases held output.
+    monkeypatch.setattr(router_module, "SEND_LOOP_WAIT_TIMEOUT_S", 5.0)
     app = create_app(pool=[unit], stop_event=ThreadingEvent())
     async with app.router.lifespan_context(app):
 
@@ -400,9 +415,8 @@ async def test_held_output_waits_despite_queued_audio(monkeypatch):
     unit.service._state(session_id).response_created_pending_key = "held"
     unit.output_queue.put(_pcm_bytes(256))
     monkeypatch.setattr(router_module, "SEND_LOOP_HOLD_RETRY_S", 5.0)
-    for signal in (unit.output_signal, unit.text_signal, unit.state_signal):
-        signal.bind_loop(asyncio.get_running_loop())
-        signal.clear()
+    unit.output_signal.bind_loop(asyncio.get_running_loop())
+    unit.output_signal.clear()
     waiter = asyncio.create_task(_wait_for_pipeline_output(unit))
     try:
         await asyncio.sleep(0.02)
@@ -413,34 +427,6 @@ async def test_held_output_waits_despite_queued_audio(monkeypatch):
     finally:
         waiter.cancel()
         await asyncio.gather(waiter, return_exceptions=True)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("trigger", ["client", "speech"])
-async def test_cancellation_accounts_parked_usage(trigger):
-    unit = make_pipeline_unit()
-    transport = RecordingTransport()
-    session_id = unit.service.register()
-    usage = TokenUsageEvent(input_tokens=17, output_tokens=23, response_key="rk_1")
-    unit.session = SessionState(session_id=session_id, transport=transport, pending_output_item=usage)
-    st = unit.service._state(session_id)
-    st.in_response = True
-    st.current_response_id = "resp_1"
-    st.current_response_key = "rk_1"
-    st.response_created_pending_key = "rk_1"
-    if trigger == "client":
-        await _dispatch_client_event(unit, session_id, {"type": "response.cancel"}, transport)
-    else:
-        unit.text_output_queue.put(SpeechStartedEvent())
-    app = create_app(pool=[unit], stop_event=ThreadingEvent())
-    async with app.router.lifespan_context(app):
-
-        async def wait_for_usage():
-            while unit.service.total_usage.input_tokens != 17:
-                await asyncio.sleep(0)
-
-        await asyncio.wait_for(wait_for_usage(), timeout=0.5)
-        assert unit.service.total_usage.output_tokens == 23
 
 
 @pytest.mark.asyncio
@@ -466,10 +452,3 @@ async def test_cancellation_preserves_parked_lifecycle_terminal(terminal):
             assert unit.session.drained.is_set()
         else:
             assert not unit.cancel_scope.discarding
-
-
-def test_cancel_flush_discards_parked_audio():
-    unit = make_pipeline_unit()
-    unit.session = SessionState(pending_output_item=_pcm_bytes(256))
-    _flush_cancelled_output(unit)
-    assert unit.session.pending_output_item is None

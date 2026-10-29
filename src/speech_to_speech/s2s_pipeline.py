@@ -615,8 +615,6 @@ def _build_pipeline_unit(
     turn_latency_store = TurnLatencyStore()
     speculative_turns.wait_observer = turn_latency_store.record_smart_wait
     output_signal = OutputSignal()
-    text_signal = OutputSignal()
-    state_signal = OutputSignal()
     recv_audio_chunks_queue: Queue[AudioInItem] = Queue()
     send_audio_chunks_queue: Queue[AudioOutItem] = NotifyingQueue(signal=output_signal)
     spoken_prompt_queue: Queue[VADOutItem] = Queue()
@@ -624,7 +622,7 @@ def _build_pipeline_unit(
     text_prompt_queue: Queue[TextPromptItem] = Queue()
     lm_response_queue: Queue[LMOutItem] = Queue()
     lm_processed_queue: Queue[TTSInItem] = Queue()
-    text_output_queue: Queue[TextEventItem] = NotifyingQueue(signal=text_signal)
+    text_output_queue: Queue[TextEventItem] = NotifyingQueue(signal=output_signal)
 
     chat_size = llm_selection.config.get("chat_size", 10)
     default_instructions = llm_selection.config.get("init_chat_prompt")
@@ -637,10 +635,6 @@ def _build_pipeline_unit(
         turn_latency_store=turn_latency_store,
         default_instructions=default_instructions,
     )
-    # State transitions on the service (response announcements, pending
-    # response clearing) can release held output without a queue write; let
-    # the service wake the send loop when that happens (#692).
-    service.set_state_waker(state_signal.notify_threadsafe)
 
     if module_kwargs.enable_live_transcription and not stt_selection.spec.capabilities.streams_audio_chunks:
         vad_kw.enable_realtime_transcription = True
@@ -708,8 +702,6 @@ def _build_pipeline_unit(
         text_output_queue=text_output_queue,
         text_prompt_queue=text_prompt_queue,
         output_signal=output_signal,
-        text_signal=text_signal,
-        state_signal=state_signal,
         handlers=handlers,
     )
 

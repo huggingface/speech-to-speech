@@ -71,13 +71,13 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 MAX_AUDIO_BATCH_BYTES = 6400
-# Upper bound on how long the event-driven send loop idles between output,
-# state transitions, and shutdown. Signals wake it sooner; the timeout is
-# only a lost-wakeup safety net (#692).
+# Upper bound on how long the event-driven send loop idles between output
+# and shutdown. Queue puts wake it sooner; the timeout is only a lost-wakeup
+# safety net (#692).
 SEND_LOOP_WAIT_TIMEOUT_S = 1.0
-# When buffered output or input terminals are held for a timed gate (response
-# announcement, speculative reopen grace), re-check at the old poll cadence so
-# deadline expiry cannot wait for the idle safety net (#692).
+# Held output and input terminals wait on state that changes without a queue
+# write (response announcement, speculative reopen grace), so re-check them at
+# the old poll cadence instead of the idle safety net (#692).
 SEND_LOOP_HOLD_RETRY_S = 0.01
 # How long the release path waits for SESSION_END to propagate through the
 # handler chain back to output_queue before warning that the unit is stuck.
@@ -225,25 +225,6 @@ def _flush_queue(
         notify = getattr(getattr(q, "_signal", None), "notify_threadsafe", None)
         if notify is not None:
             notify()
-
-
-def _flush_cancelled_output(unit: PipelineUnit) -> None:
-    """Discard cancelled output while preserving queued and parked bookkeeping."""
-    _flush_queue(unit.output_queue, preserve=_keep_cancel_bookkeeping)
-    _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
-    session = unit.session
-    if session is not None:
-        if isinstance(session.pending_output_item, TokenUsageEvent):
-            # Account now: a cancelled response can still have an outstanding
-            # response.created barrier, which must not hold private metrics.
-            unit.service.dispatch_pipeline_event(session.session_id, session.pending_output_item)
-            session.pending_output_item = None
-        elif not _keep_cancel_bookkeeping(session.pending_output_item):
-            session.pending_output_item = None
-        session.pending_text_output_items = [
-            item for item in session.pending_text_output_items if _keep_user_text_event(item)
-        ]
-    unit.state_signal.notify_threadsafe()
 
 
 def _clean_unit(
@@ -408,7 +389,6 @@ def _release_session(unit: PipelineUnit, session_id: str) -> None:
         account_usage(item)
     old_session.pending_text_output_items.clear()
     _clean_unit(unit, on_discard=account_usage)
-    unit.state_signal.notify_threadsafe()
     # Tag SESSION_END with this session's id so that, after a force
     # release, a late arrival can't satisfy the next session's drain.
     unit.input_queue.put(PipelineControlMessage(SESSION_END.kind, session_id=session_id))
@@ -530,7 +510,8 @@ async def _dispatch_client_event(
         if had_response:
             unit.cancel_scope.cancel()
             _flush_queue(unit.text_prompt_queue, preserve=_keep_pipeline_control)
-        _flush_cancelled_output(unit)
+        _flush_queue(unit.output_queue, preserve=_keep_cancel_bookkeeping)
+        _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
         transport.discard_pending_audio()
         events = service.handle_response_cancel(session_id)
         if events:
@@ -579,31 +560,23 @@ def _pipeline_output_ready(unit: PipelineUnit) -> bool:
 
 
 async def _wait_for_pipeline_output(unit: PipelineUnit) -> None:
-    """Idle the send loop until a producer signals work, state changes, or timeout.
+    """Idle the send loop until a producer signals work or the timeout expires.
 
-    Replaces fixed 10 ms polling (#692): queue puts fire the output/text
-    signals, hold releases fire the state signal, and the timeout bounds the
-    delay of any missed signal. Shutdown cancels this wait via the send task.
+    Replaces fixed 10 ms polling (#692): puts on either output queue fire the
+    unit's signal, held output re-checks after the hold retry, and the idle
+    timeout bounds the delay of any missed signal. Shutdown cancels this wait
+    via the send task.
     """
     if _pipeline_output_ready(unit):
         # Notifications coalesce; drain existing work before waiting for a new
         # one. Yield so a backlog cannot starve client cancellation or shutdown.
         await asyncio.sleep(0)
         return
-    timeout = _send_loop_wait_timeout(unit)
-    output_task = asyncio.create_task(unit.output_signal.wait())
-    text_task = asyncio.create_task(unit.text_signal.wait())
-    state_task = asyncio.create_task(unit.state_signal.wait())
     try:
-        await asyncio.wait(
-            {output_task, text_task, state_task},
-            timeout=timeout,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-    finally:
-        for task in (output_task, text_task, state_task):
-            task.cancel()
-        await asyncio.gather(output_task, text_task, state_task, return_exceptions=True)
+        async with asyncio.timeout(_send_loop_wait_timeout(unit)):
+            await unit.output_signal.wait()
+    except TimeoutError:
+        pass
 
 
 def create_app(
@@ -681,7 +654,6 @@ def create_app(
             session_id = unit.service.register()
             unit.session.session_id = session_id
             logger.info(f"Client connected to pipeline {unit.index} (session {session_id})")
-            unit.state_signal.notify_threadsafe()
 
             # Defensive: drain edge queues and reset events so stale data from a
             # previous session that survived SESSION_END propagation doesn't leak.
@@ -817,7 +789,6 @@ def create_app(
             assert unit.session is not None
             unit.session.session_id = session_id
             logger.info(f"WebRTC client claiming pipeline {unit.index} (session {session_id})")
-            unit.state_signal.notify_threadsafe()
 
             # Defensive: drain edge queues and reset events so stale data from a
             # previous session that survived SESSION_END propagation doesn't leak.
@@ -926,14 +897,11 @@ def create_app(
         no stale sentinel can leak into the next claim.
         """
         pipeline_log_ctx.set(unit.index)
-        # Bind the wakeup signals to this loop, then clear any stale signal
+        # Bind the wakeup signal to this loop, then clear any stale signal
         # before draining so an item arriving during the drain re-sets it.
-        for signal in (unit.output_signal, unit.text_signal, unit.state_signal):
-            signal.bind_loop(asyncio.get_running_loop())
+        unit.output_signal.bind_loop(asyncio.get_running_loop())
         while not stop_event.is_set():
             unit.output_signal.clear()
-            unit.text_signal.clear()
-            unit.state_signal.clear()
             try:
                 # Snapshot the session once per iteration; if the route releases the
                 # unit mid-iteration, we continue against the prior snapshot which is
@@ -1020,7 +988,8 @@ def create_app(
                                 unit.cancel_scope.cancel()
                                 unit.service.close_pending_responses(session_id)
                                 _flush_queue(unit.text_prompt_queue, preserve=_keep_pipeline_control)
-                                _flush_cancelled_output(unit)
+                                _flush_queue(unit.output_queue, preserve=_keep_cancel_bookkeeping)
+                                _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
                                 if unit.response_playing.is_set():
                                     unit.response_playing.clear()
                                 logger.info(
@@ -1060,8 +1029,8 @@ def create_app(
                         # response is publicly announced and its turn has settled.
                         unit.service.history.hold(session_id, audio_chunk)
                         session.pending_output_item = audio_chunk
-                        # Wait for a state release (or hold-retry timeout); a bare
-                        # continue would busy-spin on the same pending item (#692).
+                        # Re-check after the hold retry (or sooner on new output);
+                        # a bare continue would busy-spin on the same item (#692).
                         await _wait_for_pipeline_output(unit)
                         continue
 

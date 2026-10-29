@@ -22,9 +22,6 @@ def make_pipeline_unit(*, index: int = 0, service: RealtimeService | None = None
     if service is None:
         service = RealtimeService(text_prompt_queue=text_prompt_queue, should_listen=should_listen)
     output_signal = OutputSignal()
-    text_signal = OutputSignal()
-    state_signal = OutputSignal()
-    service.set_state_waker(state_signal.notify_threadsafe)
     return PipelineUnit(
         index=index,
         service=service,
@@ -33,11 +30,9 @@ def make_pipeline_unit(*, index: int = 0, service: RealtimeService | None = None
         response_playing=ThreadingEvent(),
         input_queue=Queue(),
         output_queue=NotifyingQueue(signal=output_signal),
-        text_output_queue=NotifyingQueue(signal=text_signal),
+        text_output_queue=NotifyingQueue(signal=output_signal),
         text_prompt_queue=text_prompt_queue,
         output_signal=output_signal,
-        text_signal=text_signal,
-        state_signal=state_signal,
         handlers=[],
     )
 
