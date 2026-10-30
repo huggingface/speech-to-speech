@@ -8,7 +8,7 @@ import { chromium } from "@playwright/test";
 const root = path.resolve(import.meta.dirname, "..");
 const timing = {
   version: 2, turn_id: "turn_1", turn_revision: 0, response_key: "key-1", status: "completed",
-  stt_s: 0.18, llm_s: 1.24, tts_ttfa_s: 0.12, e2e_s: 1.61,
+  llm_total_s: 2.4, llm_rounds: 3, stt_s: 0.18, llm_s: 0.8, tts_ttfa_s: 0.12, e2e_s: 1.61,
   vad_decision_s: 0.32,
   hold_s: 0, smart_status: "incomplete",
 };
@@ -60,8 +60,10 @@ test("history shows per-response server timings on desktop and phone", async (t)
     assert.match(await page.locator(".hist-timings dl").innerText(), /0.00 s/);
     assert.deepEqual(await page.locator(".hist-timings dt").allTextContents(), [
       "E2E time", "VAD end decision", "Smart Turn decision", "Transcription",
-      "Response generation", "Voice synthesis to first audio", "Hold time before response",
+      "LLM", "LLM for this response", "Voice synthesis to first audio", "Hold time before response",
     ]);
+    assert.match(await page.locator(".hist-timings dl").innerText(), /2.40 s total · 3 rounds/);
+    assert.match(await page.locator(".hist-timings dl").innerText(), /LLM for this response\s+0.80 s/);
     assert.match(await page.locator(".hist-timings dl").innerText(), /Hold time before response/);
     assert.match(await page.locator(".hist-timings").innerText(), /excluding browser playback/);
     await page.waitForFunction(() => {
@@ -86,6 +88,27 @@ test("history shows per-response server timings on desktop and phone", async (t)
     assert.equal(await page.locator(".hist-note").textContent(), "Interrupted");
     assert.equal(await page.locator(".hist-msg.assistant").last().locator(".hist-timings").count(), 0);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    for (const fields of [{}, { llm_rounds: 0 }, { llm_total_s: 0.8 }, { llm_total_s: 0.8, llm_rounds: 1 }]) {
+      await page.evaluate(({ timing, fields }) => {
+        const legacy = { ...timing };
+        delete legacy.llm_total_s;
+        delete legacy.llm_rounds;
+        const id = `compat-${fields.llm_rounds ?? (fields.llm_total_s === undefined ? "missing" : "unknown")}`;
+        chat.onTranscript({ role: "assistant", text: "Compatibility reply.", partial: false, responseId: id });
+        finish(id, { ...legacy, ...fields });
+      }, { timing, fields });
+      await page.locator(".hist-timings summary").last().click();
+      const text = await page.locator(".hist-timings dl").last().innerText();
+      if (fields.llm_total_s === undefined) {
+        assert.match(text, /Total unavailable/);
+        assert.doesNotMatch(text, /total · 1 round/);
+        assert.match(text, fields.llm_rounds === 0 ? /0 rounds/ : /round count unavailable/);
+      } else if (fields.llm_rounds === undefined) {
+        assert.match(text, /round count unavailable/);
+      } else {
+        assert.match(text, /0.80 s total · 1 round\b/);
+      }
+    }
     await page.evaluate(() => { chat.clear(); chat.reset(); });
     assert.equal(await page.locator(".hist-timings").count(), 0);
     await page.close();

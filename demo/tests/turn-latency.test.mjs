@@ -23,6 +23,7 @@ test("absent, malformed, unknown-version and invalid measurements are ignored", 
   for (const value of [undefined, {}, "{", "null", "[]", ...[
     { version: 3 }, { status: "cancelled" }, { e2e_s: -1 }, { llm_s: "1.2" },
     { stt_s: undefined }, { turn_revision: 0.5 }, { response_key: "" },
+    { llm_total_s: -1 }, { llm_total_s: "2" }, { llm_rounds: -1 }, { llm_rounds: 1.5 }, { llm_rounds: null },
     { smart_wait_s: -1 }, { smart_status: "unknown" },
   ].map((patch) => JSON.stringify({ ...timing, ...patch }))]) {
     assert.equal(readTurnLatency(response(value)), null);
@@ -54,6 +55,9 @@ test("version 2 exports only the simplified measurements", () => {
     e2e_s: 1.1, vad_decision_s: 0.1, smart_status: "complete", stt_s: 0.2, llm_s: 0.4, tts_ttfa_s: 0.1, hold_s: 0.25 };
   assert.deepEqual(readTurnLatency(response(JSON.stringify(current))), current);
   assert.equal(readTurnLatency(response(JSON.stringify({ ...current, hold_s: -1 }))), null);
+  for (const fields of [{ llm_total_s: 2.4, llm_rounds: 3 }, { llm_total_s: null, llm_rounds: 0 }]) {
+    assert.deepEqual(readTurnLatency(response(JSON.stringify({ ...current, ...fields }))), { ...current, ...fields });
+  }
 });
 
 
