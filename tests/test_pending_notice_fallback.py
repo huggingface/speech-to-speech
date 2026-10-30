@@ -119,6 +119,21 @@ def test_an_unrelated_bad_request_is_not_retried():
     assert len(calls) == 1
 
 
+def test_a_400_that_the_retry_does_not_fix_leaves_the_note_as_a_system_message():
+    handler = make_chat_completions_handler()
+
+    def create(**kwargs):
+        raise _bad_request()
+
+    handler.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    chat = _chat_with_pending_call()
+
+    with pytest.raises(BadRequestError):
+        handler._request(handler._serialize(chat), {})
+
+    assert _has_trailing_notice(handler._serialize(chat))
+
+
 class _StrictTemplate:
     """Like the Mistral and Gemma templates: a system message is only allowed first."""
 

@@ -326,8 +326,10 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             ):
                 raise
             logger.warning("Provider rejected the pending tool calls system note; folding it into the user message")
+            retried = send(fold_pending_notice(api_input))
+            # Only stay folded once the retry worked; a 400 for another reason must not change the mode.
             self._fold_pending_notice = True
-            return send(fold_pending_notice(api_input))
+            return retried
 
     @abstractmethod
     def _serialize(self, active_chat: Chat) -> Any:
