@@ -30,6 +30,7 @@ from jsonschema import SchemaError, ValidationError
 from jsonschema.validators import validator_for
 from openai import AsyncOpenAI
 from rich.console import Console
+from websockets.exceptions import ConnectionClosed
 
 from speech_to_speech.api.openai_realtime.echo_canceller import EchoCanceller
 from speech_to_speech.api.openai_realtime.tool_followup import (
@@ -1354,9 +1355,18 @@ async def _run_audio_session(
             tasks.add(asyncio.create_task(worker.wait_for_failure()))
 
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        server_closed = False
         for task in done:
-            if not task.cancelled() and task.exception() is not None:
+            if task.cancelled() or task.exception() is None:
+                continue
+            if not isinstance(task.exception(), ConnectionClosed):
                 raise task.exception()  # type: ignore[misc]
+            server_closed = True
+        # Shutdown closes the local server too; only report an unrequested close.
+        if server_closed and not stop_event.is_set():
+            renderer.clear_live_user_text()
+            renderer.finish_live_assistant_text()
+            renderer.print_conversation("Server closed the connection.", style="red")
         stop_event.set()
     except asyncio.CancelledError:
         stop_event.set()

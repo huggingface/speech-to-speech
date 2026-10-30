@@ -2080,6 +2080,43 @@ async def test_ready_waits_for_audio_devices_and_session_acknowledgement(monkeyp
     await asyncio.wait_for(session, 2)
 
 
+@pytest.mark.parametrize("shutting_down", [False, True])
+async def test_server_closing_the_connection_ends_the_session_without_a_traceback(monkeypatch, capsys, shutting_down):
+    from websockets.exceptions import ConnectionClosedOK
+
+    stop = Event()
+
+    class Stream:
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    class Connection:
+        async def send(self, _event):
+            pass
+
+        async def recv(self):
+            if shutting_down:
+                stop.set()
+            raise ConnectionClosedOK(None, None)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sounddevice",
+        SimpleNamespace(RawInputStream=lambda **_: Stream(), RawOutputStream=lambda **_: Stream()),
+    )
+
+    await asyncio.wait_for(audio_client_module._run_audio_session(Connection(), RealtimeAudioClientConfig(), stop), 2)
+
+    assert stop.is_set()
+    assert capsys.readouterr().out == ("" if shutting_down else "Server closed the connection.\n")
+
+
 def test_voice_status_is_rewritten_in_place_below_the_conversation():
     from io import StringIO
 
