@@ -3,6 +3,7 @@ import math
 import subprocess
 import sys
 from dataclasses import fields
+from pathlib import Path
 
 import pytest
 
@@ -543,3 +544,16 @@ def test_inherited_viseme_options_defaults_sources_and_inactive_environment(docu
         assert result.sources[("pipelines", "primary", "options", field.name)] == "environment"
     with pytest.raises(ConfigurationError):
         resolve_config(document, names=["secondary"], environ={})
+
+
+@pytest.mark.parametrize(("os_name", "rejected"), [("nt", True), ("posix", False)])
+def test_tilde_name_is_rejected_only_on_windows(monkeypatch, os_name, rejected):
+    from speech_to_speech import config
+
+    monkeypatch.setattr(config.os, "name", os_name)
+    monkeypatch.setattr(config.Path, "expanduser", lambda self: Path("/home/someone/config.yaml"))
+    if rejected:
+        with pytest.raises(RuntimeError):
+            config._expand_home(Path("~someone/config.yaml"))
+    else:
+        assert config._expand_home(Path("~someone/config.yaml")) == Path("/home/someone/config.yaml")
