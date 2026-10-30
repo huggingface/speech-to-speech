@@ -1,6 +1,7 @@
 import base64
 import io
 import re
+import unicodedata
 from collections.abc import Callable
 from typing import Optional
 
@@ -127,15 +128,26 @@ def remove_markdown(text: str) -> str:
 
 
 def remove_unspeechable(text: str) -> str:
-    """Keep only speechable characters: letters, digits, punctuation, whitespace.
+    """Keep speechable letters, digits, punctuation, whitespace, and combining marks.
     support unicode characters (english, arabic, chinese, japanese, korean, etc.)
+
+    Exclude variation selectors and enclosing marks so emoji components are removed.
 
     Safe to call per streaming delta. Markdown stripping is intentionally not
     included here -- unlike character filtering, it needs complete text (see
     remove_markdown), so callers apply it separately once a full sentence exists.
     """
     text = text.translate(SMART_PUNCT_TRANSLATION)
-    return SPEECHABLE_PATTERN.sub("", text)
+
+    def keep_combining_mark(match: re.Match[str]) -> str:
+        char = match.group(0)
+        if unicodedata.category(char) in ("Mn", "Mc") and not (
+            "\ufe00" <= char <= "\ufe0f" or "\U000e0100" <= char <= "\U000e01ef"
+        ):
+            return char
+        return ""
+
+    return SPEECHABLE_PATTERN.sub(keep_combining_mark, text)
 
 
 # Maps an STT language code to the language name used in the "Please reply ... in {name}"
