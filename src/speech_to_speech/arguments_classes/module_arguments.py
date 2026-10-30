@@ -13,6 +13,22 @@ _PROXY_LLM_BACKENDS = ", ".join(name for name, spec in LLM_BACKENDS.items() if s
 
 @dataclass
 class ModuleArguments(Wav2Vec2STVHandlerArguments):
+    stt_supported_languages: Optional[list[str]] = field(
+        default=None,
+        metadata={"help": "Declare the active STT model's language coverage when the backend cannot advertise it."},
+    )
+    tts_supported_languages: Optional[list[str]] = field(
+        default=None,
+        metadata={"help": "Declare the active TTS model's language coverage when the backend cannot advertise it."},
+    )
+    stt_auto_language_supported: Optional[bool] = field(
+        default=None,
+        metadata={"help": "Declare whether the active STT model can select its language automatically."},
+    )
+    tts_auto_language_supported: Optional[bool] = field(
+        default=None,
+        metadata={"help": "Declare whether the active TTS model can select its language automatically."},
+    )
     diarization: bool = field(
         default=False,
         metadata={"help": "Enable speaker-aware conversation with Nemotron 3 Diarization."},

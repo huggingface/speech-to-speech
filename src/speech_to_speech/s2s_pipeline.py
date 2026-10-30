@@ -53,6 +53,7 @@ from speech_to_speech.pipeline.transcript_logging import (
     warn_if_log_transcripts_enabled,
 )
 from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
+from speech_to_speech.speech_languages import SpeechLanguageCapabilities, backend_language_capabilities
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 from speech_to_speech.utils.thread_manager import ThreadManager
 from speech_to_speech.utils.utils import resolve_device
@@ -338,6 +339,11 @@ def apply_torch_num_threads(module_kwargs: ModuleArguments) -> None:
 
 def prepare_module_args(module_kwargs: ModuleArguments, llm_backend: BackendSelection) -> None:
     validate_torch_num_threads(module_kwargs.torch_num_threads)
+    for kind in ("stt", "tts"):
+        declared = getattr(module_kwargs, f"{kind}_supported_languages")
+        if declared is not None:
+            normalized = SpeechLanguageCapabilities(languages=frozenset(declared)).languages
+            setattr(module_kwargs, f"{kind}_supported_languages", sorted(normalized or ()))
     if module_kwargs.diarization_model_name and module_kwargs.stt == "none":
         raise ValueError("Speaker-aware conversation requires an STT backend; --stt none does not produce transcripts.")
     if module_kwargs.diarization_model_name and not 0 < module_kwargs.diarization_threshold < 1:
@@ -666,14 +672,17 @@ def _build_pipeline_unit(
         h.turn_latency_store = turn_latency_store
 
     # Validate only against language sets already known to the active backends.
-    # Faster Whisper reports the loaded checkpoint's actual language set.
-    service.stt_supported_languages = _stt_session_languages(stt_selection, handlers[1])
+    # The fixed suffix is STT → [notifier] → LM → processor → TTS → [visemes].
+    tts_index = -2 if module_kwargs.enable_visemes else -1
+    stt_index = tts_index - (3 if stt_selection.spec.capabilities.bypasses_transcription_notifier else 4)
+    stt_handler = handlers[stt_index]
+    service.stt_supported_languages = _stt_session_languages(stt_selection, stt_handler)
     setup_language = stt_selection.config.get("language")
     service.stt_auto_reset_supported = not (
         stt_selection.name == "openai-realtime" and isinstance(setup_language, str) and bool(setup_language.strip())
     )
 
-    tts_handler = handlers[-2] if module_kwargs.enable_visemes else handlers[-1]
+    tts_handler = handlers[tts_index]
     tts_module = modules[type(tts_handler).__module__]
     if tts_selection.name == "kokoro":
         service.tts_supported_languages = {"en", "ja", "zh", "fr", "es", "it", "pt", "hi"}
@@ -690,6 +699,27 @@ def _build_pipeline_unit(
         # the configured language, but reject session changes we cannot honor.
         language = tts_handler.language
         service.tts_supported_languages = {language} if language != "none" else set()
+
+    for selection, handler in ((stt_selection, stt_handler), (tts_selection, tts_handler)):
+        kind = selection.kind
+        capabilities = backend_language_capabilities(kind, selection.name, selection.config, handler)
+        if not isinstance(getattr(handler, "language_capabilities", None), SpeechLanguageCapabilities):
+            handler.language_capabilities = capabilities
+        declared = getattr(module_kwargs, f"{kind}_supported_languages")
+        automatic = getattr(module_kwargs, f"{kind}_auto_language_supported")
+        if declared is not None:
+            if capabilities.languages is not None and capabilities.languages != frozenset(declared):
+                raise ValueError(f"--{kind}_supported_languages conflicts with the active backend's declared coverage.")
+            capabilities = replace(capabilities, languages=frozenset(declared))
+        if automatic is not None:
+            if capabilities.supports_auto is not None and capabilities.supports_auto != automatic:
+                raise ValueError(f"--{kind}_auto_language_supported conflicts with the active backend's auto support.")
+            capabilities = replace(capabilities, supports_auto=automatic)
+        setattr(service, f"{kind}_language_capabilities", capabilities)
+        if capabilities.languages is not None:
+            allowed = getattr(service, f"{kind}_supported_languages")
+            known = set(capabilities.languages)
+            setattr(service, f"{kind}_supported_languages", known if allowed is None else allowed & known)
 
     return PipelineUnit(
         index=index,

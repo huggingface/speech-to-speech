@@ -246,6 +246,8 @@ def test_registry_equivalence_and_scope_coverage(document):
     from speech_to_speech.backend_registry import LLM_BACKENDS, STT_BACKENDS, TTS_BACKENDS
     from speech_to_speech.config import _MODULE_PROCESS, _MODULE_SELECTORS
 
+    document.data["pipelines"]["primary"]["options"] = {"stt_supported_languages": ["en", "Spanish"]}
+    assert resolve_config(document).pipelines["primary"].options["stt_supported_languages"] == ["en", "Spanish"]
     assert set(_MODULE_PROCESS) | set(_MODULE_SELECTORS) | set(
         resolve_config(document).pipelines["primary"].options
     ) | {"num_pipelines"} == {f.name for f in fields(ModuleArguments)}
