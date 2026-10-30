@@ -534,7 +534,9 @@ def _vad_handler_for_iterator(iterator: _StaticVADIterator) -> VADHandler:
     handler.sample_rate = 16000
     handler.min_silence_ms = 300
     handler.min_speech_ms = 384
+    handler.barge_in_ms = 384
     handler.min_speech_continuation_ms = handler.min_speech_ms
+    handler.response_playing = Event()
     handler.max_speech_ms = float("inf")
     handler.enable_realtime_transcription = False
     handler.realtime_processing_pause = 0.5
@@ -1019,6 +1021,16 @@ def test_confirmed_segment_not_discarded_at_finalization():
 
     assert len(outputs) == 1
     assert (outputs[0].turn_id, outputs[0].turn_revision) == ("turn_1", 1)
+
+
+def test_barge_in_needs_more_speech_than_a_new_turn():
+    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    handler.min_speech_ms = 192
+    handler.barge_in_ms = 384
+
+    assert handler._active_speech_min_ms(0) == 192
+    handler.response_playing.set()
+    assert handler._active_speech_min_ms(0) == 384
 
 
 def test_continuation_threshold_clamping():
