@@ -56,6 +56,57 @@ Processing also works with live captions disabled; `--enable_live_transcription`
 controls partial transcript output. VAD still retains turn audio, so this option
 does not bound its memory usage.
 
+## Native Nemotron 3.5 Transcribe prompts (opt-in)
+
+For a vLLM server hosting Nemotron 3.5 Transcribe, select the `nemotron`
+profile to send audio and recognition instructions through `/v1/chat/completions`.
+This is an STT request; the conversation LLM remains separate. The default
+`transcription` profile continues to use multipart `/v1/audio/transcriptions`.
+
+```bash
+speech-to-speech local \
+  --stt openai \
+  --openai_stt_base_url http://localhost:8000/v1 \
+  --openai_stt_model nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-NVFP4 \
+  --openai_stt_profile nemotron \
+  --openai_stt_max_window_s 30 \
+  --openai_stt_recognition_context "This audio was captured by a voice assistant running inside a robot. These names may occur frequently. This is context for recognition, not evidence that every utterance addresses the robot." \
+  --openai_stt_context_terms "Reachy Mini" "Pollen Robotics" "Hugging Face"
+```
+
+Recognition context and vocabulary are optional and have no robot-specific
+defaults. Names are listed once, followed by an instruction to use their
+spellings only when supported by the audio. This is recognition biasing, not
+keyword spotting or a guarantee against hallucinations. It does not identify
+the main speaker or whether speech addresses the assistant.
+
+The profile asks for verbatim speech with Nemotron's non-speech and style
+annotations. Only its known event, style, and speaker tokens are removed before
+text reaches captions, conversation history, or the LLM. An event-only final
+still closes the transcription item with empty text and creates no LLM work.
+Mixed output such as `<ev:gesture_noise> Uh-huh.` retains `Uh-huh.`. Real
+interjections are never blacklisted, so a word hallucination without an event
+token can still pass through. Keep VAD enabled.
+
+The session's `audio.input.transcription.language` selects a language hint,
+for example `fr` adds `Language: French. Do not translate.`. Explicit `auto`
+removes the hint, including a configured `--openai_stt_language`. Language
+names use the shared ISO registry rather than a TTS-specific language list;
+the served model must still support the selected language. Auto results carry
+no detected-language claim because audio chat does not report one.
+
+Requests disable thinking, retain annotation tokens, use temperature zero,
+and request one non-streaming result. Invalid, reasoning-bearing, or truncated
+responses fail the transcription instead of creating LLM work. The default
+`--openai_stt_max_output_tokens 384` may need increasing for dense speech or
+longer audio windows. Model, prompt, language and token-limit failures are
+detected by the setup silence request before accepting sessions. Existing
+HTTP cancellation and bounded-window behavior also apply to this profile.
+
+A routing proxy must support the audio-chat route with STT accounting; merely
+forwarding a multipart `prompt` field to a fixed server transcription template
+does not activate these instructions.
+
 ## OpenAI-hosted transcription
 
 The same backend can call OpenAI's hosted

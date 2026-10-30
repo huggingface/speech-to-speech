@@ -539,6 +539,36 @@ def test_openai_stt_backend_constructs_through_registry(monkeypatch):
     assert isinstance(stt, OpenAICompatibleSTTHandler)
 
 
+def test_nemotron_stt_profile_and_terms_construct_through_registry(monkeypatch):
+    from speech_to_speech.STT.openai_compatible_handler import OpenAICompatibleSTTHandler
+
+    monkeypatch.setattr(OpenAICompatibleSTTHandler, "warmup", lambda self: None)
+    args = parse_arguments(
+        [
+            "--stt",
+            "openai",
+            "--openai_stt_profile",
+            "nemotron",
+            "--openai_stt_model",
+            "native-model",
+            "--openai_stt_context_terms",
+            "Reachy Mini",
+            "Pollen Robotics",
+            "Hugging Face",
+            "--openai_stt_max_window_s",
+            "30",
+            "--openai_stt_max_output_tokens",
+            "512",
+        ]
+    )
+    stt = create_backend_handler(args.stt_backend, _context())
+    assert stt.profile == "nemotron"
+    assert stt.endpoint_url.endswith("/v1/chat/completions")
+    assert stt.context_terms == ("Reachy Mini", "Pollen Robotics", "Hugging Face")
+    assert stt.max_window_s == 30
+    assert stt.max_output_tokens == 512
+
+
 @pytest.mark.parametrize("live", [False, True])
 def test_windowed_http_stt_configuration_reaches_handler_and_vad(monkeypatch, live):
     from speech_to_speech.STT.openai_compatible_handler import OpenAICompatibleSTTHandler

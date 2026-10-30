@@ -7,6 +7,8 @@ from typing import Optional
 import requests  # type: ignore[import-untyped]
 from PIL import Image
 
+from speech_to_speech.language_codes import LANGUAGE_NAMES as WHISPER_LANGUAGE_TO_LLM_LANGUAGE
+
 SMART_PUNCT_TRANSLATION = str.maketrans(
     {
         "\u2018": "'",
@@ -136,123 +138,6 @@ def remove_unspeechable(text: str) -> str:
     """
     text = text.translate(SMART_PUNCT_TRANSLATION)
     return SPEECHABLE_PATTERN.sub("", text)
-
-
-# Maps an STT language code to the language name used in the "Please reply ... in {name}"
-# prompt. Every language any bundled STT backend can report needs an entry here, otherwise
-# `--enable_lang_prompt` silently emits no instruction for it. The names are lowercase
-# because they are interpolated mid-sentence.
-#
-# `tests/test_llm_utils.py` asserts this covers the SUPPORTED_LANGUAGES of every bundled STT
-# handler, so adding a language to a handler without adding it here fails CI.
-WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
-    "en": "english",
-    "fr": "french",
-    "es": "spanish",
-    "zh": "chinese",
-    "ja": "japanese",
-    "ko": "korean",
-    "hi": "hindi",
-    "de": "german",
-    "pt": "portuguese",
-    "pl": "polish",
-    "it": "italian",
-    "nl": "dutch",
-    # The remaining languages Parakeet TDT v3 (the default STT) detects and reports.
-    "ru": "russian",
-    "uk": "ukrainian",
-    "cs": "czech",
-    "sk": "slovak",
-    "hu": "hungarian",
-    "ro": "romanian",
-    "bg": "bulgarian",
-    "hr": "croatian",
-    "sl": "slovenian",
-    "sr": "serbian",
-    "da": "danish",
-    "no": "norwegian",
-    "sv": "swedish",
-    "fi": "finnish",
-    "et": "estonian",
-    "lv": "latvian",
-    "lt": "lithuanian",
-    # The rest of Whisper's language set, which the Whisper-family backends (including
-    # faster-whisper) can detect and report. Without a name here the prompt is silently
-    # skipped for that language, so coverage has to match what the backends can emit.
-    "tr": "turkish",
-    "ca": "catalan",
-    "ar": "arabic",
-    "id": "indonesian",
-    "vi": "vietnamese",
-    "he": "hebrew",
-    "el": "greek",
-    "ms": "malay",
-    "ta": "tamil",
-    "th": "thai",
-    "ur": "urdu",
-    "la": "latin",
-    "mi": "maori",
-    "ml": "malayalam",
-    "cy": "welsh",
-    "te": "telugu",
-    "fa": "persian",
-    "bn": "bengali",
-    "az": "azerbaijani",
-    "kn": "kannada",
-    "mk": "macedonian",
-    "br": "breton",
-    "eu": "basque",
-    "is": "icelandic",
-    "hy": "armenian",
-    "ne": "nepali",
-    "mn": "mongolian",
-    "bs": "bosnian",
-    "kk": "kazakh",
-    "sq": "albanian",
-    "sw": "swahili",
-    # Qwen3-ASR reports Filipino as "fil"; Whisper only knows "tl" (Tagalog) above.
-    "fil": "filipino",
-    "gl": "galician",
-    "mr": "marathi",
-    "pa": "punjabi",
-    "si": "sinhala",
-    "km": "khmer",
-    "sn": "shona",
-    "yo": "yoruba",
-    "so": "somali",
-    "af": "afrikaans",
-    "oc": "occitan",
-    "ka": "georgian",
-    "be": "belarusian",
-    "tg": "tajik",
-    "sd": "sindhi",
-    "gu": "gujarati",
-    "am": "amharic",
-    "yi": "yiddish",
-    "lo": "lao",
-    "uz": "uzbek",
-    "fo": "faroese",
-    "ht": "haitian creole",
-    "ps": "pashto",
-    "tk": "turkmen",
-    "nn": "nynorsk",
-    "mt": "maltese",
-    "sa": "sanskrit",
-    "lb": "luxembourgish",
-    "my": "myanmar",
-    "bo": "tibetan",
-    "tl": "tagalog",
-    "mg": "malagasy",
-    "as": "assamese",
-    "tt": "tatar",
-    "haw": "hawaiian",
-    "ln": "lingala",
-    "ha": "hausa",
-    "ba": "bashkir",
-    "jw": "javanese",
-    "su": "sundanese",
-    "yue": "cantonese",
-}
 
 
 def format_language_instruction(lang_name: str) -> str:
