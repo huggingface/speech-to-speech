@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 import httpx
 from nltk import sent_tokenize
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemAssistantMessage,
     RealtimeConversationItemFunctionCall,
@@ -28,12 +28,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.chat import (
+    PENDING_NOTICE_PREFIX,
     Chat,
     ChatItemError,
     ResponsesAssistantMessage,
     ResponsesFunctionCall,
     SupportedItem,
     build_active_chat,
+    fold_pending_notice,
     make_user_audio_message,
 )
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
@@ -299,6 +301,33 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
     def _build_compaction_generate_fn(self) -> CompactGenerateFn:
         """Return a ``(system, user) -> text`` fn used to compact long histories."""
         ...
+
+    # Set once a provider rejects the trailing pending-calls system note; the note then rides in the last user message.
+    _fold_pending_notice = False
+
+    def _with_pending_notice(self, items: list[Any], chat: Chat) -> list[Any]:
+        """Append the pending tool calls note last, as a system message or folded into the last user message."""
+        notice = chat.pending_tool_calls_notice()
+        if not notice:
+            return items
+        with_notice = [*items, {"role": "system", "content": notice}]
+        return fold_pending_notice(with_notice) if self._fold_pending_notice else with_notice
+
+    def _send_with_notice_fallback(self, api_input: Any, send: Callable[[Any], Any]) -> Any:
+        """Call *send*; if the provider rejects the trailing system note, retry once with it folded away."""
+        try:
+            return send(api_input)
+        except BadRequestError:
+            last = api_input[-1] if isinstance(api_input, list) and api_input else None
+            if not (
+                isinstance(last, dict)
+                and last.get("role") == "system"
+                and str(last.get("content", "")).startswith(PENDING_NOTICE_PREFIX)
+            ):
+                raise
+            logger.warning("Provider rejected the pending tool calls system note; folding it into the user message")
+            self._fold_pending_notice = True
+            return send(fold_pending_notice(api_input))
 
     @abstractmethod
     def _serialize(self, active_chat: Chat) -> Any:
@@ -942,15 +971,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         original_chat = runtime_config.chat
         active_chat = original_chat.copy(deep=True)
         history_anchor_id = active_chat.history_anchor_id()
-        if not is_out_of_band(response) and active_chat.has_pending_tool_calls():
-            yield EndOfResponse(
-                turn_id=turn_id,
-                turn_revision=turn_revision,
-                cancel_generation=gen,
-                response_key=request.response_key,
-                error="Cannot generate a response while function call outputs are pending.",
-            )
-            return
         if is_out_of_band(response):
             try:
                 active_chat = build_active_chat(active_chat, response)
@@ -1060,15 +1080,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         original_chat = runtime_config.chat
         active_chat = original_chat.copy(deep=True)
         history_anchor_id = active_chat.history_anchor_id()
-        if not is_out_of_band(response) and active_chat.has_pending_tool_calls():
-            yield EndOfResponse(
-                turn_id=turn_id,
-                turn_revision=turn_revision,
-                cancel_generation=gen,
-                response_key=request.response_key,
-                error="Cannot generate a response while function call outputs are pending.",
-            )
-            return
         if is_out_of_band(response):
             try:
                 active_chat = build_active_chat(active_chat, response)

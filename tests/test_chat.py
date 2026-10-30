@@ -1679,6 +1679,39 @@ class TestTurnOrdering:
             "message",
         ]
 
+    def test_result_arriving_after_an_answered_later_turn_is_serialized_where_it_arrived(self):
+        chat = Chat(size=5)
+        chat.add_item(_user("A"))
+        anchor = chat.history_anchor_id()
+        chat.add_provisional_generation_items("response-a", [_fc("call_a")], after_item_id=anchor)
+        chat.add_item(_user("B"))
+        chat.add_item(_assistant("answer to B"))
+
+        chat.add_item(_fco("call_a", output="result"))
+
+        # The call and its result come last, so a follow-up response answers the result.
+        expected = ["message", "message", "function_call", "function_call_output"]
+        assert [item["type"] for item in chat.to_responses_api_chat()] == expected
+        roles = [message["role"] for message in chat.to_transformers_chat()]
+        assert roles == ["user", "assistant", "assistant", "tool"]
+
+    def test_finished_parallel_call_is_kept_while_its_sibling_is_still_pending(self):
+        chat = Chat(size=5)
+        chat.add_item(_user("A"))
+        chat.add_ordered_function_call(_fc("call_slow"))
+        chat.add_ordered_function_call(_fc("call_done"))
+
+        chat.add_item(_fco("call_done", output="finished"))
+
+        # Only the finished call and its result reach the model; the running one is omitted.
+        responses = chat.to_responses_api_chat()
+        assert [item["type"] for item in responses] == ["message", "function_call", "function_call_output"]
+        assert responses[1]["call_id"] == "call_done"
+        transformers = chat.to_transformers_chat()
+        assert [m["role"] for m in transformers] == ["user", "assistant", "tool"]
+        assert "call_slow" not in str(transformers) and "call_done" in str(transformers)
+        assert chat.has_pending_tool_calls()
+
     def test_second_commit_of_a_turn_follows_the_items_it_already_wrote(self):
         chat = Chat(size=5)
         chat.add_item(_user("A"))

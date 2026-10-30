@@ -24,6 +24,14 @@ from tests.llm_history import drive_llm
 from tests.test_responses_api_language_model import _make_handler, _make_request, _make_response, _make_stream
 
 
+def _without_pending_notice(api_input):
+    """Drop the trailing system note that names tool calls still running."""
+    notice = api_input[-1] if api_input else None
+    if isinstance(notice, dict) and notice.get("role") == "system" and "still running" in str(notice.get("content")):
+        return api_input[:-1]
+    return api_input
+
+
 def _items(suffix="1"):
     return [
         ResponseReasoningItem(
@@ -97,7 +105,7 @@ def test_assistant_message_payload_survives_complete_reasoning_tool_continuation
     captured = []
 
     def create(**kwargs):
-        captured.append(kwargs["input"])
+        captured.append(_without_pending_notice(kwargs["input"]))
         if len(captured) == 1:
             return _stream(items) if stream else _make_response(items)
         assert kwargs["input"][2:5] == originals
@@ -163,7 +171,7 @@ def test_consecutive_tools_replay_all_reasoning_since_user(stream):
     captured = []
 
     def create(**kwargs):
-        captured.append(kwargs["input"])
+        captured.append(_without_pending_notice(kwargs["input"]))
         items = next(replies)
         return _stream(items) if stream else _make_response(items)
 
@@ -283,7 +291,7 @@ def test_out_of_band_opaque_provider_call_can_continue_with_explicit_client_inpu
     captured = []
 
     def create(**kwargs):
-        captured.append(kwargs["input"])
+        captured.append(_without_pending_notice(kwargs["input"]))
         items = [call] if len(captured) == 1 else []
         return _stream(items) if stream else _make_response(items)
 
@@ -359,7 +367,7 @@ def test_out_of_band_snapshot_omits_reasoning_for_unresolved_call(stream, comple
     captured = []
 
     def create(**kwargs):
-        captured.append(kwargs["input"])
+        captured.append(_without_pending_notice(kwargs["input"]))
         items = next(replies)
         return _stream(items) if stream else _make_response(items)
 
@@ -520,6 +528,7 @@ def test_pinned_sdk_pending_snapshot_preserves_previous_completed_response(strea
 
     def respond(request):
         body = json.loads(request.content)
+        body["input"] = _without_pending_notice(body["input"])
         requests.append(body)
         output = first if len(requests) == 1 else pending if len(requests) == 2 else []
         response = {
@@ -603,6 +612,7 @@ def test_pinned_sdk_parses_and_serializes_reasoning_tool_continuation(stream, re
 
     def respond(request):
         body = json.loads(request.content)
+        body["input"] = _without_pending_notice(body["input"])
         requests.append(body)
         output = originals if len(requests) == 1 else []
         response = {

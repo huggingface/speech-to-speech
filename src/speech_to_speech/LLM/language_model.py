@@ -39,6 +39,7 @@ from speech_to_speech.LLM.chat import (
     Chat,
     ChatItemError,
     build_active_chat,
+    fold_pending_notice,
     make_assistant_message,
 )
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
@@ -100,6 +101,29 @@ except ImportError:
     HAS_MLX_VLM = False
 
 logger = logging.getLogger(__name__)
+
+
+def _messages_with_pending_notice(chat: Chat, tokenizer: Any = None) -> list[dict[str, Any]]:
+    """Serialize *chat* for a local model, ending with the pending tool calls note.
+
+    The note is last so a small model weighs it above the system prompt's tool rules.
+    Some chat templates (Mistral, Gemma) reject a system message after the first turn.
+    When *tokenizer* refuses the note, it is folded into the last user message instead.
+    """
+    messages = chat.to_transformers_chat()
+    notice = chat.pending_tool_calls_notice()
+    if not notice:
+        return messages
+    with_notice = [*messages, {"role": "system", "content": notice}]
+    if tokenizer is not None:
+        try:
+            tokenizer.apply_chat_template(with_notice, tokenize=False)
+        except Exception:
+            logger.warning(
+                "Chat template rejected the pending tool calls system note; folding it into the user message"
+            )
+            return fold_pending_notice(with_notice)
+    return with_notice
 
 
 @runtime_checkable
@@ -629,15 +653,6 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         # speech appends a newer user message while the model is still running.
         active_chat = original_chat.copy(deep=True)
         history_anchor_id = active_chat.history_anchor_id()
-        if not out_of_band and active_chat.has_pending_tool_calls():
-            yield EndOfResponse(
-                turn_id=ctx.turn_id,
-                turn_revision=ctx.turn_revision,
-                cancel_generation=gen,
-                response_key=request.response_key,
-                error="Cannot generate a response while function call outputs are pending.",
-            )
-            return
         if out_of_band:
             try:
                 active_chat = build_active_chat(active_chat, response)
@@ -853,7 +868,7 @@ class LanguageModelHandler(BaseLanguageModelHandler):
         runtime_config: RuntimeConfig | None = None,
         response: RealtimeResponseCreateParams | None = None,
     ) -> Iterator[LLMResponseChunk]:
-        chat_messages = chat.to_transformers_chat()
+        chat_messages = _messages_with_pending_notice(chat, self.tokenizer)
         chat_input = self.tokenizer.apply_chat_template(chat_messages, tokenize=True)
         ctx.input_tokens += len(chat_input if isinstance(chat_input, list) else chat_input["input_ids"])  # type: ignore[index]
         logger.debug("Prompt token count: %d", ctx.input_tokens)
@@ -1043,7 +1058,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
         runtime_config: RuntimeConfig | None = None,
         response: RealtimeResponseCreateParams | None = None,
     ) -> Iterator[LLMResponseChunk]:
-        prepared = chat.to_transformers_chat()
+        prepared = _messages_with_pending_notice(chat)
         if self.backend == "mlx":
             images, formatted_prompt = self._prepare_mlx_vlm_inputs(prepared)
             ctx.input_tokens += len(self.tokenizer.encode(formatted_prompt))
