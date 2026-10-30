@@ -236,6 +236,89 @@ def test_omnivoice_tts_backend_is_registered_as_optional():
     assert spec.required_extra == "omnivoice"
 
 
+@pytest.mark.parametrize(("num_threads", "expected_threads", "tail_ms"), [(None, 4, None), (2, 2, 120)])
+def test_phonon_cli_and_registry_construct_native_handler(monkeypatch, num_threads, expected_threads, tail_ms):
+    from speech_to_speech.TTS.phonon_tts_handler import PhononTTSHandler
+
+    loaded = []
+    thread_counts = []
+
+    def load(**kwargs):
+        loaded.append(kwargs)
+        return SimpleNamespace(sample_rate=24000, voices=["voice-a"])
+
+    monkeypatch.setitem(sys.modules, "ptts", SimpleNamespace(TTS=load, set_num_threads=thread_counts.append))
+    args = parse_arguments(
+        [
+            "--tts",
+            "phonon",
+            "--phonon_tts_model_name",
+            "/models/test",
+            "--phonon_tts_voice",
+            "voice-a",
+            "--phonon_tts_language",
+            "fr",
+            "--phonon_tts_revision",
+            "revision",
+            "--phonon_tts_blocksize",
+            "256",
+        ]
+        + (["--phonon_tts_num_threads", str(num_threads)] if num_threads is not None else [])
+        + (["--phonon_tts_max_trailing_silence_ms", str(tail_ms)] if tail_ms is not None else [])
+    )
+    assert args.tts_backend.spec.required_extra == "phonon"
+    assert args.tts_backend.config == {
+        "model_name": "/models/test",
+        "revision": "revision",
+        "voice": "voice-a",
+        "language": "fr",
+        "quant": "q8",
+        "blocksize": 256,
+        "num_threads": expected_threads,
+        "max_trailing_silence_ms": tail_ms,
+        "gen_kwargs": {},
+    }
+    handler = create_backend_handler(args.tts_backend, _context())
+    assert isinstance(handler, PhononTTSHandler)
+    assert handler.max_trailing_silence_ms == tail_ms
+    assert loaded == [{"config": "/models/test", "revision": "revision", "lang": "fr", "quant": "q8", "device": "cpu"}]
+    assert thread_counts == [expected_threads]
+
+
+def test_phonon_missing_dependency_reports_install_extra(monkeypatch):
+    monkeypatch.setitem(sys.modules, "ptts", None)
+    args = parse_arguments(["--tts", "phonon", "--phonon_tts_model_name", "/models/test"])
+    with pytest.raises(ImportError, match=r"speech-to-speech\[phonon\]"):
+        create_backend_handler(args.tts_backend, _context())
+
+
+def test_phonon_stays_on_cpu_when_global_device_is_set():
+    args = parse_arguments(["--tts", "phonon", "--device", "mps"])
+    prepare_all_args(args)
+    assert "device" not in args.tts_backend.config
+
+
+@pytest.mark.parametrize(("normalizer", "expected"), [("en", {"en"}), ("fr", {"fr"}), ("none", set())])
+@pytest.mark.parametrize("enable_visemes", [False, True])
+def test_phonon_session_languages_match_fixed_normalizer(monkeypatch, normalizer, expected, enable_visemes):
+    args = parse_arguments(["--stt", "openai", "--tts", "phonon", "--phonon_tts_language", normalizer])
+    args.module_kwargs.enable_visemes = enable_visemes
+    handlers = [SimpleNamespace(), SimpleNamespace(language=normalizer)]
+    if enable_visemes:
+        handlers.append(SimpleNamespace())
+    monkeypatch.setattr(s2s_pipeline, "_build_handlers", lambda **kwargs: handlers)
+    unit = s2s_pipeline._build_pipeline_unit(
+        index=0,
+        stop_event=Event(),
+        module_kwargs=args.module_kwargs,
+        vad_handler_kwargs=args.vad_handler_kwargs,
+        stt_backend=args.stt_backend,
+        llm_backend=args.llm_backend,
+        tts_backend=args.tts_backend,
+    )
+    assert unit.service.tts_supported_languages == expected
+
+
 def test_sensevoice_stt_backend_is_registered_with_its_optional_extra():
     spec = STT_BACKENDS["sense-voice"]
 
@@ -403,14 +486,19 @@ def test_test_backend_only_needs_config_factory_and_registry_entry():
     assert calls[0][1] is selection.config
 
 
-def test_openai_tts_backend_constructs_through_registry(monkeypatch):
+@pytest.mark.parametrize("backend", ["openai", "drama3"])
+def test_openai_tts_backend_constructs_through_registry(monkeypatch, backend):
+    from speech_to_speech.TTS.drama3_handler import Drama3TTSHandler
     from speech_to_speech.TTS.openai_compatible_handler import OpenAICompatibleTTSHandler
 
     monkeypatch.setattr(OpenAICompatibleTTSHandler, "warmup", lambda self: None)
-    args = parse_arguments(["--tts", "openai"])
-    tts = create_backend_handler(args.tts_backend, _context())
+    args = parse_arguments(["--tts", backend])
+    context = _context()
+    tts = create_backend_handler(args.tts_backend, context)
 
-    assert isinstance(tts, OpenAICompatibleTTSHandler)
+    assert type(tts) is (Drama3TTSHandler if backend == "drama3" else OpenAICompatibleTTSHandler)
+    assert tts.cancel_scope is context.cancel_scope
+    assert tts.speculative_turns is context.speculative_turns
 
 
 def test_openai_tts_factory_receives_assistant_language_opt_in(monkeypatch):
@@ -449,6 +537,79 @@ def test_openai_stt_backend_constructs_through_registry(monkeypatch):
     stt = create_backend_handler(args.stt_backend, _context())
 
     assert isinstance(stt, OpenAICompatibleSTTHandler)
+
+
+def test_nemotron_stt_profile_and_terms_construct_through_registry(monkeypatch):
+    from speech_to_speech.STT.openai_compatible_handler import OpenAICompatibleSTTHandler
+
+    monkeypatch.setattr(OpenAICompatibleSTTHandler, "warmup", lambda self: None)
+    args = parse_arguments(
+        [
+            "--stt",
+            "openai",
+            "--openai_stt_profile",
+            "nemotron",
+            "--openai_stt_model",
+            "native-model",
+            "--openai_stt_context_terms",
+            "Reachy Mini",
+            "Pollen Robotics",
+            "Hugging Face",
+            "--openai_stt_max_window_s",
+            "30",
+            "--openai_stt_max_output_tokens",
+            "512",
+        ]
+    )
+    stt = create_backend_handler(args.stt_backend, _context())
+    assert stt.profile == "nemotron"
+    assert stt.endpoint_url.endswith("/v1/chat/completions")
+    assert stt.context_terms == ("Reachy Mini", "Pollen Robotics", "Hugging Face")
+    assert stt.max_window_s == 30
+    assert stt.max_output_tokens == 512
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_windowed_http_stt_configuration_reaches_handler_and_vad(monkeypatch, live):
+    from speech_to_speech.STT.openai_compatible_handler import OpenAICompatibleSTTHandler
+
+    class DummyHandler:
+        def __init__(self, *_args, **kwargs):
+            self.__dict__.update(kwargs.get("setup_kwargs", {}))
+
+    monkeypatch.setattr(OpenAICompatibleSTTHandler, "warmup", lambda self: None)
+    monkeypatch.setattr(s2s_pipeline, "VADHandler", DummyHandler)
+    monkeypatch.setattr(s2s_pipeline, "TranscriptionNotifier", DummyHandler)
+    monkeypatch.setattr("speech_to_speech.LLM.lm_output_processor.LMOutputProcessor", DummyHandler)
+    args = parse_arguments(["--stt", "openai", "--openai_stt_max_window_s", "120"])
+    args.module_kwargs.enable_live_transcription = live
+    other = BackendSpec("dummy", "llm", FakeArguments, lambda *_args: object())
+    selection = BackendSelection(other, other.normalize(FakeArguments()))
+    handlers = s2s_pipeline._build_handlers(
+        stop_event=Event(),
+        should_listen=Event(),
+        recv_audio_chunks_queue=Queue(),
+        spoken_prompt_queue=Queue(),
+        stt_output_queue=Queue(),
+        text_prompt_queue=Queue(),
+        lm_response_queue=Queue(),
+        lm_processed_queue=Queue(),
+        send_audio_chunks_queue=Queue(),
+        text_output_queue=Queue(),
+        module_kwargs=args.module_kwargs,
+        vad_handler_kwargs=VADHandlerArguments(enable_realtime_transcription=live),
+        stt_backend=args.stt_backend,
+        llm_backend=selection,
+        tts_backend=selection,
+        speculative_turns=SpeculativeTurnTracker(),
+        cancel_scope=CancelScope(),
+        pipeline_index=0,
+    )
+    assert handlers[0].transcription_window_samples == 120 * 16000
+    assert handlers[0].enable_realtime_transcription == live
+    stt = next(h for h in handlers if isinstance(h, OpenAICompatibleSTTHandler))
+    assert stt.max_window_s == 120
+    assert stt.window_partials_enabled == live
 
 
 @pytest.mark.parametrize(

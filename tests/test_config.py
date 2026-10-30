@@ -53,6 +53,15 @@ def test_load_resolve_selection_defaults_and_independence(document):
     assert document.data == original
 
 
+def test_configured_client_accepts_voice_choices(document):
+    from speech_to_speech.configured_runtime import build_configured_client
+
+    document.data["runtime"] = {"client": {"voice": "Zoey", "voice_choices": ["Zoey", "Maeve"]}}
+    validate_config(document)
+    client = build_configured_client(resolve_config(document, include_client=True))
+    assert client.voice == "Zoey" and client.voice_choices == ["Zoey", "Maeve"]
+
+
 @pytest.mark.parametrize("names", [[], "primary", ["primary", "primary"], ["unknown"]])
 def test_invalid_selection(document, names):
     with pytest.raises(ConfigurationError):
@@ -466,10 +475,13 @@ def test_explicit_scope_inventory():
         "output_device",
         "instructions",
         "voice",
+        "voice_choices",
         "print_json",
+        "verbose",
         "block_mic_during_playback",
         "vad_threshold",
         "interrupt_response",
+        "echo_cancellation",
         "log_transcripts",
         "connection_retry_timeout_s",
         "tools",
@@ -482,7 +494,7 @@ def test_client_only_skips_server_and_pipeline_environment(document):
     document.data["runtime"] = {
         "server": {"port": {"env": "MISSING_PORT"}},
         "log_transcripts": {"env": "LOG_TRANSCRIPTS"},
-        "client": {"api_key": "", "model": "client-model", "playback_buffer_ms": 0},
+        "client": {"api_key": "", "model": "client-model", "playback_buffer_ms": 0, "echo_cancellation": True},
     }
     document.data["blocks"]["llm"]["settings"] = {"responses_api_api_key": {"env": "MISSING_KEY"}}
     document.data["pipelines"]["primary"]["num_pipelines"] = {"env": "MISSING_COUNT"}
@@ -494,6 +506,7 @@ def test_client_only_skips_server_and_pipeline_environment(document):
     assert result.client["api_key"] == ""
     assert result.client["model"] == "client-model"
     assert result.client["playback_buffer_ms"] == 0
+    assert result.client["echo_cancellation"] is True
     assert result.sources[("runtime", "client", "api_key")] == "file"
     assert not any(path[0] in {"blocks", "pipelines"} for path in result.sources)
     assert document.data == original

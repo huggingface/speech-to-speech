@@ -37,12 +37,9 @@ from speech_to_speech.api.openai_realtime.audio_client import (
     ToolResult,
     listen_and_play_realtime,
 )
-from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
-from speech_to_speech.api.openai_realtime.service import RealtimeService
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
-from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantToolCallReadyEvent,
@@ -63,6 +60,7 @@ from speech_to_speech.pipeline.messages import (
     TTSInput,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from tests.openai_realtime.conftest import make_pipeline_unit
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -83,31 +81,16 @@ class _ServerEnv:
     """Wraps a running uvicorn server + all pipeline queues."""
 
     def __init__(self):
-        self.text_prompt_queue: Queue = Queue()
-        self.should_listen = ThreadingEvent()
-        self.should_listen.set()
-        self.service = RealtimeService(
-            text_prompt_queue=self.text_prompt_queue,
-            should_listen=self.should_listen,
-        )
-        self.input_queue: Queue = Queue()
-        self.output_queue: Queue = Queue()
-        self.text_output_queue: Queue = Queue()
+        self.unit = make_pipeline_unit()
+        self.service = self.unit.service
+        self.text_prompt_queue = self.unit.text_prompt_queue
+        self.should_listen = self.unit.should_listen
+        self.input_queue = self.unit.input_queue
+        self.output_queue = self.unit.output_queue
+        self.text_output_queue = self.unit.text_output_queue
+        self.response_playing = self.unit.response_playing
+        self.cancel_scope = self.unit.cancel_scope
         self.stop_event = ThreadingEvent()
-        self.response_playing = ThreadingEvent()
-        self.cancel_scope = CancelScope()
-        self.unit = PipelineUnit(
-            index=0,
-            service=self.service,
-            cancel_scope=self.cancel_scope,
-            should_listen=self.should_listen,
-            response_playing=self.response_playing,
-            input_queue=self.input_queue,
-            output_queue=self.output_queue,
-            text_output_queue=self.text_output_queue,
-            text_prompt_queue=self.text_prompt_queue,
-            handlers=[],
-        )
         self.app = create_app(pool=[self.unit], stop_event=self.stop_event)
         self.port = _free_port()
         self._server_thread: threading.Thread | None = None

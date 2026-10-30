@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import logging
+import math
 import os
 import wave
 from collections import deque
@@ -148,6 +150,23 @@ class HttpTranscriptionOperation:
         headers = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        client = httpx.AsyncClient(timeout=self.timeout_s)
+        try:
+            response = await client.post(self.endpoint_url, headers=headers, **self._request_kwargs())
+            response.raise_for_status()
+            return self._parse_response(response.content, response.headers.get("content-type", ""))
+        except httpx.HTTPStatusError as exc:
+            raise TranscriptionRequestError(self._rejection_message(exc.response)) from exc
+        except httpx.TimeoutException as exc:
+            raise TranscriptionRequestError("transcription request timed out") from exc
+        except httpx.HTTPError as exc:
+            raise TranscriptionRequestError(f"transcription transport failed: {type(exc).__name__}") from exc
+        finally:
+            # Repeated cancellation must not interrupt release of the HTTP transport.
+            with anyio.CancelScope(shield=True):
+                await client.aclose()
+
+    def _request_kwargs(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "response_format": self.response_format,
             **(self.extra_fields or {}),
@@ -160,26 +179,39 @@ class HttpTranscriptionOperation:
             else:
                 data["language"] = self.language
 
-        client = httpx.AsyncClient(timeout=self.timeout_s)
-        try:
-            response = await client.post(
-                self.endpoint_url,
-                headers=headers,
-                data=data,
-                files={"file": ("audio.wav", self.wav_bytes, "audio/wav")},
+        return {"data": data, "files": {"file": ("audio.wav", self.wav_bytes, "audio/wav")}}
+
+    @staticmethod
+    def _rejection_message(response: httpx.Response) -> str:
+        message = f"transcription server returned HTTP {response.status_code}"
+        if response.status_code == 413:
+            return (
+                f"{message}: request exceeds the server upload limit; use shorter transcription windows "
+                "or increase the server upload limit"
             )
-            response.raise_for_status()
-            return self._parse_response(response.content, response.headers.get("content-type", ""))
-        except httpx.HTTPStatusError as exc:
-            raise TranscriptionRequestError(f"transcription server returned HTTP {exc.response.status_code}") from exc
-        except httpx.TimeoutException as exc:
-            raise TranscriptionRequestError("transcription request timed out") from exc
-        except httpx.HTTPError as exc:
-            raise TranscriptionRequestError(f"transcription transport failed: {type(exc).__name__}") from exc
-        finally:
-            # Repeated cancellation must not interrupt release of the HTTP transport.
-            with anyio.CancelScope(shield=True):
-                await client.aclose()
+        if response.status_code != 400:
+            return message
+        try:
+            payload = response.json()
+        except (ValueError, UnicodeError):
+            return message
+        error = payload.get("error") if isinstance(payload, dict) else None
+        detail = error.get("message") if isinstance(error, dict) else None
+        if not isinstance(detail, str):
+            return message
+        # Classify known vLLM validation errors, never echo arbitrary provider text
+        # (which can contain credentials, audio content, or internal server paths).
+        if detail.startswith("Audio exceeds maximum allowed duration of "):
+            return (
+                f"{message}: audio exceeds the server duration limit; use shorter transcription windows "
+                "or increase VLLM_MAX_AUDIO_DECODE_DURATION_S on the server"
+            )
+        if detail.startswith("Maximum file size exceeded"):
+            return (
+                f"{message}: audio exceeds the server file size limit; use shorter transcription windows "
+                "or increase the server upload limit"
+            )
+        return message
 
     def _parse_response(self, body: bytes, content_type: str) -> HttpTranscriptionResult:
         if self.response_format == "text" or "text/plain" in content_type:
@@ -215,6 +247,16 @@ class _TranscriptionRequest:
     elapsed_s: float | None = None
 
 
+@dataclass
+class _WindowedTurn:
+    """Completed, non-overlapping audio prefix; the outstanding tail stays revisable."""
+
+    language: str | None
+    end: int = 0
+    fingerprint: bytes = b""
+    results: list[HttpTranscriptionResult] = field(default_factory=list)
+
+
 class OpenAICompatibleSTTHandler(BaseSTTHandler):
     """Per-pipeline asynchronous STT with turn and session lifecycle ownership."""
 
@@ -232,18 +274,46 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         speculative_turns: SpeculativeTurnTracker | None = None,
         final_revision_settle_s: float = 0.0,
         gen_kwargs: dict[str, Any] | None = None,
+        max_window_s: float | None = None,
+        profile: str = "transcription",
+        recognition_context: str = "",
+        context_terms: list[str] | None = None,
+        max_output_tokens: int = 384,
     ) -> None:
+        if profile not in {"transcription", "nemotron"}:
+            raise ValueError("OpenAI-compatible STT profile must be 'transcription' or 'nemotron'")
+        if profile == "transcription" and (recognition_context or context_terms):
+            raise ValueError("STT recognition context requires the nemotron profile")
+        if context_terms is not None and not isinstance(context_terms, (list, tuple)):
+            raise ValueError("STT context_terms must be a list of nonempty strings")
+        if profile == "nemotron" and (response_format != "json" or not model or gen_kwargs):
+            raise ValueError("Nemotron STT requires a model, json responses, and no gen_kwargs overrides")
+        if isinstance(max_output_tokens, bool) or not isinstance(max_output_tokens, int) or max_output_tokens < 1:
+            raise ValueError("STT max_output_tokens must be a positive integer")
         if response_format not in {"json", "text"}:
             raise ValueError("OpenAI-compatible STT response_format must be 'json' or 'text'")
         if timeout <= 0:
             raise ValueError("OpenAI-compatible STT timeout must be > 0")
-        model = model.strip() if model else None
-        language = language.strip() if language else None
+        if max_window_s is not None and (not math.isfinite(max_window_s) or max_window_s < 1):
+            raise ValueError("OpenAI-compatible STT max_window_s must be finite and at least 1 second")
+        model = (model.strip() or None) if model else None
+        language = (language.strip() or None) if language else None
+        if profile == "nemotron" and model is None:
+            raise ValueError("Nemotron STT requires a model")
         if model is None and language is None:
             raise ValueError("OpenAI-compatible STT requires either a model or language")
 
         self.base_url = base_url.rstrip("/")
         self.endpoint_url = f"{self.base_url}/audio/transcriptions"
+        self.profile = profile
+        self.recognition_context = recognition_context.strip()
+        self.context_terms = tuple(context_terms or ())
+        self.max_output_tokens = max_output_tokens
+        if profile == "nemotron":
+            from speech_to_speech.STT.nemotron_transcribe import build_prompt
+
+            build_prompt(self.recognition_context, self.context_terms, language)
+            self.endpoint_url = f"{self.base_url}/chat/completions"
         self.api_key = api_key
         if self.api_key is None and self.base_url == OPENAI_BASE_URL:
             self.api_key = os.getenv("OPENAI_API_KEY")
@@ -254,6 +324,11 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         self.speculative_turns = speculative_turns
         self.final_revision_settle_s = final_revision_settle_s
         self.gen_kwargs = gen_kwargs or {}
+        self.max_window_s = max_window_s
+        # Direct callers submitting progressive inputs keep their existing behavior.
+        # Pipeline construction disables captions for internal window-only snapshots.
+        self.window_partials_enabled = True
+        self._windowed_turns: dict[str, _WindowedTurn] = {}
         self._request_lock = RLock()
         self._session_generation = 0
         self._closed = False
@@ -288,6 +363,13 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
                 if not self._request_is_current(active):
                     self._cancel_request(active, "superseded")
             self._pending_finals = deque(r for r in self._pending_finals if self._request_is_current(r))
+            retained_turns = {
+                r.source.turn_id
+                for r in [*self._active.values(), *self._pending_finals, request, self._pending_progressive]
+                if r is not None
+                if r.session_generation == self._session_generation
+            }
+            self._windowed_turns = {k: v for k, v in self._windowed_turns.items() if k in retained_turns}
             final_requests = [*self._pending_finals]
             if "final" in self._active:
                 final_requests.append(self._active["final"])
@@ -369,20 +451,12 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             if not self._request_is_current(request):
                 return
             selected = source.runtime_config.selected_language if source.runtime_config else None
-            if selected is None:
-                operation = self._make_operation(source.audio)
-            else:
-                operation = self._make_operation(
-                    source.audio,
-                    language=None if selected == "auto" else selected,
-                    use_setup_language=False,
-                )
-            with self._request_lock:
-                request.operation = operation
-                if not self._request_is_current(request):
-                    operation.cancel("superseded")
+            if self.max_window_s is not None:
+                result = self._transcribe_windows(request, selected)
+                if result is None:
                     return
-            result = operation.run(cancel_check=lambda: not self._request_is_current(request))
+            else:
+                result = self._transcribe_audio(request, source.audio, selected)
         except TranscriptionRequestCancelled:
             return
         except Exception as exc:
@@ -412,6 +486,105 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
                 source.mode,
                 elapsed,
             )
+
+    def _transcribe_audio(
+        self, request: _TranscriptionRequest, audio: np.ndarray, selected: str | None = None
+    ) -> HttpTranscriptionResult:
+        if selected is None:
+            operation = self._make_operation(audio)
+        else:
+            operation = self._make_operation(
+                audio, language=None if selected == "auto" else selected, use_setup_language=False
+            )
+        with self._request_lock:
+            request.operation = operation
+            if not self._request_is_current(request):
+                operation.cancel("superseded")
+                raise TranscriptionRequestCancelled("superseded")
+        return operation.run(cancel_check=lambda: not self._request_is_current(request))
+
+    @staticmethod
+    def _audio_fingerprint(audio: np.ndarray) -> bytes:
+        return hashlib.sha256(np.ascontiguousarray(audio).data.cast("B")).digest()
+
+    @staticmethod
+    def _window_end(audio: np.ndarray, start: int, maximum: int) -> int:
+        end = start + maximum
+        frame = PIPELINE_SAMPLE_RATE // 10
+        left = end - min(5 * PIPELINE_SAMPLE_RATE, maximum // 4)
+        count = (end - left) // frame
+        if count == 0:
+            return end
+        frames = audio[left : left + count * frame].reshape(count, frame)
+        energy = np.square(frames.astype(np.float64)).mean(axis=1)
+        # The quietest frame need not be silence. Its midpoint still gives a
+        # hard bound and exact sample coverage when speech has no pauses.
+        return left + int(np.argmin(energy)) * frame + frame // 2
+
+    def _transcribe_windows(
+        self, request: _TranscriptionRequest, selected: str | None
+    ) -> HttpTranscriptionResult | None:
+        source = request.source
+        audio = np.asarray(source.audio).squeeze()
+        if audio.ndim != 1:
+            raise ValueError("STT audio must be mono")
+        language = self.language if selected is None else None if selected == "auto" else selected
+        with self._request_lock:
+            if not self._request_is_current(request):
+                raise TranscriptionRequestCancelled("superseded")
+            state = self._windowed_turns.get(source.turn_id) if source.turn_id is not None else None
+            if (
+                state is None
+                or state.language != selected
+                or len(audio) < state.end
+                or (state.end and self._audio_fingerprint(audio[: state.end]) != state.fingerprint)
+            ):
+                # VAD's resumed prefix is normally unchanged. Enhancement or a
+                # changed language hint can invalidate it: bound the recompute
+                # rather than joining text recognized from different audio.
+                state = _WindowedTurn(selected)
+                if source.turn_id is not None:
+                    self._windowed_turns[source.turn_id] = state
+            start = state.end
+            results = list(state.results)
+        assert self.max_window_s is not None
+        maximum = int(self.max_window_s * PIPELINE_SAMPLE_RATE)
+        progressive = source.mode == "progressive"
+        while len(audio) - start > maximum or (progressive and len(audio) - start == maximum):
+            end = self._window_end(audio, start, maximum)
+            result = self._transcribe_audio(request, audio[start:end], selected)
+            with self._request_lock:
+                if not self._request_is_current(request):
+                    raise TranscriptionRequestCancelled("superseded")
+                state.results.append(result)
+                state.end = end
+                state.fingerprint = self._audio_fingerprint(audio[:end])
+            results.append(result)
+            start = end
+        if progressive and not self.window_partials_enabled:
+            return None
+        if start < len(audio):
+            results.append(self._transcribe_audio(request, audio[start:], selected))
+        text = ""
+
+        def cjk(character: str) -> bool:
+            # Includes fullwidth punctuation such as "\uff0c", which often precedes a quiet cut.
+            return (
+                "\u3000" <= character <= "\u30ff"
+                or "\u3400" <= character <= "\u9fff"
+                or "\uff00" <= character <= "\uffef"
+            )
+
+        for result in results:
+            part = result.text.strip()
+            if not part:
+                continue
+            # Preserve ordinary word separators; CJK text need not gain spaces
+            # at the newly introduced internal boundaries, including auto mode.
+            separator = "" if text and cjk(text[-1]) and cjk(part[0]) else " "
+            text = f"{text}{separator if text else ''}{part}"
+        detected = next((r.language for r in reversed(results) if r.language), language)
+        return HttpTranscriptionResult(text=text, language=detected)
 
     def _publish_failure(self, request: _TranscriptionRequest, message: str) -> None:
         if not self._request_is_current(request):
@@ -480,6 +653,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             self._session_generation += 1
             self._pending_finals.clear()
             self._pending_progressive = None
+            self._windowed_turns.clear()
             for request in self._active.values():
                 self._cancel_request(request, "session_end")
             super().on_session_end()
@@ -490,6 +664,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             self._session_generation += 1
             self._pending_finals.clear()
             self._pending_progressive = None
+            self._windowed_turns.clear()
             for request in self._active.values():
                 self._cancel_request(request, "shutdown")
             workers = (self._final_thread, self._progressive_thread)
@@ -504,6 +679,21 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         language: str | None = None,
         use_setup_language: bool = True,
     ) -> HttpTranscriptionOperation:
+        if self.profile == "nemotron":
+            from speech_to_speech.STT.nemotron_transcribe import NemotronTranscriptionOperation, build_prompt
+
+            selected_language = self.language if use_setup_language else language
+            return NemotronTranscriptionOperation(
+                endpoint_url=self.endpoint_url,
+                api_key=self.api_key,
+                model=self.model,
+                wav_bytes=self._encode_wav(audio),
+                language=selected_language,
+                response_format="json",
+                timeout_s=self.timeout,
+                prompt=build_prompt(self.recognition_context, self.context_terms, selected_language),
+                max_output_tokens=self.max_output_tokens,
+            )
         extra_fields = self.gen_kwargs.copy()
         if not use_setup_language:
             extra_fields.pop("language", None)

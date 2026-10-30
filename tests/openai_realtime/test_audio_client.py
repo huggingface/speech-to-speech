@@ -4,7 +4,9 @@ import json
 import logging
 import signal
 import sys
-from threading import Event
+from contextlib import contextmanager
+from pathlib import Path
+from threading import Event, Thread
 from types import SimpleNamespace
 
 import pytest
@@ -23,6 +25,7 @@ from speech_to_speech.api.openai_realtime.audio_client import (
     normalize_realtime_url,
     run_realtime_audio_client,
 )
+from speech_to_speech.api.openai_realtime.echo_canceller import EchoCanceller
 from speech_to_speech.api.openai_realtime.tool_followup import (
     TOOL_FOLLOWUP_COVERED,
     TOOL_FOLLOWUP_METADATA_KEY,
@@ -274,6 +277,122 @@ def test_playback_buffer_starts_immediately_by_default():
     assert playback.buffered_bytes == 0
 
 
+def _reference_speech(np, rate):
+    import soundfile
+    import soxr
+
+    speech, source_rate = soundfile.read(
+        Path(__file__).parents[2] / "src/speech_to_speech/TTS/ref_audio.wav", dtype="float32"
+    )
+    return (soxr.resample(speech.mean(axis=1), source_rate, rate)[: 12 * rate] * 12000).astype(np.int16)
+
+
+@pytest.mark.parametrize("mode", ["echo", "overlap", "no_playback"])
+@pytest.mark.parametrize("block,device_delay_ms", [(1024, 256), (8192, 1000)])
+@pytest.mark.parametrize("rate", [16000, 24000])
+def test_echo_canceller_removes_played_audio_from_microphone_blocks(mode, block, device_delay_ms, rate):
+    np = pytest.importorskip("numpy")
+    from scipy.signal import correlate, correlation_lags
+
+    played = _reference_speech(np, rate)
+    echo = np.zeros_like(played)
+    delay = rate * device_delay_ms // 1000 + 320
+    echo[delay:] = (played[:-delay] * 0.3).astype(np.int16)
+    near = np.zeros_like(played)
+    if mode == "overlap":
+        near[6 * rate : 8 * rate] = played[10 * rate : 12 * rate]
+    if mode == "no_playback":
+        echo[:] = 0
+        near = played.copy()
+    microphone = (echo.astype(np.int32) + near).astype(np.int16)
+    canceller = EchoCanceller(rate, rate)
+    cleaned = bytearray()
+    for start in range(0, len(played), block):
+        if mode != "no_playback":
+            jitter = 0.002 * (start // block % 2) if block == 1024 else 0
+            canceller.render(played[start : start + block].tobytes(), (start + delay - 320) / rate + jitter)
+        cleaned += canceller.capture(microphone[start : start + block].tobytes(), start / rate)
+
+    assert len(cleaned) == len(played) // (rate // 100) * (rate // 100) * 2
+    output = np.frombuffer(bytes(cleaned), dtype=np.int16).astype(float)
+    if mode != "echo":
+        # The binding's high-pass filter and processing delay change phase.
+        # Require the near speech to survive, allowing up to 10 ms alignment.
+        actual = output[6 * rate : 8 * rate]
+        expected = near[6 * rate : 8 * rate].astype(float)
+        scores = correlate(actual, expected, method="fft")
+        lags = correlation_lags(len(actual), len(expected))
+        correlation = scores[np.abs(lags) < rate // 100].max() / (np.linalg.norm(actual) * np.linalg.norm(expected))
+        assert correlation > 0.6
+        assert np.linalg.norm(actual) > 0.5 * np.linalg.norm(expected)
+    else:
+        tail = slice(8 * rate, len(output))
+        reduction_db = 10 * np.log10(np.mean(echo[tail].astype(float) ** 2) / (np.mean(output[tail] ** 2) + 1e-9))
+        assert reduction_db > 30
+
+
+@pytest.mark.parametrize("case", ["late_microphone_start", "lost_microphone_block", "unreported_microphone_gap"])
+def test_echo_canceller_realigns_after_microphone_discontinuity(case):
+    np = pytest.importorskip("numpy")
+
+    rate, block = 16000, 1024
+    played = _reference_speech(np, rate)
+    echo = np.zeros_like(played)
+    echo[320:] = (played[:-320] * 0.3).astype(np.int16)
+    # Silence the speaker played before the first microphone callback.
+    skew = 5 * block if case == "late_microphone_start" else 0
+    speaker = np.concatenate([np.zeros(skew, dtype=np.int16), played])
+    lost = 4 * rate // block if case != "late_microphone_start" else -2
+    canceller = EchoCanceller(rate, rate)
+    for start in range(0, skew + block, block):
+        canceller.render(speaker[start : start + block].tobytes(), start / rate)
+    cleaned = bytearray()
+    for index, start in enumerate(range(0, len(played), block)):
+        canceller.render(
+            speaker[start + skew + block : start + skew + 2 * block].tobytes(),
+            (start + skew + block) / rate,
+        )
+        if index == lost:
+            continue
+        cleaned += canceller.capture(
+            echo[start : start + block].tobytes(),
+            (start + skew) / rate,
+            lost_input=case == "lost_microphone_block" and index == lost + 1,
+        )
+
+    output = np.frombuffer(bytes(cleaned), dtype=np.int16).astype(float)
+    tail = 4 * rate
+    reduction_db = 10 * np.log10(np.mean(echo[-tail:].astype(float) ** 2) / (np.mean(output[-tail:] ** 2) + 1e-9))
+    assert reduction_db > 30
+
+
+def test_echo_canceller_rejects_unsupported_rates():
+    with pytest.raises(ValueError, match="22050 Hz"):
+        EchoCanceller(22050, 16000)
+    with pytest.raises(ValueError, match="matching"):
+        EchoCanceller(16000, 48000)
+
+
+def test_echo_canceller_passes_raw_audio_after_processor_failure(caplog):
+    calls = []
+
+    def fail(near, far):
+        calls.append((len(near), len(far)))
+        raise RuntimeError("native failure")
+
+    canceller = EchoCanceller(16000, 16000)
+    canceller._apm = SimpleNamespace(process=fail)
+    block = bytes(range(256)) * 8
+
+    canceller.render(block, playback_time_s=0)
+    assert canceller.capture(block, capture_time_s=0) == block
+    assert canceller.capture(block, capture_time_s=1024 / 16000) == block
+    assert calls == [(960, 960)]
+    assert [record.getMessage() for record in caplog.records if record.levelname == "ERROR"] == [
+        "Echo cancellation failed; sending raw microphone audio for the rest of the session"
+    ]
+
+
 @pytest.mark.parametrize("buffer_ms", [-1, float("inf"), float("nan")])
 def test_audio_client_rejects_invalid_playback_buffer(buffer_ms):
     with pytest.raises(ValueError, match="playback_buffer_ms"):
@@ -434,6 +553,72 @@ def test_audio_client_streams_assistant_transcript_without_reprinting_done(capsy
         handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
 
     assert capsys.readouterr().out == "ASSISTANT: Hello there.\n"
+
+
+def test_conversation_only_renders_one_exchange_and_keeps_playback_and_barge_in(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer(conversation_only=True)
+    for event in (
+        SimpleNamespace(type="session.created"),
+        SimpleNamespace(type="input_audio_buffer.speech_started"),
+        SimpleNamespace(type="speech_to_speech.input_audio_transcription.snapshot", transcript="How"),
+        SimpleNamespace(type="conversation.item.input_audio_transcription.delta", delta="How are you?"),
+        SimpleNamespace(type="input_audio_buffer.committed"),
+        SimpleNamespace(type="conversation.item.created"),
+        SimpleNamespace(type="conversation.item.input_audio_transcription.completed", transcript="How are you?"),
+        response_created("response_1"),
+        SimpleNamespace(type="response.content_part.added"),
+        SimpleNamespace(type="response.output_audio_transcript.delta", delta="I'm"),
+        SimpleNamespace(type="speech_to_speech.input_audio_transcription.snapshot", transcript="background"),
+        SimpleNamespace(type="rate_limits.updated"),
+        tool_call("call_1"),
+        SimpleNamespace(type="response.output_audio_transcript.delta", delta=" doing well."),
+        SimpleNamespace(type="response.output_audio_transcript.done", transcript="I'm doing well."),
+        SimpleNamespace(type="response.output_audio.delta", delta="AQI="),
+        SimpleNamespace(type="response.output_audio.done"),
+        SimpleNamespace(type="response.content_part.done"),
+        response_done(),
+    ):
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+
+    assert capsys.readouterr().out == "USER: How are you?\nASSISTANT: I'm doing well.\n"
+    assert playback.buffered_bytes == 2
+    handle_server_event(
+        SimpleNamespace(type="input_audio_buffer.speech_started"),
+        playback=playback,
+        renderer=renderer,
+        print_json=False,
+    )
+    assert playback.buffered_bytes == 0
+
+
+def test_conversation_only_keeps_errors_visible(capsys):
+    playback = PlaybackBuffer(16000)
+    renderer = _FriendlyEventRenderer(conversation_only=True)
+    for event in (
+        SimpleNamespace(type="error", error=SimpleNamespace(type="server_error", message="Try again")),
+        response_done(status="failed"),
+        SimpleNamespace(type="conversation.item.input_audio_transcription.failed", item_id="item_1", error=None),
+    ):
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+    assert capsys.readouterr().out == (
+        "ERROR: server_error: Try again\n"
+        "ERROR: response failed\n"
+        "ERROR: transcription_error: Input audio transcription failed\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "settings,conversation_only",
+    [
+        ({}, True),
+        ({"verbose": True}, False),
+        ({"print_json": True}, False),
+        ({"verbose": True, "print_json": True}, False),
+    ],
+)
+def test_audio_client_defaults_to_clean_output_with_explicit_diagnostics(settings, conversation_only):
+    assert RealtimeAudioClientConfig(**settings).conversation_only is conversation_only
 
 
 def test_audio_client_tracks_interleaved_transcripts_per_output_item(capsys):
@@ -1571,20 +1756,31 @@ def test_audio_client_does_not_duplicate_partial_transcript_on_cancel(capsys):
     assert playback.buffered_bytes == 0
 
 
-async def test_audio_streams_are_cleaned_up_when_output_start_fails(monkeypatch):
+def test_audio_stream_clock_mapping_uses_the_shortest_read(monkeypatch):
+    readings = iter([0, 10, 20, 22, 30, 34, 40, 46, 50, 58])
+    stream_times = iter([101, 121, 131, 141, 151])
+
+    class Stream:
+        @property
+        def time(self):
+            return next(stream_times)
+
+    monkeypatch.setattr(audio_client_module.time, "monotonic", lambda: next(readings))
+
+    assert audio_client_module._stream_clock_offset(Stream()) == -100
+
+
+@pytest.mark.parametrize("echo_cancellation", [False, True])
+@pytest.mark.parametrize("windows", [False, True])
+def test_audio_streams_are_cleaned_up_when_startup_fails(monkeypatch, echo_cancellation, windows):
     events = []
-    playback_args = []
-
-    original_playback_buffer = PlaybackBuffer
-
-    def recording_playback_buffer(recv_rate, startup_buffer_ms):
-        playback_args.append((recv_rate, startup_buffer_ms))
-        return original_playback_buffer(recv_rate, startup_buffer_ms)
+    stream_options = []
 
     class FakeStream:
         def __init__(self, name, *, fail_start=False):
             self.name = name
             self.fail_start = fail_start
+            self.time = 0.0
 
         def start(self):
             events.append(f"{self.name}.start")
@@ -1599,28 +1795,120 @@ async def test_audio_streams_are_cleaned_up_when_output_start_fails(monkeypatch)
 
     input_stream = FakeStream("input")
     output_stream = FakeStream("output", fail_start=True)
+
+    def make_stream(stream, **kwargs):
+        stream_options.append(kwargs)
+        return stream
+
+    wasapi_settings = object()
     fake_sounddevice = SimpleNamespace(
-        RawInputStream=lambda **_kwargs: input_stream,
-        RawOutputStream=lambda **_kwargs: output_stream,
+        RawInputStream=lambda **kwargs: make_stream(input_stream, **kwargs),
+        RawOutputStream=lambda **kwargs: make_stream(output_stream, **kwargs),
+        query_hostapis=lambda: [
+            {"name": "MME"},
+            {"name": "Windows WASAPI", "default_input_device": 9, "default_output_device": 8},
+        ],
+        query_devices=lambda device, kind: {"hostapi": 1},
+        WasapiSettings=lambda *, auto_convert: wasapi_settings if auto_convert else None,
     )
     monkeypatch.setitem(sys.modules, "sounddevice", fake_sounddevice)
-    monkeypatch.setattr(audio_client_module, "PlaybackBuffer", recording_playback_buffer)
+    monkeypatch.setattr(
+        audio_client_module, "sys", SimpleNamespace(platform="win32" if windows else "linux"), raising=False
+    )
 
+    config = RealtimeAudioClientConfig(playback_buffer_ms=240, echo_cancellation=echo_cancellation)
     with pytest.raises(RuntimeError, match="output start failed"):
-        await audio_client_module._run_audio_session(
-            SimpleNamespace(),
-            RealtimeAudioClientConfig(playback_buffer_ms=240),
-            Event(),
-        )
+        with audio_client_module._open_audio_streams(config, PlaybackBuffer(16000, 240), audio_client_module.Queue()):
+            pass
 
-    assert playback_args == [(16000, 240)]
-    assert events == [
-        "input.start",
-        "output.start",
-        "input.stop",
-        "output.close",
-        "input.close",
-    ]
+    assert events == ["input.start", "output.start", "input.stop", "output.close", "input.close"]
+    if windows and echo_cancellation:
+        assert [options["device"] for options in stream_options] == [9, 8]
+        assert all(options["extra_settings"] is wasapi_settings for options in stream_options)
+    else:
+        assert all(options["device"] is None and "extra_settings" not in options for options in stream_options)
+
+
+@pytest.mark.parametrize("devices", [(9, 8), (1, 8), (9, 3)])
+def test_windows_echo_cancellation_preserves_explicit_wasapi_devices(monkeypatch, devices):
+    monkeypatch.setattr(audio_client_module, "sys", SimpleNamespace(platform="win32"), raising=False)
+    opened = []
+
+    def stream(**kwargs):
+        opened.append(kwargs)
+        return SimpleNamespace(time=0.0, start=lambda: None, stop=lambda: None, close=lambda: None)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sounddevice",
+        SimpleNamespace(
+            query_hostapis=lambda: [{"name": "MME"}, {"name": "Windows WASAPI"}],
+            query_devices=lambda device, kind: {"hostapi": 1 if device in (9, 8) else 0},
+            WasapiSettings=lambda **kwargs: kwargs,
+            RawInputStream=stream,
+            RawOutputStream=stream,
+        ),
+    )
+    config = RealtimeAudioClientConfig(echo_cancellation=True, input_device=devices[0], output_device=devices[1])
+    if devices == (9, 8):
+        with audio_client_module._open_audio_streams(config, PlaybackBuffer(16000), audio_client_module.Queue()):
+            pass
+        assert [options["device"] for options in opened] == [9, 8]
+    else:
+        with pytest.raises(ValueError, match="requires WASAPI input and output"):
+            with audio_client_module._open_audio_streams(config, PlaybackBuffer(16000), audio_client_module.Queue()):
+                pass
+        assert not opened
+
+
+async def test_audio_worker_reports_startup_failure_and_exits():
+    config = RealtimeAudioClientConfig(echo_cancellation=True, input_device=-9999)
+    worker = audio_client_module._AudioWorker(config)
+    with worker:
+        for _ in range(2):
+            with pytest.raises(RuntimeError):
+                await asyncio.wait_for(worker.wait_for_failure(), timeout=15)
+    assert not worker._process.is_alive()
+
+
+def test_audio_worker_can_stop_before_opening_devices():
+    worker = audio_client_module._AudioWorker(RealtimeAudioClientConfig(echo_cancellation=True, input_device=-9999))
+    worker._stop.set()
+    with worker:
+        worker.playback.append(bytes(1024 * 1024))
+        worker.playback.clear()
+    assert worker._process.exitcode == 0
+    worker._commands._thread.join(timeout=2)
+    assert not worker._commands._thread.is_alive()
+
+
+def _produce_microphone_audio(mic_queue):
+    for _ in range(128):
+        mic_queue.put_nowait(bytes(16384))
+    Event().wait(15)
+
+
+def test_audio_worker_death_unblocks_microphone_reader():
+    worker = audio_client_module._AudioWorker(RealtimeAudioClientConfig(echo_cancellation=True))
+    worker._process = audio_client_module.multiprocessing.get_context("spawn").Process(
+        target=_produce_microphone_audio, args=(worker.mic_queue,)
+    )
+
+    def drain():
+        try:
+            while True:
+                worker.mic_queue.get(timeout=0.1)
+        except (EOFError, OSError):
+            pass
+
+    with worker:
+        assert worker.mic_queue.get(timeout=10) == bytes(16384)
+        worker._process.terminate()
+        worker._process.join(timeout=5)
+        reader = Thread(target=drain, daemon=True)
+        reader.start()
+        reader.join(timeout=2)
+        assert not reader.is_alive()
 
 
 async def test_open_input_stream_is_closed_when_output_construction_fails(monkeypatch):
@@ -1642,20 +1930,24 @@ async def test_open_input_stream_is_closed_when_output_construction_fails(monkey
     with pytest.raises(RuntimeError, match="output construction failed"):
         await audio_client_module._run_audio_session(
             SimpleNamespace(),
-            RealtimeAudioClientConfig(),
+            RealtimeAudioClientConfig(echo_cancellation=False),
             Event(),
         )
 
     assert events == ["input.close"]
 
 
-async def test_audio_client_startup_and_shutdown_use_public_realtime_connection(monkeypatch):
+@pytest.mark.parametrize("startup_failure", [False, True])
+async def test_audio_client_startup_and_shutdown_use_public_realtime_connection(monkeypatch, startup_failure):
     sent = []
     audio_session_calls = []
 
     class FakeConnection:
         async def send(self, event):
             sent.append(event)
+
+        async def recv(self):
+            await asyncio.Future()
 
     class FakeConnectContext:
         async def __aenter__(self):
@@ -1680,18 +1972,54 @@ async def test_audio_client_startup_and_shutdown_use_public_realtime_connection(
         received_stop_event.set()
 
     monkeypatch.setattr(audio_client_module, "_make_client", lambda _config: fake_client)
-    monkeypatch.setattr(audio_client_module, "_run_audio_session", fake_audio_session)
-    config = RealtimeAudioClientConfig()
+    if not startup_failure:
+        monkeypatch.setattr(audio_client_module, "_run_audio_session", fake_audio_session)
+    config = RealtimeAudioClientConfig(echo_cancellation=startup_failure, input_device=-9999)
 
-    await audio_client_module.listen_and_play_realtime(
-        config,
-        stop_event=stop_event,
-    )
+    if startup_failure:
+        with pytest.raises(RuntimeError):
+            await asyncio.wait_for(audio_client_module.listen_and_play_realtime(config, stop_event=stop_event), 15)
+    else:
+        await audio_client_module.listen_and_play_realtime(config, stop_event=stop_event)
+        assert len(audio_session_calls) == 1
+        assert audio_session_calls[0][2] is stop_event
 
     assert sent == [build_session_update(config)]
-    assert len(audio_session_calls) == 1
-    assert audio_session_calls[0][2] is stop_event
     assert fake_client.closed is True
+
+
+async def test_audio_session_cancellation_closes_streams_and_stops_receiving(monkeypatch):
+    receiving = asyncio.Event()
+    closed = []
+
+    @contextmanager
+    def streams(*_args):
+        try:
+            yield
+        finally:
+            closed.append("streams")
+
+    class Connection:
+        async def recv(self):
+            receiving.set()
+            try:
+                await asyncio.Future()
+            finally:
+                closed.append("receiver")
+
+    monkeypatch.setattr(audio_client_module, "_open_audio_streams", streams)
+    stop_event = Event()
+    session = asyncio.create_task(
+        audio_client_module._run_audio_session(
+            Connection(), RealtimeAudioClientConfig(echo_cancellation=False), stop_event
+        )
+    )
+    await asyncio.wait_for(receiving.wait(), timeout=1)
+    session.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await session
+    assert stop_event.is_set()
+    assert closed == ["receiver", "streams"]
 
 
 def test_talk_client_uses_signal_driven_shutdown(monkeypatch):
@@ -1725,3 +2053,191 @@ def test_talk_client_uses_signal_driven_shutdown(monkeypatch):
         (signal.SIGINT, "previous-SIGINT"),
         (signal.SIGTERM, "previous-SIGTERM"),
     ]
+
+
+def test_clean_conversation_has_colors_literal_text_and_no_blank_lines_between_turns():
+    from io import StringIO
+
+    from rich.console import Console
+    from rich.text import Text
+
+    output = StringIO()
+    terminal = Console(file=output, force_terminal=True, color_system="standard", no_color=False)
+    renderer = _FriendlyEventRenderer(conversation_only=True, console=terminal)
+    playback = PlaybackBuffer(16000)
+    events = [
+        SimpleNamespace(type="session.created"),
+        SimpleNamespace(type="session.updated"),
+        SimpleNamespace(type="session.updated"),
+    ]
+    for user, assistant in (("Hello [bold]", "Hi there!"), ("Thanks", "You're welcome.")):
+        events.extend(
+            [
+                SimpleNamespace(type="input_audio_buffer.speech_started"),
+                SimpleNamespace(type="conversation.item.input_audio_transcription.completed", transcript=user),
+                response_created("response_1"),
+                SimpleNamespace(type="response.output_audio_transcript.delta", delta=assistant),
+                SimpleNamespace(type="response.output_audio_transcript.done", transcript=assistant),
+                SimpleNamespace(type="response.output_audio.done"),
+                response_done(),
+            ]
+        )
+    for event in events:
+        handle_server_event(event, playback=playback, renderer=renderer, print_json=False)
+
+    colored = output.getvalue()
+    assert "\x1b[33mUSER: Hello [bold]" in colored
+    assert "\x1b[32mASSISTANT: " in colored
+    assert Text.from_ansi(colored).plain == (
+        "Ready — start speaking.\nUSER: Hello [bold]\nASSISTANT: Hi there!\nUSER: Thanks\nASSISTANT: You're welcome.\n"
+    )
+
+
+@pytest.mark.parametrize("echo_cancellation", [False, True])
+async def test_ready_waits_for_audio_devices_and_session_acknowledgement(monkeypatch, capsys, echo_cancellation):
+    starts = []
+    stop = Event()
+    audio_sent = asyncio.Event()
+
+    class Stream:
+        def __init__(self, name):
+            self.name = name
+
+        def start(self):
+            starts.append(self.name)
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    class Connection:
+        count = 0
+
+        async def send(self, _event):
+            audio_sent.set()
+
+        async def recv(self):
+            assert starts == ["microphone", "speakers"]
+            self.count += 1
+            if self.count == 1:
+                assert capsys.readouterr().out == ""
+                return SimpleNamespace(type="session.created")
+            if self.count == 2:
+                assert capsys.readouterr().out == ""
+                return SimpleNamespace(type="session.updated")
+            assert capsys.readouterr().out == "Ready — start speaking.\n"
+            stop.set()
+            await asyncio.Future()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sounddevice",
+        SimpleNamespace(
+            RawInputStream=lambda **_: Stream("microphone"),
+            RawOutputStream=lambda **_: Stream("speakers"),
+        ),
+    )
+
+    class Worker:
+        def __init__(self):
+            self.mic_queue = audio_client_module.Queue()
+            self.playback = PlaybackBuffer(16000)
+            self._ready = Event()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        async def wait_for_failure(self):
+            await asyncio.Future()
+
+    worker = Worker()
+    monkeypatch.setattr(audio_client_module, "_AudioWorker", lambda _config: worker)
+    conn = Connection()
+    session = asyncio.create_task(
+        audio_client_module._run_audio_session(
+            conn, RealtimeAudioClientConfig(echo_cancellation=echo_cancellation), stop
+        )
+    )
+    if echo_cancellation:
+        # Input can arrive before the output stream has finished opening.
+        worker.mic_queue.put(bytes(320))
+        await asyncio.wait_for(audio_sent.wait(), 2)
+        assert conn.count == 0
+        assert capsys.readouterr().out == ""
+        starts.extend(["microphone", "speakers"])
+        worker._ready.set()
+    await asyncio.wait_for(session, 2)
+
+
+@pytest.mark.parametrize("shutting_down", [False, True])
+async def test_server_closing_the_connection_ends_the_session_without_a_traceback(monkeypatch, capsys, shutting_down):
+    from websockets.exceptions import ConnectionClosedOK
+
+    stop = Event()
+
+    class Stream:
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    class Connection:
+        async def send(self, _event):
+            pass
+
+        async def recv(self):
+            if shutting_down:
+                stop.set()
+            raise ConnectionClosedOK(None, None)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sounddevice",
+        SimpleNamespace(RawInputStream=lambda **_: Stream(), RawOutputStream=lambda **_: Stream()),
+    )
+
+    await asyncio.wait_for(audio_client_module._run_audio_session(Connection(), RealtimeAudioClientConfig(), stop), 2)
+
+    assert stop.is_set()
+    assert capsys.readouterr().out == ("" if shutting_down else "Server closed the connection.\n")
+
+
+def test_voice_status_is_rewritten_in_place_below_the_conversation():
+    from io import StringIO
+
+    from rich.console import Console
+
+    output = StringIO()
+    terminal = Console(file=output, force_terminal=True, no_color=True, width=40)
+    renderer = _FriendlyEventRenderer(conversation_only=True, console=terminal)
+    renderer.show_status("Voice [1/38]: default")
+    renderer.show_status("Voice [2/38]: Zoey — switching")
+    renderer.render_assistant_text_delta(
+        SimpleNamespace(delta="Hi.", response_id="r", item_id="i", output_index=0, content_index=0)
+    )
+    renderer.show_status("Voice [3/38]: Juniper — next reply")
+    renderer.finish_live_assistant_text()
+    renderer.clear_status()
+
+    clear = "\r\x1b[2K"
+    assert output.getvalue() == (
+        "Voice [1/38]: default"
+        f"{clear}Voice [2/38]: Zoey — switching"
+        f"{clear}ASSISTANT: Hi.\n"
+        f"Voice [3/38]: Juniper — next reply{clear}"
+    )
+
+
+def test_voice_status_prints_lines_without_a_terminal(capsys):
+    renderer = _FriendlyEventRenderer(conversation_only=False)
+    renderer.show_status("Voice [2/38]: Zoey — selected")
+    assert capsys.readouterr().out == "Voice [2/38]: Zoey — selected\n"

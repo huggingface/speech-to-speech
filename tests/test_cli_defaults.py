@@ -13,6 +13,7 @@ from speech_to_speech.arguments_classes.language_model_arguments import (
 )
 from speech_to_speech.arguments_classes.local_audio_arguments import LocalAudioArguments
 from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
+from speech_to_speech.arguments_classes.phonon_tts_arguments import PhononTTSHandlerArguments
 from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
 from speech_to_speech.arguments_classes.realtime_server_arguments import RealtimeServerArguments
 from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
@@ -22,6 +23,13 @@ from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
 from speech_to_speech.cli import main, parse_command, parse_talk_arguments
 from speech_to_speech.pipeline.transcript_logging import set_log_transcripts, transcript_for_log
 from speech_to_speech.s2s_pipeline import ParsedArguments, parse_arguments, prepare_all_args, prepare_module_args
+
+
+def test_phonon_defaults_to_public_english_31m_checkpoint():
+    phonon_args = PhononTTSHandlerArguments()
+    assert phonon_args.phonon_tts_model_name == "gradium/phonon-31m-en"
+    assert phonon_args.phonon_tts_language == "en"
+    assert phonon_args.phonon_tts_num_threads == 4
 
 
 def test_release_defaults_match_local_qwen35_parakeet_qwen3_profile():
@@ -85,6 +93,28 @@ def test_parse_talk_arguments_keeps_retry_timeout_field_name():
     config = parse_talk_arguments(["--connection-retry-timeout", "12.5"])
 
     assert config.connection_retry_timeout_s == 12.5
+
+
+def test_conversation_only_is_the_default_for_local_and_talk():
+    assert parse_arguments([], command="local").local_audio_kwargs.verbose is False
+    assert parse_talk_arguments([]).conversation_only is True
+
+
+def test_verbose_restores_diagnostic_output_for_local_and_talk():
+    assert parse_arguments(["--verbose"], command="local").local_audio_kwargs.verbose is True
+    assert parse_talk_arguments(["--verbose"]).conversation_only is False
+
+
+@pytest.mark.parametrize("flags", [["--print-json"], ["--verbose", "--print-json"]])
+def test_raw_json_enables_diagnostic_output(flags):
+    config = parse_talk_arguments(flags)
+    assert config.print_json is True
+    assert config.conversation_only is False
+
+
+def test_serve_rejects_client_verbose_flag():
+    with pytest.raises(ValueError, match="verbose"):
+        parse_arguments(["--verbose"], command="serve")
 
 
 def test_vad_firered_flag_is_accepted():
@@ -454,6 +484,12 @@ def test_talk_leaves_api_key_unset_for_sdk_environment_authentication():
     assert parse_talk_arguments(["--api-key", "explicit-secret"]).api_key == "explicit-secret"
 
 
+def test_talk_can_cycle_voices_without_losing_initial_voice():
+    config = parse_talk_arguments(["--voice", "Zoey", "--voices", "Zoey", "Maeve", "Hugh"])
+    assert config.voice == "Zoey"
+    assert config.voice_choices == ["Zoey", "Maeve", "Hugh"]
+
+
 def test_talk_accepts_custom_playback_buffer():
     config = parse_talk_arguments(["--playback-buffer-ms", "240"])
 
@@ -471,6 +507,13 @@ def test_talk_accepts_turn_detection_settings():
 def test_packaged_audio_clients_have_no_general_playback_buffer_default():
     assert parse_talk_arguments([]).playback_buffer_ms == 0
     assert LocalAudioArguments().local_audio_playback_buffer_ms is None
+
+
+def test_talk_accepts_echo_cancellation_opt_in():
+    assert parse_talk_arguments([]).echo_cancellation is False
+    assert parse_talk_arguments(["--echo-cancellation"]).echo_cancellation is True
+    with pytest.raises(ValueError, match="cannot be combined"):
+        parse_talk_arguments(["--echo-cancellation", "--block-mic-during-playback"])
 
 
 @pytest.mark.parametrize("flag", ["--log-transcripts", "--log_transcripts"])
@@ -551,6 +594,7 @@ def test_local_accepts_audio_flags_but_rejects_host():
             "0.8",
             "--local_audio_interrupt_response",
             "false",
+            "--echo-cancellation",
         ],
         command="local",
     )
@@ -561,6 +605,7 @@ def test_local_accepts_audio_flags_but_rejects_host():
     assert args.local_audio_kwargs.local_audio_playback_buffer_ms == 240
     assert args.local_audio_kwargs.local_audio_vad_threshold == 0.8
     assert args.local_audio_kwargs.local_audio_interrupt_response is False
+    assert args.local_audio_kwargs.local_audio_echo_cancellation is True
     with pytest.raises(ValueError, match="--host"):
         parse_arguments(["--host", "0.0.0.0"], command="local")
 
@@ -867,3 +912,22 @@ def test_parse_arguments_preserves_kitten_backend_options():
 def test_parse_arguments_rejects_unsupported_kitten_device():
     with pytest.raises(SystemExit):
         parse_arguments(["--tts", "kitten", "--kitten_device", "cuda"])
+
+
+def test_responses_api_request_timeout_s_default():
+    args = ResponsesApiLanguageModelHandlerArguments()
+    assert args.responses_api_request_timeout_s == 20.0
+
+
+def test_parse_arguments_maps_request_timeout_for_chat_completions():
+    args = parse_arguments(["--llm_backend", "chat-completions", "--responses_api_request_timeout_s", "90"])
+
+    assert args.llm_backend.name == "chat-completions"
+    assert args.llm_backend.config["request_timeout_s"] == 90.0
+
+
+def test_parse_arguments_maps_request_timeout_for_responses_api():
+    args = parse_arguments(["--llm_backend", "responses-api", "--responses_api_request_timeout_s", "90"])
+
+    assert args.llm_backend.name == "responses-api"
+    assert args.llm_backend.config["request_timeout_s"] == 90.0

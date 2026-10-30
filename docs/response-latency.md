@@ -47,7 +47,7 @@ are added only to terminal responses.
 | --- | --- | --- |
 | `stt` | `parakeet-tdt`, `openai`, `openai-realtime`, `vllm-realtime`, `whisper`, `whisper-mlx`, `mlx-audio-whisper`, `faster-whisper`, `qwen3-asr`, `parakeet-unified`, `nemotron-streaming`, `orukeet`, `paraformer`, `sense-voice` | None of the built-in STT backends (`--stt none` excluded) |
 | `llm` | `transformers`, `mlx-lm`, `responses-api`, `chat-completions` | None of the built-in LLM backends |
-| `tts_ttfa`, `e2e` | `qwen3`, `openai`, `pocket`, `kokoro`, `facebookMMS`, `chatTTS` | `omnivoice`, `supertonic` |
+| `tts_ttfa`, `e2e` | `qwen3`, `openai`, `pocket`, `kokoro`, `facebookMMS`, `chatTTS`, `omnivoice`, `kitten` | `supertonic` |
 
 `--stt none` deliberately has no STT measurement. Any field is also `n/a`
 when its stage did not run, produced no audio, or its measurement was unavailable.
@@ -76,6 +76,14 @@ that lock is not contended, and hold is omitted entirely when nothing held it.
   on the selected device, before CPU copying, resampling, and PCM block assembly.
   A language-model reload is excluded from MMS TTFA but remains inside E2E;
   low TTFA alone therefore does not imply that all delay was upstream of TTS.
+  OmniVoice likewise returns a full waveform from a blocking `generate` call:
+  its TTFA ends when that waveform is available, before reshape, resampling,
+  and PCM block assembly.
+  Kitten synthesizes ONNX waveforms in blocking calls. Its TTFA ends when the
+  first nonempty model waveform is available, before synthesis of later internal
+  chunks, concatenation, `resample_poly`, and PCM block assembly. The measurement
+  is published only if synthesis completes with usable, uncancelled output;
+  E2E still includes all synthesis and assembly before the first yielded block.
 - `e2e` runs from estimated speech end to the first audio block yielded by TTS.
   It includes VAD decision time, Smart Turn analysis, audio enhancement, and
   subsequent processing/hold time before that block. The timestamp is propagated
