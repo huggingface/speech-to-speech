@@ -499,7 +499,6 @@ class TestPackagedAudioClient:
         client_task = asyncio.create_task(
             listen_and_play_realtime(
                 RealtimeAudioClientConfig(
-                    echo_cancellation=False,
                     url=f"ws://127.0.0.1:{server_env.port}/v1/realtime",
                     api_key="local",
                 ),
@@ -580,7 +579,6 @@ class TestPackagedAudioClient:
 
         client_stop = ThreadingEvent()
         config = RealtimeAudioClientConfig(
-            echo_cancellation=False,
             url=f"ws://127.0.0.1:{server_env.port}/v1/realtime",
             api_key="local",
             tools=[

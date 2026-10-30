@@ -77,7 +77,7 @@ class RealtimeAudioClientConfig:
     print_json: bool = False
     verbose: bool = False
     block_mic_during_playback: bool = False
-    echo_cancellation: bool = True
+    echo_cancellation: bool = False
     log_transcripts: bool = False
     connection_retry_timeout_s: float = 30.0
     tools: list[dict[str, Any]] = field(default_factory=list)
@@ -87,8 +87,8 @@ class RealtimeAudioClientConfig:
     def __post_init__(self) -> None:
         if not 0 <= self.playback_buffer_ms < float("inf"):
             raise ValueError("playback_buffer_ms must be a finite non-negative number")
-        if self.block_mic_during_playback:
-            self.echo_cancellation = False
+        if self.echo_cancellation and self.block_mic_during_playback:
+            raise ValueError("Echo cancellation cannot be combined with blocking the microphone during playback")
         if any(not isinstance(voice, str) or not voice.strip() for voice in self.voice_choices):
             raise ValueError("voice_choices must contain non-empty voice names")
         self.voice_choices = list(dict.fromkeys(self.voice_choices))

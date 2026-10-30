@@ -44,11 +44,11 @@ class LocalAudioArguments:
         },
     )
     local_audio_echo_cancellation: bool = field(
-        default=True,
+        default=False,
         metadata={
             "help": (
-                "Remove speaker playback from the local microphone (on by default). "
-                "Use --no-echo-cancellation for headphones or a headset. Microphone blocking disables cancellation."
+                "Remove speaker playback from the local microphone so voice barge-in works on speakers. "
+                "Not needed with headphones or a headset."
             ),
             "aliases": ["--echo-cancellation"],
         },

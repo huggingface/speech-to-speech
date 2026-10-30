@@ -39,7 +39,7 @@ pip install speech-to-speech
 speech-to-speech local
 ```
 
-Then talk: speak, pause, and the assistant answers through your speakers. Stop with `Ctrl+C`. The first run downloads the models, so give it a few minutes. Echo cancellation is on by default so you can interrupt the assistant on speakers; use `--no-echo-cancellation` with headphones. See [echo cancellation](docs/echo-cancellation.md) for requirements and limits.
+Then talk: speak, pause, and the assistant answers through your speakers. Stop with `Ctrl+C`. The first run downloads the models, so give it a few minutes. On speakers, add `--echo-cancellation` so the assistant does not hear itself and you can still interrupt it by voice; headphones don't need it. See [echo cancellation](docs/echo-cancellation.md) for requirements and limits.
 
 By default, `local` and `talk` show final user transcripts and streaming assistant
 replies once, hiding backend transcript copies, routine logs, tool details, and protocol

@@ -501,15 +501,11 @@ def test_packaged_audio_clients_have_no_general_playback_buffer_default():
     assert LocalAudioArguments().local_audio_playback_buffer_ms is None
 
 
-def test_talk_defaults_to_echo_cancellation_with_an_opt_out():
-    from speech_to_speech.api.openai_realtime.audio_client import RealtimeAudioClientConfig
-
-    assert RealtimeAudioClientConfig().echo_cancellation is True
-    assert parse_talk_arguments([]).echo_cancellation is True
+def test_talk_accepts_echo_cancellation_opt_in():
+    assert parse_talk_arguments([]).echo_cancellation is False
     assert parse_talk_arguments(["--echo-cancellation"]).echo_cancellation is True
-    assert parse_talk_arguments(["--no-echo-cancellation"]).echo_cancellation is False
-    assert parse_talk_arguments(["--block-mic-during-playback"]).echo_cancellation is False
-    assert parse_talk_arguments(["--echo-cancellation", "--block-mic-during-playback"]).echo_cancellation is False
+    with pytest.raises(ValueError, match="cannot be combined"):
+        parse_talk_arguments(["--echo-cancellation", "--block-mic-during-playback"])
 
 
 @pytest.mark.parametrize("flag", ["--log-transcripts", "--log_transcripts"])

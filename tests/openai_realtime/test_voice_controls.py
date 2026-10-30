@@ -192,7 +192,7 @@ async def test_live_audio_session_applies_arrow_on_existing_connection_after_rep
             RawOutputStream=lambda **kwargs: Stream(),
         ),
     )
-    config = RealtimeAudioClientConfig(voice="Zoey", voice_choices=["Zoey", "Maeve"], echo_cancellation=False)
+    config = RealtimeAudioClientConfig(voice="Zoey", voice_choices=["Zoey", "Maeve"])
     conn = AudioConnection()
     await asyncio.wait_for(audio_client._run_audio_session(conn, config, stop), 2)
     assert config.voice == "Maeve"
