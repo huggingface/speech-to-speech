@@ -104,13 +104,13 @@ def _error(document: ConfigDocument, path: tuple[str | int, ...], message: str) 
 
 
 def _expand_home(path: Path) -> Path:
-    """Expand ``~`` and ``~/...`` only.
+    """Expand the home directory, rejecting ``~name`` on Windows.
 
     Windows maps ``~name`` to a sibling of the current user's home instead of failing,
-    so reject that form everywhere to keep the behavior the same on every platform.
+    so it could read another user's folder. Unix keeps its normal ``~name`` behavior.
     """
     first = path.parts[0] if path.parts else ""
-    if first.startswith("~") and first != "~":
+    if os.name == "nt" and first.startswith("~") and first != "~":
         raise RuntimeError("Unsupported home directory form")
     return path.expanduser()
 
