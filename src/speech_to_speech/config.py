@@ -103,12 +103,24 @@ def _error(document: ConfigDocument, path: tuple[str | int, ...], message: str) 
     raise ConfigurationError(f"{location}: {safe_path or 'document'}: {message}") from None
 
 
+def _expand_home(path: Path) -> Path:
+    """Expand the home directory, rejecting ``~name`` on Windows.
+
+    Windows maps ``~name`` to a sibling of the current user's home instead of failing,
+    so it could read another user's folder. Unix keeps its normal ``~name`` behavior.
+    """
+    first = path.parts[0] if path.parts else ""
+    if os.name == "nt" and first.startswith("~") and first != "~":
+        raise RuntimeError("Unsupported home directory form")
+    return path.expanduser()
+
+
 def load_config(path: str | Path) -> ConfigDocument:
     """Load one bounded YAML file without importing runtime or registry modules."""
     path = Path(path)
     expansion_failure = False
     try:
-        path = path.expanduser().absolute()
+        path = _expand_home(path).absolute()
     except RuntimeError:
         expansion_failure = True
     if expansion_failure:
@@ -303,7 +315,7 @@ def _settings(
         if environ is not None and name in _PATH_FIELDS and value:
             expansion_failure = False
             try:
-                candidate = Path(value).expanduser()
+                candidate = _expand_home(Path(value))
             except RuntimeError:
                 expansion_failure = True
             if expansion_failure:
