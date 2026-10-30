@@ -764,9 +764,23 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
     tool_response_create = True
     if local_audio.local_audio_tool_module:
         tools, tool_executor, tool_response_create = load_realtime_tool_module(local_audio.local_audio_tool_module)
+    # Validate the client config before loading models.
+    client_config = RealtimeAudioClientConfig(
+        url=f"ws://127.0.0.1:{args.realtime_server_kwargs.port}/v1/realtime",
+        api_key="local",
+        chunk_size=local_audio.local_audio_chunk_size,
+        playback_buffer_ms=playback_buffer_ms,
+        input_device=local_audio.local_audio_input_device,
+        output_device=local_audio.local_audio_output_device,
+        print_json=local_audio.local_audio_print_json,
+        verbose=local_audio.verbose,
+        block_mic_during_playback=local_audio.local_audio_block_mic_during_playback,
+        echo_cancellation=local_audio.local_audio_echo_cancellation,
+        tools=tools,
+        tool_executor=tool_executor,
+        tool_response_create=tool_response_create,
+    )
     server_manager = build_pipeline(args, stop_event, host="127.0.0.1")
-    voice_choices: list[str] = []
-    voice = None
     if args.tts_backend.name == "phonon":
         from speech_to_speech.TTS.phonon_tts_handler import PhononTTSHandler
 
@@ -776,27 +790,9 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
                 if "default" in voice_choices:
                     voice_choices.remove("default")
                     voice_choices.insert(0, "default")
-                voice = handler.voice
+                client_config = replace(client_config, voice=handler.voice, voice_choices=voice_choices)
                 break
-    client = RealtimeAudioClient(
-        stop_event,
-        RealtimeAudioClientConfig(
-            url=f"ws://127.0.0.1:{args.realtime_server_kwargs.port}/v1/realtime",
-            api_key="local",
-            voice=voice,
-            voice_choices=voice_choices,
-            chunk_size=local_audio.local_audio_chunk_size,
-            playback_buffer_ms=playback_buffer_ms,
-            input_device=local_audio.local_audio_input_device,
-            output_device=local_audio.local_audio_output_device,
-            print_json=local_audio.local_audio_print_json,
-            verbose=local_audio.verbose,
-            block_mic_during_playback=local_audio.local_audio_block_mic_during_playback,
-            tools=tools,
-            tool_executor=tool_executor,
-            tool_response_create=tool_response_create,
-        ),
-    )
+    client = RealtimeAudioClient(stop_event, client_config)
     return ThreadManager([*server_manager.handlers, client])
 
 
