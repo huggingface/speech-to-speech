@@ -745,7 +745,9 @@ class TestBargeInAfterResponseDone:
 
 
 @pytest.fixture
-def server_env():
+def server_env(monkeypatch):
+    # Loopback peers need host candidates only, without public STUN/TURN lookups.
+    monkeypatch.setenv("SPEECH_TO_SPEECH_ICE_SERVERS", "[]")
     env = _ServerEnv()
     env.start()
     yield env
@@ -784,7 +786,7 @@ class _DataChannelInbox:
 
 class TestWebRTCLoopback:
     async def test_cancelled_close_keeps_teardown_running(self, monkeypatch):
-        server_pc = RTCPeerConnection()
+        server_pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
         teardown_started = asyncio.Event()
         release_teardown = asyncio.Event()
         closed_calls = []
@@ -835,8 +837,8 @@ class TestWebRTCLoopback:
             await server_pc.close()
 
     async def test_close_awaits_pending_ice_checks(self, monkeypatch):
-        client_pc = RTCPeerConnection()
-        server_pc = RTCPeerConnection()
+        client_pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+        server_pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
         first_close = None
         second_close = None
         release_sweep = asyncio.Event()
@@ -993,7 +995,7 @@ class TestWebRTCLoopback:
             await asyncio.gather(*consumers, return_exceptions=True)
 
     async def test_handshake_events_and_multi_output_audio_roundtrip(self, server_env):
-        pc = RTCPeerConnection()
+        pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
         try:
             dc = pc.createDataChannel("oai-events")
             inbox = _DataChannelInbox(dc)
@@ -1161,7 +1163,7 @@ class TestWebRTCLoopback:
         assert resp.status_code == 415
 
     async def test_rejects_when_pool_full(self, server_env):
-        pc = RTCPeerConnection()
+        pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
         try:
             pc.createDataChannel("oai-events")
             pc.addTrack(AudioStreamTrack())
@@ -1191,7 +1193,7 @@ class TestWebRTCLoopback:
     async def test_delete_location_hangs_up(self, server_env):
         """DELETE on the Location URL advertised by the 201 releases the unit;
         an unknown call id answers 404."""
-        pc = RTCPeerConnection()
+        pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
         try:
             pc.createDataChannel("oai-events")
             pc.addTrack(AudioStreamTrack())
@@ -1243,7 +1245,7 @@ class TestWebRTCLoopback:
         # eagerly at load), so that's the name to patch.
         monkeypatch.setattr(router_module, "rtc_configuration_from_env", _boom)
 
-        pc = RTCPeerConnection()
+        pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
         try:
             pc.createDataChannel("oai-events")
             pc.addTrack(AudioStreamTrack())

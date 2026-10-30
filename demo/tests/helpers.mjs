@@ -27,7 +27,12 @@ export async function startTestServer() {
   const child = spawn(
     python,
     ["-m", "tests.openai_realtime.agents_sdk_server"],
-    { cwd: repository, stdio: ["ignore", "pipe", "pipe"] },
+    {
+      cwd: repository,
+      // The browser and server connect locally, so public ICE servers are unnecessary.
+      env: { ...process.env, SPEECH_TO_SPEECH_ICE_SERVERS: "[]" },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
   );
   let stderr = "";
   child.stderr.setEncoding("utf8");
@@ -49,7 +54,15 @@ export async function startTestServer() {
       async close() {
         clearTimeout(timer);
         child.kill("SIGTERM");
-        await Promise.race([once(child, "exit"), new Promise((resolve) => setTimeout(resolve, 5_000))]);
+        let exitTimer;
+        try {
+          await Promise.race([
+            once(child, "exit"),
+            new Promise((resolve) => { exitTimer = setTimeout(resolve, 5_000); }),
+          ]);
+        } finally {
+          clearTimeout(exitTimer);
+        }
       },
     };
   } catch (error) {
