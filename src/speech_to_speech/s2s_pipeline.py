@@ -431,7 +431,7 @@ def _build_handlers(
         if diarization_device == "cpu":
             logger.warning(
                 "Diarization is using CPU; sustained speech can outpace inference and disable speaker labels "
-                "until reconnect. CUDA or MPS is recommended for live sessions."
+                "until reconnect. CUDA, NPU, or MPS is recommended for live sessions."
             )
         diarizer = StreamingDiarizer.from_pretrained(
             module_kwargs.diarization_model_name,
