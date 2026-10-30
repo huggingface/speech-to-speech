@@ -262,6 +262,19 @@ Both handlers yield ordered `AssistantTextPart` and `AssistantToolCallPart` valu
 3. If the tool result needs to be spoken to the user, such as camera/search/data results, the client sends `response.create` to trigger follow-up generation.
 4. For fire-and-forget robot actions such as dance, emotion, head movement, stop, or idle tools, the client can stop after `conversation.item.created`; the assistant should already have spoken the natural lead-in before the tool call.
 
+### Pending tool calls
+
+A client function call that has no output yet does not block the conversation. The client can send a new user message and `response.create` while a slow tool is still running, and the server answers it normally.
+
+- The model request omits a call until its output arrives, so no provider (Transformers, MLX, Responses API, Chat Completions) receives an unpaired tool call. Instead the request ends with a short system note naming the tools that are still running, telling the model not to call them again or guess their results. The note comes last because the system prompt alone did not stop models from repeating the call (`gpt-4.1-mini` re-issued it in 4 of 6 runs; a 1.5B local model in 5 of 5). It exists on the request only and never enters the stored history.
+- Each result is matched to its call by `call_id` and accepted once. A second `function_call_output` for the same `call_id` is rejected with an `error` event. Results can arrive in any order, and several calls can be pending at once.
+- A result that arrives while another response is active is deferred until that response finishes, like any other `conversation.item.create`. It does not start a response by itself, so the client still sends `response.create` when the result should be spoken.
+- A late result sits next to its call in the model request. If a later user turn was already answered by then, the call and its result are placed where the result arrived, so the next response (for example the client's `response.create`) answers the result instead of repeating its last reply.
+- Small local models (1.5B and 3B 4-bit were tried) stop repeating the call with the note. When the history is realistic (the assistant said it would check before the call), they also answer the new question and use the late result. With an artificial history that has no such acknowledgement, they can still answer the earlier request instead of the new one.
+- Cancelling, interrupting or failing an unrelated response leaves the pending call and its eventual result intact.
+- The note is guidance, not enforcement. A weak tool caller can still repeat a pending call: `cohere/north-mini-code:free` did so in 5 of 6 runs with the note, against 6 of 6 without it. Putting the note in the last user message instead cut that to 2 of 6 for that model but made `gpt-4o` on the Responses API repeat the call in 3 of 4 runs, so the system message stays the default.
+- Some providers and chat templates (Mistral and Gemma style) reject a system message that is not first. If a provider answers the request with a 400 while the note is present, the handler retries once with the note folded into the last user message and keeps that mode. A local chat template that refuses the note is detected the same way before generation. Nothing is probed per provider ahead of time.
+
 ### Packaged Python client tools
 
 The microphone/speaker client used by `talk` and `local` only executes explicitly declared Python tools. An importable tool module provides flattened Realtime function definitions in `TOOLS` and an async `execute_tool(name, arguments)` callback:
