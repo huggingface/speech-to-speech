@@ -496,6 +496,14 @@ def test_talk_accepts_custom_playback_buffer():
     assert config.playback_buffer_ms == 240
 
 
+def test_talk_accepts_turn_detection_settings():
+    defaults = parse_talk_arguments([])
+    config = parse_talk_arguments(["--vad-threshold", "0.8", "--no-interrupt-response"])
+
+    assert (defaults.vad_threshold, defaults.interrupt_response) == (None, True)
+    assert (config.vad_threshold, config.interrupt_response) == (0.8, False)
+
+
 def test_packaged_audio_clients_have_no_general_playback_buffer_default():
     assert parse_talk_arguments([]).playback_buffer_ms == 0
     assert LocalAudioArguments().local_audio_playback_buffer_ms is None
@@ -575,7 +583,19 @@ def test_serve_rejects_local_audio_flags():
 
 def test_local_accepts_audio_flags_but_rejects_host():
     args = parse_arguments(
-        ["--port", "9876", "--local_audio_input_device", "2", "--playback-buffer-ms", "240", "--echo-cancellation"],
+        [
+            "--port",
+            "9876",
+            "--local_audio_input_device",
+            "2",
+            "--playback-buffer-ms",
+            "240",
+            "--local_audio_vad_threshold",
+            "0.8",
+            "--local_audio_interrupt_response",
+            "false",
+            "--echo-cancellation",
+        ],
         command="local",
     )
 
@@ -583,6 +603,8 @@ def test_local_accepts_audio_flags_but_rejects_host():
     assert args.realtime_server_kwargs.port == 9876
     assert args.local_audio_kwargs.local_audio_input_device == 2
     assert args.local_audio_kwargs.local_audio_playback_buffer_ms == 240
+    assert args.local_audio_kwargs.local_audio_vad_threshold == 0.8
+    assert args.local_audio_kwargs.local_audio_interrupt_response is False
     assert args.local_audio_kwargs.local_audio_echo_cancellation is True
     with pytest.raises(ValueError, match="--host"):
         parse_arguments(["--host", "0.0.0.0"], command="local")

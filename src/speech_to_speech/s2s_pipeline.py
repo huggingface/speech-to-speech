@@ -775,6 +775,8 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
         print_json=local_audio.local_audio_print_json,
         verbose=local_audio.verbose,
         block_mic_during_playback=local_audio.local_audio_block_mic_during_playback,
+        vad_threshold=local_audio.local_audio_vad_threshold,
+        interrupt_response=local_audio.local_audio_interrupt_response,
         echo_cancellation=local_audio.local_audio_echo_cancellation,
         tools=tools,
         tool_executor=tool_executor,
