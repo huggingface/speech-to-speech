@@ -10,7 +10,7 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-_SUPPORTED_RATES = (8000, 16000, 32000, 48000)
+_SUPPORTED_RATES = (8000, 16000, 24000, 32000, 48000)
 _FRAME_DURATION_S = 0.01
 
 

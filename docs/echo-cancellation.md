@@ -17,8 +17,8 @@ native call; partial frames carry over to the next callback.
 
 On Windows, cancellation uses the default WASAPI input and output devices.
 If you set `--input-device` or `--output-device`, select WASAPI devices; MME
-does not provide capture timestamps. Shared-mode conversion keeps audio at
-16 kHz even when the Windows mixer uses another rate. The `soxr` dependency
+does not provide capture timestamps. Shared-mode conversion keeps the client's
+sample rate even when the Windows mixer uses another rate. The `soxr` dependency
 needs the [Microsoft Visual C++ x64 runtime](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
 
 With cancellation enabled, a separate audio process owns the device streams.
@@ -34,7 +34,7 @@ playback and so disables voice interruptions.
 ## Limits
 
 - Echo cancellation in the packaged client requires `--send-rate` and
-  `--recv-rate` to both be 16 kHz, their default.
+  `--recv-rate` to match: both 16 kHz, their default, or both 24 kHz.
 - The client does not correct clock drift between separate input and output
   devices.
 - While the assistant speaks, the canceller can turn the user's voice down

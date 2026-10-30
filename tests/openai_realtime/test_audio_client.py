@@ -287,11 +287,11 @@ def _reference_speech(np, rate):
 
 @pytest.mark.parametrize("mode", ["echo", "overlap", "no_playback"])
 @pytest.mark.parametrize("block,device_delay_ms", [(1024, 256), (8192, 1000)])
-def test_echo_canceller_removes_played_audio_from_microphone_blocks(mode, block, device_delay_ms):
+@pytest.mark.parametrize("rate", [16000, 24000])
+def test_echo_canceller_removes_played_audio_from_microphone_blocks(mode, block, device_delay_ms, rate):
     np = pytest.importorskip("numpy")
     from scipy.signal import correlate, correlation_lags
 
-    rate = 16000
     played = _reference_speech(np, rate)
     echo = np.zeros_like(played)
     delay = rate * device_delay_ms // 1000 + 320
