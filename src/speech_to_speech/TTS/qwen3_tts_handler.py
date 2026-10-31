@@ -24,6 +24,7 @@ import torch
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.api.openai_realtime.utils import StreamingPcm16Resampler
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.console import console
@@ -677,14 +678,6 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 "Provide qwen3_tts_ref_audio or qwen3_tts_ref_spk, or use a CustomVoice/VoiceDesign model."
             )
 
-    def _resample_to_pipeline_sr(self, audio: np.ndarray, sr: int) -> np.ndarray:
-        if sr == PIPELINE_SR:
-            return audio
-        from scipy.signal import resample_poly
-
-        gcd = np.gcd(PIPELINE_SR, sr)
-        return resample_poly(audio, up=PIPELINE_SR // gcd, down=sr // gcd)
-
     def _prepare_audio_chunk(self, item: Any) -> tuple[np.ndarray | None, int | None]:
         if isinstance(item, tuple):
             audio_chunk, sr, _timing = item
@@ -706,6 +699,7 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
         first_chunk = True
         found_speech = False
         leftover = np.array([], dtype=np.int16)
+        resampler: StreamingPcm16Resampler | None = None
 
         for item in gen:
             if cancel_gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(cancel_gen):
@@ -724,8 +718,11 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                     tracker.record_tts_ttfa(ttfa_s)
                 first_chunk = False
 
-            audio_chunk = self._resample_to_pipeline_sr(audio_chunk, sr)
-            audio_chunk = self._to_int16(audio_chunk)
+            # One filter for the whole utterance: resampling each streamed chunk
+            # separately restarts the FIR against zero padding at every chunk edge.
+            if resampler is None:
+                resampler = StreamingPcm16Resampler(sr, PIPELINE_SR)
+            audio_chunk = np.frombuffer(resampler.push(self._to_int16(audio_chunk).tobytes()), dtype=np.int16)
 
             # Trim the initial silent ramp-up, but keep enough preroll to avoid
             # shaving soft initial phonemes at the start of the utterance.
@@ -746,10 +743,12 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
                 total_samples += self.blocksize
             leftover = audio_chunk[n:]
 
-        if len(leftover) > 0:
-            chunk = np.pad(leftover, (0, self.blocksize - len(leftover)))
-            yield chunk
-            total_samples += len(leftover)
+        if resampler is not None and found_speech:
+            leftover = np.concatenate([leftover, np.frombuffer(resampler.flush(), dtype=np.int16)])
+        for i in range(0, len(leftover), self.blocksize):
+            chunk = leftover[i : i + self.blocksize]
+            yield np.pad(chunk, (0, self.blocksize - len(chunk)))
+            total_samples += len(chunk)
 
         generation_time = perf_counter() - start
         audio_duration = total_samples / PIPELINE_SR
