@@ -67,6 +67,9 @@ WARMUP_MAX_RETRIES = 6
 PREFETCH_PROVIDER_WORKER_LIMIT = 1
 PREFETCH_STREAM_QUEUE_MAXSIZE = 16
 PREFETCH_WORKER_ACQUIRE_TIMEOUT_S = 0.05
+# How often an active streaming turn checks whether it was cancelled, so a
+# provider read that never produces another event can be released.
+CANCEL_WATCH_INTERVAL_S = 0.05
 PROVIDER_FAILURE_FALLBACK = "I'm having trouble responding right now. Please try again."
 
 
@@ -415,6 +418,75 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             self._prefetch_worker_slots.release()
             raise
         return worker
+
+    def _publish_event(
+        self,
+        results: Queue[tuple[bool, Any]],
+        stop_reading: ThreadingEvent,
+        item: tuple[bool, Any],
+    ) -> bool:
+        """Hand one item to the consumer, giving up once the read is released."""
+        while not stop_reading.is_set():
+            try:
+                results.put(item, timeout=CANCEL_WATCH_INTERVAL_S)
+            except Full:
+                continue
+            return True
+        return False
+
+    def _iter_events_interruptibly(
+        self,
+        api_response: Any,
+        event_iterator: Callable[[Any], Iterator[ProviderEvent]],
+        turn: _Turn,
+    ) -> Iterator[ProviderEvent]:
+        """Read provider events so a cancellation is never queued behind a read.
+
+        Iterating the SDK stream directly only observes ``cancel_scope.cancel()``
+        when the provider produces another event. SSE comment keep-alives keep
+        the socket busy without producing one, so neither the check nor the read
+        timeout runs, and the cancelled turn keeps its pipeline worker busy. The
+        blocking read therefore runs in one worker while this generator polls the
+        cancellation state; on cancellation it closes the response, which releases
+        the socket read.
+        """
+        results: Queue[tuple[bool, Any]] = Queue(maxsize=PREFETCH_STREAM_QUEUE_MAXSIZE)
+        done = object()
+        stop_reading = ThreadingEvent()
+
+        def read_events() -> None:
+            try:
+                for event in event_iterator(api_response):
+                    if not self._publish_event(results, stop_reading, (True, event)):
+                        return
+                self._publish_event(results, stop_reading, (True, done))
+            except BaseException as exc:  # noqa: BLE001 - re-raised by the consumer
+                self._publish_event(results, stop_reading, (False, exc))
+            finally:
+                stop_reading.set()
+
+        worker = Thread(target=read_events, name="llm-provider-stream", daemon=True)
+        worker.start()
+        try:
+            while True:
+                if self._turn_is_cancelled(turn):
+                    return
+                try:
+                    succeeded, value = results.get(timeout=CANCEL_WATCH_INTERVAL_S)
+                except Empty:
+                    continue
+                if not succeeded:
+                    if self._turn_is_cancelled(turn):
+                        # Closing the response is what raised here; the turn is
+                        # already cancelled, so there is nothing to report.
+                        return
+                    raise value
+                if value is done:
+                    return
+                yield value
+        finally:
+            stop_reading.set()
+            self._close_response(api_response)
 
     def _iter_prefetch_events_interruptibly(
         self,
@@ -803,7 +875,16 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         )
                     else:
                         api_response = make_request()
-                        events = (event_iterator_fn or self._iter_events)(api_response)
+                        # Only a streaming response can stay open without producing
+                        # an event; a non-streaming one is already complete here.
+                        if self.stream:
+                            events = self._iter_events_interruptibly(
+                                api_response,
+                                event_iterator_fn or self._iter_events,
+                                turn,
+                            )
+                        else:
+                            events = (event_iterator_fn or self._iter_events)(api_response)
                 if events is not None:
 
                     def measured_events() -> Iterator[ProviderEvent]:
