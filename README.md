@@ -128,7 +128,7 @@ It listens at `ws://127.0.0.1:8765/v1/realtime`. Connect with:
 
 The pipeline is a cascade of four components, each running in its own thread and connected by queues:
 
-1. **Voice Activity Detection (VAD)**: [Silero VAD v5](https://github.com/snakers4/silero-vad) detects speech boundaries and turn-taking.
+1. **Voice Activity Detection (VAD)**: [Silero VAD](https://github.com/snakers4/silero-vad) detects speech boundaries and turn-taking.
 2. **Speech to Text (STT)**: transcribes the user's turn, with optional live partial transcripts.
 3. **Language Model (LLM)**: generates the response, streaming text and tool calls.
 4. **Text to Speech (TTS)**: synthesizes audio and streams it back to the client.
@@ -238,7 +238,7 @@ This installs the package in editable mode. With the environment activated, use 
 
 | Component | Backend | Platforms | Install |
 |---|---|---|---|
-| VAD | [Silero VAD v5](https://github.com/snakers4/silero-vad) | all | built-in |
+| VAD | [Silero VAD](https://github.com/snakers4/silero-vad) | all | built-in |
 | VAD | [FireRed Stream-VAD](https://huggingface.co/FireRedTeam/FireRedVAD) | CUDA / CPU | `fireredvad` |
 | STT | [Parakeet TDT](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (default) | CUDA / CPU through nano-parakeet, Apple Silicon through MLX | built-in |
 | STT | [Parakeet Unified](https://huggingface.co/nvidia/parakeet-unified-en-0.6b) | CUDA / CPU | `nemo` |
