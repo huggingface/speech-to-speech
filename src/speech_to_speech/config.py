@@ -23,6 +23,10 @@ _STAGES = ("vad", "stt", "llm", "tts")
 _MODULE_PROCESS = {"log_level", "log_transcripts", "torch_num_threads"}
 _MODULE_SELECTORS = {"stt", "llm_backend", "tts"}
 _MODULE_PIPELINE = {
+    "stt_supported_languages",
+    "tts_supported_languages",
+    "stt_auto_language_supported",
+    "tts_auto_language_supported",
     "diarization",
     "diarization_model_name",
     "diarization_revision",
