@@ -16,6 +16,7 @@ from openai.types.realtime.realtime_conversation_item_assistant_message import (
 from openai.types.realtime.realtime_conversation_item_function_call import (
     RealtimeConversationItemFunctionCall,
 )
+from openai.types.realtime.realtime_conversation_item_user_message import RealtimeConversationItemUserMessage
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel, ConfigDict, Field
@@ -40,6 +41,7 @@ from speech_to_speech.LLM.chat import (
     ChatItemError,
     build_active_chat,
     make_assistant_message,
+    make_user_audio_message,
 )
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
 from speech_to_speech.LLM.text_prompt import build_text_system_prompt
@@ -77,7 +79,13 @@ from speech_to_speech.pipeline.messages import (
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
 from speech_to_speech.pipeline.turn_latency import active_turn_latency_tracker, bind_active_turn_latency_tracker
-from speech_to_speech.utils.utils import TORCH_DEVICES, is_out_of_band, resolve_device, response_wants_audio
+from speech_to_speech.utils.utils import (
+    TORCH_DEVICES,
+    audio_to_wav_base64,
+    is_out_of_band,
+    resolve_device,
+    response_wants_audio,
+)
 
 try:
     import mlx.core as mx
@@ -178,6 +186,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
     _cancel_criteria: _CancelCriteria
     streamer: Iterable[str]
     tokenizer: _Tokenizer
+    # Newest direct-audio user turns kept as audio; older ones become a text placeholder.
+    audio_history_turns = 1
 
     def setup(
         self,
@@ -671,6 +681,26 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             language_name=lang_name,
         )
 
+        # Direct audio input (``--stt none``) arrives with the request rather
+        # than in the chat. Commit it to history with this turn's reply.
+        input_items: list[RealtimeConversationItemUserMessage] = []
+        consumed_audio_items: list[RealtimeConversationItemUserMessage] | None = None
+        if request.audio is not None:
+            audio_message = make_user_audio_message(audio_to_wav_base64(request.audio, request.audio_sample_rate))
+            if request.input_item_id is not None:
+                audio_message.id = request.input_item_id
+            active_chat.add_item(audio_message)
+            if not out_of_band:
+                input_items.append(audio_message)
+            consumed_audio_items = [
+                item for item in active_chat.buffer if isinstance(item, RealtimeConversationItemUserMessage)
+            ]
+        audio_history: dict[str, Any] = {
+            "input_item_id": input_items[0].id if input_items else None,
+            "audio_history_turns": self.audio_history_turns if consumed_audio_items is not None else None,
+            "consumed_audio_items": consumed_audio_items,
+        }
+
         # Images the model sees this turn; only these are stripped on write-back,
         # so an image a fast client injects mid-generation for the next turn
         # survives (it is not in this serialized snapshot).
@@ -694,10 +724,14 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         if not out_of_band and any(isinstance(part, AssistantToolCallPart) for part in new_parts):
                             chunk.history = ResponseHistory.capture(
                                 original_chat,
-                                self._ordered_output_items(
-                                    ctx.output_parts, wants_audio=response_wants_audio(response)
-                                ),
+                                [
+                                    *input_items,
+                                    *self._ordered_output_items(
+                                        ctx.output_parts, wants_audio=response_wants_audio(response)
+                                    ),
+                                ],
                                 after_item_id=history_anchor_id,
+                                **audio_history,
                             )
                         yield chunk
             finally:
@@ -733,11 +767,15 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if commit_allowed:
                 history = ResponseHistory.capture(
                     original_chat,
-                    self._ordered_output_items(ctx.output_parts, wants_audio=response_wants_audio(response)),
+                    [
+                        *input_items,
+                        *self._ordered_output_items(ctx.output_parts, wants_audio=response_wants_audio(response)),
+                    ],
                     after_item_id=history_anchor_id,
                     complete=True,
                     consumed_image_ids=consumed_image_ids,
                     compactor=self.compactor,
+                    **audio_history,
                 )
             generation_completed = turn_output_allowed
             logger.debug("Clean text: %s", transcript_for_log(ctx.generated_text))

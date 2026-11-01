@@ -357,6 +357,12 @@ def _check_composition(
     bypass = stage_blocks["stt"]["backend"] == "none"
     if bypass and not capabilities.supports_audio_input:
         _error(document, ("pipelines", name, "stages", "llm"), "STT bypass requires an audio-input LLM backend.")
+    if capabilities.generates_speech != (stage_blocks["tts"]["backend"] == "none"):
+        _error(
+            document,
+            ("pipelines", name, "stages", "tts"),
+            "A speaking LLM backend requires TTS backend none, and TTS backend none requires a speaking LLM backend.",
+        )
     model = options.get("diarization_model_name")
     diarization = options.get("diarization")
     active = (not _is_env(model) and bool(model)) or diarization is True

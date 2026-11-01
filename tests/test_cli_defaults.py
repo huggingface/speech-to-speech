@@ -635,28 +635,21 @@ def test_parse_arguments_transformers_backend():
     assert not hasattr(args, "responses_api_language_model_handler_kwargs")
 
 
-def test_prepare_module_args_rejects_responses_api_for_stt_none():
-    original_argv = sys.argv[:]
-    try:
-        sys.argv = [
-            "speech-to-speech",
-            "--stt",
-            "none",
-            "--llm_backend",
-            "responses-api",
-            "--responses_api_base_url",
-            "http://127.0.0.1:8080/v1",
-            "--model_name",
-            "ggml-org/gemma-4-12B-it-GGUF",
-        ]
-        args = parse_arguments()
-    finally:
-        sys.argv = original_argv
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (
+            ["--stt", "none", "--llm_backend", "responses-api", "--model_name", "ggml-org/gemma-4-12B-it-GGUF"],
+            "--stt none requires an audio-input LLM backend.*chat-completions",
+        ),
+        (["--llm_backend", "lfm-audio"], "--llm_backend lfm-audio speaks its replies itself; use --tts none"),
+        (["--tts", "none"], "--tts none requires an LLM backend that generates speech.*lfm-audio"),
+    ],
+)
+def test_prepare_module_args_rejects_incompatible_stage_pairs(argv, message):
+    args = parse_arguments(argv)
 
-    with pytest.raises(
-        ValueError,
-        match="--stt none requires an audio-input LLM backend.*chat-completions",
-    ):
+    with pytest.raises(ValueError, match=message):
         prepare_module_args(args.module_kwargs, args.llm_backend)
 
 

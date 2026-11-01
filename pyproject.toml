@@ -87,6 +87,9 @@ kokoro = [
 kitten = [
     "kittenml>=0.9.4,<0.10",
 ]
+lfm-audio = [
+    "transformers>=5.20.2,<6; platform_system != 'Darwin'",
+]
 mlx-lm = [
     "mlx-lm==0.31.3; platform_system == 'Darwin'",
     "mlx-vlm==0.4.1; platform_system == 'Darwin'",

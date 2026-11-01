@@ -931,6 +931,10 @@ def test_global_device_only_updates_device_aware_builtin_configs(kind, backend_n
     argv = ["--device", "cpu", selector, backend_name]
     if kind == "stt" and backend_name == "none":
         argv.extend(["--llm_backend", "chat-completions"])
+    if kind == "llm" and LLM_BACKENDS[backend_name].capabilities.generates_speech:
+        argv.extend(["--tts", "none"])
+    if kind == "tts" and backend_name == "none":
+        argv.extend(["--llm_backend", "lfm-audio"])
 
     args = parse_arguments(argv)
     field_name = f"{kind}_backend"

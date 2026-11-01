@@ -347,6 +347,11 @@ def prepare_module_args(module_kwargs: ModuleArguments, llm_backend: BackendSele
     if module_kwargs.stt == "none" and not llm_backend.spec.capabilities.supports_audio_input:
         supported = ", ".join(name for name, spec in LLM_BACKENDS.items() if spec.capabilities.supports_audio_input)
         raise ValueError(f"--stt none requires an audio-input LLM backend; choose one of: {supported}.")
+    if llm_backend.spec.capabilities.generates_speech and module_kwargs.tts != "none":
+        raise ValueError(f"--llm_backend {llm_backend.name} speaks its replies itself; use --tts none.")
+    if module_kwargs.tts == "none" and not llm_backend.spec.capabilities.generates_speech:
+        supported = ", ".join(name for name, spec in LLM_BACKENDS.items() if spec.capabilities.generates_speech)
+        raise ValueError(f"--tts none requires an LLM backend that generates speech; choose one of: {supported}.")
     if module_kwargs.enable_llm_proxy and not llm_backend.spec.capabilities.supports_llm_proxy:
         supported = ", ".join(name for name, spec in LLM_BACKENDS.items() if spec.capabilities.supports_llm_proxy)
         raise ValueError(
