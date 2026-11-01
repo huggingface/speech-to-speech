@@ -90,7 +90,12 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         # Synthesis start: after speculative gate / MPS housekeeping, before provider work.
         started_at_s = perf_counter()
-        wavs_gen = self.model.infer(text, params_infer_code=self.params_infer_code, stream=self.stream)
+        # ChatTTS >= 0.2.2 splits text into sentences by default and synthesizes them as one batch, so each
+        # streamed chunk would hold one row per sentence and the loop below plays only the first row.
+        # Streaming the text as a single row keeps every sentence; non-stream output already joins them.
+        wavs_gen = self.model.infer(
+            text, params_infer_code=self.params_infer_code, stream=self.stream, split_text=not self.stream
+        )
         store = getattr(self, "turn_latency_store", None)
         response_key = getattr(tts_input, "response_key", None)
         speech_stopped_at_s = getattr(tts_input, "speech_stopped_at_s", None)

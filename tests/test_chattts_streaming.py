@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import itertools
+import re
 import sys
 from types import SimpleNamespace
 from typing import Any
@@ -68,3 +70,33 @@ def test_streaming_stops_on_an_empty_chunk(handler_factory) -> None:
 
 def test_streaming_stops_on_a_none_chunk(handler_factory) -> None:
     assert _blocks(handler_factory([None])) == []
+
+
+def _stream_like_chattts(text: str, split_text: bool = True, **_kwargs: Any) -> Any:
+    """Stream like ChatTTS >= 0.2.2, which splits the text after ". " unless split_text=False and synthesizes
+    the sentences as one batch: each chunk is (sentences, samples), one zero-padded row per sentence.
+    Sentence k is the constant level k / 10, so the output shows which sentences were played."""
+    sentences = [s for s in re.split(r"(?<=\.\s)", text) if s]
+    speech = [np.full(4000 * k, k / 10, dtype=np.float32) for k in range(1, len(sentences) + 1)]
+    rows = speech if split_text else [np.concatenate(speech)]
+    wavs = np.zeros((len(rows), max(len(row) for row in rows)), dtype=np.float32)
+    for i, row in enumerate(rows):
+        wavs[i, : len(row)] = row
+    return iter([wavs[:, start : start + 6000] for start in range(0, wavs.shape[1], 6000)])
+
+
+def test_streaming_speaks_every_sentence_of_the_input(handler_factory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Playing row 0 of each chunk used to drop every sentence after the first."""
+    from speech_to_speech.TTS import chatTTS_handler
+
+    # Keep the samples as they are so each sentence's level can be read back.
+    monkeypatch.setattr(chatTTS_handler, "librosa", SimpleNamespace(resample=lambda chunk, **_kwargs: chunk))
+    handler = handler_factory([])
+    handler.model = SimpleNamespace(infer=_stream_like_chattts)
+
+    audio = np.concatenate(list(handler.process(TTSInput(text="One sentence here. Another one here. A third one."))))
+    levels = np.rint(audio[audio != 0] / 32768 * 10).astype(int).tolist()
+
+    # Each sentence plays in full and in order, not interleaved with the others.
+    runs = [(level, len(list(group))) for level, group in itertools.groupby(levels)]
+    assert runs == [(1, 4000), (2, 8000), (3, 12000)]
