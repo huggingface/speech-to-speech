@@ -1000,14 +1000,21 @@ def test_provider_error_after_text_tool_rolls_back_ordered_call():
     assert not request.runtime_config.chat.has_pending_tool_calls()
 
 
-def test_generation_is_rejected_until_ordered_tool_output_arrives():
+def test_generation_proceeds_while_ordered_tool_call_is_pending():
     handler = _make_handler()
-    called = False
+    sent_inputs = []
 
     def create(**kwargs):
-        nonlocal called
-        called = True
-        return _make_stream([])
+        sent_inputs.append(kwargs["input"])
+        return _make_stream(
+            [
+                _make_text_delta_event("Answer."),
+                _make_output_item_done_event(content="Answer."),
+                ResponseCompletedEvent.model_construct(
+                    type="response.completed", response=SimpleNamespace(status="completed", usage=None)
+                ),
+            ]
+        )
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
     chat = Chat(5)
@@ -1026,11 +1033,14 @@ def test_generation_is_rejected_until_ordered_tool_output_arrives():
 
     outputs = list(handler.process(request))
 
-    assert called is False
-    assert len(outputs) == 1
-    assert isinstance(outputs[0], EndOfResponse)
-    assert outputs[0].error is not None and "function call outputs are pending" in outputs[0].error
-    assert [item.type for item in chat.buffer] == ["message", "function_call", "message"]
+    terminal = next(item for item in outputs if isinstance(item, EndOfResponse))
+    assert terminal.error is None
+    assert len(sent_inputs) == 1
+    # The provider never sees a call without its output, but keeps the newer turn.
+    assert "call_pending" not in str(sent_inputs[0])
+    assert "second" in str(sent_inputs[0])
+    assert chat.has_pending_tool_calls()
+    assert sent_inputs[0][-1]["role"] == "system" and "pending({})" in sent_inputs[0][-1]["content"]
 
     chat.append_tool_output(
         "call_pending",

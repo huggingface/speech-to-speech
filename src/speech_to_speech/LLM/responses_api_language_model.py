@@ -169,7 +169,8 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
     # ── base hooks ──────────────────────────────────────────────────────────--
 
     def _serialize(self, active_chat: Chat) -> Any:
-        return active_chat.to_responses_api_chat()
+        api_input = active_chat.to_responses_api_chat()
+        return self._with_pending_notice(api_input, active_chat)
 
     def _build_optional_kwargs(self, req_tools: Any, req_tool_choice: Any) -> dict[str, Any]:
         optional_kwargs = self._reasoning_kwargs()
@@ -180,13 +181,16 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
         return optional_kwargs
 
     def _request(self, api_input: Any, optional_kwargs: dict[str, Any]) -> Any:
-        return self.client.responses.create(
-            model=self.model_name,
-            input=api_input,
-            stream=self.stream,
-            extra_body=self._extra_body,
-            timeout=self.request_timeout,
-            **optional_kwargs,
+        return self._send_with_notice_fallback(
+            api_input,
+            lambda items: self.client.responses.create(
+                model=self.model_name,
+                input=items,
+                stream=self.stream,
+                extra_body=self._extra_body,
+                timeout=self.request_timeout,
+                **optional_kwargs,
+            ),
         )
 
     @staticmethod
