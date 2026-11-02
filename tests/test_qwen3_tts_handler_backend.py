@@ -1165,3 +1165,22 @@ def test_process_custom_voice_uses_assistant_language_only_when_enabled(
     assert captured["language"] == expected
     assert handler.language == configured_language
     assert not hasattr(handler, "_active_language")
+
+
+@pytest.mark.parametrize("cuts", [[], [15360, 30720], [7680, 15360, 23040], [1, 17, 1920, 9999, 20000]])
+def test_stream_resampling_matches_whole_signal_across_chunk_boundaries(cuts):
+    from scipy.signal import resample_poly
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.cancel_scope = None
+    handler.blocksize = 512
+    samples = (0.5 * np.sin(2 * np.pi * 220 * np.arange(36001) / 24000)).astype(np.float32)
+    native_pcm = handler._to_int16(samples).astype(float)
+    expected = np.clip(np.round(resample_poly(native_pcm, 2, 3)), -32768, 32767).astype(np.int16)
+
+    chunks = ((part, 24000, None) for part in np.split(samples, cuts))
+    actual = np.concatenate(list(handler._stream(chunks, "test")))
+
+    assert np.array_equal(actual[: len(expected)], expected)
+    assert np.all(actual[len(expected) :] == 0)
+    assert len(actual) == ((len(expected) + handler.blocksize - 1) // handler.blocksize) * handler.blocksize
