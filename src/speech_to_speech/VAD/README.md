@@ -11,6 +11,25 @@ FireRed uses `FireRedStreamVad` speech-start and speech-end events. It does not 
 
 Streaming FireRedVAD has no published benchmark yet. Silero remains the default.
 
+## Progressive audio snapshots
+
+`VADHandler.transcription_window_samples` sets an optional cadence for emitting
+`VADAudio(mode="progressive")`, independently of the transcription backend or live
+transcription setting. It is measured in input samples and defaults to `None` (disabled):
+
+```python
+vad_handler.transcription_window_samples = 120 * vad_handler.sample_rate
+```
+
+Once speech is accepted, snapshots are emitted after each additional interval of
+audio since the previous snapshot. They contain the current segment plus any
+retained prefix from reopened speech. Capture and buffering continue; snapshots
+do not split speech or end the turn. Finalization can add held short fragments,
+so consumers must handle changed audio rather than assume an exact final prefix.
+
+The pipeline currently enables this capability for the
+[OpenAI-compatible HTTP STT window option](../../../docs/openai-compatible-stt.md#bounded-long-turns-opt-in).
+
 ## FireRedVAD
 
 Install the optional extra and download Stream-VAD weights:

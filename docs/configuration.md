@@ -62,7 +62,7 @@ and `pipelines` mappings.
 | Pipeline `options` | Pipeline-wide options such as `device`, `mac_optimal_settings`, diarization, and `enable_visemes` / `stv_model_name` / `stv_device` |
 | `runtime` | Process settings: `log_level`, `log_transcripts`, and `torch_num_threads` |
 | `runtime.server` | Listener `host` and `port` |
-| `runtime.client` | Packaged client settings such as `url`, `voice`, `input_device`, `output_device`, `playback_buffer_ms`, and `tool_module` |
+| `runtime.client` | Packaged client settings such as `url`, `voice`, `input_device`, `output_device`, `playback_buffer_ms`, `vad_threshold`, `interrupt_response`, and `tool_module` |
 
 Settings use the existing [argument definitions](../src/speech_to_speech/arguments_classes/)
 and defaults. Unknown fields fail. Backend selectors belong in `backend`, not `settings`.
@@ -87,6 +87,19 @@ concurrently is separate work in [#681](https://github.com/huggingface/speech-to
 `local` starts the server and one microphone/speaker client over loopback. Its
 client URL follows the server port; an explicit non-loopback host or conflicting
 client URL fails.
+
+`local` and `talk` show conversation-only terminal output by default, with warnings
+and errors still visible. To include routine logs, backend transcripts, tool details,
+and protocol events, set:
+
+```yaml
+runtime:
+  client:
+    verbose: true
+```
+
+Setting `runtime.client.print_json: true` also enables diagnostic output with raw events.
+Use `runtime.log_level: debug` together with `verbose: true` for more detailed logs.
 
 `talk` reads `runtime.client` and process logging settings. It does not start
 pipeline handlers or require server/block environment values, and rejects

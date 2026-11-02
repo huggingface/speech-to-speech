@@ -34,6 +34,7 @@ from speech_to_speech.LLM.chat import (
     Chat,
     ChatItemError,
     CompactionResult,
+    add_supported_item,
     build_active_chat,
     make_assistant_message,
     make_system_message,
@@ -518,7 +519,7 @@ class TestAddItem:
         assert fc.call_id is not None
         assert fc.call_id.startswith("call_")
 
-    def test_function_call_bad_call_id_prefix_raises(self):
+    def test_function_call_empty_call_id_raises(self):
         chat = Chat(size=5)
         fc = RealtimeConversationItemFunctionCall(
             type="function_call",
@@ -526,8 +527,32 @@ class TestAddItem:
             name="f",
             arguments="{}",
         )
-        with pytest.raises(ChatItemError, match="call_"):
+        with pytest.raises(ChatItemError, match="must not be empty"):
             chat.add_item(fc)
+
+    def test_function_call_keeps_a_client_call_id_without_the_call_prefix(self):
+        """#686: the Realtime schema does not require a ``call_`` prefix."""
+        chat = Chat(size=5)
+        fc = RealtimeConversationItemFunctionCall(
+            type="function_call", id="fc_test", call_id="external-call-1", name="lookup", arguments="{}"
+        )
+        add_supported_item(chat, fc)
+
+        assert fc.call_id == "external-call-1"
+        assert chat.has_pending_tool_calls()
+
+        chat.add_item(
+            RealtimeConversationItemFunctionCallOutput(
+                type="function_call_output", call_id="external-call-1", output="ok"
+            )
+        )
+        assert not chat.has_pending_tool_calls()
+
+    def test_add_supported_item_still_rejects_a_missing_call_id(self):
+        chat = Chat(size=5)
+        fc = RealtimeConversationItemFunctionCall(type="function_call", name="lookup", arguments="{}")
+        with pytest.raises(ChatItemError, match="missing a call_id"):
+            add_supported_item(chat, fc)
 
     def test_invalid_provisional_batch_rolls_back_earlier_items(self):
         chat = Chat(size=5)

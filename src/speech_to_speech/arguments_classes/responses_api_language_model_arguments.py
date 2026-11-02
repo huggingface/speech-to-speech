@@ -65,3 +65,13 @@ class ResponsesApiLanguageModelHandlerArguments(LanguageModelBaseArguments):
             "a role-preserving placeholder. Set to 0 to replace every completed audio turn. Default is 1."
         },
     )
+    responses_api_request_timeout_s: float = field(
+        default=20.0,
+        metadata={
+            "help": "Timeout in seconds for each request to the OpenAI-compatible API, including warmup and history "
+            "compaction. It bounds every wait for data: the first response bytes and each gap between streamed "
+            "chunks; the connect timeout stays capped at 10s. The OpenAI SDK retries a timed-out turn request "
+            "twice, so a provider that never responds takes about 3x this value before the fallback reply. Raise "
+            "it for slow upstreams such as agent servers that run tools before replying. Default is 20.0."
+        },
+    )

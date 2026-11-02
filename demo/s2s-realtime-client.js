@@ -42,6 +42,7 @@
  * @property {NoiseGate} [noiseGate]
  * @property {string} [audioOutputId]
  * @property {number} [playbackBufferMs] WebSocket startup reserve; applies on the next connection.
+ * @property {boolean} [localVad] Locally duck playback on speech candidates (default true).
  * @property {(call: {name: string, arguments: string, callId: string}) => Promise<{output: string, image?: string}>} [executeTool]
  */
 
@@ -49,6 +50,7 @@ import { readTurnLatency } from "./turn-latency.js";
 import { extractResponseTranscript, trimTrailingSlash } from "./ws/codec.js";
 import { OrbVisualiser, VIS_FFT_SIZE } from "./ws/orb-visualizer.js";
 import { SentAudioRecorder } from "./ws/user-audio-recorder.js";
+import { LocalVad } from "./ws/local-vad.js";
 
 export const AUDIO_SAMPLE_RATE = 24_000;
 export const AUDIO_WORKLET_VERSION = "audio-24k-v2";
@@ -117,6 +119,9 @@ export class S2sRealtimeClient extends EventTarget {
     this._micSrc = null;
     this._captureNode = null;
     this._playbackNode = null;
+    this._outputGain = null;
+    this._localVad = null;
+    this._localSpeech = false;
     this._playbackThreshold = Math.ceil(AUDIO_SAMPLE_RATE * normalizePlaybackBufferMs(options.playbackBufferMs) / 1000);
     this._resetPlaybackBuffer();
     this._playbackItems = new Map();
@@ -153,6 +158,7 @@ export class S2sRealtimeClient extends EventTarget {
   _setStatus(status) {
     if (this._status === status) return;
     this._status = status;
+    if (status === "error") this._setLocalSpeech(false);
     this.dispatchEvent(new CustomEvent("status", { detail: { status } }));
   }
 
@@ -247,6 +253,16 @@ export class S2sRealtimeClient extends EventTarget {
     }
     this.setMuted(this._muted);
     this._setStatus("connected");
+    // Model loading never delays connecting, greeting, or microphone streaming.
+    if (this.options.localVad !== false && this._ctx) {
+      this._localVad = new LocalVad({
+        audioContext: this._ctx,
+        stream: this.options.micStream,
+        isEnabled: () => !this._closed && !this._muted && this._status !== "error",
+        onChange: (active) => this._setLocalSpeech(active),
+      });
+      void this._localVad.start();
+    }
   }
 
   _sessionConfig() {
@@ -301,6 +317,8 @@ export class S2sRealtimeClient extends EventTarget {
   async _setupAudio() {
     const ctx = this.options.audioContext ?? new AudioContext({ latencyHint: "interactive" });
     this._ctx = ctx;
+    this._outputGain = ctx.createGain();
+    this._outputGain.connect(ctx.destination);
     if (ctx.state === "suspended") await ctx.resume().catch(() => {});
     const micSrc = ctx.createMediaStreamSource(this.options.micStream);
     this._micSrc = micSrc;
@@ -371,7 +389,7 @@ export class S2sRealtimeClient extends EventTarget {
       output.fftSize = VIS_FFT_SIZE;
       output.smoothingTimeConstant = 0.3;
       playback.connect(output);
-      output.connect(ctx.destination);
+      output.connect(this._outputGain);
       this._playbackNode = playback;
       this._outAnalyser = output;
       this._visualiser = new OrbVisualiser(micAnalyser, output, () => this._aiSpeaking);
@@ -393,7 +411,7 @@ export class S2sRealtimeClient extends EventTarget {
     output.fftSize = VIS_FFT_SIZE;
     output.smoothingTimeConstant = 0.3;
     source.connect(output);
-    output.connect(this._ctx.destination);
+    output.connect(this._outputGain);
     this._remoteSrc = source;
     this._outAnalyser = output;
     this._visualiser = new OrbVisualiser(this._micAnalyser, output, () => this._aiSpeaking);
@@ -770,7 +788,21 @@ export class S2sRealtimeClient extends EventTarget {
   /** @param {boolean} muted */
   setMuted(muted) {
     this._muted = muted;
+    if (muted) {
+      this._localVad?.candidate.reset();
+      this._setLocalSpeech(false);
+    }
     if (this.options.transport === "webrtc") this._session?.mute(muted);
+  }
+
+  /** A reversible local reaction; server confirmation owns queue clearing.
+   * @param {boolean} active */
+  _setLocalSpeech(active) {
+    this._localSpeech = active && !this._muted && !this._closed && this._status !== "error";
+    if (!this._outputGain || !this._ctx) return;
+    const now = this._ctx.currentTime;
+    this._outputGain.gain.cancelScheduledValues(now);
+    this._outputGain.gain.setTargetAtTime(this._localSpeech ? 0.25 : 1, now, 0.005);
   }
 
   /** @param {NoiseGate} gate */
@@ -919,6 +951,8 @@ export class S2sRealtimeClient extends EventTarget {
   async close() {
     this._closed = true;
     this._closing = true;
+    await this._localVad?.close();
+    this._localVad = null;
     if (this.options.transport === "websocket") this._clearPlayback();
     this._userAudioRecorder.reset();
     this._userTranscriptByItem.clear();
@@ -941,7 +975,7 @@ export class S2sRealtimeClient extends EventTarget {
     this._session?.close();
     this._session = null;
     this._transport = null;
-    for (const node of [this._captureNode, this._playbackNode, this._micSrc, this._micAnalyser, this._remoteSrc, this._outAnalyser]) {
+    for (const node of [this._captureNode, this._playbackNode, this._micSrc, this._micAnalyser, this._remoteSrc, this._outAnalyser, this._outputGain]) {
       try { node?.disconnect(); } catch { /* ignored */ }
     }
     try { await this._ctx?.close(); } catch { /* ignored */ }

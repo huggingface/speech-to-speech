@@ -350,6 +350,17 @@ def build_configured_server(config: ResolvedConfig, stop_event: Event, *, local:
 
 def run_configured_command(command: Literal["serve", "local", "talk"], config: ResolvedConfig) -> None:
     """Own CLI signal handlers and always stop constructed resources."""
+    from speech_to_speech.pipeline.console import conversation_output
+
+    settings = config.client or {}
+    conversation_only = command in {"local", "talk"} and not (
+        settings.get("verbose", False) or settings.get("print_json", False)
+    )
+    with conversation_output(conversation_only):
+        _run_configured_command(command, config)
+
+
+def _run_configured_command(command: Literal["serve", "local", "talk"], config: ResolvedConfig) -> None:
     from speech_to_speech.pipeline.transcript_logging import set_log_transcripts, warn_if_log_transcripts_enabled
 
     stop_event = Event()
@@ -367,10 +378,12 @@ def run_configured_command(command: Literal["serve", "local", "talk"], config: R
             warn_if_log_transcripts_enabled()
             asyncio.run(listen_and_play_realtime(client, stop_event=stop_event))
         else:
+            from speech_to_speech.pipeline.console import console, model_startup_output
             from speech_to_speech.s2s_pipeline import setup_logger
 
             setup_logger(config.runtime.get("log_level", "info"))
-            result = build_configured_server(config, stop_event, local=command == "local")
+            with model_startup_output(command == "local" and console.quiet):
+                result = build_configured_server(config, stop_event, local=command == "local")
             set_log_transcripts(
                 result.client.config.log_transcripts
                 if command == "local"

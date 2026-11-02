@@ -52,14 +52,11 @@ try:
     HAS_DF = True
 except (ImportError, ModuleNotFoundError) as e:
     HAS_DF = False
-    logger.warning(f"DeepFilterNet not available for audio enhancement: {e}")
+    logger.debug("DeepFilterNet not available for optional audio enhancement: %s", e)
 
 
 class VADHandler(BaseHandler[VADIn, VADOut]):
-    """
-    Handles voice activity detection. When voice activity is detected, audio will be accumulated until the end of speech is detected and then passed
-    to the following part.
-    """
+    """Emit speech audio at segment end, with optional cumulative snapshots during capture."""
 
     def setup(
         self,
@@ -193,6 +190,10 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._log_progressive_yields = 0
         self._speech_started_emitted = False
         self._speculative_audio_prefix: np.ndarray | None = None
+        # Optional snapshot cadence in input samples, independent of live transcription.
+        self.transcription_window_samples: int | None = None
+        self._last_window_snapshot_samples = 0
+        self._window_check_after_samples = 0
         self._speculative_raw_audio_prefix: np.ndarray | None = None
         self._pending_short_segment: _PendingShortSegment | None = None
         self.streaming_stt_sink: Any | None = None
@@ -270,6 +271,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         turn_id, revision, reopened = self.speculative_turns.speech_started(audio_start_ms)
         if not reopened and revision == 0 and not self._speech_started_emitted:
             self._speculative_audio_prefix = None
+            self._last_window_snapshot_samples = 0
+            self._window_check_after_samples = 0
             self._speculative_raw_audio_prefix = None
             self._speculative_speaker_prefix = None
         return turn_id, revision, reopened
@@ -656,8 +659,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             self._log_progressive_yields = 0
             self._last_log_time = now
 
-        # Live transcription controls whether progressive STT work is emitted
-        # before the final segment.
+        # Emit requested snapshots or finalize a detected speech segment.
         yield from self._process_realtime(vad_output, runtime_config, received_at_s, decision_at_s)
 
     def _process_realtime(
@@ -667,15 +669,35 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         received_at_s: float | None = None,
         decision_at_s: float | None = None,
     ) -> Iterator[VADOut]:
-        """Process with real-time progressive audio release."""
+        """Emit cumulative progressive snapshots and handle detected speech ends."""
+        window_samples = getattr(self, "transcription_window_samples", None)
+        # Within a segment the turn grows by at most the audio received, so
+        # window-only checks skip recounting the whole buffer until one can be due.
+        window_check = window_samples is not None and self._total_samples >= self._window_check_after_samples
         # Check if we're currently in a speech segment.
-        if self.enable_realtime_transcription and hasattr(self.iterator, "buffer") and len(self.iterator.buffer) > 0:
+        if (
+            (self.enable_realtime_transcription or window_check)
+            and hasattr(self.iterator, "buffer")
+            and len(self.iterator.buffer) > 0
+        ):
             current_time = time.time()
             duration_ms = self._speech_buffer_duration_ms()
+            segment_samples = round(duration_ms * self.sample_rate / 1000)
+            prefix_samples = len(self._speculative_audio_prefix) if self._speculative_audio_prefix is not None else 0
+            turn_samples = prefix_samples + segment_samples
+            window_due = window_samples is not None and (
+                turn_samples >= self._last_window_snapshot_samples + window_samples
+            )
+            if window_samples is not None and not window_due:
+                self._window_check_after_samples = (
+                    self._total_samples + self._last_window_snapshot_samples + window_samples - turn_samples
+                )
             progressive_pause = self._progressive_processing_pause(duration_ms)
 
             # Yield accumulated audio periodically while speaking
-            if (current_time - self.last_process_time) >= progressive_pause:
+            if window_due or (
+                self.enable_realtime_transcription and (current_time - self.last_process_time) >= progressive_pause
+            ):
                 array = torch.cat(self.iterator.speech_buffer()).cpu().numpy()
                 duration_ms = len(array) / self.sample_rate * 1000
                 active_speech_duration_ms = self._current_active_speech_duration_ms()
@@ -690,6 +712,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                         progressive_pause,
                     )
                     turn_id, turn_revision = self._current_turn_metadata()
+                    self._last_window_snapshot_samples = turn_samples
                     yield VADAudio(
                         audio=self._combined_turn_audio(array),
                         runtime_config=runtime_config,
@@ -701,6 +724,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
         # Handle end of speech
         if vad_output is not None:
+            # A new prefix or stitched segment can outgrow received audio.
+            self._window_check_after_samples = 0
             if len(vad_output) == 0:
                 logger.info("VAD: phantom trigger (empty buffer), closing speech pair")
                 if self._speech_started_emitted and self.text_output_queue:
@@ -922,6 +947,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._total_samples = 0
         self._speech_started_emitted = False
         self._speculative_audio_prefix = None
+        self._last_window_snapshot_samples = 0
+        self._window_check_after_samples = 0
         self._speculative_raw_audio_prefix = None
         self.speculative_turns.reset()
         self.should_listen.set()

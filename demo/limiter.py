@@ -19,6 +19,10 @@ new row (no explicit reset). Logged-in users are keyed by a hashed HF `sub`;
 anonymous users by BOTH a hashed IP and a hashed signed-cookie id, OR-matched
 (spent = max of the two) so clearing one identifier doesn't reset the budget.
 
+Every granted session is recorded, unlimited tiers included (never debited),
+so web search can require a live one (`session_live`). The same store caps web
+searches on the server's Serper key per user per day (`take_search`).
+
 Storage is SQLite at $USAGE_DB_PATH, else /data (persistent Spaces storage),
 else a /tmp fallback. On /tmp the budget is only per-uptime — flagged in logs.
 """
@@ -43,6 +47,7 @@ FREE_SEC = int(os.environ.get("LIMIT_FREE_SEC", "600"))   # 10 min/day, signed i
 CHUNK_SEC = int(os.environ.get("RESERVE_CHUNK_SEC", "10"))  # reservation granularity
 HEARTBEAT_SEC = int(os.environ.get("HEARTBEAT_SEC", "5"))   # advertised client cadence
 REAP_AFTER_SEC = int(os.environ.get("SESSION_REAP_SEC", "15"))  # silence before sweep
+SEARCH_PER_DAY = int(os.environ.get("LIMIT_SEARCH_PER_DAY", "100"))  # server-key web searches/day
 
 # Stable across restarts or the hashed keys (and signed cookies) rotate and the
 # budget effectively resets. Set it as a Space secret. Falls back to a per-boot
@@ -53,12 +58,14 @@ _lock = threading.Lock()
 _db_path: "Path | None" = None
 
 
-def budget_for(tier: str) -> "int | None":
-    """Daily second-budget for a tier, or None for unlimited.
+# 'pro' (paying PRO members) and 'org' (members of an allow-listed
+# organisation, see UNLIMITED_ORGS in auth.py).
+UNLIMITED_TIERS = ("pro", "org")
 
-    Unlimited tiers: 'pro' (paying PRO members) and 'org' (members of an
-    allow-listed organisation, see UNLIMITED_ORGS in auth.py)."""
-    if tier in ("pro", "org"):
+
+def budget_for(tier: str) -> "int | None":
+    """Daily second-budget for a tier, or None for unlimited (UNLIMITED_TIERS)."""
+    if tier in UNLIMITED_TIERS:
         return None
     if tier == "free":
         return FREE_SEC
@@ -134,6 +141,14 @@ def init() -> None:
                    ended        INTEGER NOT NULL DEFAULT 0
                )"""
         )
+        con.execute(
+            """CREATE TABLE IF NOT EXISTS search_daily (
+                   user_key TEXT NOT NULL,
+                   day      TEXT NOT NULL,
+                   count    INTEGER NOT NULL DEFAULT 0,
+                   PRIMARY KEY (user_key, day)
+               )"""
+        )
     logger.info("Usage limiter ready at %s (anon=%ss free=%ss chunk=%ss)", _db_path, ANON_SEC, FREE_SEC, CHUNK_SEC)
 
 
@@ -179,12 +194,13 @@ def remaining(keys, tier: str) -> "int | None":
 def begin(session_id: str, keys, tier: str) -> int:
     """Reserve the first chunk for a new session and record it. Returns the
     chunk reserved (0 if the budget is already exhausted — the first heartbeat
-    will then expire it). PRO (unlimited) is never tracked; don't call it here."""
+    will then expire it). Unlimited tiers are recorded too, so web search can
+    tell their session is live, but never debited."""
     day = _today()
     budget = budget_for(tier)
     now = time.time()
     with _lock, _connect() as con:
-        avail = budget - _spent_max(con, keys, day) if budget is not None else CHUNK_SEC
+        avail = budget - _spent_max(con, keys, day) if budget is not None else 0
         chunk = max(0, min(CHUNK_SEC, avail))
         if chunk:
             _add(con, keys, day, chunk)
@@ -212,15 +228,21 @@ def heartbeat(session_id: str) -> bool:
         keys = row[0].split(",")
         day, tier, grant_ts, reserved = row[1], row[2], row[3], int(row[4])
         budget = budget_for(tier)
+        if budget is None:
+            # Unlimited: nothing to meter, the heartbeat only shows it's live.
+            con.execute("UPDATE sessions SET last_seen_ts=? WHERE session_id=?", (now, session_id))
+            return True
         elapsed = now - grant_ts
 
         # Grow the reservation one chunk at a time until it covers elapsed + a
-        # one-chunk lookahead, or the budget runs dry.
+        # one-chunk lookahead, or the budget runs dry. The last chunk is clamped
+        # to what's left so a session never reserves past the daily budget.
         while reserved < elapsed + CHUNK_SEC:
-            if budget is not None and _spent_max(con, keys, day) >= budget:
+            chunk = min(CHUNK_SEC, budget - _spent_max(con, keys, day))
+            if chunk <= 0:
                 break
-            _add(con, keys, day, CHUNK_SEC)
-            reserved += CHUNK_SEC
+            _add(con, keys, day, chunk)
+            reserved += chunk
 
         alive = reserved > elapsed  # could we cover the time already elapsed?
         con.execute(
@@ -249,21 +271,65 @@ def end(session_id: str) -> None:
 
 
 def sweep() -> None:
-    """Reap sessions that went silent (crash / closed without a beacon): bill
-    their elapsed time, refund the rest, mark ended. Forfeits ≤ one chunk."""
+    """Reap metered sessions that went silent (crash / closed without a beacon):
+    bill their elapsed time, refund the rest, mark ended. Forfeits ≤ one chunk.
+
+    Unlimited sessions have nothing to bill, so they're left open: a heartbeat
+    after an outage revives them, while session_live() treats them as stale in
+    the meantime. Only an explicit end() closes them."""
     now = time.time()
     cutoff = now - REAP_AFTER_SEC
+    unlimited = ",".join("?" * len(UNLIMITED_TIERS))
     with _lock, _connect() as con:
         stale = con.execute(
             "SELECT session_id, keys, day, grant_ts, last_seen_ts, reserved_sec FROM sessions "
-            "WHERE ended=0 AND last_seen_ts < ?",
-            (cutoff,),
+            f"WHERE ended=0 AND last_seen_ts < ? AND tier NOT IN ({unlimited})",
+            (cutoff, *UNLIMITED_TIERS),
         ).fetchall()
         for session_id, keys_s, day, grant_ts, last_seen, reserved in stale:
             _reconcile(con, keys_s.split(","), day, grant_ts, int(reserved), end_ts=last_seen)
             con.execute("UPDATE sessions SET ended=1 WHERE session_id=?", (session_id,))
         if stale:
             logger.debug("swept %d stale session(s)", len(stale))
+
+
+def session_live(session_id: str, keys) -> bool:
+    """Whether `session_id` is a session granted to these keys that hasn't ended
+    and was heard from (grant or heartbeat) within REAP_AFTER_SEC."""
+    if not session_id:
+        return False
+    with _lock, _connect() as con:
+        row = con.execute(
+            "SELECT keys, ended, last_seen_ts FROM sessions WHERE session_id=?", (session_id,)
+        ).fetchone()
+    return (
+        bool(row)
+        and not row[1]
+        and row[0] == ",".join(keys)
+        and row[2] >= time.time() - REAP_AFTER_SEC
+    )
+
+
+def take_search(keys) -> bool:
+    """Count one server-key web search against today's cap (OR-matched like the
+    talk budget). False, with nothing counted, once the cap is reached."""
+    day = _today()
+    with _lock, _connect() as con:
+        counts = [
+            con.execute(
+                "SELECT count FROM search_daily WHERE user_key=? AND day=?", (k, day)
+            ).fetchone()
+            for k in keys
+        ]
+        if max((int(c[0]) for c in counts if c), default=0) >= SEARCH_PER_DAY:
+            return False
+        for k in keys:
+            con.execute(
+                """INSERT INTO search_daily (user_key, day, count) VALUES (?, ?, 1)
+                   ON CONFLICT(user_key, day) DO UPDATE SET count = count + 1""",
+                (k, day),
+            )
+        return True
 
 
 def _reconcile(con, keys, day: str, grant_ts: float, reserved: int, end_ts: float) -> None:

@@ -167,6 +167,31 @@ Caveats vs. WebSocket:
   (~60 KB), so the model may see a smaller frame than over WebSocket.
 - **Load-balancer mode is WebSocket-only** for now.
 
+## Faster interruptions
+
+**Settings → Faster interruptions** is on by default for WebSocket and WebRTC.
+A browser-local Silero v6 VAD watches the existing echo-cancelled microphone
+stream in 32 ms frames. A speech candidate immediately lowers assistant playback
+to 25% volume, including audio already queued in the browser. Two quiet frames
+(64 ms) restore normal volume if the candidate is rejected. This follows
+[Reachy's local barge-in approach](https://github.com/pollen-robotics/reachy_mini_conversation_app#configuration).
+
+Server VAD still confirms interruptions, cancels generation, and controls turn
+boundaries. Local detection does not commit input audio or request responses,
+and the microphone continues streaming normally. Muting the mic also disables
+local ducking. Changes to the setting apply on the next conversation or Restart.
+
+The pinned `@ricky0123/vad-web` model and `onnxruntime-web` WASM assets are served
+by this demo (installed with `npm ci`, included in Docker). Inference runs on the
+device without an external model CDN. Loading happens in the background; a load
+failure falls back to server VAD. Missing inference frames restore volume after
+500 ms. Speaker echo and background speech can still cause unwanted ducking;
+disable the setting if needed.
+
+Validation: `npm run test:agents:adapter` covers detection, lifecycle, and playback
+regressions. `npm run test:ui` runs real Silero inference on a speech recording in
+Chromium as well as the history UI checks (`npx playwright install chromium`).
+
 ## Connecting to a backend
 
 Three modes, picked by env (`/api/config` tells the client which one is active):
@@ -215,7 +240,10 @@ button, top-right):
 - **Web search** — Google results via Serper.dev, proxied server-side so the key
   never reaches the browser. Set `SERPER_API_KEY` as an env var / Space secret.
   Without it, the tool is disabled unless the user pastes their own key in the
-  Tools panel.
+  Tools panel. On a Space the server key is only spent for a signed-in HF user
+  with a live conversation (every tier), capped at `LIMIT_SEARCH_PER_DAY`
+  searches per user per day; a Space without HF sign-in never uses it. Locally
+  the key is unrestricted.
 - **Camera** — while enabled, a live self-view shows bottom-left; when the model
   calls the tool, the current frame is sent to the vision-language model so it can
   see what you're showing it. This needs a vision-language model on the server
@@ -234,6 +262,7 @@ leaves the app unmetered. Tunable via env:
 |-----|---------|------|
 | `LIMIT_ANON_SEC` | `300` | Daily seconds for anonymous visitors (5 min) |
 | `LIMIT_FREE_SEC` | `600` | Daily seconds for signed-in non-PRO users (10 min) |
+| `LIMIT_SEARCH_PER_DAY` | `100` | Daily web searches on the server's Serper key per signed-in user (every tier) |
 | `LB_HF_TOKEN` | _(falls back to user OAuth)_ | Optional Space secret sent in standard `Authorization` to authenticate requests at the HF Inference Endpoint ingress; per-user attribution continues through `X-Reachy-Mini-Authorization` |
 | `UNLIMITED_ORGS` | _(adds to defaults)_ | Extra HF org names whose members get **unlimited** usage, like PRO |
 | `USAGE_HASH_SECRET` | _(random)_ | HMAC secret for hashing identity keys + signing the anon cookie |
@@ -271,6 +300,7 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
 | `s2s-realtime-client.js` | Narrow demo adapter around one Agents SDK `RealtimeSession` and SDK transports with browser-owned WebSocket truncation |
 | `package.json` / `package-lock.json` | Exact official Agents SDK and browser-test dependency pins |
 | `ws/codec.js` | URL normalization + transcript extraction (pure) |
+| `ws/local-vad.js` | Browser Silero detection, reversible playback ducking, and lifecycle |
 | `ws/user-audio-recorder.js` | Bounded sent-PCM buffer + VAD slicing + browser-playable WAV wrapping |
 | `ws/orb-visualizer.js` | `OrbVisualiser`: FFT bands -> orb CSS custom properties |
 | `worklets/mic-capture.js` | AudioWorklet: 48 kHz Float32 -> 24 kHz Int16 PCM, posts ~40 ms chunks |

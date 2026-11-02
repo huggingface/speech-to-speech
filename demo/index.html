@@ -291,6 +291,15 @@
               </small>
             </label>
 
+            <label class="field">
+              <span>Faster interruptions</span>
+              <select id="local-vad">
+                <option value="on">On</option>
+                <option value="off">Off</option>
+              </select>
+              <small>Lowers the assistant's volume when you start speaking. Applies on the next conversation.</small>
+            </label>
+
             <label class="field" id="playback-buffer-field">
               <span>Playback startup buffer (ms)</span>
               <input id="playback-buffer-ms" type="number" min="0" step="any" aria-describedby="playback-buffer-hint" />

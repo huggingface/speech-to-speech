@@ -2,6 +2,8 @@ import sys
 from threading import Event
 from types import SimpleNamespace
 
+import pytest
+
 from speech_to_speech.api.openai_realtime.audio_client import RealtimeAudioClient
 from speech_to_speech.api.openai_realtime.server import RealtimeServer
 from speech_to_speech.s2s_pipeline import build_local_pipeline, build_pipeline, parse_arguments
@@ -44,6 +46,9 @@ def test_local_composes_loopback_client_with_same_server_builder(monkeypatch):
     args.realtime_server_kwargs.host = "192.0.2.10"
     args.realtime_server_kwargs.port = 9876
     args.local_audio_kwargs.local_audio_playback_buffer_ms = 240
+    args.local_audio_kwargs.verbose = True
+    args.local_audio_kwargs.local_audio_vad_threshold = 0.8
+    args.local_audio_kwargs.local_audio_interrupt_response = False
     pipeline_handler = object()
     unit = SimpleNamespace(handlers=[pipeline_handler])
     monkeypatch.setattr("speech_to_speech.s2s_pipeline._build_pipeline_unit", lambda **_kwargs: unit)
@@ -61,6 +66,22 @@ def test_local_composes_loopback_client_with_same_server_builder(monkeypatch):
     assert client.config.url == f"ws://127.0.0.1:{server.port}/v1/realtime"
     assert client.config.api_key == "local"
     assert client.config.playback_buffer_ms == 240
+    assert client.config.conversation_only is False
+    assert client.config.vad_threshold == 0.8
+    assert client.config.interrupt_response is False
+
+
+@pytest.mark.parametrize("threshold", [-0.1, 1.5, float("nan"), float("inf"), float("-inf")])
+def test_local_rejects_invalid_vad_threshold_before_loading_models(monkeypatch, threshold):
+    args = parse_arguments([f"--local_audio_vad_threshold={threshold}"], command="local")
+
+    def unexpected_model_load(*_args, **_kwargs):
+        pytest.fail("Invalid VAD thresholds must be rejected before loading models")
+
+    monkeypatch.setattr("speech_to_speech.s2s_pipeline.build_pipeline", unexpected_model_load)
+
+    with pytest.raises(ValueError, match="vad_threshold"):
+        build_local_pipeline(args, Event())
 
 
 def test_local_resolves_backend_specific_playback_buffer_defaults(monkeypatch):
@@ -80,6 +101,20 @@ def test_local_resolves_backend_specific_playback_buffer_defaults(monkeypatch):
 
         assert isinstance(client, RealtimeAudioClient)
         assert client.config.playback_buffer_ms == expected_buffer_ms
+
+
+def test_local_phonon_offers_loaded_voices_and_preserves_configured_voice(monkeypatch):
+    from speech_to_speech.TTS.phonon_tts_handler import PhononTTSHandler
+
+    handler = PhononTTSHandler.__new__(PhononTTSHandler)
+    handler.voices = ["Maeve", "Zoey", "default"]
+    handler.voice = "Zoey"
+    unit = SimpleNamespace(handlers=[handler])
+    monkeypatch.setattr("speech_to_speech.s2s_pipeline._build_pipeline_unit", lambda **_kwargs: unit)
+    args = parse_arguments(["--tts", "phonon"], command="local")
+    manager = build_local_pipeline(args, Event())
+    assert manager.handlers[-1].config.voice == "Zoey"
+    assert manager.handlers[-1].config.voice_choices == ["default", "Maeve", "Zoey"]
 
 
 def test_failed_handler_setup_cleans_and_preserves_original_error():

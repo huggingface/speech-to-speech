@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from queue import Queue
 from threading import Barrier, Event, Thread
 
+import httpx
 import numpy as np
 import pytest
 from openai.types.realtime import (
@@ -169,6 +170,58 @@ def test_http_transcription_operation_parses_plain_text():
     result = operation._parse_response(b" hello world\n", "text/plain; charset=utf-8")
 
     assert result == HttpTranscriptionResult(text="hello world", language="en")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "body", "reason"),
+    [
+        (
+            400,
+            {"error": {"message": "Audio exceeds maximum allowed duration of 600s. private detail"}},
+            "audio exceeds the server duration limit; use shorter transcription windows "
+            "or increase VLLM_MAX_AUDIO_DECODE_DURATION_S on the server",
+        ),
+        (
+            400,
+            {"error": {"message": "Maximum file size exceeded", "param": "audio_filesize_mb"}},
+            "audio exceeds the server file size limit; use shorter transcription windows "
+            "or increase the server upload limit",
+        ),
+        (
+            413,
+            {"detail": "private proxy path and credential"},
+            "request exceeds the server upload limit; use shorter transcription windows "
+            "or increase the server upload limit",
+        ),
+        (400, {"error": {"message": "private audio, bearer credential, and server path"}}, None),
+        (500, {"error": {"message": "Audio exceeds maximum allowed duration of 600s"}}, None),
+        (400, {"error": "private credential"}, None),
+        (400, ["private credential"], None),
+    ],
+)
+async def test_backend_rejections_surface_only_known_sanitized_reasons(monkeypatch, status, body, reason):
+    def reject(request):
+        return httpx.Response(status, json=body)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(reject))
+    monkeypatch.setattr(stt_module.httpx, "AsyncClient", lambda **kwargs: client)
+    operation = HttpTranscriptionOperation(
+        endpoint_url="https://example.test/v1/audio/transcriptions",
+        api_key="private credential",
+        model="test-model",
+        wav_bytes=b"RIFF-test-wave",
+        language=None,
+        response_format="json",
+        timeout_s=2,
+    )
+    expected = f"transcription server returned HTTP {status}"
+    if reason:
+        expected += f": {reason}"
+    with pytest.raises(TranscriptionRequestError) as error:
+        await operation._request_async()
+    assert str(error.value) == expected
+    assert client.is_closed
 
 
 def test_openai_stt_encodes_mono_pcm16_16khz_wav():

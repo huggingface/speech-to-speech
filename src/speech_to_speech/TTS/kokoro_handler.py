@@ -17,10 +17,10 @@ from time import perf_counter
 from typing import Any, Iterator, Optional
 
 import numpy as np
-from rich.console import Console
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -29,7 +29,6 @@ from speech_to_speech.utils.mlx_lock import MLXLockContext
 from speech_to_speech.utils.utils import resolve_device
 
 logger = logging.getLogger(__name__)
-console = Console()
 
 # Language code mapping from Whisper/langdetect language codes to Kokoro lang codes
 WHISPER_LANGUAGE_TO_KOKORO_LANG = {
@@ -169,11 +168,11 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
             self._preload_multilingual_voices()
         except ImportError as e:
             message = str(e)
-            if "misaki" in message or "espeakng_loader" in message:
+            if any(dep in message for dep in ("misaki", "spacy", "phonemizer", "espeakng_loader", "num2words")):
                 raise ImportError(
                     "Kokoro TTS on Apple Silicon requires additional mlx-audio TTS dependencies. "
                     f"Missing dependency: {message}. "
-                    "Install with: pip install misaki espeakng-loader"
+                    'Install with: pip install "speech-to-speech[kokoro]" (Python 3.11 or 3.12)'
                 ) from e
             raise ImportError(
                 "mlx-audio is required for Kokoro TTS on Apple Silicon. Install with: pip install mlx-audio"

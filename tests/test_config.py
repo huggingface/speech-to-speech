@@ -3,6 +3,8 @@ import math
 import subprocess
 import sys
 from dataclasses import fields
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -53,6 +55,15 @@ def test_load_resolve_selection_defaults_and_independence(document):
     assert document.data == original
 
 
+def test_configured_client_accepts_voice_choices(document):
+    from speech_to_speech.configured_runtime import build_configured_client
+
+    document.data["runtime"] = {"client": {"voice": "Zoey", "voice_choices": ["Zoey", "Maeve"]}}
+    validate_config(document)
+    client = build_configured_client(resolve_config(document, include_client=True))
+    assert client.voice == "Zoey" and client.voice_choices == ["Zoey", "Maeve"]
+
+
 @pytest.mark.parametrize("names", [[], "primary", ["primary", "primary"], ["unknown"]])
 def test_invalid_selection(document, names):
     with pytest.raises(ConfigurationError):
@@ -78,6 +89,7 @@ def test_invalid_selection(document, names):
         lambda d: d["pipelines"]["primary"].update(num_pipelines=True),
         lambda d: d["pipelines"]["primary"].update(options={"log_level": "info"}),
         lambda d: d.update(runtime={"client": {"tool_executor": "foo"}}),
+        lambda d: d.update(runtime={"client": {"vad_threshold": 1.5}}),
     ],
 )
 def test_invalid_schema(document, change):
@@ -391,12 +403,12 @@ def test_duplicate_diagnostic_and_huge_numeric_type(tmp_path, document):
         validate_config(document)
 
 
-def test_schema_references_paths_and_provider_error_redaction(document, monkeypatch):
+def test_schema_references_paths_and_provider_error_redaction(document, monkeypatch, tmp_path):
     document.data["blocks"]["vad"]["settings"] = {"smart_turn_model_path": "~/model.onnx"}
-    monkeypatch.setenv("HOME", "/tmp/config-home")
-    assert (
-        resolve_config(document).pipelines["primary"].stages["vad"].settings["smart_turn_model_path"]
-        == "/tmp/config-home/model.onnx"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # what Windows reads instead of HOME
+    assert resolve_config(document).pipelines["primary"].stages["vad"].settings["smart_turn_model_path"] == str(
+        tmp_path / "model.onnx"
     )
     document.data["blocks"]["stt"]["backend"] = "mlx-audio-whisper"
     document.data["blocks"]["stt"]["settings"] = {"mlx_audio_whisper_gen_kwargs": {"SECRET_MARKER": object()}}
@@ -426,7 +438,8 @@ def test_config_path_home_expansion_is_safe():
 
 def test_parser_size_and_depth_boundaries(tmp_path):
     path = tmp_path / "config.yml"
-    path.write_text(BASE + "#" * (1024 * 1024 - len(BASE.encode())))
+    # Write bytes so Windows doesn't turn newlines into CRLF and push the file past 1 MiB.
+    path.write_bytes((BASE + "#" * (1024 * 1024 - len(BASE.encode()))).encode())
     validate_config(load_config(path))
     document = write(tmp_path, "x: " + "[" * 31 + "0" + "]" * 31)
     assert "x" in document.data
@@ -465,8 +478,13 @@ def test_explicit_scope_inventory():
         "output_device",
         "instructions",
         "voice",
+        "voice_choices",
         "print_json",
+        "verbose",
         "block_mic_during_playback",
+        "vad_threshold",
+        "interrupt_response",
+        "echo_cancellation",
         "log_transcripts",
         "connection_retry_timeout_s",
         "tools",
@@ -479,7 +497,7 @@ def test_client_only_skips_server_and_pipeline_environment(document):
     document.data["runtime"] = {
         "server": {"port": {"env": "MISSING_PORT"}},
         "log_transcripts": {"env": "LOG_TRANSCRIPTS"},
-        "client": {"api_key": "", "model": "client-model", "playback_buffer_ms": 0},
+        "client": {"api_key": "", "model": "client-model", "playback_buffer_ms": 0, "echo_cancellation": True},
     }
     document.data["blocks"]["llm"]["settings"] = {"responses_api_api_key": {"env": "MISSING_KEY"}}
     document.data["pipelines"]["primary"]["num_pipelines"] = {"env": "MISSING_COUNT"}
@@ -491,6 +509,7 @@ def test_client_only_skips_server_and_pipeline_environment(document):
     assert result.client["api_key"] == ""
     assert result.client["model"] == "client-model"
     assert result.client["playback_buffer_ms"] == 0
+    assert result.client["echo_cancellation"] is True
     assert result.sources[("runtime", "client", "api_key")] == "file"
     assert not any(path[0] in {"blocks", "pipelines"} for path in result.sources)
     assert document.data == original
@@ -542,3 +561,17 @@ def test_inherited_viseme_options_defaults_sources_and_inactive_environment(docu
         assert result.sources[("pipelines", "primary", "options", field.name)] == "environment"
     with pytest.raises(ConfigurationError):
         resolve_config(document, names=["secondary"], environ={})
+
+
+@pytest.mark.parametrize(("os_name", "rejected"), [("nt", True), ("posix", False)])
+def test_tilde_name_is_rejected_only_on_windows(monkeypatch, os_name, rejected):
+    from speech_to_speech import config
+
+    expanded = Path("/home/someone/config.yaml")
+    monkeypatch.setattr(config, "os", SimpleNamespace(name=os_name))
+    monkeypatch.setattr(config.Path, "expanduser", lambda self: expanded)
+    if rejected:
+        with pytest.raises(RuntimeError, match="Unsupported home directory form"):
+            config._expand_home(Path("~someone/config.yaml"))
+    else:
+        assert config._expand_home(Path("~someone/config.yaml")) == expanded

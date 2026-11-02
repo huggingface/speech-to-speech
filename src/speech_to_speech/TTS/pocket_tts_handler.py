@@ -7,10 +7,10 @@ from time import perf_counter
 from typing import Any, Callable, Iterator, cast
 
 import numpy as np
-from rich.console import Console
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
@@ -22,7 +22,6 @@ from speech_to_speech.TTS.pocket_tts_farsi import PersianPhonemizer
 from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
 
 logger = logging.getLogger(__name__)
-console = Console()
 
 
 class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):

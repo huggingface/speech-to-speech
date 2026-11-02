@@ -7,8 +7,8 @@ from typing import Any, Iterator, Optional
 import numpy as np
 import torch
 from lightning_whisper_mlx import LightningWhisperMLX
-from rich.console import Console
 
+from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
@@ -16,7 +16,6 @@ from speech_to_speech.utils.mlx_lock import MLXLockContext
 
 logger = logging.getLogger(__name__)
 
-console = Console()
 
 SUPPORTED_LANGUAGES = [
     "en",

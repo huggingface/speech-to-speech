@@ -19,7 +19,7 @@ import asyncio
 import base64
 import json
 import time
-from queue import Empty, Queue
+from queue import Empty
 from threading import Event as ThreadingEvent
 from unittest.mock import AsyncMock, Mock
 
@@ -41,8 +41,7 @@ from aiortc.rtp import RtcpPacket, RtcpRrPacket, RtcpSrPacket, RtpPacket, is_rtc
 from starlette.testclient import TestClient  # noqa: E402
 
 import speech_to_speech.api.openai_realtime.websocket_router as router_module  # noqa: E402
-from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit  # noqa: E402
-from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService  # noqa: E402
+from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES  # noqa: E402
 from speech_to_speech.api.openai_realtime.transports import SessionTransport  # noqa: E402
 from speech_to_speech.api.openai_realtime.webrtc_session import (  # noqa: E402
     AUDIO_PTIME,
@@ -52,7 +51,6 @@ from speech_to_speech.api.openai_realtime.webrtc_session import (  # noqa: E402
     PipelineAudioTrack,
     WebRTCSession,
 )
-from speech_to_speech.pipeline.cancel_scope import CancelScope  # noqa: E402
 from speech_to_speech.pipeline.events import (  # noqa: E402
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
@@ -66,6 +64,7 @@ from speech_to_speech.pipeline.messages import (  # noqa: E402
     AssistantToolCallPart,
     AudioOutput,
 )
+from tests.openai_realtime.conftest import make_pipeline_unit  # noqa: E402
 
 from .test_openai_client import _ServerEnv  # noqa: E402
 
@@ -79,23 +78,8 @@ RECV_TIMEOUT_S = 1.0
 # ---------------------------------------------------------------------------
 
 
-def _make_unit() -> PipelineUnit:
-    text_prompt_queue: Queue = Queue()
-    should_listen = ThreadingEvent()
-    should_listen.set()
-    service = RealtimeService(text_prompt_queue=text_prompt_queue, should_listen=should_listen)
-    return PipelineUnit(
-        index=0,
-        service=service,
-        cancel_scope=CancelScope(),
-        should_listen=should_listen,
-        response_playing=ThreadingEvent(),
-        input_queue=Queue(),
-        output_queue=Queue(),
-        text_output_queue=Queue(),
-        text_prompt_queue=text_prompt_queue,
-        handlers=[],
-    )
+def _make_unit():
+    return make_pipeline_unit()
 
 
 class _FakeTransport(SessionTransport):
@@ -761,7 +745,9 @@ class TestBargeInAfterResponseDone:
 
 
 @pytest.fixture
-def server_env():
+def server_env(monkeypatch):
+    # Loopback peers need host candidates only, without public STUN/TURN lookups.
+    monkeypatch.setenv("SPEECH_TO_SPEECH_ICE_SERVERS", "[]")
     env = _ServerEnv()
     env.start()
     yield env
@@ -800,7 +786,7 @@ class _DataChannelInbox:
 
 class TestWebRTCLoopback:
     async def test_cancelled_close_keeps_teardown_running(self, monkeypatch):
-        server_pc = RTCPeerConnection()
+        server_pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
         teardown_started = asyncio.Event()
         release_teardown = asyncio.Event()
         closed_calls = []
@@ -851,8 +837,8 @@ class TestWebRTCLoopback:
             await server_pc.close()
 
     async def test_close_awaits_pending_ice_checks(self, monkeypatch):
-        client_pc = RTCPeerConnection()
-        server_pc = RTCPeerConnection()
+        client_pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+        server_pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
         first_close = None
         second_close = None
         release_sweep = asyncio.Event()
@@ -1009,7 +995,7 @@ class TestWebRTCLoopback:
             await asyncio.gather(*consumers, return_exceptions=True)
 
     async def test_handshake_events_and_multi_output_audio_roundtrip(self, server_env):
-        pc = RTCPeerConnection()
+        pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
         try:
             dc = pc.createDataChannel("oai-events")
             inbox = _DataChannelInbox(dc)
@@ -1177,7 +1163,7 @@ class TestWebRTCLoopback:
         assert resp.status_code == 415
 
     async def test_rejects_when_pool_full(self, server_env):
-        pc = RTCPeerConnection()
+        pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
         try:
             pc.createDataChannel("oai-events")
             pc.addTrack(AudioStreamTrack())
@@ -1207,7 +1193,7 @@ class TestWebRTCLoopback:
     async def test_delete_location_hangs_up(self, server_env):
         """DELETE on the Location URL advertised by the 201 releases the unit;
         an unknown call id answers 404."""
-        pc = RTCPeerConnection()
+        pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
         try:
             pc.createDataChannel("oai-events")
             pc.addTrack(AudioStreamTrack())
@@ -1259,7 +1245,7 @@ class TestWebRTCLoopback:
         # eagerly at load), so that's the name to patch.
         monkeypatch.setattr(router_module, "rtc_configuration_from_env", _boom)
 
-        pc = RTCPeerConnection()
+        pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
         try:
             pc.createDataChannel("oai-events")
             pc.addTrack(AudioStreamTrack())

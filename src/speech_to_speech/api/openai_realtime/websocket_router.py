@@ -71,6 +71,14 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 MAX_AUDIO_BATCH_BYTES = 6400
+# Upper bound on how long the event-driven send loop idles between output
+# and shutdown. Queue puts wake it sooner; the timeout is only a lost-wakeup
+# safety net (#692).
+SEND_LOOP_WAIT_TIMEOUT_S = 1.0
+# Held output and input terminals wait on state that changes without a queue
+# write (response announcement, speculative reopen grace), so re-check them at
+# the old poll cadence instead of the idle safety net (#692).
+SEND_LOOP_HOLD_RETRY_S = 0.01
 # How long the release path waits for SESSION_END to propagate through the
 # handler chain back to output_queue before warning that the unit is stuck.
 # Tests monkeypatch this to a small value since their fixtures usually skip
@@ -213,6 +221,10 @@ def _flush_queue(
             for item in reversed(preserved):
                 q.queue.appendleft(item)
             q.not_empty.notify(len(preserved))
+        # Re-insert bypasses NotifyingQueue.put; wake the send loop explicitly.
+        notify = getattr(getattr(q, "_signal", None), "notify_threadsafe", None)
+        if notify is not None:
+            notify()
 
 
 def _clean_unit(
@@ -507,6 +519,66 @@ async def _dispatch_client_event(
         unit.response_playing.clear()
 
 
+def _send_loop_wait_timeout(unit: PipelineUnit) -> float:
+    """Choose how long the send loop may idle before re-checking local state.
+
+    Truly idle units (including unclaimed ones) use the long safety-net
+    timeout. Held pending output and input terminals still depend on timed
+    gates that do not write queues, so they keep the historical 10 ms retry.
+    """
+    session = unit.session
+    if session is None:
+        return SEND_LOOP_WAIT_TIMEOUT_S
+    if session.pending_output_item is not None or session.pending_text_output_items:
+        return SEND_LOOP_HOLD_RETRY_S
+    session_id = session.session_id
+    if not session_id:
+        return SEND_LOOP_WAIT_TIMEOUT_S
+    try:
+        pending_terminals = unit.service._state(session_id).pending_input_terminals
+    except KeyError:
+        return SEND_LOOP_WAIT_TIMEOUT_S
+    if pending_terminals:
+        return SEND_LOOP_HOLD_RETRY_S
+    return SEND_LOOP_WAIT_TIMEOUT_S
+
+
+def _pipeline_output_ready(unit: PipelineUnit) -> bool:
+    """Check for consumable work, respecting the serial output hold barrier."""
+    if not unit.text_output_queue.empty():
+        return True
+    session = unit.session
+    if session is not None:
+        session_id = session.session_id
+        if any(not _output_is_held(unit, session_id, item) for item in session.pending_text_output_items):
+            return True
+        if session.pending_output_item is not None:
+            # Later output must not overtake a held item. Text events can still
+            # run above, including speech that cancels this response.
+            return not _output_is_held(unit, session_id, session.pending_output_item)
+    return not unit.output_queue.empty()
+
+
+async def _wait_for_pipeline_output(unit: PipelineUnit) -> None:
+    """Idle the send loop until a producer signals work or the timeout expires.
+
+    Replaces fixed 10 ms polling (#692): puts on either output queue fire the
+    unit's signal, held output re-checks after the hold retry, and the idle
+    timeout bounds the delay of any missed signal. Shutdown cancels this wait
+    via the send task.
+    """
+    if _pipeline_output_ready(unit):
+        # Notifications coalesce; drain existing work before waiting for a new
+        # one. Yield so a backlog cannot starve client cancellation or shutdown.
+        await asyncio.sleep(0)
+        return
+    try:
+        async with asyncio.timeout(_send_loop_wait_timeout(unit)):
+            await unit.output_signal.wait()
+    except TimeoutError:
+        pass
+
+
 def create_app(
     pool: list[PipelineUnit],
     stop_event: ThreadingEvent,
@@ -514,8 +586,8 @@ def create_app(
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        # One send loop per pipeline unit; each polls its own queues and forwards
-        # to the websocket currently attached via unit.session.
+        # One send loop per pipeline unit; notifications wake it to forward
+        # queued output to the transport currently attached via unit.session.
         send_tasks = [asyncio.create_task(_send_loop_for(unit)) for unit in pool]
         yield
         for task in send_tasks:
@@ -817,15 +889,19 @@ def create_app(
         return Response(content="Unknown call", status_code=404, media_type="text/plain")
 
     async def _send_loop_for(unit: PipelineUnit) -> None:
-        """Per-pipeline send loop. Polls this unit's output queues and forwards
-        to the transport currently attached via unit.session.
+        """Per-pipeline send loop. Waits on output signals and forwards queued
+        items to the transport currently attached via unit.session.
 
         Per-session scratch (pending_output_item) lives on SessionState, so it
         disappears together with the transport when the session is released —
         no stale sentinel can leak into the next claim.
         """
         pipeline_log_ctx.set(unit.index)
+        # Bind the wakeup signal to this loop, then clear any stale signal
+        # before draining so an item arriving during the drain re-sets it.
+        unit.output_signal.bind_loop(asyncio.get_running_loop())
         while not stop_event.is_set():
+            unit.output_signal.clear()
             try:
                 # Snapshot the session once per iteration; if the route releases the
                 # unit mid-iteration, we continue against the prior snapshot which is
@@ -953,7 +1029,9 @@ def create_app(
                         # response is publicly announced and its turn has settled.
                         unit.service.history.hold(session_id, audio_chunk)
                         session.pending_output_item = audio_chunk
-                        await asyncio.sleep(0.01)
+                        # Re-check after the hold retry (or sooner on new output);
+                        # a bare continue would busy-spin on the same item (#692).
+                        await _wait_for_pipeline_output(unit)
                         continue
 
                     if isinstance(audio_chunk, TokenUsageEvent):
@@ -975,7 +1053,7 @@ def create_app(
                             except TurnOutputHeld:
                                 # Resumed speech started after the hold check.
                                 session.pending_output_item = audio_chunk
-                                await asyncio.sleep(0.01)
+                                await _wait_for_pipeline_output(unit)
                                 continue
                             await transport.send_events(events)
                         continue
@@ -1139,7 +1217,7 @@ def create_app(
                 except Empty:
                     pass
 
-                await asyncio.sleep(0.01)
+                await _wait_for_pipeline_output(unit)
 
             except asyncio.CancelledError:
                 break

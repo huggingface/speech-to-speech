@@ -18,7 +18,7 @@
  */
 
 import { S2sRealtimeClient, normalizePlaybackBufferMs } from "./s2s-realtime-client.js?v=audio-24k-v2";
-import { $, truncateError, DEBUG } from "./ui/dom.js";
+import { $, truncateError, errorMessage, DEBUG } from "./ui/dom.js";
 import { ChatView } from "./ui/chat.js";
 import { Account } from "./ui/account.js";
 
@@ -35,6 +35,7 @@ const STORAGE_KEYS = {
   searchKey: "s2s.ws.searchKey",
   noiseGate: "s2s.ws.noiseGate",
   playbackBufferMs: "s2s.ws.playbackBufferMs",
+  localVad: "s2s.audio.localVad",
   // "ws" | "webrtc". Not under the historical "s2s.ws." prefix — it selects
   // between the transports rather than configuring the WS one.
   transport: "s2s.transport",
@@ -114,6 +115,7 @@ function loadSettings() {
     instructions: localStorage.getItem(STORAGE_KEYS.instructions) || DEFAULT_INSTRUCTIONS,
     noiseGate: loadGateThreshold(),
     playbackBufferMs: normalizePlaybackBufferMs(localStorage.getItem(STORAGE_KEYS.playbackBufferMs)),
+    localVad: localStorage.getItem(STORAGE_KEYS.localVad) !== "off",
     // Default WebSocket: the proven path stays the first-run experience.
     transport: localStorage.getItem(STORAGE_KEYS.transport) === "webrtc" ? "webrtc" : "ws",
     audioInputId: localStorage.getItem(STORAGE_KEYS.audioInputId) || "",
@@ -141,6 +143,7 @@ function saveSettings(s) {
   localStorage.setItem(STORAGE_KEYS.instructions, s.instructions);
   localStorage.setItem(STORAGE_KEYS.noiseGate, String(s.noiseGate));
   localStorage.setItem(STORAGE_KEYS.playbackBufferMs, String(s.playbackBufferMs));
+  localStorage.setItem(STORAGE_KEYS.localVad, s.localVad ? "on" : "off");
   localStorage.setItem(STORAGE_KEYS.transport, s.transport);
   localStorage.setItem(STORAGE_KEYS.audioInputId, s.audioInputId || "");
   localStorage.setItem(STORAGE_KEYS.audioOutputId, s.audioOutputId || "");
@@ -268,6 +271,8 @@ const gateField = $("#gate-field");
 const playbackBufferField = $("#playback-buffer-field");
 /** @type {HTMLInputElement} */
 const inputPlaybackBuffer = $("#playback-buffer-ms");
+/** @type {HTMLSelectElement} */
+const inputLocalVad = $("#local-vad");
 /** @type {HTMLSelectElement} */
 const inputVoice = $("#voice");
 /** @type {HTMLSelectElement} */
@@ -464,6 +469,7 @@ function openSettings() {
   syncConnectionUi();
   inputVoice.value = settings.voice;
   inputPlaybackBuffer.value = String(settings.playbackBufferMs);
+  inputLocalVad.value = settings.localVad ? "on" : "off";
   inputInstructions.value = settings.instructions;
   syncGateUi();
   updateRestartAvailability();
@@ -868,6 +874,8 @@ async function execWebSearch(query) {
   const body = { query };
   // Only send a user key when there's no server key (server prefers its own).
   if (!serverSearchKey && userSearchKey) body.key = userSearchKey;
+  // On the Space, the server key only serves searches from a live session.
+  if (trackedSessionId) body.sessionId = trackedSessionId;
 
   const res = await fetch("api/search", {
     method: "POST",
@@ -997,6 +1005,7 @@ function readSettingsFromForm() {
     instructions: inputInstructions.value.trim() || DEFAULT_INSTRUCTIONS,
     noiseGate: readGateThreshold(),
     playbackBufferMs: normalizePlaybackBufferMs(inputPlaybackBuffer.value),
+    localVad: inputLocalVad.value !== "off",
     transport: /** @type {"ws" | "webrtc"} */ (
       transportSelectable()
         ? (inputTransport.value === "webrtc" ? "webrtc" : "ws")
@@ -1415,6 +1424,7 @@ async function doStart(audioContext = null) {
   // a still-pending grant just means the snapshot tool isn't ready yet.
 
   const common = {
+    localVad: settings.localVad,
     voice: settings.voice,
     instructions: settings.instructions,
     startupGreeting,
@@ -1461,6 +1471,9 @@ async function doStart(audioContext = null) {
     if (info?.sessionId) {
       trackedSessionId = info.sessionId;
       trackedTier = info.tier || "anon";
+      // Heartbeat while the user decides to join, or the server reaps the
+      // granted session as abandoned.
+      if (info.heartbeatSec) startHeartbeat(info.heartbeatSec, !!info.limited);
     }
     startJoinCountdown(expiresSec);
   });
@@ -1499,7 +1512,7 @@ async function doStart(audioContext = null) {
     // Non-fatal: the backend reported an error mid-session. Log it, keep the
     // socket and the conversation alive (the model can recover on its own).
     const detail = /** @type {CustomEvent<{ error: unknown }>} */ (e).detail;
-    const msg = detail.error instanceof Error ? detail.error.message : String(detail.error);
+    const msg = errorMessage(detail.error);
     console.warn("[main] server error (non-fatal):", msg);
   });
   c.addEventListener("session", (e) => {
@@ -1508,12 +1521,13 @@ async function doStart(audioContext = null) {
     // A slot was granted — we're out of the queue; drop the ticket reference so
     // teardown doesn't try to leave a line we already left.
     queuedTicketId = "";
-    // A metered tier (anon / free): heartbeat so the server can extend the
-    // reservation and tell us when the daily budget runs out. PRO isn't limited.
-    if (info.limited && info.sessionId) {
+    // Heartbeat every granted session: it shows the server the conversation is
+    // live (web search requires that), and for a metered tier (anon / free) it
+    // extends the reservation and tells us when the daily budget runs out.
+    if (info.sessionId && info.heartbeatSec) {
       trackedSessionId = info.sessionId;
       trackedTier = info.tier || "anon";
-      startHeartbeat(info.heartbeatSec || 5);
+      startHeartbeat(info.heartbeatSec, !!info.limited);
     }
   });
   c.addEventListener("input-level", (e) => {
@@ -1534,10 +1548,11 @@ async function doStart(audioContext = null) {
 
 // ── Conversation-time heartbeat ─────────────────────────────────────────────
 
-/** Ping the server every `sec` seconds so it can meter the live session; when
- *  it reports the daily budget is spent, cut the call and show the limit modal.
- *  @param {number} sec */
-function startHeartbeat(sec) {
+/** Ping the server every `sec` seconds so it knows the session is live and can
+ *  meter it; when it reports a metered session's daily budget is spent, cut the
+ *  call and show the limit modal.
+ *  @param {number} sec @param {boolean} limited */
+function startHeartbeat(sec, limited) {
   stopHeartbeat();
   heartbeatTimer = window.setInterval(async () => {
     if (!trackedSessionId) return;
@@ -1549,7 +1564,7 @@ function startHeartbeat(sec) {
         keepalive: true,
       });
       const json = await res.json().catch(() => ({}));
-      if (json.expired) await onLimitReached();
+      if (json.expired && limited) await onLimitReached();
     } catch (err) {
       // A transient network blip shouldn't kill the call; the next tick retries.
       if (DEBUG) console.debug("[ui] heartbeat failed:", err);
@@ -1674,7 +1689,7 @@ async function teardown() {
 /** @param {unknown} err */
 async function onFatalError(err) {
   console.error("[main] fatal:", err);
-  const message = err instanceof Error ? err.message : String(err);
+  const message = errorMessage(err);
   try {
     await teardown();
   } catch (teardownError) {

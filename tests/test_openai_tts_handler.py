@@ -13,6 +13,7 @@ import pytest
 from openai.types.realtime import RealtimeSessionCreateRequest, ResponseCreateEvent, SessionUpdateEvent
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from scipy.io import wavfile
+from scipy.signal import resample_poly
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.api.openai_realtime.service import RealtimeService
@@ -32,6 +33,7 @@ from speech_to_speech.pipeline.messages import (
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS import openai_compatible_handler as tts_module
+from speech_to_speech.TTS.drama3_handler import Drama3TTSHandler
 from speech_to_speech.TTS.openai_compatible_handler import (
     HttpSpeechOperation,
     OpenAICompatibleTTSHandler,
@@ -96,18 +98,19 @@ def _reset_fake_speech_operation() -> None:
 def _openai_tts_handler(
     monkeypatch,
     *,
+    backend: str = "openai",
     cancel_scope: CancelScope | None = None,
     speculative_turns: SpeculativeTurnTracker | None = None,
 ) -> OpenAICompatibleTTSHandler:
     _reset_fake_speech_operation()
     monkeypatch.setattr(tts_module, "HttpSpeechOperation", _FakeSpeechOperation)
-    handler = OpenAICompatibleTTSHandler(
+    handler_class = Drama3TTSHandler if backend == "drama3" else OpenAICompatibleTTSHandler
+    handler = handler_class(
         Event(),
         queue_in=Queue(),
         queue_out=Queue(),
         setup_args=(Event(),),
         setup_kwargs={
-            "sample_rate": 24000,
             "blocksize": 512,
             "cancel_scope": cancel_scope,
             "speculative_turns": speculative_turns,
@@ -510,23 +513,22 @@ def test_pending_response_uses_selection_at_response_create(monkeypatch):
     ]
 
 
-def test_openai_tts_streaming_resampler_is_chunk_invariant_and_anti_aliased():
-    sample_rate = 24000
+@pytest.mark.parametrize(("backend", "sample_rate"), [("openai", 24000), ("openai", 44100), ("drama3", 44100)])
+def test_openai_tts_streaming_resampler_is_chunk_invariant_and_anti_aliased(monkeypatch, backend, sample_rate):
+    handler = _openai_tts_handler(monkeypatch, backend=backend)
     duration_s = 0.2
     timeline = np.arange(int(sample_rate * duration_s)) / sample_rate
     passband = np.round(16000 * np.sin(2 * np.pi * 1000 * timeline)).astype(np.int16)
     stopband = np.round(16000 * np.sin(2 * np.pi * 10000 * timeline)).astype(np.int16)
 
     def resample(samples, chunk_sizes):
-        resampler = tts_module._StreamingFIRResampler(sample_rate, 16000)
-        output = []
+        chunks = []
         offset = 0
         for chunk_size in chunk_sizes:
-            output.append(resampler.push(samples[offset : offset + chunk_size]))
+            chunks.append(samples[offset : offset + chunk_size])
             offset += chunk_size
-        output.append(resampler.push(samples[offset:]))
-        output.append(resampler.push(np.empty(0, dtype=np.int16), final=True))
-        return np.concatenate(output)
+        chunks.append(samples[offset:])
+        return np.concatenate(list(handler._resample_to_blocks(iter(chunks), sample_rate)))
 
     passband_streamed = resample(passband, [1, 301, 17, 1024, 3])
     passband_single = resample(passband, [])
@@ -535,6 +537,29 @@ def test_openai_tts_streaming_resampler_is_chunk_invariant_and_anti_aliased():
     np.testing.assert_array_equal(passband_streamed, passband_single)
     assert np.sqrt(np.mean(passband_streamed.astype(np.float64) ** 2)) > 10000
     assert np.sqrt(np.mean(stopband_streamed.astype(np.float64) ** 2)) < 500
+
+
+@pytest.mark.parametrize("final_with_input", [False, True])
+def test_openai_tts_44100_resampler_matches_whole_signal(final_with_input):
+    samples = np.random.default_rng(44100).integers(-32768, 32768, size=4411).astype(np.float64)
+    # Full-scale plateaus also exercise saturation after filtering.
+    samples[1500:1700] = 32767
+    samples[1700:1900] = -32768
+    resampler = tts_module._StreamingFIRResampler(44100, 16000)
+    chunks = np.array_split(samples, [1, 1477, 2953])
+    parts = [resampler.push(chunk) for chunk in chunks[:-1]]
+    parts.append(resampler.push(chunks[-1], final=final_with_input))
+    # Pin per-push availability as well as the complete signal's numerical result.
+    assert [part.size for part in parts] == [0, 526, 536, 539 if final_with_input else 529]
+    if not final_with_input:
+        assert resampler.push(np.empty(0)).size == 0
+        tail = resampler.push(np.empty(0), final=True)
+        assert tail.size == 10
+        parts.append(tail)
+    output = np.concatenate(parts)
+    reference = np.clip(np.round(resample_poly(samples, 16000, 44100)), -32768, 32767).astype(np.int16)
+    assert output.dtype == np.int16
+    np.testing.assert_allclose(output.astype(np.int32), reference.astype(np.int32), rtol=0, atol=1)
 
 
 def test_openai_tts_vllm_stream_extension_is_opt_in(monkeypatch):
@@ -1025,10 +1050,12 @@ def test_openai_tts_reopened_during_startup_suppresses_old_revision(monkeypatch)
     assert _FakeSpeechOperation.instances[0].cancelled is True
 
 
-def test_openai_tts_cancellation_stops_publication_and_closes_operation(monkeypatch):
+@pytest.mark.parametrize(("backend", "sample_rate"), [("openai", 24000), ("openai", 44100), ("drama3", 44100)])
+def test_openai_tts_cancellation_stops_publication_and_closes_operation(monkeypatch, backend, sample_rate):
     cancel_scope = CancelScope()
-    handler = _openai_tts_handler(monkeypatch, cancel_scope=cancel_scope)
+    handler = _openai_tts_handler(monkeypatch, backend=backend, cancel_scope=cancel_scope)
 
+    handler.sample_rate = sample_rate
     generation = handler.process(TTSInput(text="Hello", cancel_generation=cancel_scope.generation))
     first = next(generation)
     cancel_scope.cancel()
@@ -1038,8 +1065,10 @@ def test_openai_tts_cancellation_stops_publication_and_closes_operation(monkeypa
     assert _FakeSpeechOperation.instances[0].cancelled is True
 
 
-def test_openai_tts_session_teardown_stops_publication_and_closes_operation(monkeypatch):
-    handler = _openai_tts_handler(monkeypatch)
+@pytest.mark.parametrize(("backend", "sample_rate"), [("openai", 24000), ("openai", 44100), ("drama3", 44100)])
+def test_openai_tts_session_teardown_stops_publication_and_closes_operation(monkeypatch, backend, sample_rate):
+    handler = _openai_tts_handler(monkeypatch, backend=backend)
+    handler.sample_rate = sample_rate
     generation = handler.process(TTSInput(text="Hello"))
     first = next(generation)
     operation = _FakeSpeechOperation.instances[0]
