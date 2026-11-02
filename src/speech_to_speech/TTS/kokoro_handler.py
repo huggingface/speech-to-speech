@@ -291,12 +291,7 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         else:
             yield from self._process_kokoro(text, language_code, pinned_voice=voice, tts_input=tts_input)
 
-
-    # Realtime clients validate ``audio.output.voice`` against OpenAI's own
-    # allowlist, so they can only ever send names like "alloy". Kokoro ships
-    # af_alloy / af_nova / ... Map the ones that have a clear counterpart and
-    # fall back to the configured voice for anything else, rather than letting
-    # a 404 on voices/<name>.pt abort synthesis and emit no audio at all.
+    # Translate Realtime voice names before asking the backend to load them.
     _OPENAI_VOICE_ALIASES = {
         "alloy": "af_alloy",
         "nova": "af_nova",
@@ -312,23 +307,22 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
     }
 
     def _resolve_requested_voice(self, voice: Optional[str]) -> Optional[str]:
-        """Map a requested voice onto a Kokoro voice id.
+        """Translate aliases, preserving backend voice IDs, blends and paths."""
+        if voice is None:
+            return None
+        return self._OPENAI_VOICE_ALIASES.get(voice, voice)
 
-        Returns ``voice`` unchanged when it already looks like a Kokoro id
-        (``af_heart``, ``bm_fable``, ...), a mapped id for a known OpenAI
-        Realtime voice name, and the currently configured voice otherwise.
-        """
-        if not voice:
-            return voice
-        alias = self._OPENAI_VOICE_ALIASES.get(voice)
-        if alias is not None:
-            return alias
-        if len(voice) > 3 and voice[2] == "_":
-            return voice
-        logger.warning(
-            "Unknown Kokoro voice %r; falling back to %r", voice, self.voice
-        )
-        return self.voice
+    def _load_requested_voice(self, pipeline: Any, voice: str) -> str:
+        """Load a client voice, retrying a failed load with the setup voice."""
+        try:
+            pipeline.load_voice(voice)
+        except Exception as exc:
+            if voice == self._initial_voice:
+                raise
+            logger.warning("Failed to load Kokoro voice %r; falling back to %r: %s", voice, self._initial_voice, exc)
+            pipeline.load_voice(self._initial_voice)
+            return self._initial_voice
+        return voice
 
     def _record_tts_ttfa(self, tts_input: TTSInput | None, started_at_s: float, first_audio_at_s: float) -> None:
         if tts_input is None:
@@ -389,7 +383,10 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 )
                 try:
                     new_pipeline = self.model._get_pipeline(new_lang_code)
-                    new_pipeline.load_voice(new_voice)
+                    if new_voice == pinned_voice:
+                        new_voice = self._load_requested_voice(new_pipeline, new_voice)
+                    else:
+                        new_pipeline.load_voice(new_voice)
                     self.lang_code = new_lang_code
                     self.voice = new_voice
                     self._pipeline = new_pipeline
@@ -482,11 +479,13 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
             self.pipeline = KPipeline(lang_code=new_lang_code, device=self.device)
             self.lang_code = new_lang_code
+        started_at_s = perf_counter()
+        if new_voice == pinned_voice:
+            new_voice = self._load_requested_voice(self.pipeline, new_voice)
         self.voice = new_voice
 
         console.print(f"[green]ASSISTANT: {llm_sentence}")
 
-        started_at_s = perf_counter()
         first_provider = True
         first_yielded = True
 

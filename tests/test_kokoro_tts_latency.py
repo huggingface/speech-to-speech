@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.pipeline.messages import TTSInput
 from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.TTS import kokoro_handler
@@ -83,6 +84,27 @@ def test_kokoro_records_ttfa_at_first_provider_chunk_and_preserves_first_audio(m
 
     assert tracker.tts_ttfa_s == pytest.approx(0.05)
     assert tracker.e2e_s == pytest.approx(1.05)
+
+
+def test_native_requested_voice_loading_counts_toward_ttfa(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(kokoro_handler, "perf_counter", lambda: clock[0])
+
+    def stream():
+        clock[0] = 100.05
+        yield ("Hello", "", np.full(8, 0.1, dtype=np.float32))
+
+    handler = _native_handler(monkeypatch, stream=stream)
+    monkeypatch.setattr(handler.pipeline, "load_voice", lambda voice: clock.__setitem__(0, 100.04), raising=False)
+    store = handler.turn_latency_store = TurnLatencyStore()
+    tracker = store.get_or_create_response("voice-load", turn_id="turn_1")
+    config = RuntimeConfig()
+    config.session.audio.output.voice = "alloy"
+
+    chunks = list(handler.process(TTSInput(text="Hello", runtime_config=config, response_key="voice-load")))
+
+    assert chunks
+    assert tracker.tts_ttfa_s == pytest.approx(0.05)
 
 
 def test_kokoro_mlx_records_ttfa_before_silence_trim(monkeypatch):
