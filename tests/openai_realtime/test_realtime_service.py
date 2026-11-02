@@ -177,7 +177,7 @@ class TestConnectionLifecycle:
         assert evt.session.instructions == "Be concise"
 
     def test_session_language_update_and_auto_reset_are_reported(self, service, conn_id, runtime_config):
-        for requested, expected in (("es", "es"), ("Auto", "auto")):
+        for requested, expected in (("es", "es"), (" EN ", "en"), ("Spanish", "es"), ("Auto", "auto")):
             update = SessionUpdateEvent.model_validate(
                 {
                     "type": "session.update",
