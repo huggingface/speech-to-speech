@@ -4,6 +4,7 @@ import subprocess
 import sys
 from dataclasses import fields
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -550,10 +551,11 @@ def test_inherited_viseme_options_defaults_sources_and_inactive_environment(docu
 def test_tilde_name_is_rejected_only_on_windows(monkeypatch, os_name, rejected):
     from speech_to_speech import config
 
-    monkeypatch.setattr(config.os, "name", os_name)
-    monkeypatch.setattr(config.Path, "expanduser", lambda self: Path("/home/someone/config.yaml"))
+    expanded = Path("/home/someone/config.yaml")
+    monkeypatch.setattr(config, "os", SimpleNamespace(name=os_name))
+    monkeypatch.setattr(config.Path, "expanduser", lambda self: expanded)
     if rejected:
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match="Unsupported home directory form"):
             config._expand_home(Path("~someone/config.yaml"))
     else:
-        assert config._expand_home(Path("~someone/config.yaml")) == Path("/home/someone/config.yaml")
+        assert config._expand_home(Path("~someone/config.yaml")) == expanded
