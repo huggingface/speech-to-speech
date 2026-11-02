@@ -100,7 +100,7 @@ def test_vllm_realtime_final_commit_reaches_response_log(service, conn_id, caplo
 
 
 @pytest.mark.parametrize("make_handler", [make_responses_handler, make_chat_handler])
-@pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("failure", [False, True, "empty_input"])
 def test_remote_llm_records_generation_through_terminal_response(
     service, conn_id, caplog, monkeypatch, make_handler, failure
 ):
@@ -111,11 +111,14 @@ def test_remote_llm_records_generation_through_terminal_response(
     request = service.text_prompt_queue.get_nowait()
     handler = make_handler()
     handler.turn_latency_store = service.turn_latency_store
-    handler._serialize = lambda chat: [{"role": "user", "content": "hello"}]
+    handler._serialize = lambda chat: [] if failure == "empty_input" else [{"role": "user", "content": "hello"}]
     clock = [10.0]
     monkeypatch.setattr(llm_module, "perf_counter", lambda: clock[0])
 
+    calls = []
+
     def provider_request(api_input, optional_kwargs):
+        calls.append(api_input)
         if failure:
             clock[0] = 10.25
             raise RuntimeError("provider failed")
@@ -133,10 +136,17 @@ def test_remote_llm_records_generation_through_terminal_response(
 
     handler._iter_events = provider_events
     outputs = list(handler.process(request))
-    assert any(isinstance(output, EndOfResponse) and bool(output.error) == failure for output in outputs)
+    assert any(isinstance(output, EndOfResponse) and bool(output.error) == bool(failure) for output in outputs)
     line, metadata = _finish(
         service, conn_id, request.response_key, caplog, status="failed" if failure else "completed"
     )
+    assert metadata["llm_rounds"] == (0 if failure == "empty_input" else 1)
+    assert len(calls) == metadata["llm_rounds"]
+    if failure == "empty_input":
+        assert metadata["llm_total_s"] is None
+        assert metadata["llm_s"] is None
+        return
+    assert metadata["llm_total_s"] == pytest.approx(0.25)
     assert "llm_ttft=" not in line
     assert "llm=0.25s" in line
     assert f"status={'failed' if failure else 'completed'}" in line

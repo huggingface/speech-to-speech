@@ -790,9 +790,12 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     # would reject this; fail with a clear message instead of an opaque error.
                     error_message = "Cannot generate a response: no instructions and no input were provided."
                 else:
-                    provider_request_started = True
 
                     def make_request() -> Any:
+                        nonlocal provider_request_started
+                        provider_request_started = True
+                        if tracker is not None:
+                            tracker.start_llm()
                         return (request_fn or self._request)(api_input, optional_kwargs)
 
                     if turn.prefetch_transaction is not None:

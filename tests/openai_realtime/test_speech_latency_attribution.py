@@ -119,6 +119,9 @@ def test_independent_create_after_idle_has_stage_timings_without_speech_e2e(serv
 def test_tool_chain_keeps_delay_only_until_first_audio(service, conn_id, monkeypatch, prefetch, already_spoke):
     clock = [11.0]
     original = speech(service, conn_id)
+    tracker = service.turn_latency_store.get_response(original.response_key)
+    tracker.start_llm()
+    tracker.record_llm(0.7)
     call = RealtimeConversationItemFunctionCall(
         type="function_call", id="fc_lookup", call_id="call_lookup", name="lookup", arguments="{}"
     )
@@ -153,6 +156,9 @@ def test_tool_chain_keeps_delay_only_until_first_audio(service, conn_id, monkeyp
         assert result.type == "response.created"
         service.response.mark_response_created_sent(conn_id, service._state(conn_id).current_response_key)
         followup = service.text_prompt_queue.get_nowait()
+    tracker = service.turn_latency_store.get_response(followup.response_key)
+    tracker.start_llm()
+    tracker.record_llm(0.5)
     clock[0] = 31.0
     audio(service, conn_id, followup, monkeypatch, clock)
     service.dispatch_pipeline_event(
@@ -168,10 +174,15 @@ def test_tool_chain_keeps_delay_only_until_first_audio(service, conn_id, monkeyp
     assert record["e2e_s"] == (pytest.approx(1.25) if already_spoke else None)
     assert followup_record["e2e_s"] == (None if already_spoke else pytest.approx(21.25))
     assert followup_record["source"] == "tool"
+    assert followup_record["llm_total_s"] == pytest.approx(1.2)
+    assert followup_record["llm_rounds"] == 2
     assert followup_record["tts_ttfa_s"] == pytest.approx(0.25)
     again = create(service, conn_id)
     assert again.speech_stopped_at_s is None
-    assert service.turn_latency_store.get_response(again.response_key).source == "client"
+    tracker = service.turn_latency_store.get_response(again.response_key)
+    assert tracker.source == "client"
+    assert tracker.llm_rounds == 0
+    assert tracker.llm_total_s is None
 
 
 @pytest.mark.parametrize("pending", [False, True])
@@ -271,6 +282,9 @@ def test_discarding_prefetch_does_not_abandon_tool_speech_anchor(service, conn_i
 @pytest.mark.parametrize("supplied_text", ["conversation_item", "response_input"])
 def test_rebuilt_tool_prefetch_after_new_text_has_no_speech_e2e(service, conn_id, monkeypatch, supplied_text):
     request = speech(service, conn_id)
+    tracker = service.turn_latency_store.get_response(request.response_key)
+    tracker.start_llm()
+    tracker.record_llm(0.7)
     call = RealtimeConversationItemFunctionCall(
         type="function_call", id="fc_lookup", call_id="call_lookup", name="lookup", arguments="{}"
     )
@@ -319,11 +333,14 @@ def test_rebuilt_tool_prefetch_after_new_text_has_no_speech_e2e(service, conn_id
     audio(service, conn_id, rebuilt, monkeypatch, clock)
     record = finish(service, conn_id, rebuilt)
     assert record["source"] == "client"
+    assert record["llm_rounds"] == 0
+    assert record["llm_total_s"] is None
     assert record["e2e_s"] is None
     assert record["tts_ttfa_s"] == pytest.approx(0.25)
 
 
-def test_typed_tool_chain_exports_stage_measurements_without_speech(service, conn_id, monkeypatch):
+@pytest.mark.parametrize("assistant_tail", [False, True])
+def test_typed_tool_chain_exports_stage_measurements_without_speech(service, conn_id, monkeypatch, assistant_tail):
     service.handle_conversation_item_create(
         conn_id,
         ConversationItemCreateEvent(
@@ -332,6 +349,9 @@ def test_typed_tool_chain_exports_stage_measurements_without_speech(service, con
         ),
     )
     request = create(service, conn_id)
+    tracker = service.turn_latency_store.get_response(request.response_key)
+    tracker.start_llm()
+    tracker.record_llm(0.7)
     call = RealtimeConversationItemFunctionCall(
         type="function_call", id="fc_lookup", call_id="call_lookup", name="lookup", arguments="{}"
     )
@@ -348,20 +368,37 @@ def test_typed_tool_chain_exports_stage_measurements_without_speech(service, con
             item={"type": "function_call_output", "call_id": call.call_id, "output": "result"},
         ),
     )
-    followup = create(service, conn_id)
+    response = None
+    if assistant_tail:
+        response = {
+            "input": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "The lookup finished."}],
+                }
+            ]
+        }
+    followup = create(service, conn_id, response)
     assert followup.turn_id is None and followup.speech_stopped_at_s is None
     tracker = service.turn_latency_store.get_response(followup.response_key)
+    tracker.start_llm()
     tracker.record_llm(0.5)
     audio(service, conn_id, followup, monkeypatch, [1011.0])
     record = finish(service, conn_id, followup)
     assert record["source"] == "tool"
     assert record["e2e_s"] is None
     assert record["llm_s"] == 0.5
+    assert record["llm_total_s"] == pytest.approx(1.2)
+    assert record["llm_rounds"] == 2
     assert record["tts_ttfa_s"] == pytest.approx(0.25)
 
 
 def test_new_text_before_tool_result_supersedes_prefetch_speech_timing(service, conn_id, monkeypatch):
     request = speech(service, conn_id)
+    tracker = service.turn_latency_store.get_response(request.response_key)
+    tracker.start_llm()
+    tracker.record_llm(0.7)
     call = RealtimeConversationItemFunctionCall(
         type="function_call", id="fc_lookup", call_id="call_lookup", name="lookup", arguments="{}"
     )
@@ -405,6 +442,8 @@ def test_new_text_before_tool_result_supersedes_prefetch_speech_timing(service, 
     audio(service, conn_id, rebuilt, monkeypatch, [1011.0])
     record = finish(service, conn_id, rebuilt)
     assert record["source"] == "client"
+    assert record["llm_rounds"] == 0
+    assert record["llm_total_s"] is None
     assert record["e2e_s"] is None
     assert record["tts_ttfa_s"] == pytest.approx(0.25)
 

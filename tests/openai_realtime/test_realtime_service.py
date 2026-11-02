@@ -100,6 +100,42 @@ def _make_audio_append(audio_b64: str) -> InputAudioBufferAppendEvent:
     return InputAudioBufferAppendEvent(type="input_audio_buffer.append", audio=audio_b64)
 
 
+def _seed_tool_latency(service, conn_id, *, origin_active=False):
+    """A measured tool request whose result is ready for a follow-up."""
+    st = service._state(conn_id)
+    call = RealtimeConversationItemFunctionCall(type="function_call", call_id="call_1", name="lookup", arguments="{}")
+    st.runtime_config.chat.add_item(call)
+    st.runtime_config.chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output",
+            call_id="call_1",
+            output="result",
+        )
+    )
+    st.input_turn_by_call_id["call_1"] = ("turn_1", 0, None)
+    st.in_response = True
+    st.current_response_id = "resp_origin"
+    st.current_response_key = "response_origin"
+    st.current_response_turn_id = "turn_1"
+    st.current_response_turn_revision = 0
+    st.pending_function_calls = {0: call}
+    service.bind_response_latency_tracker(conn_id, "response_origin", turn_id="turn_1", turn_revision=0)
+    tracker = service.turn_latency_store.get_response("response_origin")
+    tracker.start_llm()
+    tracker.record_llm(0.7)
+    if not origin_active:
+        service.finish_response(conn_id, response_key="response_origin")
+
+
+def _finish_latency(service, conn_id, request):
+    tracker = service.turn_latency_store.get_response(request.response_key)
+    tracker.start_llm()
+    tracker.record_llm(0.8)
+    events = service.finish_response(conn_id, response_key=request.response_key)
+    done = next(event for event in events if isinstance(event, ResponseDoneEvent))
+    return json.loads(done.response.metadata[TURN_LATENCY_METADATA_KEY])
+
+
 # ===================================================================
 # Connection lifecycle
 # ===================================================================
@@ -1341,6 +1377,7 @@ class TestHandleResponseCreate:
         conn_id,
         text_prompt_queue,
     ):
+        _seed_tool_latency(service, conn_id)
         st = service._state(conn_id)
         transaction = ResponsePrefetchTransaction()
         prefetch = GenerateResponseRequest(
@@ -1371,6 +1408,10 @@ class TestHandleResponseCreate:
         assert replacement.response_key != prefetch.response_key
         assert st.current_response_key == replacement.response_key
 
+        timing = _finish_latency(service, conn_id, replacement)
+        assert timing["llm_total_s"] == 1.5
+        assert timing["llm_rounds"] == 2
+
     @pytest.mark.parametrize("origin_active", [True, False])
     def test_failed_unclaimed_prefetch_is_discarded_before_standard_create(
         self,
@@ -1379,12 +1420,9 @@ class TestHandleResponseCreate:
         text_prompt_queue,
         origin_active,
     ):
+        _seed_tool_latency(service, conn_id, origin_active=origin_active)
         st = service._state(conn_id)
         origin_key = "response_origin"
-        if origin_active:
-            st.in_response = True
-            st.current_response_id = "resp_origin"
-            st.current_response_key = origin_key
         st.generation_done_tool_calls[origin_key] = {"call_1"}
         prefetch = GenerateResponseRequest(
             runtime_config=st.runtime_config,
@@ -1393,6 +1431,11 @@ class TestHandleResponseCreate:
         st.tool_followup_prefetch_request = prefetch
         st.tool_followup_prefetch_origin_response_key = origin_key
         st.mark_response_pending(prefetch.response_key)
+
+        service.bind_response_latency_tracker(conn_id, prefetch.response_key, turn_id="turn_1", turn_revision=0)
+        hidden_tracker = service.turn_latency_store.get_response(prefetch.response_key)
+        hidden_tracker.start_llm()
+        hidden_tracker.record_llm(0.2)
 
         events = service.dispatch_pipeline_event(
             conn_id,
@@ -1417,12 +1460,17 @@ class TestHandleResponseCreate:
         assert isinstance(replacement, GenerateResponseRequest)
         assert replacement.response_key != prefetch.response_key
 
+        timing = _finish_latency(service, conn_id, replacement)
+        assert timing["llm_total_s"] == 1.5
+        assert timing["llm_rounds"] == 2
+
     def test_discarded_prefetch_transaction_forces_immediate_create_fallback(
         self,
         service,
         conn_id,
         text_prompt_queue,
     ):
+        _seed_tool_latency(service, conn_id)
         st = service._state(conn_id)
         transaction = ResponsePrefetchTransaction()
         prefetch = GenerateResponseRequest(
@@ -1443,7 +1491,10 @@ class TestHandleResponseCreate:
         assert replacement.response_key != prefetch.response_key
         assert st.tool_followup_prefetch_request is None
         assert prefetch.response_key in st.closed_response_keys
-        assert prefetch.response_key in st.closed_response_keys
+
+        timing = _finish_latency(service, conn_id, replacement)
+        assert timing["llm_total_s"] == 1.5
+        assert timing["llm_rounds"] == 2
 
     def test_prefetched_followup_preserves_logical_done_for_a_second_tool_round(
         self,
@@ -2214,6 +2265,11 @@ class TestHandleResponseCreate:
         service.response._ensure_response(conn_id, initial_req.response_key)
         service.response._end_response(conn_id)
 
+        _seed_tool_latency(service, conn_id)
+        st = service._state(conn_id)
+        st.generation_done_tool_calls["response_origin"] = {"call_1"}
+        assert service.response.maybe_start_tool_followup_prefetch(conn_id)
+        prefetch = text_prompt_queue.get_nowait()
         result = service.handle_response_create(
             conn_id, ResponseCreateEvent(type="response.create", response={"conversation": "none"})
         )
@@ -2223,6 +2279,14 @@ class TestHandleResponseCreate:
         assert req.turn_id is None
         assert req.turn_revision is None
         assert req.speech_stopped_at_s is None
+        assert prefetch.response_key in st.closed_response_keys
+        assert service.turn_latency_store.get_response(req.response_key) is None
+
+        service.finish_response(conn_id, response_key=req.response_key)
+        service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
+        timing = _finish_latency(service, conn_id, text_prompt_queue.get_nowait())
+        assert timing["llm_total_s"] == 1.5
+        assert timing["llm_rounds"] == 2
 
     def test_response_create_out_of_band_reports_null_conversation_id(self, service, conn_id):
         result = service.handle_response_create(
@@ -2597,6 +2661,7 @@ class TestFinishAudioResponse:
         )
         tracker.record_stt(0.181284123)
         tracker.record_llm_ttft(0.108531234)
+        tracker.start_llm()
         tracker.record_llm(1.241907456)
         tracker.record_tts_ttfa(0.121775789)
         tracker.record_e2e(1.613482987)
@@ -2614,6 +2679,8 @@ class TestFinishAudioResponse:
             "response_key": response_key,
             "stt_s": 0.181284123,
             "llm_s": 1.241907456,
+            "llm_total_s": 1.241907456,
+            "llm_rounds": 1,
             "tts_ttfa_s": 0.121775789,
             "e2e_s": 1.613482987,
             "vad_decision_s": None,
