@@ -197,18 +197,14 @@ class PhononTTSHandler(BaseTTSHandler):
         )
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
-        tracker = self.speculative_turns
         identity = (tts_input.cancel_generation, tts_input.response_key, tts_input.turn_id, tts_input.turn_revision)
         if isinstance(tts_input, EndOfResponse):
             self._failed_responses.discard(identity)
-            if tracker and not tracker.wait_for_gate(tts_input.turn_id, tts_input.turn_revision):
-                if tts_input.response_key is None:
-                    return
-                tts_input.cleanup_only = True
-            yield AUDIO_RESPONSE_DONE
+            if self._gate_end_of_response(tts_input):
+                yield AUDIO_RESPONSE_DONE
             return
 
-        if tracker and not tracker.wait_for_gate(tts_input.turn_id, tts_input.turn_revision, commit=True):
+        if not self._admit_input(tts_input):
             return
         generation = tts_input.cancel_generation
         if generation is None and self.cancel_scope is not None:

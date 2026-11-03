@@ -437,25 +437,13 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         if isinstance(tts_input, EndOfResponse):
-            if self.speculative_turns and not self.speculative_turns.wait_for_gate(
-                tts_input.turn_id,
-                tts_input.turn_revision,
-            ):
-                if tts_input.response_key is None:
-                    return
-                tts_input.cleanup_only = True
-            with self._operation_lock:
-                self._failed_responses.discard(self._response_identity(tts_input))
-            yield AUDIO_RESPONSE_DONE
+            if self._gate_end_of_response(tts_input):
+                with self._operation_lock:
+                    self._failed_responses.discard(self._response_identity(tts_input))
+                yield AUDIO_RESPONSE_DONE
             return
 
-        if self.speculative_turns and not self.speculative_turns.wait_for_gate(
-            tts_input.turn_id,
-            tts_input.turn_revision,
-        ):
-            logger.debug(
-                "Dropping stale remote TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision
-            )
+        if not self._admit_input(tts_input, commit=False):
             return
 
         cancel_generation = tts_input.cancel_generation
