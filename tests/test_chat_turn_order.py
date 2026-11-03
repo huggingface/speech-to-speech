@@ -12,6 +12,7 @@ from queue import Queue
 from threading import Event, Thread
 from typing import Any, Optional
 
+import numpy as np
 import pytest
 from openai.types.realtime import RealtimeSessionCreateRequest
 from openai.types.realtime.realtime_conversation_item_user_message import Content as UserContent
@@ -64,8 +65,26 @@ class _OverlappingSpeechHandler(BaseLanguageModelHandler):
         yield LLMResponseChunk(text="answer A", runtime_config=runtime_config, response=response)
 
 
-def _make_handler() -> _OverlappingSpeechHandler:
-    handler = object.__new__(_OverlappingSpeechHandler)
+class _HeardInputHandler(_OverlappingSpeechHandler):
+    """Local handler that records the user content its model was given."""
+
+    heard: list[list[str]]
+
+    def _generate(
+        self,
+        chat: Chat,
+        language_code: Optional[str],
+        gen: int | None,
+        ctx: StreamContext,
+        runtime_config: RuntimeConfig | None = None,
+        response: RealtimeResponseCreateParams | None = None,
+    ) -> Iterator[LLMResponseChunk]:
+        self.heard = [[part.type for part in item.content] for item in chat.buffer if item.type == "message"]
+        yield LLMResponseChunk(text="answer", runtime_config=runtime_config, response=response)
+
+
+def _make_handler(handler_class: type[BaseLanguageModelHandler] = _OverlappingSpeechHandler) -> Any:
+    handler = object.__new__(handler_class)
     handler.cancel_scope = None
     handler.speculative_turns = None
     handler.enable_lang_prompt = False
@@ -89,6 +108,22 @@ def test_local_response_history_precedes_speech_that_arrived_during_generation()
     list(drive_llm(_make_handler(), request))
 
     assert [part.text for item in chat.buffer for part in item.content if part.text] == ["A", "answer A", "B"]
+
+
+def test_local_direct_audio_input_is_heard_and_committed_before_its_reply():
+    chat = Chat(10)
+    request = GenerateResponseRequest(
+        runtime_config=RuntimeConfig(chat=chat, session=RealtimeSessionCreateRequest(type="realtime")),
+        audio=np.zeros(1600, dtype=np.float32),
+        input_item_id="item_spoken",
+    )
+    handler = _make_handler(_HeardInputHandler)
+
+    list(drive_llm(handler, request))
+
+    assert handler.heard[-1] == ["input_audio"]
+    assert [(item.id, item.role) for item in chat.buffer][0] == ("item_spoken", "user")
+    assert [item.role for item in chat.buffer] == ["user", "assistant"]
 
 
 @pytest.mark.parametrize("outcome", ["superseded", "completed", "cancelled"])

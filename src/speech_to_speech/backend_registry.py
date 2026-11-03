@@ -24,6 +24,7 @@ from speech_to_speech.arguments_classes.language_model_arguments import (
     LanguageModelHandlerArguments,
     MLXLanguageModelHandlerArguments,
 )
+from speech_to_speech.arguments_classes.lfm_audio_arguments import LFMAudioModelHandlerArguments
 from speech_to_speech.arguments_classes.minimax_tts_arguments import MiniMaxTTSHandlerArguments
 from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import (
     MLXAudioWhisperSTTHandlerArguments,
@@ -76,6 +77,8 @@ class BackendCapabilities:
     supports_audio_input: bool = False
     supports_llm_proxy: bool = False
     streams_audio_chunks: bool = False
+    # The LLM speaks its replies itself and pairs with ``--tts none``.
+    generates_speech: bool = False
 
 
 @dataclass(frozen=True)
@@ -550,12 +553,36 @@ LLM_BACKENDS = build_backend_registry(
             config_prefix="responses_api",
             capabilities=BackendCapabilities(supports_audio_input=True, supports_llm_proxy=True),
         ),
+        BackendSpec(
+            "lfm-audio",
+            "llm",
+            LFMAudioModelHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.LLM.lfm_audio_model",
+                "LFMAudioModelHandler",
+                context_kwargs=True,
+            ),
+            config_prefix="llm",
+            required_extra="lfm-audio",
+            capabilities=BackendCapabilities(supports_audio_input=True, generates_speech=True),
+        ),
     ],
 )
 
 TTS_BACKENDS = build_backend_registry(
     "tts",
     [
+        BackendSpec(
+            "none",
+            "tts",
+            EmptyBackendArguments,
+            _simple_handler_factory(
+                "speech_to_speech.TTS.model_speech_handler",
+                "ModelSpeechHandler",
+                setup_should_listen=True,
+                context_kwargs=True,
+            ),
+        ),
         BackendSpec(
             "chatTTS",
             "tts",

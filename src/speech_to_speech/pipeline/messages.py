@@ -159,6 +159,8 @@ class LLMResponseChunk(PipelineMessage):
     language_code: Optional[str] = None
     selected_language: str | None = Field(default=None, exclude=True)
     tools: list[ResponseFunctionToolCall] = Field(default_factory=list)
+    # Speech a speaking model generated with this text, as pipeline-rate PCM16.
+    audio: np.ndarray | None = Field(default=None, exclude=True, repr=False)
     runtime_config: RuntimeConfig | None = None
     response: RealtimeResponseCreateParams | None = None
     turn_id: str | None = None
@@ -224,6 +226,8 @@ class TTSInput(PipelineMessage):
 
     tag: Literal["tts_input"] = "tts_input"
     text: str
+    # Speech the LLM already generated; set only for speaking models.
+    audio: np.ndarray | None = Field(default=None, exclude=True, repr=False)
     language_code: Optional[str] = None
     selected_language: str | None = Field(default=None, exclude=True)
     tts_language_code: str | None = Field(default=None, exclude=True)
