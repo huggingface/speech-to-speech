@@ -9,6 +9,8 @@
  * @property {string} status
  * @property {number|null} stt_s
  * @property {number|null} llm_s
+ * @property {number|null|undefined} [llm_total_s]
+ * @property {number|undefined} [llm_rounds]
  * @property {number|null} tts_ttfa_s
  * @property {number|null} e2e_s
  * @property {number|null|undefined} [vad_decision_s]
@@ -37,10 +39,11 @@ export function readTurnLatency(response) {
       if (data[field] !== null &&
           (typeof data[field] !== "number" || !Number.isFinite(data[field]) || data[field] < 0)) return null;
     }
-    for (const field of ["vad_decision_s", "hold_s", "smart_wait_s"]) {
+    for (const field of ["vad_decision_s", "hold_s", "smart_wait_s", "llm_total_s"]) {
       if (data[field] !== undefined && data[field] !== null &&
           (typeof data[field] !== "number" || !Number.isFinite(data[field]) || data[field] < 0)) return null;
     }
+    if (data.llm_rounds !== undefined && (!Number.isInteger(data.llm_rounds) || data.llm_rounds < 0)) return null;
     if (data.smart_status !== undefined && data.smart_status !== null &&
         !["complete", "incomplete", "failed", "disabled"].includes(data.smart_status)) return null;
     return data;

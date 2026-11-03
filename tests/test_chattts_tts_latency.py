@@ -49,7 +49,7 @@ def _handler(ChatTTSHandler, *, stream: bool, chunks: list[Any]):
 def test_stream_records_ttfa_before_resample_and_e2e_on_first_yield(monkeypatch, chattts_modules):
     chatTTS_handler, ChatTTSHandler = chattts_modules
     clock = [100.0]
-    monkeypatch.setattr(chatTTS_handler, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
 
     def slow_resample(chunk, *, orig_sr, target_sr):
         clock[0] = 100.40
@@ -89,7 +89,7 @@ def test_stream_records_ttfa_before_resample_and_e2e_on_first_yield(monkeypatch,
 def test_stream_preserves_first_audio_across_later_segments(monkeypatch, chattts_modules):
     chatTTS_handler, ChatTTSHandler = chattts_modules
     clock = [50.0]
-    monkeypatch.setattr(chatTTS_handler, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     monkeypatch.setattr(
         chatTTS_handler,
         "librosa",
@@ -152,7 +152,7 @@ def test_stream_preserves_first_audio_across_later_segments(monkeypatch, chattts
 def test_non_stream_records_ttfa_before_resample(monkeypatch, chattts_modules):
     chatTTS_handler, ChatTTSHandler = chattts_modules
     clock = [10.0]
-    monkeypatch.setattr(chatTTS_handler, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
 
     def slow_resample(chunk, *, orig_sr, target_sr):
         clock[0] = 10.30
@@ -189,7 +189,7 @@ def test_non_stream_records_ttfa_before_resample(monkeypatch, chattts_modules):
 def test_empty_provider_chunk_leaves_latency_unset(monkeypatch, chattts_modules):
     chatTTS_handler, ChatTTSHandler = chattts_modules
     clock = [1.0]
-    monkeypatch.setattr(chatTTS_handler, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
 
     handler = _handler(ChatTTSHandler, stream=True, chunks=[np.empty(0, dtype=np.float32)])
     store = handler.turn_latency_store = TurnLatencyStore()

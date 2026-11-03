@@ -60,6 +60,12 @@ def builder(monkeypatch):
 
 
 def test_named_pools_are_independent_and_explicitly_started(config, builder, monkeypatch):
+    config.pipelines["primary"].options.update(
+        stt_supported_languages=[" EN ", "Spanish"],
+        tts_supported_languages=["en"],
+        stt_auto_language_supported=True,
+        tts_auto_language_supported=False,
+    )
     original = copy.deepcopy(config)
     monkeypatch.setattr(signal, "signal", lambda *args: pytest.fail("library installs signals"))
     result = runtime.build_configured_runtime(config, Event())
@@ -69,6 +75,11 @@ def test_named_pools_are_independent_and_explicitly_started(config, builder, mon
     assert builder[0]["stop_event"] is builder[1]["stop_event"]
     assert builder[0]["stop_event"] is not builder[2]["stop_event"]
     assert builder[0]["llm_backend"].config is not builder[1]["llm_backend"].config
+    assert builder[0]["module_kwargs"].stt_supported_languages == ["en", "es"]
+    assert builder[0]["module_kwargs"].tts_supported_languages == ["en"]
+    assert builder[0]["module_kwargs"].stt_auto_language_supported is True
+    assert builder[0]["module_kwargs"].tts_auto_language_supported is False
+    assert builder[2]["module_kwargs"].stt_supported_languages is None
     builder[0]["llm_backend"].config["gen_kwargs"]["changed"] = True
     assert "changed" not in builder[1]["llm_backend"].config["gen_kwargs"]
     assert config == original

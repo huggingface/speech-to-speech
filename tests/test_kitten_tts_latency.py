@@ -40,6 +40,7 @@ def _quiet_console(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_records_ttfa_before_resample_and_e2e_on_first_yield(monkeypatch: pytest.MonkeyPatch) -> None:
     clock = [100.0]
     monkeypatch.setattr(kitten_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
 
     def slow_resample(chunk, *, up, down):
         clock[0] = 100.40
@@ -77,6 +78,7 @@ def test_records_ttfa_before_resample_and_e2e_on_first_yield(monkeypatch: pytest
 def test_preserves_first_audio_across_later_segments(monkeypatch: pytest.MonkeyPatch) -> None:
     clock = [50.0]
     monkeypatch.setattr(kitten_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     monkeypatch.setattr(
         kitten_module,
         "resample_poly",
@@ -133,6 +135,7 @@ def test_preserves_first_audio_across_later_segments(monkeypatch: pytest.MonkeyP
 def test_empty_audio_leaves_latency_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     clock = [1.0]
     monkeypatch.setattr(kitten_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
 
     handler = _handler()
     handler.model.generate_single_chunk = lambda text, voice: np.array([], dtype=np.float32)
@@ -150,6 +153,7 @@ def test_cancelled_or_discarded_audio_cannot_record_another_response(
 ) -> None:
     clock = [10.0]
     monkeypatch.setattr(kitten_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     monkeypatch.setattr(
         kitten_module,
         "resample_poly",
@@ -193,6 +197,7 @@ def test_cancelled_or_discarded_audio_cannot_record_another_response(
 def test_cancel_after_first_model_chunk_preserves_timing_boundaries(monkeypatch, stop_at):
     clock = [10.0]
     monkeypatch.setattr(kitten_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     handler = _handler(cancel_scope=CancelScope())
     handler._chunk_text = lambda text: ["first", "second"]
     store = handler.turn_latency_store = TurnLatencyStore()
