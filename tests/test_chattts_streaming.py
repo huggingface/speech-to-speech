@@ -48,7 +48,8 @@ def test_streaming_accepts_a_flat_chunk(handler_factory) -> None:
     blocks = _blocks(handler_factory([_tone()]))
 
     assert blocks, "a one-second chunk must produce audio"
-    assert all(len(block) == 512 for block in blocks)
+    assert all(0 < len(block) <= 512 for block in blocks)
+    assert sum(map(len, blocks)) == 16000
 
 
 def test_flat_and_column_chunks_produce_identical_audio(handler_factory) -> None:
@@ -79,7 +80,7 @@ def test_streaming_is_independent_of_provider_boundaries(handler_factory, termin
     handler = handler_factory(chunks)
     actual = np.concatenate(_blocks(handler))
     expected = np.concatenate(_blocks(handler_factory([tone])))
-    assert actual.size == 32256  # 32000 samples plus one final partial block.
+    assert actual.size == 32000
     np.testing.assert_array_equal(actual, expected)
     np.testing.assert_array_equal(np.concatenate(_blocks(handler)), expected)
 

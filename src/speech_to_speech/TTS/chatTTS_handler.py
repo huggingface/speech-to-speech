@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from itertools import chain
 from threading import Event
 from typing import Any, Iterator
 
@@ -16,6 +17,7 @@ from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
+from speech_to_speech.TTS.pcm_blocks import PCMBlockBuffer
 from speech_to_speech.utils.utils import validate_device
 
 logger = logging.getLogger(__name__)
@@ -97,7 +99,7 @@ class ChatTTSHandler(BaseTTSHandler):
 
         if self.stream:
             resampler = StreamingPcm16Resampler(24000, 16000)
-            pending = np.empty(0, dtype="<i2")
+            blocks = PCMBlockBuffer(self.chunk_size)
             for gen in wavs_gen:
                 if self._is_stale(_cancel_gen):
                     logger.info("TTS generation cancelled (interruption)")
@@ -114,23 +116,18 @@ class ChatTTSHandler(BaseTTSHandler):
                 timer.first_provider_audio()
                 pcm = np.clip(chunk * 32768, -32768, 32767).astype("<i2")
                 converted = np.frombuffer(resampler.push(pcm.tobytes()), dtype="<i2")
-                pending = np.concatenate((pending, converted))
-                while len(pending) >= self.chunk_size:
+                for block in blocks.push(converted):
                     if self._is_stale(_cancel_gen):
                         return
-                    yield from emit(pending[: self.chunk_size].copy())
-                    pending = pending[self.chunk_size :]
+                    yield from emit(block)
 
             if self._is_stale(_cancel_gen):
                 return
-            pending = np.concatenate((pending, np.frombuffer(resampler.flush(), dtype="<i2")))
-            for index in range(0, len(pending), self.chunk_size):
+            tail = np.frombuffer(resampler.flush(), dtype="<i2")
+            for block in chain(blocks.push(tail), blocks.flush()):
                 if self._is_stale(_cancel_gen):
                     return
-                block = pending[index : index + self.chunk_size]
-                if len(block) < self.chunk_size:
-                    block = np.pad(block, (0, self.chunk_size - len(block)))
-                yield from emit(block.copy())
+                yield from emit(block)
         else:
             wavs = wavs_gen
             if len(wavs[0]) == 0:
