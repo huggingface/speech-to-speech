@@ -42,12 +42,10 @@
  * @property {NoiseGate} [noiseGate]
  * @property {string} [audioOutputId]
  * @property {number} [playbackBufferMs] WebSocket startup reserve; applies on the next connection.
- * @property {boolean} [waitForModels] Wait for ZeroGPU model readiness events (default false).
  * @property {boolean} [localVad] Locally duck playback on speech candidates (default true).
  * @property {(call: {name: string, arguments: string, callId: string}) => Promise<{output: string, image?: string}>} [executeTool]
  */
 
-import { modelReadiness } from "./ws/model-readiness.js";
 import { readTurnLatency } from "./turn-latency.js";
 import { extractResponseTranscript, trimTrailingSlash } from "./ws/codec.js";
 import { OrbVisualiser, VIS_FFT_SIZE } from "./ws/orb-visualizer.js";
@@ -230,14 +228,9 @@ export class S2sRealtimeClient extends EventTarget {
       config: this._sessionConfig(),
       tracingDisabled: true,
     });
-    this._modelReadiness = this.options.waitForModels ? modelReadiness() : null;
-    this._transport.on("*", (event) => {
-      this._modelReadiness?.event(event);
-      this._onTransportEvent(event);
-    });
+    this._transport.on("*", (event) => this._onTransportEvent(event));
     this._transport.on("connection_change", (state) => {
       if (state === "disconnected" && !this._closing && this._status !== "error") {
-        this._modelReadiness?.fail(new Error("Realtime transport disconnected"));
         this._setStatus("error");
         if (this.options.transport === "websocket") this._clearPlayback();
         this.dispatchEvent(new CustomEvent("error", {
@@ -251,21 +244,7 @@ export class S2sRealtimeClient extends EventTarget {
       else this._clearPlayback();
     });
 
-    if (this._modelReadiness) {
-      this._setStatus("preparing");
-      try {
-        await Promise.all([
-          this._session.connect({ apiKey: "s2s-local", url }),
-          this._modelReadiness.promise,
-        ]);
-        if (this._closed) throw codedError("connect aborted", "aborted");
-      } catch (error) {
-        await this.close();
-        throw error;
-      }
-    } else {
-      await this._session.connect({ apiKey: "s2s-local", url });
-    }
+    await this._session.connect({ apiKey: "s2s-local", url });
     if (this.options.transport === "webrtc") this._attachRtcOutput();
     const greeting = this.options.startupGreeting?.trim();
     if (greeting) {
@@ -274,7 +253,7 @@ export class S2sRealtimeClient extends EventTarget {
     }
     this.setMuted(this._muted);
     this._setStatus("connected");
-    // ZeroGPU preparation completes before greeting, listening, and local VAD.
+    // Model loading never delays connecting, greeting, or microphone streaming.
     if (this.options.localVad !== false && this._ctx) {
       this._localVad = new LocalVad({
         audioContext: this._ctx,
@@ -568,7 +547,7 @@ export class S2sRealtimeClient extends EventTarget {
 
   /** @param {ArrayBuffer} buffer */
   _onMicChunk(buffer) {
-    if (!this._session || this._closed || this._muted || this._status === "connecting" || this._status === "preparing") return;
+    if (!this._session || this._muted || this._status === "connecting") return;
     this._session.sendAudio(buffer);
     this._userAudioRecorder.append(buffer);
   }
@@ -972,7 +951,6 @@ export class S2sRealtimeClient extends EventTarget {
   async close() {
     this._closed = true;
     this._closing = true;
-    this._modelReadiness?.cancel();
     await this._localVad?.close();
     this._localVad = null;
     if (this.options.transport === "websocket") this._clearPlayback();

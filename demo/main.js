@@ -13,7 +13,7 @@
  * proxy forwards exclusively to SPEECH_TO_SPEECH_URL); LB mode and user-typed
  * URLs stay on WebSocket.
  *
- * @typedef {"idle" | "connecting" | "preparing" | "queued" | "your-turn" | "listening" | "user-speaking" | "processing" | "ai-speaking" | "error"} AppState
+ * @typedef {"idle" | "connecting" | "queued" | "your-turn" | "listening" | "user-speaking" | "processing" | "ai-speaking" | "error"} AppState
  * @typedef {S2sRealtimeClient} RealtimeClient
  */
 
@@ -174,7 +174,6 @@ function saveTools() {
 const STATE_VIEWS = {
   idle:            { caption: "Tap to start",  disabled: false },
   connecting:      { caption: "Connecting",    disabled: true  },
-  preparing:       { caption: "Preparing models", disabled: false },
   queued:          { caption: "Finding you a spot…", disabled: true },
   "your-turn":     { caption: "You're up! 🎉", disabled: true  },
   listening:       { caption: "",              disabled: false },
@@ -188,7 +187,6 @@ const STATE_VIEWS = {
 const STATE_CLASS = {
   idle: "state-idle",
   connecting: "state-connecting",
-  preparing: "state-connecting",
   queued: "state-queued",
   "your-turn": "state-your-turn",
   listening: "state-listening",
@@ -334,7 +332,6 @@ let iceServers = [];
 // Optional hidden user prompt supplied by the deployment. When non-empty, the
 // client asks the model to greet once after the initial session configuration.
 let startupGreeting = "";
-let waitForModels = false;
 // Transport of the LIVE (or starting) conversation — as opposed to
 // `settings.transport`, which is what the NEXT one will use. Drives the
 // camera-snapshot size budget while a call is running.
@@ -435,10 +432,7 @@ function setState(next) {
   if (!yourTurn) stopJoinCountdown();
 
   // Warm reassurance under the terse position, only while waiting in line.
-  if (next === "preparing") {
-    circleSubcaption.textContent = "Warming up the models before listening. Tap to cancel.";
-    circleSubcaption.hidden = false;
-  } else if (next === "queued") {
+  if (next === "queued") {
     circleSubcaption.textContent =
       "Sorry, we overhugged! 🤗 Every slot is busy, so we saved you a spot. Hang tight, you're moving up.";
     circleSubcaption.hidden = false;
@@ -921,7 +915,6 @@ async function fetchConfig() {
       // WebRTC transport: offered only when the deploy pins the URL (the
       // /api/calls proxy refuses to forward anywhere else).
       rtcAvailable = !!json.rtc;
-      waitForModels = json.modelReadiness === true;
       iceServers = Array.isArray(json.iceServers) ? json.iceServers : [];
       startupGreeting = typeof json.startupGreeting === "string"
         ? json.startupGreeting.trim()
@@ -1153,10 +1146,6 @@ restartBtn.addEventListener("click", async () => {
 
 circleBtn.addEventListener("click", async () => {
   try {
-    if (currentState === "preparing") {
-      await teardown();
-      return;
-    }
     if (currentState === "idle" || currentState === "error") {
       if (missingServerUrl()) { promptServerUrl(); return; }
       await doStart();
@@ -1439,7 +1428,6 @@ async function doStart(audioContext = null) {
     voice: settings.voice,
     instructions: settings.instructions,
     startupGreeting,
-    waitForModels,
     acquireMic: acquireMicStream,
     tools: activeToolDefs(),
     audioOutputId: settings.audioOutputId || "",
@@ -1642,9 +1630,6 @@ function onClientStatus(status) {
     case "creating-session":
     case "connecting":
       setState("connecting");
-      break;
-    case "preparing":
-      setState("preparing");
       break;
     case "queued":
       setState("queued");
