@@ -9,6 +9,7 @@ import librosa
 import numpy as np
 import torch
 
+from speech_to_speech.api.openai_realtime.utils import StreamingPcm16Resampler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
@@ -95,29 +96,41 @@ class ChatTTSHandler(BaseTTSHandler):
             yield block
 
         if self.stream:
+            resampler = StreamingPcm16Resampler(24000, 16000)
+            pending = np.empty(0, dtype="<i2")
             for gen in wavs_gen:
                 if self._is_stale(_cancel_gen):
                     logger.info("TTS generation cancelled (interruption)")
                     return
                 if gen[0] is None:
-                    return
-                # ChatTTS streams a chunk either as (samples,) or as (1, samples)
-                # depending on version. Indexing the converted array with [0] assumed
-                # the second shape and reduced the first to a single sample, so the
-                # following len() raised "object of type 'numpy.int16' has no len()".
+                    break
+                # ChatTTS versions emit either (samples,) or (1, samples).
                 chunk = np.asarray(gen[0], dtype=np.float32)
                 if chunk.ndim > 1:
                     chunk = chunk[0]
                 if chunk.size == 0:
-                    return
+                    break
                 # Provider samples, before resample / int16 / block assembly.
                 timer.first_provider_audio()
-                audio_chunk = librosa.resample(chunk, orig_sr=24000, target_sr=16000)
-                audio_chunk = (audio_chunk * 32768).astype(np.int16)
-                while len(audio_chunk) > self.chunk_size:
-                    yield from emit(audio_chunk[: self.chunk_size])
-                    audio_chunk = audio_chunk[self.chunk_size :]
-                yield from emit(np.pad(audio_chunk, (0, self.chunk_size - len(audio_chunk))))
+                pcm = np.clip(chunk * 32768, -32768, 32767).astype("<i2")
+                converted = np.frombuffer(resampler.push(pcm.tobytes()), dtype="<i2")
+                pending = np.concatenate((pending, converted))
+                while len(pending) >= self.chunk_size:
+                    if self._is_stale(_cancel_gen):
+                        return
+                    yield from emit(pending[: self.chunk_size].copy())
+                    pending = pending[self.chunk_size :]
+
+            if self._is_stale(_cancel_gen):
+                return
+            pending = np.concatenate((pending, np.frombuffer(resampler.flush(), dtype="<i2")))
+            for index in range(0, len(pending), self.chunk_size):
+                if self._is_stale(_cancel_gen):
+                    return
+                block = pending[index : index + self.chunk_size]
+                if len(block) < self.chunk_size:
+                    block = np.pad(block, (0, self.chunk_size - len(block)))
+                yield from emit(block.copy())
         else:
             wavs = wavs_gen
             if len(wavs[0]) == 0:
