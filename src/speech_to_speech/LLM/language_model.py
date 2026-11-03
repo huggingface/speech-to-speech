@@ -180,8 +180,9 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
     _cancel_criteria: _CancelCriteria
     streamer: Iterable[str]
     tokenizer: _Tokenizer
-    # Newest direct-audio user turns kept as audio; older ones become a text placeholder.
-    audio_history_turns = 1
+    # Newest direct-audio user turns kept as audio; older ones become a text
+    # placeholder. None keeps every turn in the chat window as audio.
+    audio_history_turns: int | None = 1
 
     def setup(
         self,

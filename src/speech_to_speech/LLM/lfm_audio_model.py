@@ -42,8 +42,6 @@ MODEL_SAMPLE_RATE = 24_000
 # sooner, then whole interleaved blocks of twelve frames.
 FIRST_DECODE_FRAMES = 6
 DECODE_FRAMES = 12
-# Fresh attempts when a reply's first speech slot ends speech (rare sampling outcome).
-SPEECH_RETRIES = 2
 # The model card's instruction for voice chat. Without it the model sometimes
 # ends speech in its first speech slot and finishes the reply as text.
 INTERLEAVED_INSTRUCTION = "Respond with interleaved text and audio."
@@ -111,6 +109,9 @@ class LFMAudioModelHandler(BaseLanguageModelHandler):
     """Speech-in, speech-out handler for LiquidAI LFM3-Audio checkpoints (transformers)."""
 
     tokenizer: PreTrainedTokenizerBase
+    # Older user audio adds little to the prompt or the time to first audio here,
+    # and the model recalls details from it that its replies left out.
+    audio_history_turns = None
 
     def setup(self, **kwargs: Any) -> None:  # type: ignore[override]
         super().setup(**kwargs)
@@ -127,15 +128,18 @@ class LFMAudioModelHandler(BaseLanguageModelHandler):
         from speech_to_speech.api.openai_realtime.handlers.audio import PIPELINE_SAMPLE_RATE
 
         self.output_sample_rate = PIPELINE_SAMPLE_RATE
-        self.model = AutoModelForMultimodalLM.from_pretrained(
-            model_name, dtype=getattr(torch, torch_dtype), device_map=device, trust_remote_code=True
-        ).eval()
+        self.model = (
+            AutoModelForMultimodalLM.from_pretrained(
+                model_name, dtype=getattr(torch, torch_dtype), trust_remote_code=True
+            )
+            .to(device)
+            .eval()
+        )
         self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
         self.tokenizer = self.processor.tokenizer
         self.codec = self.processor.audio_tokenizer.to(device=device).eval()
         self._codec_cache_class = sys.modules[type(self.codec).__module__].LiquidCodecStreamingCache
         self.gen_kwargs = {"max_new_tokens": gen_kwargs.get("max_new_tokens", 1024)}
-        self.interleaved_n_text = self.model.config.interleaved_n_text
 
     def _apply_instructions(
         self,
@@ -211,13 +215,12 @@ class LFMAudioModelHandler(BaseLanguageModelHandler):
         response: RealtimeResponseCreateParams | None = None,
     ) -> Iterator[LLMResponseChunk]:
         speak = response_wants_audio(response)
-        messages = _model_conversation(chat)
-        max_new_tokens = self.gen_kwargs["max_new_tokens"]
-        events, cancel, thread, prompt_tokens = self._start_generation(messages, speak, max_new_tokens)
+        events, cancel, thread, prompt_tokens = self._start_generation(
+            _model_conversation(chat), speak, self.gen_kwargs["max_new_tokens"]
+        )
         ctx.input_tokens += prompt_tokens
         if ctx.prefetch_transaction is not None:
-            ctx.prefetch_transaction.register_abort(lambda: cancel.set())
-        speech_retries = SPEECH_RETRIES
+            ctx.prefetch_transaction.register_abort(cancel.set)
 
         text_ids: list[int] = []
         text_sent = 0
@@ -230,7 +233,7 @@ class LFMAudioModelHandler(BaseLanguageModelHandler):
             nonlocal text_sent
             text = self._decode_text(text_ids)
             # A multi-byte character can span tokens; wait for the rest of it.
-            ready = len(text) if final else len(text.rstrip("�"))
+            ready = len(text) if final else len(text.rstrip("\ufffd"))
             if speak and not final:
                 # Speech-mode text parts are joined with spaces downstream, so
                 # only release whole words.
@@ -280,17 +283,6 @@ class LFMAudioModelHandler(BaseLanguageModelHandler):
                         if tracker is not None and tracker.llm_ttft_s is None:
                             tracker.record_llm_ttft(perf_counter() - ctx.llm_start_s)
                     text_ids.extend(value.tolist())
-                    if speak and not frames_seen and len(text_ids) > self.interleaved_n_text and speech_retries:
-                        # The model sampled end-of-speech in its first speech slot
-                        # and is finishing the reply as text. Nothing has been
-                        # yielded yet, so resample: text is greedy, speech is not.
-                        speech_retries -= 1
-                        logger.info("LFM3-Audio reply started without speech; resampling")
-                        cancel.set()
-                        thread.join()
-                        events, cancel, thread, _ = self._start_generation(messages, speak, max_new_tokens)
-                        text_ids.clear()
-                        continue
                     if not speak:
                         item = chunk(final=False)
                         if item is not None:
@@ -324,8 +316,6 @@ class LFMAudioModelHandler(BaseLanguageModelHandler):
         resampler: StreamingPcm16Resampler,
         final: bool,
     ) -> np.ndarray:
-        if not frames and not final:
-            return np.empty(0, dtype="<i2")
         codes = (
             torch.stack(frames, dim=-1)[None]
             if frames

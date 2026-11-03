@@ -595,9 +595,9 @@ only works with `--tts none`. `--stt` may still name a recognizer, in which
 case the model answers the transcript instead of the audio.
 
 The backend loads through Transformers and needs a GPU for real-time replies; it
-uses about 5 GB of GPU memory. It does not support tools yet and ignores any the
-session declares. Only the newest user turn keeps its audio; earlier turns keep
-the model's replies and a placeholder. The weights use the
+uses about 5 GB of GPU memory. Voice chat is English only. The backend ignores
+tools the session declares: the model can call them, but with tools in its
+prompt it turns down many ordinary questions. The weights use the
 [LFM Open License](https://huggingface.co/LiquidAI/LFM3-Audio-2B/blob/main/LICENSE).
 
 ## Offline Operation
