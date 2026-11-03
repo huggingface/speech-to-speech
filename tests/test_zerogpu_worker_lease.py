@@ -14,9 +14,9 @@ import pytest
 
 
 @pytest.fixture
-def broker_type():
-    # worker.py loads model weights at import. Execute only the actual broker
-    # definitions so these tests stay independent of network and GPU access.
+def worker_definitions():
+    # Execute the actual broker and atomic publication helper without importing
+    # optional CUDA dependencies or allocating a GPU.
     tree = ast.parse((Path(__file__).parents[1] / "src/speech_to_speech/zerogpu/_worker.py").read_text())
     tree.body = [
         node
@@ -34,7 +34,17 @@ def broker_type():
         log=logging.getLogger("lease-test"),
     )
     exec(compile(tree, "worker.py", "exec"), namespace)
-    return namespace["LeaseBroker"]
+    return namespace
+
+
+@pytest.fixture
+def broker_type(worker_definitions):
+    return worker_definitions["LeaseBroker"]
+
+
+@pytest.fixture
+def atomic_json(worker_definitions):
+    return worker_definitions["_atomic_json"]
 
 
 def requests(directory, count=1):
@@ -135,13 +145,25 @@ def test_silent_worker_has_bounded_wait(broker_type, tmp_path):
         release.set()
 
 
-def test_prepare_waits_for_true_marker_and_reuses_live_allocation(broker_type, tmp_path):
+def test_prepare_waits_for_true_marker_and_reuses_live_allocation(broker_type, atomic_json, tmp_path, monkeypatch):
     warming, release, finish = Event(), Event(), Event()
+    writing, publish = Event(), Event()
+    write_text = Path.write_text
+
+    def paused_write(path, data, *args, **kwargs):
+        if path.name.startswith("ready.json.") and path.suffix == ".tmp":
+            # Hold an incomplete temporary file open while prepare() polls.
+            path.touch()
+            writing.set()
+            assert publish.wait(2)
+        return write_text(path, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", paused_write)
 
     def runner(ident):
         warming.set()
         assert release.wait(2)
-        (tmp_path / ident / "ready.json").write_text(json.dumps({"models": ["stt", "llm", "tts"]}))
+        atomic_json(tmp_path / ident / "ready.json", {"models": ["stt", "llm", "tts"]})
         yield {"status": "ready"}
         finish.wait(2)
 
@@ -152,12 +174,22 @@ def test_prepare_waits_for_true_marker_and_reuses_live_allocation(broker_type, t
             assert warming.wait(1)
             assert not job.done()
             release.set()
+            assert writing.wait(1)
+            assert not (broker.current / "ready.json").exists()
+            assert not job.done()
+            publish.set()
             assert job.result(timeout=2)["models"] == ["stt", "llm", "tts"]
             assert broker.prepare()["models"] == ["stt", "llm", "tts"]
             assert broker.leases_started == 1
     finally:
         release.set()
+        publish.set()
         finish.set()
+        # Let the broker finish writing lifecycle markers before tmp_path cleanup.
+        deadline = time.monotonic() + 2
+        while broker.current is not None and not (broker.current / "finished").exists():
+            assert time.monotonic() < deadline, "Simulated worker did not finish"
+            time.sleep(0.002)
 
 
 def test_prepare_surfaces_failure_and_bounds_wait(broker_type, tmp_path):
