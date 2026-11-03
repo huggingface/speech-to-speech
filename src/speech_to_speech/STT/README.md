@@ -22,6 +22,7 @@ speech-to-speech local --stt whisper --language auto --stt_device cuda
 - `orukeet` → `STT/nemo_asr_handler.py`
 - `paraformer` → `STT/paraformer_handler.py`
 - `qwen3-asr` → `STT/qwen3_asr_handler.py`
+- `moonshine` → `STT/moonshine_handler.py`
 - `openai` → `STT/openai_compatible_handler.py`
 
 ## Language Support by Handler
@@ -102,6 +103,18 @@ speech-to-speech local --stt whisper --language auto --stt_device cuda
   - Progressive (partial) windows are short and fool the language ID, so they reuse the language of the last final turn
   - A forced language is passed on every request and reported as is
 - The required Transformers version supports the prompt and explicit language forcing on all platforms.
+
+### Moonshine (`--stt moonshine`)
+
+- Handler: `MoonshineSTTHandler`
+- Model flag: `--moonshine_stt_model_name` (default `moonshine-ai/moonshine-base`, 61M). Also
+  `moonshine-ai/moonshine-tiny` (27M) and `moonshine-ai/moonshine-streaming-{tiny,small,medium}` (34M/123M/245M)
+- English only; every final turn reports `en`
+- Decoding is bounded at `--moonshine_stt_tokens_per_second` (default 6.5) tokens per second of audio, as the
+  model card recommends, to stop hallucination loops on short or noisy turns
+- The encoder takes variable-length audio without padding every input to 30 seconds
+- The `streaming-*` checkpoint names select the corresponding Transformers architecture. This handler
+  still decodes each VAD snapshot with `generate`; it does not keep a native streaming decoder across snapshots.
 
 ### 8) OpenAI-compatible endpoint (`--stt openai`)
 
@@ -243,6 +256,12 @@ speech-to-speech serve --stt qwen3-asr --qwen3_asr_language fr
 speech-to-speech serve --stt qwen3-asr \
   --qwen3_asr_model_name Qwen/Qwen3-ASR-1.7B-hf \
   --qwen3_asr_prompt "Vocabulary: Quilter, apostle."
+```
+
+### Moonshine
+
+```bash
+speech-to-speech serve --stt moonshine --moonshine_stt_model_name moonshine-ai/moonshine-tiny
 ```
 
 ### Parakeet Unified
