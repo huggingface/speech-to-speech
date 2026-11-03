@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 from threading import Event
-from time import perf_counter
 from typing import Any, Iterator
 
 import ChatTTS
@@ -10,19 +9,18 @@ import librosa
 import numpy as np
 import torch
 
-from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-from speech_to_speech.pipeline.turn_latency import record_response_e2e, record_response_tts_ttfa
+from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
 from speech_to_speech.utils.utils import validate_device
 
 logger = logging.getLogger(__name__)
 
 
-class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
+class ChatTTSHandler(BaseTTSHandler):
     def setup(
         self,
         should_listen: Event,
@@ -89,39 +87,16 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
             _ = time.time() - start  # Removing this line makes it fail more often. I'm looking into it.
 
         # Synthesis start: after speculative gate / MPS housekeeping, before provider work.
-        started_at_s = perf_counter()
+        timer = self._latency_timer(tts_input, _cancel_gen)
         wavs_gen = self.model.infer(text, params_infer_code=self.params_infer_code, stream=self.stream)
-        store = getattr(self, "turn_latency_store", None)
-        response_key = getattr(tts_input, "response_key", None)
-        speech_stopped_at_s = getattr(tts_input, "speech_stopped_at_s", None)
-        first_provider = True
-        first_yielded = True
-
-        def cancelled() -> bool:
-            return _cancel_gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(_cancel_gen)
-
-        def record_ttfa() -> None:
-            nonlocal first_provider
-            if not first_provider or cancelled():
-                return
-            record_response_tts_ttfa(store, response_key, perf_counter() - started_at_s)
-            first_provider = False
 
         def emit(block: np.ndarray) -> Iterator[TTSOut]:
-            nonlocal first_yielded
-            if first_yielded and not cancelled():
-                if speech_stopped_at_s is not None:
-                    record_response_e2e(
-                        store,
-                        response_key,
-                        max(0.0, perf_counter() - speech_stopped_at_s),
-                    )
-                first_yielded = False
+            timer.first_yield()
             yield block
 
         if self.stream:
             for gen in wavs_gen:
-                if cancelled():
+                if self._is_stale(_cancel_gen):
                     logger.info("TTS generation cancelled (interruption)")
                     return
                 if gen[0] is None:
@@ -136,7 +111,7 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 if chunk.size == 0:
                     return
                 # Provider samples, before resample / int16 / block assembly.
-                record_ttfa()
+                timer.first_provider_audio()
                 audio_chunk = librosa.resample(chunk, orig_sr=24000, target_sr=16000)
                 audio_chunk = (audio_chunk * 32768).astype(np.int16)
                 while len(audio_chunk) > self.chunk_size:
@@ -148,7 +123,7 @@ class ChatTTSHandler(BaseHandler[TTSIn, TTSOut]):
             if len(wavs[0]) == 0:
                 return
             # Full utterance is available before local resample / block assembly.
-            record_ttfa()
+            timer.first_provider_audio()
             audio_chunk = librosa.resample(wavs[0], orig_sr=24000, target_sr=16000)
             audio_chunk = (audio_chunk * 32768).astype(np.int16)
             for i in range(0, len(audio_chunk), self.chunk_size):
