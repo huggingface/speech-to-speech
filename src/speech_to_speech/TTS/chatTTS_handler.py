@@ -91,6 +91,8 @@ class ChatTTSHandler(BaseTTSHandler):
         # ChatTTS >= 0.2.2 splits text into sentences by default and synthesizes them as one batch, so each
         # streamed chunk would hold one row per sentence and the loop below plays only the first row.
         # Streaming the text as a single row keeps every sentence; non-stream output already joins them.
+        # The 384-token text-refinement limit then covers the whole streamed input too, so very long text
+        # can reach it before the audio limit.
         wavs_gen = self.model.infer(
             text, params_infer_code=self.params_infer_code, stream=self.stream, split_text=not self.stream
         )
