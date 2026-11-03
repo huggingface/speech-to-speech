@@ -366,6 +366,7 @@ def test_out_of_band_snapshot_omits_reasoning_for_unresolved_call(stream, comple
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
     if completed_prefix:
         list(drive_llm(handler, request))
+        request.runtime_config.chat.finalize_provisional_generation(request.response_key)
         _finish(request.runtime_config.chat, "call_1")
     list(drive_llm(handler, request))
     canonical = request.runtime_config.chat.copy(deep=True)
@@ -375,7 +376,7 @@ def test_out_of_band_snapshot_omits_reasoning_for_unresolved_call(stream, comple
     assert not any(item.get("id") in {"rs_2", "fc_2", "msg_provider"} for item in captured[-1])
     if completed_prefix:
         completed = [item for item in captured[-1][2:] if item["type"] != "function_call_output"]
-        assert completed == [item.model_dump(exclude_unset=True) for item in responses[0]]
+        assert completed[: len(responses[0])] == [item.model_dump(exclude_unset=True) for item in responses[0]]
     assert request.runtime_config.chat.buffer == canonical.buffer
 
 
@@ -579,7 +580,9 @@ def test_pinned_sdk_pending_snapshot_preserves_previous_completed_response(strea
         request.response = RealtimeResponseCreateParams(conversation="none")
         outputs = list(drive_llm(handler, request))
         assert next(item for item in outputs if isinstance(item, EndOfResponse)).error is None
-        assert requests[2]["input"][2:] == first
+        assert requests[2]["input"][2 : 2 + len(first)] == first
+        assert not any(item.get("id") in {"rs_B", "fc_B"} for item in requests[2]["input"])
+        assert "awaiting_output" in json.dumps(requests[2]["input"])
         assert chat.buffer == canonical.buffer
         _finish(chat, "call_B")
         request.response_key = "continuation"
@@ -655,3 +658,78 @@ def test_pinned_sdk_parses_and_serializes_reasoning_tool_continuation(stream, re
         second = list(drive_llm(handler, request))
         assert next(item for item in second if isinstance(item, EndOfResponse)).error is None
     assert len(requests) == 2
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("first", ["A", "B"])
+@pytest.mark.parametrize("unrelated_user", [False, True])
+def test_pending_parallel_results_preserve_conversation_and_shared_context(stream, first, unrelated_user):
+    handler = _make_handler(stream=stream)
+    request = _make_request(chat_size=10)
+    chat = request.runtime_config.chat
+    reasoning, call_a = _items("A")
+    call_b = _items("B")[1]
+    replies = iter(
+        [
+            [reasoning, call_a, call_b],
+            [
+                ResponseOutputMessage(
+                    id="msg_unrelated",
+                    type="message",
+                    role="assistant",
+                    status="completed",
+                    content=[{"type": "output_text", "text": "Unrelated answer.", "annotations": []}],
+                )
+            ],
+            [
+                ResponseOutputMessage(
+                    id="msg_partial",
+                    type="message",
+                    role="assistant",
+                    status="completed",
+                    content=[{"type": "output_text", "text": "The first result is 42.", "annotations": []}],
+                )
+            ],
+            [],
+        ]
+    )
+    captured = []
+
+    def create(**kwargs):
+        captured.append(kwargs["input"])
+        items = next(replies)
+        return _stream(items) if stream else _make_response(items)
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    list(drive_llm(handler, request))
+    chat.finalize_provisional_generation(request.response_key)
+    calls = {item.response_item.call_id: item for item in chat.buffer if isinstance(item, ResponsesFunctionCall)}
+    if unrelated_user:
+        chat.add_item(make_user_message("Tell me something unrelated."))
+    for index in range(3):
+        if index:
+            suffix = first if index == 1 else ("B" if first == "A" else "A")
+            chat.add_item(
+                RealtimeConversationItemFunctionCallOutput(
+                    type="function_call_output",
+                    call_id=calls[f"call_{suffix}"].call_id,
+                    output="42" if index == 1 else "84",
+                )
+            )
+        # A new response identity, as on the wire, even without a new user message.
+        request = request.model_copy(update={"response_key": f"followup_{index}"})
+        outputs = list(drive_llm(handler, request))
+        assert next(item for item in outputs if isinstance(item, EndOfResponse)).error is None
+        chat.finalize_provisional_generation(request.response_key)
+    for snapshot in captured[1:]:
+        assert not any(item.get("type") in {"reasoning", "function_call", "function_call_output"} for item in snapshot)
+    final_text = "\n".join(part.get("text", "") for item in captured[-1] for part in item.get("content", []))
+    assert (
+        final_text.index("Unrelated answer.")
+        < final_text.index('"output": "42"')
+        < final_text.index("The first result is 42.")
+        < final_text.index('"output": "84"')
+    )
+    assert reasoning in chat.buffer
+    assert not chat.has_pending_tool_calls()
+    assert len([item for item in chat.buffer if item.type == "function_call_output"]) == 2

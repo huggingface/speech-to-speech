@@ -330,6 +330,16 @@ Both handlers yield ordered `AssistantTextPart` and `AssistantToolCallPart` valu
 3. If the tool result needs to be spoken to the user, such as camera/search/data results, the client sends `response.create` to trigger follow-up generation.
 4. For fire-and-forget robot actions such as dance, emotion, head movement, stop, or idle tools, the client can stop after `conversation.item.created`; the assistant should already have spoken the natural lead-in before the tool call.
 
+### Pending client tool calls
+
+A client call awaiting its output does not block ordinary conversation once its originating response has completed. The client can add a user message and send `response.create`, then submit the actual `function_call_output` later with the original `call_id`. Multiple calls may remain pending, and results may arrive in any order. The server does not substitute a “started” or “done” result. Duplicate outputs are rejected; explicitly deleting a retained output reopens that call.
+
+For providers that require paired calls and outputs, an intervening generation represents the pending response's calls and visible messages as text, and actual results as labeled data at their arrival positions. It omits that response's opaque reasoning and native tool items together. This representation persists after completion; ordinary synchronous tool chains retain native replay. Request-only context identifies calls awaiting output without claiming that the client has started them. Local text/VLM and hosted text/audio paths share this projection. Model accuracy and accidental repeated calls remain model-dependent; call names and arguments are not deduplication keys.
+
+Receiving a result does not create a response. Results arriving during generation use the existing deferred-item ordering; clients request a follow-up when needed. Cancelling or failing an unrelated response preserves earlier pending calls. Cancelling their originating response before it commits still rolls back its calls. `response.cancel` does not cancel a committed external operation; the client owns execution, terminal errors, and cancellation outcomes. Pending calls have the existing session lifetime, without durable reconnect guarantees.
+
+The packaged Python client executes tools concurrently but currently delivers results in original call/batch order and waits for pending deliveries before its automatic follow-up. The server's out-of-order support does not remove that client limit. Successful generation also does not guarantee that a result was played to the listener.
+
 ### Packaged Python client tools
 
 The microphone/speaker client used by `talk` and `local` only executes explicitly declared Python tools. An importable tool module provides flattened Realtime function definitions in `TOOLS` and an async `execute_tool(name, arguments)` callback:

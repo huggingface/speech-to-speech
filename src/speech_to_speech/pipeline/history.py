@@ -30,6 +30,7 @@ class ResponseHistory:
     audio_history_turns: int | None = None
     consumed_audio_items: tuple[RealtimeConversationItemUserMessage, ...] | None = None
     compactor: CompactFn | None = None
+    tool_projection_ids: frozenset[str] = frozenset()
     _resolved: Event = field(default_factory=Event, repr=False, compare=False)
 
     def resolve(self) -> None:
@@ -53,6 +54,7 @@ class ResponseHistory:
         audio_history_turns: int | None = None,
         consumed_audio_items: Iterable[RealtimeConversationItemUserMessage] | None = None,
         compactor: CompactFn | None = None,
+        tool_projection_ids: frozenset[str] = frozenset(),
     ) -> ResponseHistory:
         return cls(
             chat=chat,
@@ -69,6 +71,7 @@ class ResponseHistory:
                 else None
             ),
             compactor=compactor,
+            tool_projection_ids=tool_projection_ids,
         )
 
     def write(self, response_key: str, start: int = 0, after_item_id: str | None = None) -> list[SupportedItem]:
@@ -84,6 +87,7 @@ class ResponseHistory:
         chat = self.chat
         snapshot = chat.snapshot_history_cleanup()
         try:
+            chat.retain_tool_projection(self.tool_projection_ids)
             if self.item_order is not None:
                 chat.order_response_items(self.item_order)
             chat.strip_images(set(self.consumed_image_ids))
