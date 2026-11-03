@@ -25,3 +25,6 @@ PyYAML
 nano-parakeet==0.2.1
 faster-qwen3-tts==0.5.4
 qwen-tts-hf==0.1.1.post1
+
+# Optional second TTS backend for the model-flexibility demo.
+kokoro==0.9.4

@@ -1,75 +1,220 @@
-"""Native parent-side Qwen handler with only synthesis offloaded."""
+"""Conversation-side TTS lifecycle, independent of the allocated GPU provider."""
 
+import logging
+from queue import Empty, Full, Queue
+from threading import Event, Lock, Thread
 from time import perf_counter
-from types import SimpleNamespace
 
-import torch
-
-from speech_to_speech.pipeline.turn_latency import active_turn_latency_tracker
-from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
+from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.pipeline.events import ResponseFailedEvent
+from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
+from speech_to_speech.pipeline.turn_latency import record_response_e2e, record_response_tts_ttfa
 from speech_to_speech.zerogpu import runtime
 
+logger = logging.getLogger(__name__)
 
-class ZeroGPUTTSHandler(Qwen3TTSHandler):
+
+class _StreamCancelled(Exception):
+    pass
+
+
+class ZeroGPUTTSHandler(BaseHandler[TTSIn, TTSOut]):
     def setup(
         self,
         should_listen,
-        model_name="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-        speaker="Aiden",
-        language="english",
+        backend=None,
+        model_name=None,
+        voice=None,
+        language=None,
         gen_kwargs=None,
-        **kwargs,
+        cancel_scope=None,
+        speculative_turns=None,
+        detect_llm_output_language=False,
     ):
-        if model_name != runtime.get_model_ids()["tts"]:
-            raise ValueError("ZeroGPU TTS model must match runtime.initialize(tts_model=...).")
-        super().setup(
-            should_listen,
-            model_name=model_name,
-            speaker=speaker,
-            language=language,
-            device="cuda",
-            dtype="bfloat16",
-            backend="torch",
-            streaming_chunk_size=4,
-            max_new_tokens=512,
-            gen_kwargs=gen_kwargs,
-            **kwargs,
+        config = runtime.get_tts_config()
+        if backend is not None and backend != config["backend"]:
+            raise ValueError("ZeroGPU TTS backend must match the initialized runtime")
+        self.detect_llm_output_language = detect_llm_output_language
+        if model_name is not None and model_name != config["model"]:
+            raise ValueError("ZeroGPU TTS model must match the initialized runtime")
+        if gen_kwargs:
+            raise ValueError("Configure ZeroGPU TTS generation options on the runtime provider")
+        self.should_listen = should_listen
+        self.cancel_scope = cancel_scope
+        self.speculative_turns = speculative_turns
+        self.voice = runtime.resolve_tts_voice(voice, config["voice"])
+        self._initial_voice = self.voice
+        self.language = language or config["language"]
+        self.supported_languages = config.get("supported_languages")
+        self._failed_responses = set()
+        self._streams = set()
+        self._streams_lock = Lock()
+
+    def _identity(self, item):
+        generation = item.cancel_generation
+        if generation is None and self.cancel_scope is not None:
+            generation = self.cancel_scope.generation
+        return generation, item.response_key, item.turn_id, item.turn_revision
+
+    def _cancelled(self, item, generation):
+        return (
+            self.stop_event.is_set()
+            or (self.cancel_scope is not None and self.cancel_scope.is_stale(generation))
+            or (
+                self.speculative_turns is not None
+                and not self.speculative_turns.is_latest(item.turn_id, item.turn_revision)
+            )
         )
 
-    def _setup_faster(self, model_name, dtype, attn_implementation, backend):
-        # Session/voice settings still belong to the native handler. No model
-        # or CUDA state is required by its parent-side process() method.
-        self.dtype = torch.bfloat16
-        self.model = SimpleNamespace(sample_rate=24000)
+    def _request_voice(self, item):
+        requested = None
+        if item.response and item.response.audio and item.response.audio.output:
+            requested = item.response.audio.output.voice
+        if not requested and item.runtime_config is not None:
+            audio = item.runtime_config.session.audio
+            if audio is not None and audio.output is not None:
+                requested = audio.output.voice
+        self.voice = runtime.resolve_tts_voice(requested, self.voice)
+        return self.voice
 
-    def warmup(self):
-        pass
+    def _request_language(self, item):
+        selected = item.selected_language
+        if selected == "auto":
+            selected = None
+        language = item.tts_language_code or selected or self.language
+        if self.supported_languages and language not in self.supported_languages:
+            language = selected if selected in self.supported_languages else self.language
+        return language
 
-    def _model_type(self):
-        return "custom_voice"
+    def _chunks(self, item, generation, voice, language):
+        """Poll cancellation even while the provider is producing its first chunk.
 
-    def _supported_speakers(self):
-        # This reads checkpoint metadata, never performs CUDA inference.
-        return runtime.get_tts_speakers()
+        Only the producer owns/closes the iterator. A cancelled blocking native
+        next() may finish later, but its audio is discarded and cleanup follows
+        on that same thread; never close a running generator from another thread.
+        """
+        results = Queue(maxsize=1)
+        stopped = Event()
+        with self._streams_lock:
+            self._streams.add(stopped)
 
-    def _process_custom_voice(self, text, language=None):
-        generation = self.cancel_scope.generation if self.cancel_scope else None
+        def publish(kind, value=None):
+            while not stopped.is_set():
+                try:
+                    results.put((kind, value), timeout=0.025)
+                    return True
+                except Full:
+                    pass
+            return False
+
+        def produce():
+            chunks = None
+            try:
+                if stopped.is_set():
+                    return
+                chunks = iter(runtime.synthesize_chunks(item.text, language, voice))
+                for chunk in chunks:
+                    if not publish("audio", chunk):
+                        return
+                publish("done")
+            except Exception as exc:
+                publish("error", exc)
+            finally:
+                try:
+                    close = getattr(chunks, "close", None)
+                    if close:
+                        close()
+                except Exception:
+                    logger.exception("Closing ZeroGPU TTS stream failed")
+
+        Thread(target=produce, name="zerogpu-tts-stream", daemon=True).start()
+        try:
+            while not stopped.is_set() and not self._cancelled(item, generation):
+                try:
+                    kind, value = results.get(timeout=0.025)
+                except Empty:
+                    continue
+                if stopped.is_set():
+                    raise _StreamCancelled
+                if self._cancelled(item, generation):
+                    return
+                if kind == "done":
+                    return
+                if kind == "error":
+                    raise value
+                yield value
+            if stopped.is_set():
+                raise _StreamCancelled
+        finally:
+            stopped.set()
+            with self._streams_lock:
+                self._streams.discard(stopped)
+
+    def process(self, item):
+        identity = self._identity(item)
+        tracker = self.speculative_turns
+        if isinstance(item, EndOfResponse):
+            self._failed_responses.discard(identity)
+            if tracker and not tracker.wait_for_gate(item.turn_id, item.turn_revision):
+                if item.response_key is None:
+                    return
+                item.cleanup_only = True
+            yield AUDIO_RESPONSE_DONE
+            return
+        generation = identity[0]
+        if identity in self._failed_responses or not item.text.strip() or self._cancelled(item, generation):
+            return
+        if tracker and not tracker.wait_for_gate(item.turn_id, item.turn_revision):
+            return
+        chunks = None
         started = perf_counter()
         first = True
-        chunks = runtime.synthesize_chunks(text, language or self.language, self.speaker)
         try:
+            chunks = self._chunks(item, generation, self._request_voice(item), self._request_language(item))
             for chunk in chunks:
-                if self.cancel_scope and self.cancel_scope.is_stale(generation):
+                if self._cancelled(item, generation):
                     return
+                if len(chunk) == 0:
+                    continue
                 if first:
-                    tracker = active_turn_latency_tracker()
-                    if tracker is not None:
-                        tracker.record_tts_ttfa(perf_counter() - started)
+                    if tracker and not tracker.wait_for_gate(item.turn_id, item.turn_revision, commit=True):
+                        return
+                    store = getattr(self, "turn_latency_store", None)
+                    record_response_tts_ttfa(store, item.response_key, perf_counter() - started)
+                    if item.speech_stopped_at_s is not None:
+                        record_response_e2e(store, item.response_key, max(0, perf_counter() - item.speech_stopped_at_s))
                     first = False
-                # Child's native Qwen _stream already converts/resamples to
-                # pipeline PCM16/16kHz and preserves streaming chunk boundaries.
                 yield chunk
+            if first and not self._cancelled(item, generation):
+                raise RuntimeError("ZeroGPU TTS provider returned no audio")
+        except _StreamCancelled:
+            return
+        except Exception:
+            logger.exception("ZeroGPU TTS synthesis failed")
+            if not self._cancelled(item, generation):
+                self._failed_responses.add(identity)
+                self.queue_out.put(
+                    ResponseFailedEvent(
+                        message="ZeroGPU TTS synthesis failed",
+                        turn_id=item.turn_id,
+                        turn_revision=item.turn_revision,
+                        cancel_generation=generation,
+                        response_key=item.response_key,
+                    )
+                )
         finally:
-            close = getattr(chunks, "close", None)
-            if close:
-                close()
+            if chunks is not None:
+                chunks.close()
+
+    def on_session_end(self):
+        with self._streams_lock:
+            for stopped in self._streams:
+                stopped.set()
+        self.voice = self._initial_voice
+        self._failed_responses.clear()
+
+    def cleanup(self):
+        # BaseHandler also calls cleanup when setup failed before state existed.
+        if hasattr(self, "_streams_lock"):
+            self.on_session_end()

@@ -1,5 +1,6 @@
 """Create an explicit deployment snapshot without uploading local secrets."""
 
+import os
 import re
 import shutil
 import sys
@@ -40,6 +41,8 @@ def stage(destination):
     html = re.sub(r'<a class="cerebras-credit".*?</a>', "", html, flags=re.DOTALL)
     html = re.sub(r'<span class="pipe-note">· via\s*</span>', "", html)
     html = html.replace('<span class="sep" aria-hidden="true">·</span>', "")
+    if os.getenv("TTS_BACKEND", "qwen3") == "kokoro":
+        html = html.replace("Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", os.getenv("TTS_MODEL", "hexgrad/Kokoro-82M"))
     index.write_text(html)
     for name in ["ui", "ws", "worklets"]:
         shutil.copytree(ROOT / "demo" / name, frontend / name)

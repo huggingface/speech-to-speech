@@ -23,14 +23,14 @@ from transformers import (
 )
 
 from ._model_stt import create_stt, warmup_stt, transcribe as transcribe_stt
-from ._model_tts import load_tts, initialize_tts_graphs, gpu_models as tts_gpu_models, synthesize_chunks16k
+from ._tts_provider import create_provider
 
 
 # Populated only by runtime.initialize(), before the deployment starts ZeroGPU.
 stt = llm_model = llm_tokenizer = tts = None
 
 
-def initialize_models(stt_model, llm_model_id, tts_model, tts_speaker):
+def initialize_models(stt_model, llm_model_id, tts_backend, tts_model, tts_voice):
     global stt, llm_model, llm_tokenizer, tts
     stt = create_stt(stt_model)
     llm_tokenizer = AutoTokenizer.from_pretrained(llm_model_id)
@@ -42,7 +42,7 @@ def initialize_models(stt_model, llm_model_id, tts_model, tts_speaker):
         .to("cuda")
         .eval()
     )
-    tts = load_tts(tts_model, tts_speaker)
+    tts = create_provider(tts_backend, tts_model, tts_voice)
 
 
 CANCEL_DIR = Path("/tmp/s2s-zerogpu-cancel")
@@ -148,28 +148,19 @@ def _tokens(messages, gen_kwargs, cancel_id=None, deadline=None, abandoned_path=
             raise RuntimeError("GPU generation thread did not stop")
 
 
-def _synthesize(text):
-    chunks = list(synthesize_chunks16k(tts, text))
-    return np.concatenate(chunks).astype(np.float32) / 32768 if chunks else np.zeros(0, dtype=np.float32)
-
-
 def _gpu_models():
-    return {"stt": stt.model, "llm": llm_model, **tts_gpu_models(tts)}
+    return {"stt": stt.model, "llm": llm_model, **tts.gpu_models()}
 
 
 @spaces.GPU(duration=10)
 def gpu_info():
     return {
         "gpu": torch.cuda.get_device_name(),
+        "tts_model": tts.model_name,
+        "tts_provider": type(tts).__name__,
         "devices": {name: str(next(model.parameters()).device) for name, model in _gpu_models().items()},
     }
 
-
-# Keep one-shot entrypoints available for controlled comparisons. Conversation
-# code below uses the shared executor; there is no silent CPU/one-shot fallback.
-transcribe_once = spaces.GPU(duration=15)(_transcribe)
-tokens_once = spaces.GPU(duration=30)(_tokens)
-synthesize_once = spaces.GPU(duration=15)(_synthesize)
 
 LEASE_ROOT = Path("/tmp/s2s-zerogpu-leases")
 LEASE_ROOT.mkdir(mode=0o700, exist_ok=True)
@@ -207,7 +198,7 @@ def lease_worker(lease_id):
     # CUDA graph capture must be exclusive across this entire process. Once it
     # completes, independent STT/LLM/TTS lanes may safely execute concurrently.
     graph_started = time.monotonic()
-    initialize_tts_graphs(tts)
+    tts.initialize_lease()
     log.info("lease %s TTS graph initialization %.4fs", lease_id, time.monotonic() - graph_started)
     # First connection explicitly waits here before listening. These are real
     # GPU operations, including codec decoding, not just model/device loading.
@@ -223,7 +214,7 @@ def lease_worker(lease_id):
                 )
             ),
         ),
-        ("TTS", lambda: list(synthesize_chunks16k(tts, "Hello."))),
+        ("TTS", tts.warmup),
     ):
         warmup_started = time.monotonic()
         warm()
@@ -274,9 +265,7 @@ def lease_worker(lease_id):
                             emit("text", token)
                     elif operation == "synthesize":
                         for number, chunk in enumerate(
-                            synthesize_chunks16k(
-                                tts, payload["text"], payload.get("language", "english"), payload.get("speaker")
-                            )
+                            tts.synthesize_chunks(payload["text"], payload.get("language"), payload.get("speaker"))
                         ):
                             if abandoned.exists():
                                 break
@@ -470,7 +459,7 @@ def tokens(messages, gen_kwargs, cancel_id=None):
             yield event["value"]
 
 
-def synthesize_chunks(text, language="english", speaker=None):
+def synthesize_chunks(text, language=None, speaker=None):
     for event in _broker.submit("synthesize", {"text": text, "language": language, "speaker": speaker}):
         if event["kind"] == "audio":
             yield event["value"]

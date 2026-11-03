@@ -19,20 +19,30 @@ _initialize_lock = Lock()
 
 
 def initialize(
-    *, stt_model=DEFAULT_STT_MODEL, llm_model=DEFAULT_LLM_MODEL, tts_model=DEFAULT_TTS_MODEL, tts_speaker="Aiden"
+    *, stt_model=DEFAULT_STT_MODEL, llm_model=DEFAULT_LLM_MODEL, tts_backend="qwen3", tts_model=None, tts_voice=None
 ):
     """Load all three models once, without inference outside a GPU allocation.
 
     Returns the worker module so the deployment can register its decorated
     ``lease_worker`` and diagnostic GPU entrypoints with Gradio. Repeating the
     same initialization is harmless; changing models requires a process restart.
-    Supported model families are Parakeet TDT, Transformers causal LMs, and
-    Qwen3 TTS CustomVoice. Model identifiers alone do not add other backends.
+    Select TTS independently of execution using an existing backend name.
+    Only backends with an explicit ZeroGPU loading adapter are supported;
+    changing a model identifier alone does not add a new architecture.
     """
     global _worker, _settings
-    settings = dict(stt_model=stt_model, llm_model=llm_model, tts_model=tts_model, tts_speaker=tts_speaker)
-    if any(not isinstance(value, str) or not value.strip() for value in settings.values()):
+    settings = dict(
+        stt_model=stt_model, llm_model=llm_model, tts_backend=tts_backend, tts_model=tts_model, tts_voice=tts_voice
+    )
+    if any(value is not None and (not isinstance(value, str) or not value.strip()) for value in settings.values()):
         raise ValueError("ZeroGPU model identifiers and speaker must be nonempty strings")
+    if stt_model is None or llm_model is None:
+        raise ValueError("STT and LLM model identifiers are required")
+    # Validate before importing CUDA libraries or loading any weights.
+    from ._tts_provider import SUPPORTED_BACKENDS
+
+    if tts_backend not in SUPPORTED_BACKENDS:
+        raise ValueError(f"No ZeroGPU loading adapter for TTS backend {tts_backend!r}; supported: qwen3, kokoro")
     with _initialize_lock:
         if _worker is not None:
             if settings != _settings:
@@ -48,7 +58,7 @@ def initialize(
                     "ZeroGPU requires the optional spaces package and a Hugging Face ZeroGPU deployment"
                 ) from exc
             raise
-        worker.initialize_models(stt_model, llm_model, tts_model, tts_speaker)
+        worker.initialize_models(stt_model, llm_model, tts_backend, tts_model, tts_voice)
         _settings = settings
         _worker = worker
         return worker
@@ -68,8 +78,8 @@ def get_model_ids():
     return {
         "stt": _settings["stt_model"],
         "llm": _settings["llm_model"],
-        "tts": _settings["tts_model"],
-        "speaker": _settings["tts_speaker"],
+        "tts": get_tts_config()["model"],
+        "speaker": get_tts_config()["voice"],
     }
 
 
@@ -78,9 +88,21 @@ def get_tokenizer():
     return _require_worker().llm_tokenizer
 
 
-def get_tts_speakers():
-    """Speakers supported by the initialized native Qwen3 handler."""
-    return _require_worker().tts._supported_speakers()
+def get_tts_config():
+    """CPU metadata; no GPU allocation is requested to configure a session."""
+    provider = _require_worker().tts
+    return {
+        "backend": _settings["tts_backend"],
+        "model": provider.model_name,
+        "voice": provider.default_voice,
+        "language": provider.default_language,
+        "supported_languages": set(provider.supported_languages),
+    }
+
+
+def resolve_tts_voice(requested, current):
+    """Resolve a session voice through the selected model's native metadata."""
+    return _require_worker().tts.resolve_voice(requested, current)
 
 
 def prepare():
@@ -101,7 +123,7 @@ def tokens(messages, gen_kwargs, cancel_id=None):
     return _require_worker().tokens(messages, gen_kwargs, cancel_id)
 
 
-def synthesize_chunks(text, language="english", speaker=None):
+def synthesize_chunks(text, language=None, speaker=None):
     """Stream native 16 kHz PCM16 chunks from the allocated GPU."""
     return _require_worker().synthesize_chunks(text, language, speaker)
 

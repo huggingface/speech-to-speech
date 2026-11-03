@@ -687,7 +687,7 @@ def _build_pipeline_unit(
     tts_handler = handlers[tts_index]
     tts_module = modules[type(tts_handler).__module__]
     if tts_selection.name == "zerogpu":
-        service.tts_supported_languages = {"en"}
+        service.tts_supported_languages = set(tts_handler.supported_languages)
     elif tts_selection.name == "kokoro":
         service.tts_supported_languages = {"en", "ja", "zh", "fr", "es", "it", "pt", "hi"}
     elif tts_selection.name == "facebookMMS":

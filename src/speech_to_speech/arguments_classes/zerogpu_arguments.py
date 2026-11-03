@@ -26,9 +26,16 @@ class ZeroGPULLMArguments(LanguageModelBaseArguments):
 
 @dataclass
 class ZeroGPUTTSArguments:
-    zerogpu_tts_model_name: str = field(
-        default="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-        metadata={"help": "Qwen CustomVoice model loaded by the ZeroGPU application."},
+    zerogpu_tts_backend: str | None = field(
+        default=None,
+        metadata={"help": "Native TTS backend selected by the initialized ZeroGPU runtime (qwen3 or kokoro)."},
     )
-    zerogpu_tts_speaker: str = field(default="Aiden", metadata={"help": "Qwen CustomVoice speaker."})
-    zerogpu_tts_language: str = field(default="english", metadata={"help": "Language for speech synthesis."})
+    zerogpu_tts_model_name: str | None = field(
+        default=None, metadata={"help": "Must match the model initialized in the worker; defaults to its model."}
+    )
+    zerogpu_tts_voice: str | None = field(
+        default=None, metadata={"help": "Voice ID understood by the selected TTS backend."}
+    )
+    zerogpu_tts_language: str | None = field(
+        default=None, metadata={"help": "Speech language; defaults to the selected backend's language."}
+    )

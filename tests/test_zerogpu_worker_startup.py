@@ -41,12 +41,10 @@ def executor(tmp_path, fail=None):
         torch=SimpleNamespace(cuda=SimpleNamespace(get_device_name=lambda: "fake GPU")),
         _lease_directory=lambda ident: tmp_path,
         _gpu_models=lambda: {},
-        initialize_tts_graphs=lambda handler: stage("graphs"),
         warmup_stt=lambda handler: stage("stt"),
         stt=object(),
-        tts=object(),
+        tts=SimpleNamespace(initialize_lease=lambda: stage("graphs"), warmup=lambda: stage("tts")),
         _tokens=lambda *args, **kwargs: iter(stage("llm")),
-        synthesize_chunks16k=lambda *args: iter(stage("tts")),
         LEASE_ADMISSION_SECONDS=5,
         LEASE_IDLE_SECONDS=5,
     )

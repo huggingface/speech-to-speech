@@ -37,7 +37,7 @@ def test_uninitialized_runtime_has_actionable_error():
         runtime.prefetch,
         runtime.get_tokenizer,
         runtime.get_model_ids,
-        runtime.get_tts_speakers,
+        runtime.get_tts_config,
     ]:
         with pytest.raises(RuntimeError, match=r"initialize\(\) before building"):
             operation()
@@ -48,7 +48,13 @@ def test_explicit_initialization_is_shared_and_does_not_silently_change_models(m
     worker = SimpleNamespace(
         initialize_models=Mock(),
         llm_tokenizer=object(),
-        tts=SimpleNamespace(_supported_speakers=lambda: ["Aiden"]),
+        tts=SimpleNamespace(
+            model_name=runtime.DEFAULT_TTS_MODEL,
+            default_voice="Aiden",
+            default_language="english",
+            supported_languages={"en"},
+            resolve_voice=lambda requested, current: requested or current,
+        ),
         prepare=Mock(return_value={"models": ["stt", "llm", "tts"]}),
         stop=Mock(),
     )
@@ -58,10 +64,11 @@ def test_explicit_initialization_is_shared_and_does_not_silently_change_models(m
     assert runtime.initialize() is worker
     importer.assert_called_once_with("speech_to_speech.zerogpu._worker")
     worker.initialize_models.assert_called_once_with(
-        runtime.DEFAULT_STT_MODEL, runtime.DEFAULT_LLM_MODEL, runtime.DEFAULT_TTS_MODEL, "Aiden"
+        runtime.DEFAULT_STT_MODEL, runtime.DEFAULT_LLM_MODEL, "qwen3", None, None
     )
     assert runtime.get_tokenizer() is worker.llm_tokenizer
-    assert runtime.get_tts_speakers() == ["Aiden"]
+    assert runtime.get_tts_config()["voice"] == "Aiden"
+    assert runtime.resolve_tts_voice("Vivian", "Aiden") == "Vivian"
     assert runtime.get_model_ids()["stt"] == runtime.DEFAULT_STT_MODEL
     ids = runtime.get_model_ids()
     ids["stt"] = "modified"
@@ -94,8 +101,37 @@ def test_streaming_and_cancellation_delegate_without_buffering(monkeypatch):
     assert runtime.tokens([], {"max_new_tokens": 5}, "id") is stream
     worker.tokens.assert_called_once_with([], {"max_new_tokens": 5}, "id")
     assert runtime.synthesize_chunks("Hi", speaker="Aiden") is stream
-    worker.synthesize_chunks.assert_called_once_with("Hi", "english", "Aiden")
+    worker.synthesize_chunks.assert_called_once_with("Hi", None, "Aiden")
     runtime.cancel_generation("id")
     runtime.cleanup_cancel("id")
     worker.cancel_generation.assert_called_once_with("id")
     worker.cleanup_cancel.assert_called_once_with("id")
+
+
+def test_unknown_tts_backend_fails_before_importing_cuda(monkeypatch):
+    importer = Mock()
+    monkeypatch.setattr(runtime, "import_module", importer)
+    with pytest.raises(ValueError, match="No ZeroGPU loading adapter"):
+        runtime.initialize(tts_backend="unsupported")
+    importer.assert_not_called()
+
+
+def test_tts_backend_selection_is_independent_of_execution(monkeypatch):
+    worker = SimpleNamespace(
+        initialize_models=Mock(),
+        tts=SimpleNamespace(
+            model_name="hexgrad/Kokoro-82M",
+            default_voice="bm_fable",
+            default_language="en",
+            supported_languages={"en", "fr"},
+        ),
+    )
+    monkeypatch.setattr(runtime, "import_module", lambda name: worker)
+    runtime.initialize(tts_backend="kokoro")
+    worker.initialize_models.assert_called_once_with(
+        runtime.DEFAULT_STT_MODEL, runtime.DEFAULT_LLM_MODEL, "kokoro", None, None
+    )
+    assert runtime.get_tts_config()["backend"] == "kokoro"
+    assert runtime.get_model_ids()["tts"] == "hexgrad/Kokoro-82M"
+    with pytest.raises(RuntimeError, match="different models"):
+        runtime.initialize(tts_backend="qwen3")
