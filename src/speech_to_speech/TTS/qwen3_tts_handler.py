@@ -40,6 +40,7 @@ from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception
 from speech_to_speech.pipeline.turn_latency import TTSResponseTimer, bind_active_turn_latency_tracker
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
+from speech_to_speech.TTS.pcm_blocks import PCMBlockBuffer
 from speech_to_speech.utils.mlx_lock import MLXLockContext
 from speech_to_speech.utils.utils import resolve_device
 
@@ -713,7 +714,7 @@ class Qwen3TTSHandler(BaseTTSHandler):
         total_samples = 0
         first_chunk = True
         found_speech = False
-        leftover = np.array([], dtype=np.int16)
+        blocks = PCMBlockBuffer(self.blocksize)
 
         for item in gen:
             if self._is_stale(cancel_gen):
@@ -745,18 +746,17 @@ class Qwen3TTSHandler(BaseTTSHandler):
                 audio_chunk = audio_chunk[start_idx:]
                 found_speech = True
 
-            audio_chunk = np.concatenate([leftover, audio_chunk])
+            for block in blocks.push(audio_chunk):
+                if self._is_stale(cancel_gen):
+                    return
+                yield block
+                total_samples += len(block)
 
-            n = (len(audio_chunk) // self.blocksize) * self.blocksize
-            for i in range(0, n, self.blocksize):
-                yield audio_chunk[i : i + self.blocksize]
-                total_samples += self.blocksize
-            leftover = audio_chunk[n:]
-
-        if len(leftover) > 0:
-            chunk = np.pad(leftover, (0, self.blocksize - len(leftover)))
-            yield chunk
-            total_samples += len(leftover)
+        for block in blocks.flush():
+            if self._is_stale(cancel_gen):
+                return
+            yield block
+            total_samples += len(block)
 
         generation_time = perf_counter() - start
         audio_duration = total_samples / PIPELINE_SR

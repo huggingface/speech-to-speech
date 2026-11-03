@@ -171,7 +171,7 @@ def test_openai_tts_warmup_http_failure_aborts_construction(monkeypatch):
         )
 
 
-def test_openai_tts_streams_resampled_fixed_size_pcm(monkeypatch):
+def test_openai_tts_streams_resampled_pcm_with_short_tail(monkeypatch):
     handler = _openai_tts_handler(monkeypatch, cancel_scope=CancelScope())
     handler.model = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     handler.voice = "aiden"
@@ -181,8 +181,8 @@ def test_openai_tts_streams_resampled_fixed_size_pcm(monkeypatch):
 
     assert chunks
     assert all(isinstance(chunk, np.ndarray) for chunk in chunks)
-    assert all(chunk.dtype == np.int16 and chunk.shape == (512,) for chunk in chunks)
-    assert sum(chunk.size for chunk in chunks) == 2048
+    assert all(chunk.dtype == np.int16 and chunk.ndim == 1 and 0 < chunk.size <= 512 for chunk in chunks)
+    assert sum(chunk.size for chunk in chunks) == 1600
     payload = _FakeSpeechOperation.instances[0].payload
     assert payload["input"] == "Hello"
     assert payload["voice"] == "aiden"
@@ -901,8 +901,8 @@ def test_openai_tts_decodes_wav_stream(monkeypatch):
     chunks = list(handler.process(TTSInput(text="Hello")))
 
     assert chunks
-    assert all(chunk.dtype == np.int16 and chunk.shape == (512,) for chunk in chunks)
-    assert sum(chunk.size for chunk in chunks) == 2048
+    assert all(chunk.dtype == np.int16 and chunk.ndim == 1 and 0 < chunk.size <= 512 for chunk in chunks)
+    assert sum(chunk.size for chunk in chunks) == 1600
     payload = _FakeSpeechOperation.instances[0].payload
     assert payload["response_format"] == "wav"
     assert "stream" not in payload
@@ -975,8 +975,8 @@ def test_openai_tts_decodes_streaming_wav_with_unknown_data_length(monkeypatch):
     chunks = list(handler.process(TTSInput(text="Hello")))
 
     assert chunks
-    assert all(chunk.dtype == np.int16 and chunk.shape == (512,) for chunk in chunks)
-    assert sum(chunk.size for chunk in chunks) == 2048
+    assert all(chunk.dtype == np.int16 and chunk.ndim == 1 and 0 < chunk.size <= 512 for chunk in chunks)
+    assert sum(chunk.size for chunk in chunks) == 1600
 
 
 def test_openai_tts_cancellation_before_audio_does_not_commit(monkeypatch):

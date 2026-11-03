@@ -24,6 +24,7 @@ from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfRespons
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.turn_latency import TTSResponseTimer
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
+from speech_to_speech.TTS.pcm_blocks import PCMBlockBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -759,24 +760,17 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
         on_first_source_audio: Callable[[], None] | None = None,
     ) -> Iterator[np.ndarray]:
         resampler = _StreamingFIRResampler(source_rate, PIPELINE_SAMPLE_RATE)
-        sample_remainder: np.ndarray = np.empty(0, dtype=np.int16)
+        blocks = PCMBlockBuffer(self.blocksize)
         for samples in sample_chunks:
             if on_first_source_audio is not None and samples.size:
                 on_first_source_audio()
                 on_first_source_audio = None
             converted = resampler.push(samples)
-            sample_remainder = np.concatenate((sample_remainder, converted))
-            while sample_remainder.size >= self.blocksize:
-                yield sample_remainder[: self.blocksize].copy()
-                sample_remainder = sample_remainder[self.blocksize :]
+            yield from blocks.push(converted)
 
         converted = resampler.push(np.empty(0, dtype=np.float64), final=True)
-        sample_remainder = np.concatenate((sample_remainder, converted))
-        while sample_remainder.size >= self.blocksize:
-            yield sample_remainder[: self.blocksize].copy()
-            sample_remainder = sample_remainder[self.blocksize :]
-        if sample_remainder.size:
-            yield np.pad(sample_remainder, (0, self.blocksize - sample_remainder.size))
+        yield from blocks.push(converted)
+        yield from blocks.flush()
 
     def _log_first_audio_latency(self, tts_input: TTSInput, timer: TTSResponseTimer) -> None:
         logger.info("OpenAI-compatible TTS time to first audio: %.3fs", perf_counter() - timer.started_at_s)
