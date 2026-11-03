@@ -14,6 +14,7 @@ test("selected language reaches transcription, the agent, and live updates", asy
   const client = new S2sRealtimeClient({
     transport: "websocket", voice: "Aiden", instructions: "Be helpful.", language: "es",
   });
+  client._autoLanguageSupported = true;
   client._transport = { sendEvent: (event) => events.push(event) };
   client._session = { options: { config: client._sessionConfig() }, updateAgent: async () => {} };
 
@@ -37,8 +38,10 @@ test("Auto is sent explicitly at session initialization", () => {
   const client = new S2sRealtimeClient({
     transport: "websocket", voice: "Aiden", instructions: "Be helpful.", language: "auto",
   });
+  client._autoLanguageSupported = true;
   assert.equal(client._sessionConfig().audio.input.transcription.language, "auto");
   const events = [];
+  client._autoLanguageSupported = true;
   client._transport = { sendEvent: (event) => events.push(event) };
   client._sendLanguageUpdate(client.options.language);
   assert.equal(events[0].session.audio.input.transcription.language, "auto");
@@ -55,7 +58,8 @@ for (const [initial, selected] of [["auto", "fr"], ["es", "de"], ["fr", "auto"]]
     const client = new S2sRealtimeClient({
       transport: "websocket", voice: "Aiden", instructions: "Be helpful.", language: initial,
     });
-    client._transport = transport;
+    client._autoLanguageSupported = true;
+  client._transport = transport;
     client._session = new realtime.RealtimeSession(client._buildAgent(), {
       transport, config: client._sessionConfig(), tracingDisabled: true,
     });
@@ -86,3 +90,47 @@ for (const [initial, selected] of [["auto", "fr"], ["es", "de"], ["fr", "auto"]]
     assertLanguage();
   });
 }
+
+for (const supported of [true, false, null]) {
+  test(`capability discovery gates Auto in initial and subsequent config: ${supported}`, async (t) => {
+    const client = new S2sRealtimeClient({ transport: "websocket", language: "auto" });
+    t.mock.method(globalThis, "fetch", async (url) => {
+      assert.equal(url.pathname, "/v1/realtime/capabilities");
+      assert.equal(url.protocol, "https:");
+      return { ok: true, json: async () => ({ pipelines: [{ conversation: { session_auto_supported: supported } }] }) };
+    });
+    await client._loadLanguageCapabilities("wss://backend.test/v1/realtime");
+    assert.deepEqual(client._sessionConfig().audio.input.transcription,
+      supported === true ? { model: "whisper-1", language: "auto" } : { model: "whisper-1" });
+    const events = [];
+    client._transport = { sendEvent: event => events.push(event) };
+    client._sendLanguageUpdate("auto");
+    assert.equal(events.length, supported === true ? 1 : 0);
+    assert.deepEqual(client._languageConfig("es"), { language: "es" });
+  });
+}
+
+test("unavailable discovery leaves backend defaults intact", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => { throw new Error("unavailable"); });
+  const client = new S2sRealtimeClient({ transport: "websocket", language: "auto" });
+  await client._loadLanguageCapabilities("ws://backend.test/v1/realtime");
+  assert.equal(Object.hasOwn(client._sessionConfig().audio.input.transcription, "language"), false);
+});
+
+test("queued language choices update options before the SDK session exists", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const vm = await import("node:vm");
+  const source = await readFile(new URL("../main.js", import.meta.url), "utf8");
+  const handler = source.slice(source.indexOf('mainLanguage.addEventListener("change"'), source.indexOf('settingsForm.addEventListener("submit"'));
+  for (const currentState of ["queued", "your-turn", "listening"]) {
+    const client = new S2sRealtimeClient({ transport: "websocket", language: "auto" });
+    const settings = { language: "auto" };
+    let change;
+    const mainLanguage = { value: "es", addEventListener: (_, callback) => { change = callback; } };
+    vm.runInNewContext(handler, { mainLanguage, inputLanguage: {}, settings, saveSettings() {}, client,
+      currentState, LIVE_STATES: new Set(["listening"]) });
+    change();
+    assert.equal(client.options.language, "es");
+    assert.equal(client._sessionConfig().audio.input.transcription.language, "es");
+  }
+});

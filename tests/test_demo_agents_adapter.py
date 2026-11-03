@@ -83,7 +83,8 @@ for (const [transport, url] of [
     startupGreeting: "Say hello.",
     micStream,
   });
-  client._setupAudio = async () => {};
+  client._loadLanguageCapabilities = async () => { client._autoLanguageSupported = true; };
+client._setupAudio = async () => {};
   client._attachRtcOutput = () => {};
   await client.connect();
   const session = sessions.at(-1);
@@ -312,6 +313,7 @@ const client = new S2sRealtimeClient({
   startupGreeting: "Say hello.",
   micStream: { getAudioTracks() { return [track]; } },
 });
+client._loadLanguageCapabilities = async () => { client._autoLanguageSupported = true; };
 client._setupAudio = async () => {};
 client._attachRtcOutput = () => {};
 await client.connect();

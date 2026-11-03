@@ -30,6 +30,7 @@
  * @property {string} [sessionUrl]
  * @property {string} [loadBalancerUrl]
  * @property {string} [directUrl]
+ * @property {string} [capabilitiesUrl] Backend realtime URL for language discovery.
  * @property {string} [callsUrl]
  * @property {RTCIceServer[]} [iceServers]
  * @property {string} voice
@@ -54,7 +55,7 @@ import { SentAudioRecorder } from "./ws/user-audio-recorder.js";
 import { LocalVad } from "./ws/local-vad.js";
 
 export const AUDIO_SAMPLE_RATE = 24_000;
-export const AUDIO_WORKLET_VERSION = "demo-sync-20261103";
+export const AUDIO_WORKLET_VERSION = "demo-sync-20261103-2";
 export const DEFAULT_PLAYBACK_BUFFER_MS = 0;
 const MIC_CHUNK_MS = 40;
 const CAPTURE_CONFIG_TIMEOUT_MS = 2_000;
@@ -214,6 +215,8 @@ export class S2sRealtimeClient extends EventTarget {
     if (this._closed) throw codedError("connect aborted", "aborted");
     if (!this.options.micStream?.getAudioTracks()[0]) throw new Error("No microphone track available");
 
+    await this._loadLanguageCapabilities(url);
+    if (this._closed) throw codedError("connect aborted", "aborted");
     await this._setupAudio();
     const { OpenAIRealtimeWebRTC, OpenAIRealtimeWebSocket, RealtimeSession } = sdk();
     if (this.options.transport === "websocket") {
@@ -304,6 +307,33 @@ export class S2sRealtimeClient extends EventTarget {
     }
   }
 
+  async _loadLanguageCapabilities(connectUrl) {
+    this._autoLanguageSupported = false;
+    try {
+      const url = new URL(this.options.capabilitiesUrl || connectUrl, globalThis.location?.href);
+      url.protocol = url.protocol === "wss:" ? "https:" : url.protocol === "ws:" ? "http:" : url.protocol;
+      url.pathname = url.pathname.replace(/\/v1\/realtime(?:\/calls)?\/?$/, "/v1/realtime/capabilities");
+      // A same-origin WebRTC proxy cannot provide the backend capability URL.
+      if (!url.pathname.endsWith("/v1/realtime/capabilities")) return;
+      const response = await fetch(url, { signal: AbortSignal.timeout(2000) });
+      if (!response.ok) return;
+      const data = await response.json();
+      this._autoLanguageSupported = Array.isArray(data.pipelines) && data.pipelines.length > 0
+        && data.pipelines.every(pipeline => pipeline.conversation?.session_auto_supported === true);
+    } catch {
+      // Older servers and inaccessible discovery endpoints keep backend defaults.
+    } finally {
+      this.dispatchEvent(new CustomEvent("language-capabilities", {
+        detail: { autoSupported: this._autoLanguageSupported },
+      }));
+    }
+  }
+
+  _languageConfig(language) {
+    return language !== "auto" || this._autoLanguageSupported
+      ? { language } : {};
+  }
+
   _sessionConfig() {
     return {
       outputModalities: ["audio"],
@@ -315,7 +345,7 @@ export class S2sRealtimeClient extends EventTarget {
           format: { type: "audio/pcm", rate: AUDIO_SAMPLE_RATE },
           transcription: {
             model: "whisper-1",
-            language: this.options.language || "auto",
+            ...this._languageConfig(this.options.language || "auto"),
           },
           turnDetection: { type: "server_vad", interruptResponse: true },
           noiseReduction: null,
@@ -796,6 +826,7 @@ export class S2sRealtimeClient extends EventTarget {
 
   /** @param {string} language */
   _sendLanguageUpdate(language) {
+    if (language === "auto" && !this._autoLanguageSupported) return;
     this._transport?.sendEvent({
       type: "session.update",
       session: {
@@ -807,6 +838,10 @@ export class S2sRealtimeClient extends EventTarget {
 
   /** @param {{voice?: string, language?: string, instructions?: string}} patch */
   updateSession(patch) {
+    if (this._session && patch.language === "auto" && !this._autoLanguageSupported
+        && this.options.language !== "auto") {
+      throw new Error("This backend cannot restore Auto during a conversation. Start a new session using backend defaults.");
+    }
     if (patch.voice) this.options.voice = patch.voice;
     if (patch.instructions) this.options.instructions = patch.instructions;
     if (patch.language !== undefined) this.options.language = patch.language;
@@ -814,7 +849,8 @@ export class S2sRealtimeClient extends EventTarget {
     // Agent and tool updates rebuild the SDK payload from options.config.
     // Keep that config current so later updates cannot restore the initial language.
     const config = this._session.options.config;
-    config.audio.input.transcription.language = this.options.language || "auto";
+    delete config.audio.input.transcription.language;
+    Object.assign(config.audio.input.transcription, this._languageConfig(this.options.language || "auto"));
     this._agent = this._buildAgent();
     void this._session.updateAgent(this._agent).then(() => {
       // The SDK may send its cached session config while updating the agent.

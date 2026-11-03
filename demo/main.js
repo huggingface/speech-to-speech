@@ -17,7 +17,7 @@
  * @typedef {S2sRealtimeClient} RealtimeClient
  */
 
-import { S2sRealtimeClient, normalizePlaybackBufferMs } from "./s2s-realtime-client.js?v=demo-sync-20261103";
+import { S2sRealtimeClient, normalizePlaybackBufferMs } from "./s2s-realtime-client.js?v=demo-sync-20261103-2";
 import { $, truncateError, errorMessage, DEBUG } from "./ui/dom.js";
 import { ChatView } from "./ui/chat.js";
 import { Account } from "./ui/account.js";
@@ -1111,7 +1111,7 @@ mainLanguage.addEventListener("change", () => {
   settings.language = mainLanguage.value || "auto";
   inputLanguage.value = settings.language;
   saveSettings(settings);
-  if (client && LIVE_STATES.has(currentState)) {
+  if (client && (LIVE_STATES.has(currentState) || currentState === "queued" || currentState === "your-turn")) {
     client.updateSession({ language: settings.language });
   }
 });
@@ -1128,7 +1128,7 @@ settingsForm.addEventListener("submit", (event) => {
   // changed connection URL only takes effect on the next restart. Speaker
   // output can switch live when the browser supports AudioContext.setSinkId;
   // mic device changes need a Restart (new getUserMedia stream).
-  if (client && LIVE_STATES.has(currentState)) {
+  if (client && (LIVE_STATES.has(currentState) || currentState === "queued" || currentState === "your-turn")) {
     client.updateSession({ voice: settings.voice, language: settings.language, instructions: settings.instructions });
     if (typeof client.setAudioOutputDevice === "function") {
       void client.setAudioOutputDevice(settings.audioOutputId);
@@ -1452,6 +1452,7 @@ async function doStart(audioContext = null) {
     localVad: settings.localVad,
     voice: settings.voice,
     language: settings.language,
+    capabilitiesUrl: pinnedUrl || undefined,
     instructions: settings.instructions,
     startupGreeting,
     acquireMic: acquireMicStream,
@@ -1554,6 +1555,14 @@ async function doStart(audioContext = null) {
       trackedSessionId = info.sessionId;
       trackedTier = info.tier || "anon";
       startHeartbeat(info.heartbeatSec, !!info.limited);
+    }
+  });
+  c.addEventListener("language-capabilities", (event) => {
+    const { autoSupported } = event.detail;
+    for (const picker of [mainLanguage, inputLanguage]) {
+      const option = picker.querySelector('option[value="auto"]');
+      option.disabled = !autoSupported;
+      option.textContent = autoSupported ? "🌐 Auto detect" : "Backend default";
     }
   });
   c.addEventListener("input-level", (e) => {
@@ -1697,6 +1706,11 @@ async function teardown() {
       console.warn("[main] error closing client:", err);
     }
     client = null;
+  }
+  for (const picker of [mainLanguage, inputLanguage]) {
+    const option = picker.querySelector('option[value="auto"]');
+    option.disabled = false;
+    option.textContent = "🌐 Auto detect";
   }
   if (micStream) {
     for (const track of micStream.getTracks()) track.stop();
