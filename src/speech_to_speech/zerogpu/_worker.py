@@ -60,14 +60,16 @@ def _transcribe(audio):
 def _tokens(messages, gen_kwargs, deadline=None, abandoned_path=None):
     _assert_gpu(llm_model)
     stop = Event()
+    expired = Event()
 
     class Deadline(StoppingCriteria):
         def __call__(self, input_ids, scores, **kwargs):
-            return (
-                stop.is_set()
-                or (deadline is not None and time.monotonic() >= deadline)
-                or (abandoned_path is not None and abandoned_path.exists())
-            )
+            if stop.is_set() or (abandoned_path is not None and abandoned_path.exists()):
+                return True
+            if deadline is not None and time.monotonic() >= deadline:
+                expired.set()
+                return True
+            return False
 
     prompt = llm_tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
@@ -113,6 +115,8 @@ def _tokens(messages, gen_kwargs, deadline=None, abandoned_path=None):
                 yield chunk
         if errors:
             raise errors[0]
+        if expired.is_set():
+            raise TimeoutError("GPU lease deadline expired during generation")
     finally:
         stop.set()
         thread.join(timeout=5)
