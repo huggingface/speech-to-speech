@@ -119,21 +119,13 @@ def transcribe(audio):
     return _require_worker().transcribe(audio)
 
 
-def tokens(messages, gen_kwargs, cancel_id=None):
-    return _require_worker().tokens(messages, gen_kwargs, cancel_id)
+def tokens(messages, gen_kwargs, *, cancelled=None):
+    return _require_worker().tokens(messages, gen_kwargs, cancelled=cancelled)
 
 
-def synthesize_chunks(text, language=None, speaker=None):
+def synthesize_chunks(text, language=None, speaker=None, *, cancelled=None):
     """Stream native 16 kHz PCM16 chunks from the allocated GPU."""
-    return _require_worker().synthesize_chunks(text, language, speaker)
-
-
-def cancel_generation(cancel_id):
-    return _require_worker().cancel_generation(cancel_id)
-
-
-def cleanup_cancel(cancel_id):
-    return _require_worker().cleanup_cancel(cancel_id)
+    return _require_worker().synthesize_chunks(text, language, speaker, cancelled=cancelled)
 
 
 def stop():

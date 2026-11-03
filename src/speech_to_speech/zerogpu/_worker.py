@@ -45,33 +45,6 @@ def initialize_models(stt_model, llm_model_id, tts_backend, tts_model, tts_voice
     tts = create_provider(tts_backend, tts_model, tts_voice)
 
 
-CANCEL_DIR = Path("/tmp/s2s-zerogpu-cancel")
-CANCEL_DIR.mkdir(mode=0o700, exist_ok=True)
-
-
-def _cancel_path(cancel_id):
-    if not re.fullmatch(r"[0-9a-f]{32}", cancel_id):
-        raise ValueError("Invalid cancellation identifier")
-    return CANCEL_DIR / cancel_id
-
-
-def cancel_generation(cancel_id):
-    _cancel_path(cancel_id).touch()
-
-
-def cleanup_cancel(cancel_id):
-    _cancel_path(cancel_id).unlink(missing_ok=True)
-
-
-class Cancelled(StoppingCriteria):
-    def __init__(self, cancel_id, local_stop):
-        self.path = _cancel_path(cancel_id) if cancel_id else None
-        self.local_stop = local_stop
-
-    def __call__(self, input_ids, scores, **kwargs):
-        return self.local_stop.is_set() or (self.path is not None and self.path.exists())
-
-
 def _assert_gpu(model):
     device = str(next(model.parameters()).device)
     if not torch.cuda.is_available() or not device.startswith("cuda"):
@@ -84,19 +57,18 @@ def _transcribe(audio):
         return transcribe_stt(stt, audio)
 
 
-def _tokens(messages, gen_kwargs, cancel_id=None, deadline=None, abandoned_path=None):
+def _tokens(messages, gen_kwargs, deadline=None, abandoned_path=None):
     _assert_gpu(llm_model)
     stop = Event()
-    cancelled = Cancelled(cancel_id, stop)
 
     class Deadline(StoppingCriteria):
         def __call__(self, input_ids, scores, **kwargs):
-            return (deadline is not None and time.monotonic() >= deadline) or (
-                abandoned_path is not None and abandoned_path.exists()
+            return (
+                stop.is_set()
+                or (deadline is not None and time.monotonic() >= deadline)
+                or (abandoned_path is not None and abandoned_path.exists())
             )
 
-    if cancelled(None, None):
-        return
     prompt = llm_tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
     )
@@ -118,7 +90,7 @@ def _tokens(messages, gen_kwargs, cancel_id=None, deadline=None, abandoned_path=
                     **inputs,
                     **options,
                     streamer=streamer,
-                    stopping_criteria=StoppingCriteriaList([cancelled, Deadline()]),
+                    stopping_criteria=StoppingCriteriaList([Deadline()]),
                     pad_token_id=llm_tokenizer.eos_token_id,
                 )
         except BaseException as exc:
@@ -248,7 +220,6 @@ def lease_worker(lease_id):
                         for token in _tokens(
                             payload["messages"],
                             payload["gen_kwargs"],
-                            payload.get("cancel_id"),
                             started + 83,
                             abandoned,
                         ):
@@ -367,11 +338,14 @@ class LeaseBroker:
                 raise TimeoutError("Timed out preparing models on ZeroGPU")
             time.sleep(0.01)
 
-    def submit(self, operation, payload):
+    def submit(self, operation, payload, *, cancelled=None):
+        """Poll host cancellation without sending callbacks across the fork boundary."""
         if operation not in ("transcribe", "tokens", "synthesize"):
             raise ValueError("Unknown GPU operation")
         started = time.monotonic()
         for attempt in range(3):
+            if cancelled is not None and cancelled():
+                return
             directory = self._ensure_lease()
             ident = uuid4().hex
             request_payload = dict(payload)
@@ -384,6 +358,8 @@ class LeaseBroker:
             completed = False
             try:
                 while True:
+                    if cancelled is not None and cancelled():
+                        return
                     events = directory / (ident + ".events")
                     if events.exists():
                         with events.open() as stream:
@@ -407,6 +383,8 @@ class LeaseBroker:
                                 return
                             if event["kind"] == "audio" and operation == "synthesize":
                                 event["value"] = np.load(directory / event["value"], allow_pickle=False)
+                            if cancelled is not None and cancelled():
+                                return
                             yield event
                     failure = directory / "failure.json"
                     if failure.exists():
@@ -443,14 +421,16 @@ def transcribe(audio):
     raise RuntimeError("GPU transcription returned no result")
 
 
-def tokens(messages, gen_kwargs, cancel_id=None):
-    for event in _broker.submit("tokens", {"messages": messages, "gen_kwargs": gen_kwargs, "cancel_id": cancel_id}):
+def tokens(messages, gen_kwargs, *, cancelled=None):
+    for event in _broker.submit("tokens", {"messages": messages, "gen_kwargs": gen_kwargs}, cancelled=cancelled):
         if event["kind"] == "text":
             yield event["value"]
 
 
-def synthesize_chunks(text, language=None, speaker=None):
-    for event in _broker.submit("synthesize", {"text": text, "language": language, "speaker": speaker}):
+def synthesize_chunks(text, language=None, speaker=None, *, cancelled=None):
+    for event in _broker.submit(
+        "synthesize", {"text": text, "language": language, "speaker": speaker}, cancelled=cancelled
+    ):
         if event["kind"] == "audio":
             yield event["value"]
 

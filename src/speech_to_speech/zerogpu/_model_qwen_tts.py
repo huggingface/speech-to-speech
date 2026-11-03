@@ -139,13 +139,6 @@ def initialize_tts_graphs(handler):
     handler.initialize_lease()
 
 
-def warmup_tts(handler):
-    """Optional full synthesis warmup, not required before serving real audio."""
-    initialize_tts_graphs(handler)
-    for _ in handler._process_custom_voice("Hello.", "english"):
-        pass
-
-
 def synthesize_chunks16k(handler, text, language="english", speaker=None):
     """Yield native Qwen handler PCM16 chunks; never wait for a whole sentence."""
     handler.initialize_lease()

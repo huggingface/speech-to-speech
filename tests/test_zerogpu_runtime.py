@@ -94,18 +94,16 @@ def test_streaming_and_cancellation_delegate_without_buffering(monkeypatch):
     worker = SimpleNamespace(
         tokens=Mock(return_value=stream),
         synthesize_chunks=Mock(return_value=stream),
-        cancel_generation=Mock(),
-        cleanup_cancel=Mock(),
     )
     monkeypatch.setattr(runtime, "_worker", worker)
-    assert runtime.tokens([], {"max_new_tokens": 5}, "id") is stream
-    worker.tokens.assert_called_once_with([], {"max_new_tokens": 5}, "id")
+
+    def cancelled():
+        return False
+
+    assert runtime.tokens([], {"max_new_tokens": 5}, cancelled=cancelled) is stream
+    worker.tokens.assert_called_once_with([], {"max_new_tokens": 5}, cancelled=cancelled)
     assert runtime.synthesize_chunks("Hi", speaker="Aiden") is stream
-    worker.synthesize_chunks.assert_called_once_with("Hi", None, "Aiden")
-    runtime.cancel_generation("id")
-    runtime.cleanup_cancel("id")
-    worker.cancel_generation.assert_called_once_with("id")
-    worker.cleanup_cancel.assert_called_once_with("id")
+    worker.synthesize_chunks.assert_called_once_with("Hi", None, "Aiden", cancelled=None)
 
 
 def test_unknown_tts_backend_fails_before_importing_cuda(monkeypatch):

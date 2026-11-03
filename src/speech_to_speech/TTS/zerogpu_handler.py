@@ -1,8 +1,7 @@
 """Conversation-side TTS lifecycle, independent of the allocated GPU provider."""
 
 import logging
-from queue import Empty, Full, Queue
-from threading import Event, Lock, Thread
+from threading import Event
 from time import perf_counter
 
 from speech_to_speech.baseHandler import BaseHandler
@@ -13,10 +12,6 @@ from speech_to_speech.pipeline.turn_latency import record_response_e2e, record_r
 from speech_to_speech.zerogpu import runtime
 
 logger = logging.getLogger(__name__)
-
-
-class _StreamCancelled(Exception):
-    pass
 
 
 class ZeroGPUTTSHandler(BaseHandler[TTSIn, TTSOut]):
@@ -48,8 +43,7 @@ class ZeroGPUTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.language = language or config["language"]
         self.supported_languages = config.get("supported_languages")
         self._failed_responses = set()
-        self._streams = set()
-        self._streams_lock = Lock()
+        self._session_stopped = Event()
 
     def _identity(self, item):
         generation = item.cancel_generation
@@ -87,70 +81,6 @@ class ZeroGPUTTSHandler(BaseHandler[TTSIn, TTSOut]):
             language = selected if selected in self.supported_languages else self.language
         return language
 
-    def _chunks(self, item, generation, voice, language):
-        """Poll cancellation even while the provider is producing its first chunk.
-
-        Only the producer owns/closes the iterator. A cancelled blocking native
-        next() may finish later, but its audio is discarded and cleanup follows
-        on that same thread; never close a running generator from another thread.
-        """
-        results = Queue(maxsize=1)
-        stopped = Event()
-        with self._streams_lock:
-            self._streams.add(stopped)
-
-        def publish(kind, value=None):
-            while not stopped.is_set():
-                try:
-                    results.put((kind, value), timeout=0.025)
-                    return True
-                except Full:
-                    pass
-            return False
-
-        def produce():
-            chunks = None
-            try:
-                if stopped.is_set():
-                    return
-                chunks = iter(runtime.synthesize_chunks(item.text, language, voice))
-                for chunk in chunks:
-                    if not publish("audio", chunk):
-                        return
-                publish("done")
-            except Exception as exc:
-                publish("error", exc)
-            finally:
-                try:
-                    close = getattr(chunks, "close", None)
-                    if close:
-                        close()
-                except Exception:
-                    logger.exception("Closing ZeroGPU TTS stream failed")
-
-        Thread(target=produce, name="zerogpu-tts-stream", daemon=True).start()
-        try:
-            while not stopped.is_set() and not self._cancelled(item, generation):
-                try:
-                    kind, value = results.get(timeout=0.025)
-                except Empty:
-                    continue
-                if stopped.is_set():
-                    raise _StreamCancelled
-                if self._cancelled(item, generation):
-                    return
-                if kind == "done":
-                    return
-                if kind == "error":
-                    raise value
-                yield value
-            if stopped.is_set():
-                raise _StreamCancelled
-        finally:
-            stopped.set()
-            with self._streams_lock:
-                self._streams.discard(stopped)
-
     def process(self, item):
         identity = self._identity(item)
         tracker = self.speculative_turns
@@ -167,13 +97,20 @@ class ZeroGPUTTSHandler(BaseHandler[TTSIn, TTSOut]):
             return
         if tracker and not tracker.wait_for_gate(item.turn_id, item.turn_revision):
             return
+        session_stopped = self._session_stopped
+
+        def cancelled():
+            return session_stopped.is_set() or self._cancelled(item, generation)
+
         chunks = None
         started = perf_counter()
         first = True
         try:
-            chunks = self._chunks(item, generation, self._request_voice(item), self._request_language(item))
+            chunks = runtime.synthesize_chunks(
+                item.text, self._request_language(item), self._request_voice(item), cancelled=cancelled
+            )
             for chunk in chunks:
-                if self._cancelled(item, generation):
+                if cancelled():
                     return
                 if len(chunk) == 0:
                     continue
@@ -186,13 +123,11 @@ class ZeroGPUTTSHandler(BaseHandler[TTSIn, TTSOut]):
                         record_response_e2e(store, item.response_key, max(0, perf_counter() - item.speech_stopped_at_s))
                     first = False
                 yield chunk
-            if first and not self._cancelled(item, generation):
+            if first and not cancelled():
                 raise RuntimeError("ZeroGPU TTS provider returned no audio")
-        except _StreamCancelled:
-            return
         except Exception:
             logger.exception("ZeroGPU TTS synthesis failed")
-            if not self._cancelled(item, generation):
+            if not cancelled():
                 self._failed_responses.add(identity)
                 self.queue_out.put(
                     ResponseFailedEvent(
@@ -204,17 +139,17 @@ class ZeroGPUTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     )
                 )
         finally:
-            if chunks is not None:
-                chunks.close()
+            close = getattr(chunks, "close", None)
+            if close is not None:
+                close()
 
     def on_session_end(self):
-        with self._streams_lock:
-            for stopped in self._streams:
-                stopped.set()
+        self._session_stopped.set()
+        self._session_stopped = Event()
         self.voice = self._initial_voice
         self._failed_responses.clear()
 
     def cleanup(self):
         # BaseHandler also calls cleanup when setup failed before state existed.
-        if hasattr(self, "_streams_lock"):
+        if hasattr(self, "_session_stopped"):
             self.on_session_end()

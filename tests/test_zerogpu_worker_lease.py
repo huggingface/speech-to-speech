@@ -213,3 +213,46 @@ def test_prepare_surfaces_failure_and_bounds_wait(broker_type, tmp_path):
         assert broker.leases_started == 1
     finally:
         finish.set()
+
+
+@pytest.mark.parametrize("accepted", [False, True])
+def test_cancel_pending_command_returns_before_worker_and_leaves_tombstone(broker_type, tmp_path, accepted):
+    entered, release, cancelled = Event(), Event(), Event()
+
+    def runner(ident):
+        directory = tmp_path / ident
+        request = requests(directory)[0]
+        if accepted:
+            (directory / (request.name.split(".")[0] + ".accepted")).touch()
+        entered.set()
+        assert release.wait(3)
+        yield {"status": "ready"}
+
+    broker = broker_type(runner, tmp_path, wait_timeout=3)
+    try:
+        with ThreadPoolExecutor(1) as pool:
+            job = pool.submit(lambda: list(broker.submit("synthesize", {}, cancelled=cancelled.is_set)))
+            try:
+                assert entered.wait(1)
+                cancelled.set()
+                assert job.result(timeout=0.5) == []
+                assert list(broker.current.glob("*.abandoned"))
+                assert not (broker.current / "finished").exists()
+            finally:
+                release.set()
+    finally:
+        release.set()
+        deadline = time.monotonic() + 2
+        while broker.current is not None and not (broker.current / "finished").exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.002)
+
+
+def test_cancel_before_submission_does_not_allocate(broker_type, tmp_path):
+    def runner(ident):
+        pytest.fail("Cancelled request must not allocate a GPU")
+        yield
+
+    broker = broker_type(runner, tmp_path)
+    assert list(broker.submit("synthesize", {}, cancelled=lambda: True)) == []
+    assert broker.current is None

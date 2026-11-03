@@ -34,7 +34,7 @@ def adapter(monkeypatch, request):
         resolve_tts_voice=lambda requested, current: next(
             (v for v in voices if v.lower() == str(requested).lower()), current
         ),
-        synthesize_chunks=lambda *args: iter([np.ones(512, dtype=np.int16)]),
+        synthesize_chunks=lambda *args, **kwargs: iter([np.ones(512, dtype=np.int16)]),
     )
     monkeypatch.setattr(module, "runtime", worker)
     scope = CancelScope()
@@ -56,7 +56,7 @@ def test_streams_before_completion_and_records_timing(adapter):
     first, second = np.arange(512, dtype=np.int16), np.full(512, -1234, dtype=np.int16)
     release = Event()
 
-    def synthesize(text, language, voice):
+    def synthesize(text, language, voice, **kwargs):
         assert (text, language, voice) == ("Hello.", "en", voices[0])
         yield first
         assert release.wait(2)
@@ -81,10 +81,12 @@ def test_interrupt_before_first_audio_returns_without_waiting_for_native_inferen
     entered, release, closed, completed = Event(), Event(), Event(), Event()
     output = []
 
-    def synthesize(*args):
+    def synthesize(*args, **kwargs):
         try:
             entered.set()
-            assert release.wait(2)
+            while not release.wait(0.005):
+                if kwargs["cancelled"]():
+                    return
             yield np.ones(512, dtype=np.int16)
         finally:
             closed.set()
@@ -102,7 +104,7 @@ def test_interrupt_before_first_audio_returns_without_waiting_for_native_inferen
         scope.cancel()
         assert completed.wait(0.5)
         assert output == []
-        assert not closed.is_set(), "Only the producer may close its running generator"
+        assert closed.is_set(), "Cancellation closes the host stream on its own thread"
     finally:
         release.set()
         thread.join(2)
@@ -114,7 +116,7 @@ def test_interrupt_discards_late_audio_and_closes_source(adapter):
     handler, worker, scope, _ = adapter
     closed = Event()
 
-    def synthesize(*args):
+    def synthesize(*args, **kwargs):
         try:
             while True:
                 yield np.ones(512, dtype=np.int16)
@@ -132,7 +134,7 @@ def test_interrupt_discards_late_audio_and_closes_source(adapter):
 def test_voice_precedence_validation_and_session_reset(adapter):
     handler, worker, _, voices = adapter
     seen = []
-    worker.synthesize_chunks = lambda text, language, voice: seen.append(voice) or iter([b"pcm"])
+    worker.synthesize_chunks = lambda text, language, voice, **kwargs: seen.append(voice) or iter([b"pcm"])
     config = RuntimeConfig()
     config.session.audio.output.voice = voices[1].lower()
     assert list(handler.process(TTSInput(text="Hello.", runtime_config=config)))
@@ -150,7 +152,7 @@ def test_voice_precedence_validation_and_session_reset(adapter):
 def test_language_detection_falls_back_to_selected_supported_language(adapter):
     handler, worker, _, _ = adapter
     seen = []
-    worker.synthesize_chunks = lambda text, language, voice: seen.append(language) or iter([b"pcm"])
+    worker.synthesize_chunks = lambda text, language, voice, **kwargs: seen.append(language) or iter([b"pcm"])
     for detected, selected, expected in [("fr", "en", "fr"), ("xx", "fr", "fr"), ("xx", "auto", "en")]:
         assert list(handler.process(TTSInput(text="Hello", tts_language_code=detected, selected_language=selected)))
         assert seen[-1] == expected
@@ -161,7 +163,7 @@ def test_provider_failure_reported_once_and_remaining_response_suppressed(adapte
     handler, worker, scope, _ = adapter
     calls = []
 
-    def synthesize(*args):
+    def synthesize(*args, **kwargs):
         calls.append(1)
         if not empty:
             raise RuntimeError("Provider crashed")
@@ -184,9 +186,9 @@ def test_provider_failure_reported_once_and_remaining_response_suppressed(adapte
 def test_stale_speculation_drops_input_but_preserves_response_cleanup(adapter):
     handler, worker, _, _ = adapter
     handler.speculative_turns = SimpleNamespace(
-        is_latest=lambda *args: True, wait_for_gate=lambda *args, **kwargs: False
+        is_latest=lambda *args, **kwargs: True, wait_for_gate=lambda *args, **kwargs: False
     )
-    worker.synthesize_chunks = lambda *args: pytest.fail("Stale request must not reach the worker")
+    worker.synthesize_chunks = lambda *args, **kwargs: pytest.fail("Stale request must not reach the worker")
     assert list(handler.process(TTSInput(text="Stale"))) == []
     end = EndOfResponse(response_key="stale-response")
     assert list(handler.process(end)) == [AUDIO_RESPONSE_DONE]
@@ -198,7 +200,7 @@ def test_closing_parent_iterator_closes_worker_stream(adapter):
     handler, worker, _, _ = adapter
     closed = Event()
 
-    def synthesize(*args):
+    def synthesize(*args, **kwargs):
         try:
             while True:
                 yield b"pcm"
@@ -217,10 +219,12 @@ def test_session_end_cancels_pending_stream_without_reporting_failure(adapter):
     entered, release, completed, closed = Event(), Event(), Event(), Event()
     output = []
 
-    def synthesize(*args):
+    def synthesize(*args, **kwargs):
         try:
             entered.set()
-            assert release.wait(2)
+            while not release.wait(0.005):
+                if kwargs["cancelled"]():
+                    return
             yield b"late"
         finally:
             closed.set()

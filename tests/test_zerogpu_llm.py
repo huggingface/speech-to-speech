@@ -29,8 +29,6 @@ def adapter(monkeypatch):
     worker.get_model_ids = lambda: {"llm": "Qwen/Qwen3.5-4B"}
     worker.cancelled = Event()
     worker.cleaned = Event()
-    worker.cancel_generation = lambda ident: worker.cancelled.set()
-    worker.cleanup_cancel = lambda ident: worker.cleaned.set()
     monkeypatch.setattr(module, "runtime", worker)
     return module, worker
 
@@ -59,7 +57,7 @@ def test_history_stays_host_owned_and_next_turn_sees_it(adapter):
     module, worker = adapter
     seen = []
 
-    def tokens(messages, kwargs, ident):
+    def tokens(messages, kwargs, *, cancelled=None):
         seen.append(messages)
         yield "Your name is Ada."
 
@@ -86,10 +84,20 @@ def test_interrupt_while_waiting_for_first_token_cancels_worker(adapter):
     module, worker = adapter
     started = Event()
 
-    def tokens(messages, kwargs, ident):
+    def tokens(messages, kwargs, *, cancelled=None):
         started.set()
-        assert worker.cancelled.wait(2)
-        yield "This stale reply must not reach the user."
+        from time import monotonic, sleep
+
+        deadline = monotonic() + 2
+        try:
+            while not cancelled():
+                assert monotonic() < deadline
+                sleep(0.005)
+            worker.cancelled.set()
+            return
+            yield
+        finally:
+            worker.cleaned.set()
 
     worker.tokens = tokens
     scope = CancelScope()
@@ -112,7 +120,7 @@ def test_interrupt_while_waiting_for_first_token_cancels_worker(adapter):
 def test_gpu_failure_emits_terminal_error_instead_of_sticking_response(adapter):
     module, worker = adapter
 
-    def tokens(messages, kwargs, ident):
+    def tokens(messages, kwargs, *, cancelled=None):
         raise RuntimeError("allocation failed")
         yield
 
