@@ -116,8 +116,6 @@ DEFAULT_STARTUP_GREETING = (
 # Exposed to the browser through /api/config. Set an empty value to disable the
 # automatic greeting without changing the client bundle.
 STARTUP_GREETING = os.environ.get("STARTUP_GREETING", DEFAULT_STARTUP_GREETING).strip()
-# Opt in only when the target emits model readiness events (ZeroGPU).
-MODEL_READINESS = os.environ.get("SPEECH_TO_SPEECH_MODEL_READINESS", "").strip().lower() in {"1", "true", "yes"}
 
 
 def _webrtc_calls_url(s2s_url: str) -> str:
@@ -253,11 +251,9 @@ def config():
         # WebRTC transport availability: the /api/calls proxy only forwards to
         # the env-pinned URL (never a client-supplied one), so the toggle is
         # offered exactly when that URL exists.
-        # ZeroGPU preparation currently gates the WebSocket transport only.
-        "rtc": bool(SPEECH_TO_SPEECH_URL) and not MODEL_READINESS,
+        "rtc": bool(SPEECH_TO_SPEECH_URL),
         "iceServers": RTC_ICE_SERVERS,
         "startupGreeting": STARTUP_GREETING,
-        "modelReadiness": MODEL_READINESS,
         "auth": AUTH_ENABLED,
     }
 

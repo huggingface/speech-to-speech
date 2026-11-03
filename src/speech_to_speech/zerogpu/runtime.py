@@ -24,7 +24,7 @@ def initialize(
     """Load all three models once, without inference outside a GPU allocation.
 
     Returns the worker module so the deployment can register its decorated
-    ``lease_worker`` and diagnostic GPU entrypoints with Gradio. Repeating the
+    ``lease_worker`` entrypoint with Gradio. Repeating the
     same initialization is harmless; changing models requires a process restart.
     Select TTS independently of execution using an existing backend name.
     Only backends with an explicit ZeroGPU loading adapter are supported;

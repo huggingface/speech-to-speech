@@ -25,22 +25,19 @@ class TTSProvider(Protocol):
     def gpu_models(self): ...
     def warmup(self): ...
     def synthesize_chunks(self, text, language=None, speaker=None): ...
-    def supported_speakers(self): ...
 
 
 class QwenTTSProvider:
-    def __init__(self, model_name, speaker, *, language=None, speed=1.0):
+    def __init__(self, model_name, speaker):
         from speech_to_speech.TTS.qwen3_tts_handler import QWEN3_LANGUAGE_ALIASES
 
         from . import _model_qwen_tts
 
-        if speed != 1.0:
-            raise ValueError("Qwen3 TTS does not support the Kokoro speed setting")
         self.native = _model_qwen_tts
         self.handler = _model_qwen_tts.load_tts(model_name, speaker)
         self.model_name = model_name
         self.default_voice = speaker
-        self.default_language = self.handler._normalize_language(language or "english")
+        self.default_language = self.handler._normalize_language("english")
         self.handler.language = self.default_language
         self.supported_languages = frozenset(code for code in QWEN3_LANGUAGE_ALIASES if len(code) == 2)
 
@@ -84,19 +81,14 @@ class QwenTTSProvider:
         if not produced:
             raise RuntimeError("Qwen3 TTS returned no audio")
 
-    def supported_speakers(self):
-        return self.handler._supported_speakers()
 
-
-def create_provider(backend, model_name=None, speaker=None, *, language=None, speed=1.0) -> TTSProvider:
+def create_provider(backend, model_name=None, speaker=None) -> TTSProvider:
     if backend not in PROVIDER_DEFAULTS:
         raise ValueError(f"Unsupported ZeroGPU TTS backend: {backend!r}; choose 'qwen3' or 'kokoro'")
     model_name = model_name or PROVIDER_DEFAULTS[backend]["model"]
     speaker = speaker or PROVIDER_DEFAULTS[backend]["voice"]
     if backend == "qwen3":
-        return QwenTTSProvider(model_name, speaker, language=language, speed=speed)
-    if backend == "kokoro":
-        from ._model_kokoro import KokoroTTSProvider
+        return QwenTTSProvider(model_name, speaker)
+    from ._model_kokoro import KokoroTTSProvider
 
-        return KokoroTTSProvider(model_name, speaker, language=language, speed=speed)
-    raise ValueError(f"Unsupported ZeroGPU TTS backend: {backend!r}; choose 'qwen3' or 'kokoro'")
+    return KokoroTTSProvider(model_name, speaker)

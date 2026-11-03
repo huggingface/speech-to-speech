@@ -152,16 +152,6 @@ def _gpu_models():
     return {"stt": stt.model, "llm": llm_model, **tts.gpu_models()}
 
 
-@spaces.GPU(duration=10)
-def gpu_info():
-    return {
-        "gpu": torch.cuda.get_device_name(),
-        "tts_model": tts.model_name,
-        "tts_provider": type(tts).__name__,
-        "devices": {name: str(next(model.parameters()).device) for name, model in _gpu_models().items()},
-    }
-
-
 LEASE_ROOT = Path("/tmp/s2s-zerogpu-leases")
 LEASE_ROOT.mkdir(mode=0o700, exist_ok=True)
 LEASE_ADMISSION_SECONDS = 65.0
@@ -463,11 +453,6 @@ def synthesize_chunks(text, language=None, speaker=None):
     for event in _broker.submit("synthesize", {"text": text, "language": language, "speaker": speaker}):
         if event["kind"] == "audio":
             yield event["value"]
-
-
-def synthesize(text):
-    chunks = list(synthesize_chunks(text))
-    return np.concatenate(chunks).astype(np.float32) / 32768 if chunks else np.zeros(0, dtype=np.float32)
 
 
 def prefetch():

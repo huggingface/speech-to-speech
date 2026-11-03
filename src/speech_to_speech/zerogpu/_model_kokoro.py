@@ -48,29 +48,23 @@ def _language_code(language):
 
 
 class KokoroTTSProvider:
-    def __init__(self, model_name, speaker, *, language=None, speed=1.0):
+    def __init__(self, model_name, speaker):
         # Kokoro voice names encode their phonemizer language (a/b English,
         # f French, etc.). Native request handling maps ISO language codes.
         lang_code = speaker[0] if speaker and speaker[0] in "abefhijpz" else "b"
-        if isinstance(language, str) and len(language) == 1 and language in "abefhijpz":
-            lang_code = language
-            language = None
         self.model_name = model_name
         self.default_voice = speaker
-        self.default_language = (
-            _language_code(language)
-            or {
-                "a": "en",
-                "b": "en",
-                "e": "es",
-                "f": "fr",
-                "h": "hi",
-                "i": "it",
-                "j": "ja",
-                "p": "pt",
-                "z": "zh",
-            }[lang_code]
-        )
+        self.default_language = {
+            "a": "en",
+            "b": "en",
+            "e": "es",
+            "f": "fr",
+            "h": "hi",
+            "i": "it",
+            "j": "ja",
+            "p": "pt",
+            "z": "zh",
+        }[lang_code]
         self.supported_languages = KOKORO_NATIVE_LANGUAGES
         self.handler = DeferredKokoro(
             Event(),
@@ -82,7 +76,6 @@ class KokoroTTSProvider:
                 "device": "cuda",
                 "voice": speaker,
                 "lang_code": lang_code,
-                "speed": speed,
             },
         )
 
@@ -95,11 +88,6 @@ class KokoroTTSProvider:
     def initialize_lease(self):
         if not torch.cuda.is_available() or next(self.handler.gpu_model.parameters()).device.type != "cuda":
             raise RuntimeError("Kokoro TTS requires an allocated CUDA GPU; CPU fallback is disabled")
-
-    def supported_speakers(self):
-        # Native Kokoro accepts voice IDs, blends and paths, rather than a fixed
-        # checkpoint speaker list. Its own voice loader validates requests.
-        return None
 
     def warmup(self):
         for _ in self.synthesize_chunks("Hello."):

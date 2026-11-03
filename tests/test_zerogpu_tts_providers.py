@@ -25,9 +25,6 @@ def test_qwen_provider_delegates_native_language_voice_and_stream(monkeypatch):
         def _normalize_language(self, language):
             return language
 
-        def _supported_speakers(self):
-            return ["Aiden", "Vivian"]
-
         def _apply_session_voice_override(self, mode, response):
             requested = response.audio.output.voice
             self.speaker = {"aiden": "Aiden", "vivian": "Vivian"}.get(requested.lower(), self.speaker)
@@ -138,9 +135,9 @@ def test_provider_catalog_defaults_and_imports_are_lightweight(monkeypatch):
     monkeypatch.setattr(_tts_provider, "QwenTTSProvider", qwen)
     monkeypatch.setattr(_model_kokoro, "KokoroTTSProvider", kokoro)
     _tts_provider.create_provider("qwen3")
-    qwen.assert_called_once_with("Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", "Aiden", language=None, speed=1.0)
+    qwen.assert_called_once_with("Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", "Aiden")
     _tts_provider.create_provider("kokoro")
-    kokoro.assert_called_once_with("hexgrad/Kokoro-82M", "bm_fable", language=None, speed=1.0)
+    kokoro.assert_called_once_with("hexgrad/Kokoro-82M", "bm_fable")
     subprocess.run(
         [
             sys.executable,
