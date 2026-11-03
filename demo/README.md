@@ -360,3 +360,5 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
 
 - Backend: [huggingface/speech-to-speech](https://github.com/huggingface/speech-to-speech)
 - UI verbatim from `amir-tfrere/minimal-conversation-app-s2s-backend` (Pollen Robotics × Hugging Face)
+
+Choose **Language** on the conversation screen or in Settings to set transcription and response language. The choice persists across reloads and can change during a conversation; **Auto** restores automatic language selection. Language support depends on the configured speech backends.
