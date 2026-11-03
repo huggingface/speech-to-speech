@@ -360,3 +360,10 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
 
 - Backend: [huggingface/speech-to-speech](https://github.com/huggingface/speech-to-speech)
 - UI verbatim from `amir-tfrere/minimal-conversation-app-s2s-backend` (Pollen Robotics × Hugging Face)
+
+
+For a ZeroGPU backend that emits `speech_to_speech.models.ready`, set
+`SPEECH_TO_SPEECH_MODEL_READINESS=1` on the demo server. The browser then shows
+“Preparing models” and waits before sending microphone audio or the startup
+greeting; tap the orb to cancel. Leave this unset for ordinary backends, which
+connect without the custom readiness handshake.

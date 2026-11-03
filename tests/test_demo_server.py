@@ -695,3 +695,13 @@ if (!root.innerHTML.includes("signin-pill")) {
         capture_output=True,
         text=True,
     )
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_model_readiness_is_explicitly_advertised(monkeypatch, enabled):
+    monkeypatch.setattr(demo_server, "MODEL_READINESS", enabled)
+    monkeypatch.setattr(demo_server, "SPEECH_TO_SPEECH_URL", "ws://localhost:8765/v1/realtime")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=demo_server.app), base_url="http://test") as client:
+        response = await client.get("/api/config")
+    assert response.json()["modelReadiness"] is enabled
+    assert response.json()["rtc"] is (not enabled)
