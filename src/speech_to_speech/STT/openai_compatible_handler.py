@@ -150,26 +150,9 @@ class HttpTranscriptionOperation:
         headers = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        data: dict[str, Any] = {
-            "response_format": self.response_format,
-            **(self.extra_fields or {}),
-        }
-        if self.model:
-            data["model"] = self.model
-        if self.language:
-            if self.model == "gpt-transcribe":
-                data["languages[]"] = self.language
-            else:
-                data["language"] = self.language
-
         client = httpx.AsyncClient(timeout=self.timeout_s)
         try:
-            response = await client.post(
-                self.endpoint_url,
-                headers=headers,
-                data=data,
-                files={"file": ("audio.wav", self.wav_bytes, "audio/wav")},
-            )
+            response = await client.post(self.endpoint_url, headers=headers, **self._request_kwargs())
             response.raise_for_status()
             return self._parse_response(response.content, response.headers.get("content-type", ""))
         except httpx.HTTPStatusError as exc:
@@ -182,6 +165,21 @@ class HttpTranscriptionOperation:
             # Repeated cancellation must not interrupt release of the HTTP transport.
             with anyio.CancelScope(shield=True):
                 await client.aclose()
+
+    def _request_kwargs(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "response_format": self.response_format,
+            **(self.extra_fields or {}),
+        }
+        if self.model:
+            data["model"] = self.model
+        if self.language:
+            if self.model == "gpt-transcribe":
+                data["languages[]"] = self.language
+            else:
+                data["language"] = self.language
+
+        return {"data": data, "files": {"file": ("audio.wav", self.wav_bytes, "audio/wav")}}
 
     @staticmethod
     def _rejection_message(response: httpx.Response) -> str:
@@ -277,20 +275,45 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         final_revision_settle_s: float = 0.0,
         gen_kwargs: dict[str, Any] | None = None,
         max_window_s: float | None = None,
+        profile: str = "transcription",
+        recognition_context: str = "",
+        context_terms: list[str] | None = None,
+        max_output_tokens: int = 384,
     ) -> None:
+        if profile not in {"transcription", "nemotron"}:
+            raise ValueError("OpenAI-compatible STT profile must be 'transcription' or 'nemotron'")
+        if profile == "transcription" and (recognition_context or context_terms):
+            raise ValueError("STT recognition context requires the nemotron profile")
+        if context_terms is not None and not isinstance(context_terms, (list, tuple)):
+            raise ValueError("STT context_terms must be a list of nonempty strings")
+        if profile == "nemotron" and (response_format != "json" or not model or gen_kwargs):
+            raise ValueError("Nemotron STT requires a model, json responses, and no gen_kwargs overrides")
+        if isinstance(max_output_tokens, bool) or not isinstance(max_output_tokens, int) or max_output_tokens < 1:
+            raise ValueError("STT max_output_tokens must be a positive integer")
         if response_format not in {"json", "text"}:
             raise ValueError("OpenAI-compatible STT response_format must be 'json' or 'text'")
         if timeout <= 0:
             raise ValueError("OpenAI-compatible STT timeout must be > 0")
         if max_window_s is not None and (not math.isfinite(max_window_s) or max_window_s < 1):
             raise ValueError("OpenAI-compatible STT max_window_s must be finite and at least 1 second")
-        model = model.strip() if model else None
-        language = language.strip() if language else None
+        model = (model.strip() or None) if model else None
+        language = (language.strip() or None) if language else None
+        if profile == "nemotron" and model is None:
+            raise ValueError("Nemotron STT requires a model")
         if model is None and language is None:
             raise ValueError("OpenAI-compatible STT requires either a model or language")
 
         self.base_url = base_url.rstrip("/")
         self.endpoint_url = f"{self.base_url}/audio/transcriptions"
+        self.profile = profile
+        self.recognition_context = recognition_context.strip()
+        self.context_terms = tuple(context_terms or ())
+        self.max_output_tokens = max_output_tokens
+        if profile == "nemotron":
+            from speech_to_speech.STT.nemotron_transcribe import build_prompt
+
+            build_prompt(self.recognition_context, self.context_terms, language)
+            self.endpoint_url = f"{self.base_url}/chat/completions"
         self.api_key = api_key
         if self.api_key is None and self.base_url == OPENAI_BASE_URL:
             self.api_key = os.getenv("OPENAI_API_KEY")
@@ -656,6 +679,21 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         language: str | None = None,
         use_setup_language: bool = True,
     ) -> HttpTranscriptionOperation:
+        if self.profile == "nemotron":
+            from speech_to_speech.STT.nemotron_transcribe import NemotronTranscriptionOperation, build_prompt
+
+            selected_language = self.language if use_setup_language else language
+            return NemotronTranscriptionOperation(
+                endpoint_url=self.endpoint_url,
+                api_key=self.api_key,
+                model=self.model,
+                wav_bytes=self._encode_wav(audio),
+                language=selected_language,
+                response_format="json",
+                timeout_s=self.timeout,
+                prompt=build_prompt(self.recognition_context, self.context_terms, selected_language),
+                max_output_tokens=self.max_output_tokens,
+            )
         extra_fields = self.gen_kwargs.copy()
         if not use_setup_language:
             extra_fields.pop("language", None)

@@ -2,11 +2,13 @@ import json
 from threading import Event
 from types import MethodType, SimpleNamespace
 
+import pytest
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemAssistantMessage,
     RealtimeConversationItemFunctionCall,
     RealtimeConversationItemFunctionCallOutput,
 )
+from openai.types.realtime.realtime_function_tool import RealtimeFunctionTool
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.responses import ResponseFunctionToolCall
 
@@ -541,3 +543,216 @@ def test_cancelled_local_tool_turn_rolls_back_fast_output():
     assert chat.buffer == [user]
     assert not chat.has_pending_tool_calls()
     assert chat._provisional_generations == {}
+
+
+def test_local_tool_parser_accepts_native_json_tool_call_blocks():
+    """Models that fall back to <tool_call>{json}</tool_call> still produce tool calls."""
+    handler = object.__new__(LanguageModelHandler)
+    ctx = _stream_context("step_forward")
+    ctx.function_tools = [
+        FunctionTool(
+            type="function",
+            name="step_forward",
+            description="Step forward.",
+            parameters={"type": "object", "properties": {"steps": {"type": "number"}}},
+        )
+    ]
+    text = 'Sure. <tool_call>\n{"name": "step_forward", "arguments": {"steps": 1}}\n</tool_call>'
+
+    chunks, tools, remaining = handler._process_printable_text(text, None, [], ctx)
+
+    assert [t.name for t in tools] == ["step_forward"]
+    assert json.loads(tools[0].arguments) == {"steps": 1}
+    spoken = " ".join(c.text for c in chunks if c.text)
+    assert "tool_call" not in spoken and "{" not in spoken
+    assert remaining == ""
+
+
+def test_local_tool_parser_holds_partial_native_block_until_closed():
+    handler = object.__new__(LanguageModelHandler)
+    ctx = _stream_context("dance")
+    first = 'Okay. <tool_call>{"name": "dance",'
+
+    chunks, tools, remaining = handler._process_printable_text(first, None, [], ctx)
+
+    assert tools == []
+    assert remaining.startswith("<tool_call>")
+    chunks, tools, remaining = handler._process_printable_text(
+        remaining + ' "arguments": {}}</tool_call>', None, tools, ctx
+    )
+    assert [t.name for t in tools] == ["dance"]
+
+
+def test_native_block_markers_are_ignored_without_tools():
+    handler = object.__new__(LanguageModelHandler)
+    handler.stream_batch_sentences = 1
+    ctx = StreamContext(sentence_batch=[])
+    text = "I would write <tool_call> here. And more."
+
+    chunks, tools, remaining = handler._process_printable_text(text, None, [], ctx)
+
+    assert tools == []
+    assert "tool_call" in " ".join(c.text for c in chunks if c.text) + remaining
+
+
+def test_tool_blocks_are_stripped_but_not_run_when_tool_choice_is_none():
+    """With tool_choice="none" the markers stay active but no tool is exposed."""
+    handler = object.__new__(LanguageModelHandler)
+    handler.stream_batch_sentences = 1
+    ctx = StreamContext(
+        function_tools=[],
+        block_regex=build_block_regex(),
+        enter_code=ENTER_CODE,
+        end_code=END_CODE,
+        sentence_batch=[],
+    )
+    text = 'Done. <tool_call>\n{"name": "step_forward", "arguments": {"steps": 1}}\n</tool_call>'
+
+    chunks, tools, remaining = handler._process_printable_text(text, None, [], ctx)
+
+    assert tools == []
+    spoken = " ".join(c.text for c in chunks if c.text) + remaining
+    assert "tool_call" not in spoken and "step_forward" not in spoken
+
+
+def _generate_local_tool_response(text, *, modality, tool_choice="auto", instructions="Be concise.", split=False):
+    handler = _local_handler_with_chunks([])
+    handler.stop_event = Event()
+    handler.stream_batch_sentences = 3
+
+    def generate(self, chat, language, generation, ctx, config, response):
+        tokens = iter(text) if split else iter([text])
+        yield from self._stream_tokens(tokens, generation, language, ctx, config, response)
+
+    handler._generate = MethodType(generate, handler)
+    config = RuntimeConfig()
+    config.chat.add_item(make_user_message("Go."))
+    config.session.instructions = instructions
+    config.session.tools = [
+        RealtimeFunctionTool(
+            type="function",
+            name="dance",
+            parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+        )
+    ]
+    request = GenerateResponseRequest(
+        runtime_config=config,
+        response=RealtimeResponseCreateParams(output_modalities=[modality], tool_choice=tool_choice),
+    )
+    return list(drive_llm(handler, request)), config.chat
+
+
+@pytest.mark.parametrize("modality", ["audio", "text"])
+@pytest.mark.parametrize("tool_choice", ["auto", "none"])
+@pytest.mark.parametrize("split", [False, True])
+@pytest.mark.parametrize(
+    "tail",
+    [
+        '<tool_call>{"name":"dance","arguments":{}',
+        '<tool_call>{"name":"dance","arguments":{"query":"unfinished </tool_call>',
+        "<tool_ca",
+        "<co",
+        "<code>dance(",
+    ],
+)
+def test_local_generation_discards_unfinished_tool_markup(modality, tool_choice, split, tail):
+    outputs, chat = _generate_local_tool_response(
+        "Sure. " + tail, modality=modality, tool_choice=tool_choice, split=split
+    )
+
+    assert "".join(output.text for output in outputs if isinstance(output, LLMResponseChunk)).strip() == "Sure."
+    assert not any(output.tools for output in outputs if isinstance(output, LLMResponseChunk))
+    assert chat.buffer[-1].content[0].text.strip() == "Sure."
+
+
+@pytest.mark.parametrize("modality", ["audio", "text"])
+@pytest.mark.parametrize("instructions", [None, ""])
+@pytest.mark.parametrize("block", ['<tool_call>{"name":"dance","arguments":{}}</tool_call>', "<code>dance()</code>"])
+def test_local_generation_strips_disabled_tools_with_empty_instructions(modality, instructions, block):
+    outputs, chat = _generate_local_tool_response(
+        "Sure. " + block + " Done.", modality=modality, tool_choice="none", instructions=instructions
+    )
+
+    chunks = [output for output in outputs if isinstance(output, LLMResponseChunk)]
+    assert [chunk.text.strip() for chunk in chunks if chunk.text.strip()] == ["Sure.", "Done."]
+    assert not any(chunk.tools for chunk in chunks)
+    assert not chat.has_pending_tool_calls()
+
+
+@pytest.mark.parametrize("modality", ["audio", "text"])
+@pytest.mark.parametrize("split", [False, True])
+@pytest.mark.parametrize("query", ["Explain </tool_call> please.", 'A \\"quoted\\" </tool_call> and a backslash \\'])
+def test_local_generation_preserves_closing_tags_in_json_arguments(modality, split, query):
+    block = "<tool_call>" + json.dumps({"name": "dance", "arguments": {"query": query}}) + "</tool_call>"
+    outputs, chat = _generate_local_tool_response("Before. " + block + " After.", modality=modality, split=split)
+
+    chunks = [output for output in outputs if isinstance(output, LLMResponseChunk)]
+    tools = [tool for chunk in chunks for tool in chunk.tools]
+    assert len(tools) == 1
+    assert json.loads(tools[0].arguments) == {"query": query}
+    assert "".join(chunk.text for chunk in chunks).replace(" ", "") == "Before.After."
+    assert [item.type for item in chat.buffer[1:]] == ["message", "function_call", "message"]
+
+
+@pytest.mark.parametrize("modality", ["audio", "text"])
+@pytest.mark.parametrize("arguments", ["{not json}", [99], None, "", "[]"])
+def test_local_generation_does_not_emit_calls_with_malformed_arguments(modality, arguments):
+    block = "<tool_call>" + json.dumps({"name": "dance", "arguments": arguments}) + "</tool_call>"
+    outputs, chat = _generate_local_tool_response("Before. " + block + " After.", modality=modality)
+
+    chunks = [output for output in outputs if isinstance(output, LLMResponseChunk)]
+    assert not any(chunk.tools for chunk in chunks)
+    assert "".join(chunk.text for chunk in chunks).replace(" ", "") == "Before.After."
+    assert not chat.has_pending_tool_calls()
+
+
+@pytest.mark.parametrize("modality", ["audio", "text"])
+@pytest.mark.parametrize("split", [False, True])
+@pytest.mark.parametrize("tool_choice", ["auto", "none"])
+@pytest.mark.parametrize(
+    "query,string_arguments",
+    [
+        ("Check “left” please.", False),
+        ("Show “</tool_call>” literally.", False),
+        ("thumbs up 👍", False),
+        ("Show “</tool_call>” literally. 👍", True),
+    ],
+)
+def test_local_generation_extracts_native_json_before_speech_filtering(
+    modality, split, tool_choice, query, string_arguments
+):
+    arguments = {"query": query}
+    if string_arguments:
+        arguments = json.dumps(arguments, ensure_ascii=False)
+    block = "<tool_call>" + json.dumps({"name": "dance", "arguments": arguments}, ensure_ascii=False) + "</tool_call>"
+    outputs, chat = _generate_local_tool_response(
+        "Before. " + block + " After.", modality=modality, split=split, tool_choice=tool_choice
+    )
+
+    chunks = [output for output in outputs if isinstance(output, LLMResponseChunk)]
+    tools = [tool for chunk in chunks for tool in chunk.tools]
+    assert "".join(chunk.text for chunk in chunks).replace(" ", "") == "Before.After."
+    if tool_choice == "none":
+        assert tools == []
+        assert not chat.has_pending_tool_calls()
+    else:
+        assert len(tools) == 1
+        assert json.loads(tools[0].arguments) == {"query": query}
+        assert [item.type for item in chat.buffer[1:]] == ["message", "function_call", "message"]
+        assert json.loads(chat.buffer[2].arguments) == {"query": query}
+
+
+@pytest.mark.parametrize("modality", ["audio", "text"])
+@pytest.mark.parametrize("split", [False, True])
+def test_local_generation_filters_prose_before_tools_batches_and_final_flush(modality, split):
+    before = "“Before” 👍. "
+    after = " “First” 👍. “Second” 👍. “Third” 👍. “Last” 👍."
+    block = '<tool_call>{"name":"dance","arguments":{}}</tool_call>'
+    outputs, _chat = _generate_local_tool_response(before + block + after, modality=modality, split=split)
+
+    chunks = [output for output in outputs if isinstance(output, LLMResponseChunk) and output.text]
+    if modality == "text":
+        assert "".join(chunk.text for chunk in chunks) == before + after
+    else:
+        assert len(chunks) == 3
+        assert "".join(chunk.text for chunk in chunks).replace(" ", "") == '"Before"."First"."Second"."Third"."Last".'

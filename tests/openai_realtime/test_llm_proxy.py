@@ -12,7 +12,6 @@ import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from queue import Queue
 from threading import Event as ThreadingEvent
 from typing import Any
 
@@ -23,10 +22,8 @@ from pydantic import BaseModel
 from starlette.testclient import TestClient
 
 from speech_to_speech.api.openai_realtime.llm_proxy import LLMProxyConfig
-from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
-from speech_to_speech.api.openai_realtime.service import RealtimeService
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
-from speech_to_speech.pipeline.cancel_scope import CancelScope
+from tests.openai_realtime.conftest import make_pipeline_unit
 
 # ---------------------------------------------------------------------------
 # Fake upstream provider
@@ -149,22 +146,8 @@ class LiveApp:
 # ---------------------------------------------------------------------------
 
 
-def _make_unit(index: int = 0) -> PipelineUnit:
-    text_prompt_queue: Queue = Queue()
-    should_listen = ThreadingEvent()
-    should_listen.set()
-    return PipelineUnit(
-        index=index,
-        service=RealtimeService(text_prompt_queue=text_prompt_queue, should_listen=should_listen),
-        cancel_scope=CancelScope(),
-        should_listen=should_listen,
-        response_playing=ThreadingEvent(),
-        input_queue=Queue(),
-        output_queue=Queue(),
-        text_output_queue=Queue(),
-        text_prompt_queue=text_prompt_queue,
-        handlers=[],
-    )
+def _make_unit(index: int = 0):
+    return make_pipeline_unit(index=index)
 
 
 def _make_app(config: LLMProxyConfig | None):

@@ -39,3 +39,9 @@ class PhononTTSHandlerArguments:
             "help": "Positive CPU thread count for Phonon's process-wide native pool, set before model load. Default 4."
         },
     )
+    phonon_tts_max_trailing_silence_ms: int | None = field(
+        default=None,
+        metadata={
+            "help": "Opt-in target for each Phonon utterance's quiet tail in milliseconds (minimum 40); at most one second is removed per utterance. Keeps speech and internal pauses; omit to preserve native audio. Try 120 for sentence-streamed speech."
+        },
+    )

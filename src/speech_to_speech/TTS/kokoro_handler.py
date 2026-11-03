@@ -282,10 +282,44 @@ class KokoroTTSHandler(BaseTTSHandler):
             audio_cfg = runtime_config.session.audio
             audio_output = audio_cfg.output if audio_cfg is not None else None
             voice = str(audio_output.voice) if audio_output is not None and audio_output.voice else None
+        voice = self._resolve_requested_voice(voice)
         if self.backend == "mlx":
             yield from self._process_mlx(text, language_code, pinned_voice=voice, tts_input=tts_input)
         else:
             yield from self._process_kokoro(text, language_code, pinned_voice=voice, tts_input=tts_input)
+
+    # Translate Realtime voice names before asking the backend to load them.
+    _OPENAI_VOICE_ALIASES = {
+        "alloy": "af_alloy",
+        "nova": "af_nova",
+        "shimmer": "af_sky",
+        "coral": "af_heart",
+        "sage": "af_sarah",
+        "echo": "am_echo",
+        "ash": "am_adam",
+        "ballad": "bm_fable",
+        "verse": "am_michael",
+        "marin": "af_bella",
+        "cedar": "bm_george",
+    }
+
+    def _resolve_requested_voice(self, voice: Optional[str]) -> Optional[str]:
+        """Translate aliases, preserving backend voice IDs, blends and paths."""
+        if voice is None:
+            return None
+        return self._OPENAI_VOICE_ALIASES.get(voice, voice)
+
+    def _load_requested_voice(self, pipeline: Any, voice: str) -> str:
+        """Load a client voice, retrying a failed load with the setup voice."""
+        try:
+            pipeline.load_voice(voice)
+        except Exception as exc:
+            if voice == self._initial_voice:
+                raise
+            logger.warning("Failed to load Kokoro voice %r; falling back to %r: %s", voice, self._initial_voice, exc)
+            pipeline.load_voice(self._initial_voice)
+            return self._initial_voice
+        return voice
 
     def _lang_and_voice_for(self, language_code: str, pinned_voice: Optional[str] = None) -> tuple[str, str]:
         """Pick the Kokoro language and voice for a reply in ``language_code``.
@@ -328,7 +362,10 @@ class KokoroTTSHandler(BaseTTSHandler):
                 )
                 try:
                     new_pipeline = self.model._get_pipeline(new_lang_code)
-                    new_pipeline.load_voice(new_voice)
+                    if new_voice == pinned_voice:
+                        new_voice = self._load_requested_voice(new_pipeline, new_voice)
+                    else:
+                        new_pipeline.load_voice(new_voice)
                     self.lang_code = new_lang_code
                     self.voice = new_voice
                     self._pipeline = new_pipeline
@@ -415,11 +452,12 @@ class KokoroTTSHandler(BaseTTSHandler):
 
             self.pipeline = KPipeline(lang_code=new_lang_code, device=self.device)
             self.lang_code = new_lang_code
+        timer = self._latency_timer(tts_input, gen)
+        if new_voice == pinned_voice:
+            new_voice = self._load_requested_voice(self.pipeline, new_voice)
         self.voice = new_voice
 
         console.print(f"[green]ASSISTANT: {llm_sentence}")
-
-        timer = self._latency_timer(tts_input, gen)
 
         # Generate audio using Kokoro
         # The pipeline yields tuples of (graphemes, phonemes, audio)
