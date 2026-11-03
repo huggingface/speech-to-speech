@@ -516,7 +516,7 @@ def test_process_only_reenables_listening_after_end_of_response(monkeypatch):
     handler.queue_in = Queue()
     handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
     handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
-    handler._process_voice_clone = lambda text, language=None: iter([np.zeros(512, dtype=np.int16)])
+    handler._process_voice_clone = lambda text, language=None, timer=None: iter([np.zeros(512, dtype=np.int16)])
 
     monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
 
@@ -543,7 +543,7 @@ def test_process_passes_selected_language_without_changing_setup_default(monkeyp
     handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
     handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
     requested = []
-    handler._process_voice_clone = lambda text, language: (
+    handler._process_voice_clone = lambda text, language, timer=None: (
         requested.append(language),
         iter([np.zeros(512, dtype=np.int16)]),
     )[1]
@@ -715,7 +715,7 @@ def test_process_commits_turn_before_generating_audio(monkeypatch, caplog):
     handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
     handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
 
-    def _process_voice_clone(text, language=None):
+    def _process_voice_clone(text, language=None, timer=None):
         assert tracker.is_committed("turn_1", 0)
         yield np.zeros(512, dtype=np.int16)
 
@@ -754,7 +754,7 @@ def test_process_does_not_set_should_listen_when_generation_fails(monkeypatch):
     handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
     handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
 
-    def _boom(text):
+    def _boom(text, language=None, timer=None):
         raise RuntimeError("boom")
         yield  # pragma: no cover
 
