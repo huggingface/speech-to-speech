@@ -441,7 +441,10 @@ async def test_completed_answer_suppresses_duplicate_tool_followup(
         coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.speech_started", item_id="user_2"))
         coordinator.handle_event(response_done(output=[function_call("call_1")]))
         await wait_until(lambda: len(connection.sent) == 1)
-        service.handle_conversation_item_create(conn_id, ConversationItemCreateEvent.model_validate(connection.sent[0]))
+        for acknowledgment in service.handle_conversation_item_create(
+            conn_id, ConversationItemCreateEvent.model_validate(connection.sent[0])
+        ):
+            coordinator.handle_event(acknowledgment)
         runtime_config.chat.add_item(make_user_message("And hotels?"))
         created = service.handle_response_create(
             conn_id, ResponseCreateEvent(type="response.create", response={"output_modalities": ["text"]})

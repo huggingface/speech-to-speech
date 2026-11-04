@@ -1213,3 +1213,157 @@ class TestSDKMultiTurn:
             assert t2_done.type == RESPONSE_DONE
 
             assert t1_done.response.conversation_id == t2_done.response.conversation_id
+
+
+@pytest.mark.parametrize("weather_first", [False, True])
+async def test_partial_weather_reaches_audio_callback_before_page_finishes(server_env, monkeypatch, weather_first):
+    """Real SDK/server/client and audio callback; controlled model and TTS output."""
+    from speech_to_speech.LLM.chat import make_user_message
+    from tests.llm_history import drive_llm
+    from tests.test_response_overrides import _RecordingLocalHandler
+
+    streams = []
+
+    class FakeStream:
+        def __init__(self, **kwargs):
+            self.callback = kwargs["callback"]
+            streams.append(self)
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(
+        sys.modules, "sounddevice", SimpleNamespace(RawInputStream=FakeStream, RawOutputStream=FakeStream)
+    )
+    page_release = asyncio.Event()
+    executed = []
+    received = []
+    tts_texts = []
+    snapshots = []
+    client_stop = ThreadingEvent()
+
+    async def executor(name, _arguments):
+        executed.append(name)
+        if name == "page":
+            await page_release.wait()
+            return {"url": "https://example.test/page"}
+        return {"temperature_c": 18, "condition": "cloudy"}
+
+    class Model(_RecordingLocalHandler):
+        def _generate(self, chat, language_code, gen, ctx, runtime_config=None, response=None):
+            snapshot = chat.to_transformers_chat()
+            snapshots.append(snapshot)
+            text = "The weather is 18 degrees and cloudy." if len(snapshots) == 1 else "Your page is ready."
+            yield LLMResponseChunk(text=text, runtime_config=runtime_config)
+
+    class TTS(BaseHandler):
+        def process(self, item):
+            if isinstance(item, TTSInput):
+                tts_texts.append(item.text)
+                yield b"\x12\x34" * 256
+            elif isinstance(item, EndOfResponse):
+                yield AUDIO_RESPONSE_DONE
+
+    original_handle = audio_client_module.handle_server_event
+
+    def record(event, **kwargs):
+        received.append(event)
+        original_handle(event, **kwargs)
+
+    monkeypatch.setattr(audio_client_module, "handle_server_event", record)
+    config = RealtimeAudioClientConfig(
+        url=f"ws://127.0.0.1:{server_env.port}/v1/realtime",
+        api_key="local",
+        tools=[{"type": "function", "name": name, "parameters": {"type": "object"}} for name in ("weather", "page")],
+        tool_executor=executor,
+    )
+    lm_output = Queue()
+    tts_input = Queue()
+    processor = LMOutputProcessor(
+        server_env.stop_event, lm_output, tts_input, setup_kwargs={"text_output_queue": server_env.text_output_queue}
+    )
+    tts = TTS(server_env.stop_event, tts_input, server_env.output_queue)
+    threads = [threading.Thread(target=handler.run, daemon=True) for handler in (processor, tts)]
+    for thread in threads:
+        thread.start()
+    client_task = asyncio.create_task(listen_and_play_realtime(config, stop_event=client_stop))
+
+    async def wait_until(predicate):
+        async with asyncio.timeout(3):
+            while not predicate():
+                await asyncio.sleep(0.01)
+
+    try:
+        await wait_until(lambda: any(e.type == "session.updated" for e in received))
+        (conn_id,) = server_env.service._conns
+        chat = server_env.service._state(conn_id).runtime_config.chat
+        chat.add_item(make_user_message("Check the weather and build a page."))
+        names = ["weather", "page"] if weather_first else ["page", "weather"]
+        calls = [
+            RealtimeConversationItemFunctionCall(type="function_call", call_id=name, name=name, arguments="{}")
+            for name in names
+        ]
+        chat.add_provisional_generation_items("origin", calls)
+        lm_output.put(
+            LLMResponseChunk(
+                response_key="origin",
+                parts=[
+                    AssistantToolCallPart(
+                        tool={"type": "function_call", "call_id": call.call_id, "name": call.name, "arguments": "{}"}
+                    )
+                    for call in calls
+                ],
+            )
+        )
+        lm_output.put(EndOfResponse(response_key="origin"))
+        handler = object.__new__(Model)
+        handler.cancel_scope = handler.speculative_turns = handler.compactor = None
+        handler.enable_lang_prompt = False
+        handler.tokenizer = SimpleNamespace(encode=lambda _text: [])
+
+        for index in range(2):
+            request = await asyncio.to_thread(server_env.text_prompt_queue.get, True, 3)
+
+            def generate():
+                for chunk in drive_llm(handler, request, service=server_env.service, conn_id=conn_id):
+                    lm_output.put(chunk)
+
+            await asyncio.to_thread(generate)
+            await wait_until(lambda: sum(e.type == RESPONSE_DONE for e in received) >= index + 2)
+            assert not client_task.done()
+            if index == 0:
+                assert not page_release.is_set()
+                assert chat.has_pending_tool_calls()
+                assert chat.tool_output_call_ids() == ["weather"]
+                assert "18 degrees and cloudy" in " ".join(tts_texts)
+                assert any(e.type == AUDIO_DELTA for e in received)
+                # Exercise the real playback buffer through the output-device callback.
+                audio = bytearray(1024)
+                streams[1].callback(audio, 512, SimpleNamespace(outputBufferDacTime=0), None)
+                assert any(audio)
+                assert "temperature_c" in str(snapshots[0])
+                assert "awaiting_output" in str(snapshots[0])
+                assert "page" in str(snapshots[0])
+                assert not any("tool_calls" in message or message["role"] == "tool" for message in snapshots[0])
+                page_release.set()
+        assert not chat.has_pending_tool_calls()
+        assert sorted(executed) == ["page", "weather"]
+        assert "18 degrees and cloudy" in str(snapshots[1])
+        assert "https://example.test/page" in str(snapshots[1])
+        assert "Your page is ready" in " ".join(tts_texts)
+        await asyncio.sleep(0.05)
+        assert server_env.text_prompt_queue.empty()
+    finally:
+        page_release.set()
+        client_stop.set()
+        await asyncio.wait_for(client_task, 3)
+        lm_output.put(PIPELINE_END)
+        for thread in threads:
+            thread.join(timeout=1)
+            assert not thread.is_alive()
