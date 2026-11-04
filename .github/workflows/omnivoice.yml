@@ -10,6 +10,7 @@ on:
       - uv.lock
       - .github/workflows/ci.yml
       - .github/workflows/omnivoice.yml
+      - packages/smart-turn/pyproject.toml
       - src/speech_to_speech/TTS/omnivoice_handler.py
       - src/speech_to_speech/arguments_classes/omnivoice_tts_arguments.py
       - tests/test_omnivoice_tts_handler.py
@@ -66,7 +67,9 @@ jobs:
         with:
           version: "latest"
       - name: Build wheel
-        run: uv build --wheel
+        run: |
+          uv build packages/smart-turn --wheel --out-dir dist
+          uv build --wheel
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
@@ -77,7 +80,8 @@ jobs:
           source .venv-smoke/bin/activate
           python -m pip install --upgrade pip
           wheel=$(find dist -name 'speech_to_speech-*.whl' -print -quit)
-          python -m pip install "${wheel}[omnivoice]"
+          smart_turn_wheel=$(find dist -name 'speech_to_speech_smart_turn-*.whl' -print -quit)
+          python -m pip install "${wheel}[omnivoice]" "${smart_turn_wheel}"
           python -m pip check
       - name: Run installed CLI smoke test
         shell: bash
