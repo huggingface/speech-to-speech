@@ -521,6 +521,9 @@ def test_pinned_sdk_pending_snapshot_preserves_previous_completed_response(strea
 
     def respond(request):
         body = json.loads(request.content)
+        for item in body["input"]:
+            if item.get("role") == "assistant" and isinstance(item.get("content"), list):
+                assert all(part["type"] in {"output_text", "refusal"} for part in item["content"])
         requests.append(body)
         output = first if len(requests) == 1 else pending if len(requests) == 2 else []
         response = {
@@ -751,7 +754,12 @@ def test_pending_parallel_results_preserve_conversation_and_shared_context(strea
         )
         assert context["phase"] == message.phase
         assert context["annotated_content"] == [message.content[0].model_dump(include={"type", "text", "annotations"})]
-    final_text = "\n".join(part.get("text", "") for item in captured[-1] for part in item.get("content", []))
+    final_text = "\n".join(
+        item["content"]
+        if isinstance(item.get("content"), str)
+        else "\n".join(part.get("text", "") for part in item.get("content", []))
+        for item in captured[-1]
+    )
     assert (
         final_text.index("Unrelated answer.")
         < final_text.index('"output": "42"')

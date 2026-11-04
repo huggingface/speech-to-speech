@@ -1129,7 +1129,7 @@ class Chat:
                 if text:
                     result.append(
                         EasyInputMessageParam(
-                            content=[ResponseInputTextParam(text=text, type="input_text")],
+                            content=text,
                             role="assistant",
                             type="message",
                         )
