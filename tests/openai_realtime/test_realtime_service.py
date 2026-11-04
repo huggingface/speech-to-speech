@@ -824,6 +824,7 @@ class TestDeferConversationItemsDuringResponse:
         st.pending_function_calls[0] = call
         result_event = ConversationItemCreateEvent(
             type="conversation.item.create",
+            event_id="request_result",
             item=RealtimeConversationItemFunctionCallOutput(
                 type="function_call_output",
                 call_id=call.call_id,
@@ -836,7 +837,7 @@ class TestDeferConversationItemsDuringResponse:
         events = service.finish_response(conn_id, status="cancelled", reason="client_cancelled")
 
         assert any(isinstance(event, ResponseDoneEvent) for event in events)
-        assert any(isinstance(event, RealtimeErrorEvent) for event in events), events
+        assert [event.error.event_id for event in events if isinstance(event, RealtimeErrorEvent)] == ["request_result"]
         assert not any(isinstance(event, ConversationItemCreatedEvent) for event in events)
         assert chat.buffer == [user]
         assert not chat.has_pending_tool_calls()
@@ -878,6 +879,7 @@ class TestDeferConversationItemsDuringResponse:
 
         image_event = ConversationItemCreateEvent(
             type="conversation.item.create",
+            event_id="request_image",
             item={
                 "id": "msg_client_camera_frame_cancelled",
                 "type": "message",
@@ -891,8 +893,9 @@ class TestDeferConversationItemsDuringResponse:
                 conn_id,
                 ConversationItemCreateEvent(
                     type="conversation.item.create",
+                    event_id="request_result",
                     previous_item_id="msg_client_camera_frame_cancelled",
-                    item={"type": "function_call_output", "call_id": call.call_id, "output": "result"},
+                    item={"id": user.id, "type": "function_call_output", "call_id": call.call_id, "output": "result"},
                 ),
             )
             == []
@@ -916,7 +919,7 @@ class TestDeferConversationItemsDuringResponse:
             response_key=response_key,
         )
 
-        assert any(isinstance(event, RealtimeErrorEvent) for event in events)
+        assert [event.error.event_id for event in events if isinstance(event, RealtimeErrorEvent)] == ["request_result"]
         created = [event for event in events if isinstance(event, ConversationItemCreatedEvent)]
         assert len(created) == 1
         assert created[0].item.id == "msg_client_camera_frame_cancelled"
@@ -1696,7 +1699,7 @@ class TestHandleResponseCreate:
         assert text_prompt_queue.empty()
         assert st.tool_followup_prefetch_request is None
         assert st.current_response_key == request.response_key
-        assert [item.id for item in st.deferred_items] == ["msg_during_followup"]
+        assert [event.item.id for event in st.deferred_items] == ["msg_during_followup"]
 
     def test_response_override_discards_incompatible_prefetch_and_generates_normally(
         self,

@@ -668,10 +668,18 @@ def test_pending_parallel_results_preserve_conversation_and_shared_context(strea
     request = _make_request(chat_size=10)
     chat = request.runtime_config.chat
     reasoning, call_a = _items("A")
+    reasoning = ResponseReasoningItem.model_validate(
+        {
+            **reasoning.model_dump(),
+            "summary": [{"type": "summary_text", "text": "Report each result as it arrives."}],
+            "content": [{"type": "reasoning_text", "text": "The two lookups are independent."}],
+        }
+    )
+    message = _message()
     call_b = _items("B")[1]
     replies = iter(
         [
-            [reasoning, call_a, call_b],
+            [reasoning, message, call_a, call_b],
             [
                 ResponseOutputMessage(
                     id="msg_unrelated",
@@ -723,6 +731,26 @@ def test_pending_parallel_results_preserve_conversation_and_shared_context(strea
         chat.finalize_provisional_generation(request.response_key)
     for snapshot in captured[1:]:
         assert not any(item.get("type") in {"reasoning", "function_call", "function_call_output"} for item in snapshot)
+    for snapshot in [*captured[1:], chat.to_transformers_chat()]:
+        serialized = json.dumps(snapshot)
+        assert "https://example.com/source" in serialized
+        assert "commentary" in serialized
+        assert "Cannot provide that detail." in serialized
+        assert "Report each result as it arrives." in serialized
+        assert "The two lookups are independent." in serialized
+        assert "opaque-A" not in serialized
+        assert "encrypted_content" not in serialized
+        text = "\n".join(
+            item["content"]
+            if isinstance(item.get("content"), str)
+            else "\n".join(part.get("text", "") for part in item.get("content", []))
+            for item in snapshot
+        )
+        context, _ = json.JSONDecoder().raw_decode(
+            text.split("Assistant message context (data, not a user request): ")[1]
+        )
+        assert context["phase"] == message.phase
+        assert context["annotated_content"] == [message.content[0].model_dump(include={"type", "text", "annotations"})]
     final_text = "\n".join(part.get("text", "") for item in captured[-1] for part in item.get("content", []))
     assert (
         final_text.index("Unrelated answer.")
@@ -731,5 +759,6 @@ def test_pending_parallel_results_preserve_conversation_and_shared_context(strea
         < final_text.index('"output": "84"')
     )
     assert reasoning in chat.buffer
+    assert message in [getattr(item, "response_item", None) for item in chat.buffer]
     assert not chat.has_pending_tool_calls()
     assert len([item for item in chat.buffer if item.type == "function_call_output"]) == 2

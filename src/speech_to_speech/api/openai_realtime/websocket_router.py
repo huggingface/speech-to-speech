@@ -419,7 +419,7 @@ async def _dispatch_client_event(
     async def send_correlated(events: list[Any]) -> None:
         if isinstance(client_event_id, str):
             for outgoing in events:
-                if getattr(outgoing, "type", None) == "error":
+                if getattr(outgoing, "type", None) == "error" and outgoing.error.event_id is None:
                     outgoing.error.event_id = client_event_id
         await transport.send_events(events)
 

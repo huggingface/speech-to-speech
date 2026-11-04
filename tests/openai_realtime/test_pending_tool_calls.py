@@ -1,5 +1,6 @@
 """Realtime conversation continues while client function calls await their outputs."""
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -10,13 +11,16 @@ from openai.types.realtime import (
 )
 from starlette.testclient import TestClient
 
+from speech_to_speech.api.openai_realtime.audio_client import RealtimeAudioClientConfig, _ToolCallCoordinator
 from speech_to_speech.pipeline.events import (
+    AssistantOutputEvent,
     ResponseFailedEvent,
     ResponseGenerationDoneEvent,
     SpeechStartedEvent,
 )
 from speech_to_speech.pipeline.messages import EndOfResponse
 from tests.llm_history import drive_llm
+from tests.openai_realtime.test_audio_client import TOOL_DEFINITION, response_done, wait_until
 from tests.test_response_overrides import _RecordingLocalHandler
 
 from .test_websocket_router import setup as setup
@@ -72,6 +76,69 @@ def test_result_arriving_mid_response_is_deferred_then_paired_once(service, conn
     assert chat.tool_output_call_ids() == ["call_slow"]
     # The late result does not start a follow-up by itself.
     assert text_prompt_queue.empty()
+
+
+@pytest.mark.parametrize("status", ["completed", "cancelled", "failed", "incomplete"])
+async def test_accepted_result_gets_client_followup_after_unrelated_response_ends(
+    service, conn_id, text_prompt_queue, status
+):
+    st = service._state(conn_id)
+    chat = st.runtime_config.chat
+    call = _call("call_slow")
+    chat.add_provisional_generation_items("origin", [call])
+    chat.finalize_provisional_generation("origin")
+    release = asyncio.Event()
+
+    async def execute(*_):
+        await release.wait()
+        return "real late result"
+
+    class Connection:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, event):
+            self.sent.append(event)
+            if event["type"] == "conversation.item.create":
+                for reply in service.handle_conversation_item_create(
+                    conn_id, ConversationItemCreateEvent.model_validate(event)
+                ):
+                    coordinator.handle_event(reply)
+
+    connection = Connection()
+    coordinator = _ToolCallCoordinator(
+        connection, RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=execute)
+    )
+    try:
+        coordinator.handle_event(response_done("origin", output=[call]))
+        created = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
+        coordinator.handle_event(created)
+        request = text_prompt_queue.get_nowait()
+        for event in service.dispatch_pipeline_event(
+            conn_id, AssistantOutputEvent(text="An unrelated answer.", response_key=request.response_key)
+        ):
+            coordinator.handle_event(event)
+        release.set()
+        await wait_until(lambda: bool(st.deferred_items))
+        for event in service.dispatch_pipeline_event(
+            conn_id, ResponseGenerationDoneEvent(response_key=request.response_key, call_ids=[])
+        ):
+            coordinator.handle_event(event)
+        assert chat.tool_output_call_ids() == [call.call_id]
+        assert len(st.pending_item_acks) == 1
+        assert [event["type"] for event in connection.sent] == ["conversation.item.create"]
+
+        events = service.finish_response(conn_id, status=status, response_key=request.response_key)
+        assert not any(event.type == "error" for event in events)
+        for event in events:
+            coordinator.handle_event(event)
+        await wait_until(lambda: any(event["type"] == "response.create" for event in connection.sent))
+        assert len([item for item in chat.buffer if item.type == "function_call_output"]) == 1
+        assert not coordinator._pending_outputs
+        assert not coordinator._failure.done()
+        assert [event["type"] for event in connection.sent] == ["conversation.item.create", "response.create"]
+    finally:
+        await coordinator.close()
 
 
 def test_unrelated_turn_finishing_does_not_start_a_followup(service, conn_id, text_prompt_queue):
@@ -144,12 +211,15 @@ def test_issue_760_sequence_over_the_websocket(setup):
         assert "awaiting_output" in str(handler.seen_chat.to_transformers_chat())
         assert not any("tool_calls" in item for item in handler.seen_chat.to_transformers_chat())
 
-        ws.send_json({"type": "response.cancel"})
-        assert ws.receive_json()["type"] == "response.done"
-
         result = {"type": "function_call_output", "call_id": "call_slow", "output": "late"}
-        ws.send_json({"type": "conversation.item.create", "item": result})
+        ws.send_json({"type": "conversation.item.create", "event_id": "result_first", "item": result})
+        ws.send_json(
+            {"type": "conversation.item.create", "event_id": "result_duplicate", "item": {**result, "output": "again"}}
+        )
+        ws.send_json({"type": "response.cancel", "event_id": "cancel_unrelated"})
+        assert ws.receive_json()["type"] == "response.done"
         assert ws.receive_json()["type"] == "conversation.item.created"
-        ws.send_json({"type": "conversation.item.create", "item": {**result, "output": "again"}})
-        assert ws.receive_json()["type"] == "error"
+        error = ws.receive_json()
+        assert error["type"] == "error"
+        assert error["error"]["event_id"] == "result_duplicate"
         assert not service._state(conn_id).runtime_config.chat.has_pending_tool_calls()
