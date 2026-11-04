@@ -22,7 +22,6 @@ from openai.types.realtime.realtime_conversation_item_system_message import Cont
 from openai.types.realtime.realtime_conversation_item_user_message import Content as UserContent
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.responses import (
-    EasyInputMessageParam,
     ResponseFunctionToolCall,
     ResponseOutputMessage,
     ResponseOutputRefusal,
@@ -1124,16 +1123,6 @@ class Chat:
                     _append_user_input(result, content)
             elif isinstance(item, ResponsesAssistantMessage):
                 result.append(cast(ResponseInputItemParam, item.response_item.model_dump(exclude_unset=True)))
-            elif isinstance(item, RealtimeConversationItemAssistantMessage) and item.id in self._tool_projection_ids:
-                text = "\n".join(part.text for part in item.content if part.text)
-                if text:
-                    result.append(
-                        EasyInputMessageParam(
-                            content=text,
-                            role="assistant",
-                            type="message",
-                        )
-                    )
             elif isinstance(item, RealtimeConversationItemAssistantMessage):
                 assistant_content: list[ResponseOutputTextParam] = []
                 for assistant_part in item.content:

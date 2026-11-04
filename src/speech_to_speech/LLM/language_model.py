@@ -884,7 +884,6 @@ class LanguageModelHandler(BaseLanguageModelHandler):
                 mx.clear_cache()
             except Exception:
                 pass
-            torch.mps.empty_cache()
         else:
             self._cancel_criteria.reset()
             if ctx.prefetch_transaction is not None:
@@ -1075,7 +1074,6 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
                 mx.clear_cache()
             except Exception:
                 pass
-            torch.mps.empty_cache()
         else:
             inputs, input_tokens = self._prepare_vlm_inputs(prepared)
             ctx.input_tokens += input_tokens
@@ -1174,6 +1172,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             converted_messages,
             tokenize=False,
             add_generation_prompt=True,
+            enable_thinking=self.enable_thinking,
         )
         inputs = self.processor(
             text=[text_prompt],
@@ -1212,5 +1211,6 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             converted_messages,
             tokenize=False,
             add_generation_prompt=True,
+            enable_thinking=self.enable_thinking,
         )
         return images, formatted_prompt
