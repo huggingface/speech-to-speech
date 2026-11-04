@@ -93,3 +93,27 @@ def test_cancellation_discards_buffered_audio(handler_factory):
     next(stream)
     handler.cancel_scope.cancel()
     assert list(stream) == []
+
+
+def test_streaming_preserves_hq_filtering_and_starts_on_first_chunk(handler_factory):
+    import soxr
+
+    samples = np.arange(48000)
+    audio = sum(0.2 * np.sin(2 * np.pi * frequency * samples / 24000) for frequency in (440, 8200, 8500))
+    audio = audio.astype(np.float32)
+    consumed = []
+
+    def infer(*_args, **_kwargs):
+        for chunk in np.split(audio, 4):
+            consumed.append(True)
+            yield [chunk]
+
+    handler = handler_factory([])
+    handler.model = SimpleNamespace(infer=infer)
+    stream = handler.process(TTSInput(text="hello"))
+    first = [next(stream) for _ in range(15)]
+    assert len(consumed) == 1
+    actual = np.concatenate(first + list(stream))
+    expected = np.clip(soxr.resample(audio, 24000, 16000, quality="HQ") * 32768, -32768, 32767).astype(np.int16)
+    np.testing.assert_allclose(actual[: len(expected)], expected, atol=1)
+    assert not np.any(actual[len(expected) :])

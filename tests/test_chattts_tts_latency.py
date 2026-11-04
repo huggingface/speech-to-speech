@@ -51,13 +51,13 @@ def test_stream_records_ttfa_before_resample_and_e2e_on_first_yield(monkeypatch,
     clock = [100.0]
     monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
 
-    original_push = chatTTS_handler.StreamingPcm16Resampler.push
+    original_push = chatTTS_handler.soxr.ResampleStream.resample_chunk
 
-    def slow_push(self, pcm):
+    def slow_push(self, pcm, **kwargs):
         clock[0] = 100.40
-        return original_push(self, pcm)
+        return original_push(self, pcm, **kwargs)
 
-    monkeypatch.setattr(chatTTS_handler.StreamingPcm16Resampler, "push", slow_push)
+    monkeypatch.setattr(chatTTS_handler.soxr.ResampleStream, "resample_chunk", slow_push)
 
     def infer(*_a, **_k):
         clock[0] = 100.05

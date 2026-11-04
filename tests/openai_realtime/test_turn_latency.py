@@ -107,15 +107,15 @@ def test_chattts_first_audio_reaches_terminal_response(
 
     handler.model = SimpleNamespace(infer=infer)
     if stream:
-        original_push = chattts_module.StreamingPcm16Resampler.push
+        original_push = chattts_module.soxr.ResampleStream.resample_chunk
 
-        def push(resampler, pcm):
+        def push(resampler, pcm, **kwargs):
             clock[0] = 10.40
             if cancel_during == "resample":
                 handler.cancel_scope.cancel()
-            return original_push(resampler, pcm)
+            return original_push(resampler, pcm, **kwargs)
 
-        monkeypatch.setattr(chattts_module.StreamingPcm16Resampler, "push", push)
+        monkeypatch.setattr(chattts_module.soxr.ResampleStream, "resample_chunk", push)
     else:
         monkeypatch.setattr(chattts_module, "librosa", SimpleNamespace(resample=resample))
     tts_input = TTSInput(

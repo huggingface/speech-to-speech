@@ -7,9 +7,9 @@ from typing import Any, Iterator
 import ChatTTS
 import librosa
 import numpy as np
+import soxr
 import torch
 
-from speech_to_speech.api.openai_realtime.utils import StreamingPcm16Resampler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
@@ -96,7 +96,7 @@ class ChatTTSHandler(BaseTTSHandler):
             yield block
 
         if self.stream:
-            resampler = StreamingPcm16Resampler(24000, 16000)
+            resampler = soxr.ResampleStream(24000, 16000, 1, dtype="float32", quality="HQ")
             pending = np.empty(0, dtype="<i2")
             for gen in wavs_gen:
                 if self._is_stale(_cancel_gen):
@@ -112,8 +112,8 @@ class ChatTTSHandler(BaseTTSHandler):
                     break
                 # Provider samples, before resample / int16 / block assembly.
                 timer.first_provider_audio()
-                pcm = np.clip(chunk * 32768, -32768, 32767).astype("<i2")
-                converted = np.frombuffer(resampler.push(pcm.tobytes()), dtype="<i2")
+                converted = resampler.resample_chunk(chunk)
+                converted = np.clip(converted * 32768, -32768, 32767).astype(np.int16)
                 pending = np.concatenate((pending, converted))
                 while len(pending) >= self.chunk_size:
                     if self._is_stale(_cancel_gen):
@@ -123,7 +123,9 @@ class ChatTTSHandler(BaseTTSHandler):
 
             if self._is_stale(_cancel_gen):
                 return
-            pending = np.concatenate((pending, np.frombuffer(resampler.flush(), dtype="<i2")))
+            tail = resampler.resample_chunk(np.empty(0, dtype=np.float32), last=True)
+            tail = np.clip(tail * 32768, -32768, 32767).astype(np.int16)
+            pending = np.concatenate((pending, tail))
             for index in range(0, len(pending), self.chunk_size):
                 if self._is_stale(_cancel_gen):
                     return
