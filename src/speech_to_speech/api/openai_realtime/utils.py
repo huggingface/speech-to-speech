@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.signal import firwin, lfilter
+from scipy.signal import firwin, upfirdn
 
 
 class StreamingPcm16Resampler:
@@ -14,12 +14,11 @@ class StreamingPcm16Resampler:
         self._up = to_rate // gcd
         self._down = from_rate // gcd
         self._input_samples = 0
-        self._upsampled_samples = 0
         self._output_samples = 0
+        self._history = np.empty(0, dtype=np.float64)
 
         if self._up == self._down:
             self._taps = np.ones(1, dtype=np.float64)
-            self._filter_state = np.empty(0, dtype=np.float64)
             self._delay = 0
             return
 
@@ -33,7 +32,6 @@ class StreamingPcm16Resampler:
             )
             * self._up
         )
-        self._filter_state = np.zeros(self._taps.size - 1, dtype=np.float64)
         self._delay = (self._taps.size - 1) // 2
 
     def push(self, audio_int16: bytes) -> bytes:
@@ -43,21 +41,17 @@ class StreamingPcm16Resampler:
         if not audio_int16:
             return b""
         if self._up == self._down:
+            self._input_samples += np.frombuffer(audio_int16, dtype="<i2").size
             return audio_int16
 
         incoming = np.frombuffer(audio_int16, dtype="<i2").astype(np.float64)
-        self._input_samples += incoming.size
-        upsampled = np.zeros(incoming.size * self._up, dtype=np.float64)
-        upsampled[:: self._up] = incoming
-        return self._filter(upsampled)
+        return self._process(incoming, final=False)
 
     def flush(self) -> bytes:
         """Finish the stream with zero padding, preserving its intended duration."""
         if self._up == self._down or not self._input_samples:
             return b""
-        # Supply the lookahead withheld by delay compensation. _filter caps
-        # output at the duration of real input, excluding this padding.
-        return self._filter(np.zeros(self._delay + self._down, dtype=np.float64))
+        return self._process(np.empty(0, dtype=np.float64), final=True)
 
     @property
     def pending_output_samples(self) -> int:
@@ -65,25 +59,41 @@ class StreamingPcm16Resampler:
         target = (self._input_samples * self.to_rate + self.from_rate - 1) // self.from_rate
         return max(0, target - self._output_samples)
 
-    def _filter(self, upsampled: np.ndarray) -> bytes:
-        filtered, self._filter_state = lfilter(
-            self._taps,
-            np.ones(1, dtype=np.float64),
-            upsampled,
-            zi=self._filter_state,
-        )
+    def _process(self, incoming: np.ndarray, *, final: bool) -> bytes:
+        """Filter through the retained history and emit the newly available samples.
 
-        global_start = self._upsampled_samples
-        self._upsampled_samples += upsampled.size
-        minimum_index = max(global_start, self._delay)
-        phase = (minimum_index - self._delay) % self._down
-        first_index = minimum_index if phase == 0 else minimum_index + self._down - phase
-        local_start = first_index - global_start
-        output = filtered[local_start :: self._down] if local_start < filtered.size else np.empty(0, dtype=np.float64)
+        The filter is a plain FIR, so it is applied as a polyphase resample of
+        the retained input instead of zero-stuffing the chunk up to the common
+        rate and running a stateful IIR-shaped ``lfilter`` over that grid: for
+        44.1 kHz -> 16 kHz the zero-stuffed grid is 160x the input and the
+        filter has 8821 taps, which cost ~9 s of CPU per second of audio. The
+        polyphase form produces the same samples for a bounded amount of
+        history. `tests/openai_realtime/test_input_resampler.py` pins the
+        equivalence against the previous implementation.
+        """
+        # Offset of the retained history in the global upsampled grid.
+        origin = (self._input_samples - self._history.size) * self._up
+        self._input_samples += incoming.size
+        source = np.concatenate((self._history, incoming))
 
-        target_total = (self._input_samples * self.to_rate + self.from_rate - 1) // self.from_rate
-        remaining = max(0, target_total - self._output_samples)
-        if output.size > remaining:
-            output = output[:remaining]
+        if final:
+            target_total = (self._input_samples * self._up + self._down - 1) // self._down
+        else:
+            # Emit only samples whose centred FIR has every input it needs.
+            target_total = max(0, (self._input_samples * self._up - self._delay + self._down - 1) // self._down)
+        count = target_total - self._output_samples
+
+        if count > 0 and source.size:
+            # Align the local polyphase grid with delay + k * down globally.
+            prepad = (origin - self._delay) % self._down
+            taps = np.pad(self._taps, (prepad, 0)) if prepad else self._taps
+            filtered = upfirdn(taps, source, up=self._up, down=self._down)
+            start = (self._delay + self._output_samples * self._down - origin + prepad) // self._down
+            output = filtered[start : start + count]
+        else:
+            output = np.empty(0, dtype=np.float64)
+
+        history_size = (self._taps.size - 1 + self._up - 1) // self._up + 1
+        self._history = np.empty(0, dtype=np.float64) if final else source[-history_size:].copy()
         self._output_samples += output.size
         return np.clip(np.round(output), -32768, 32767).astype("<i2").tobytes()
