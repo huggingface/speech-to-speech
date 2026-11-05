@@ -77,10 +77,11 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
             reasoning_effort=None,
         )
 
-    def _reasoning_kwargs(self) -> dict[str, Any]:
-        if self.reasoning_effort is None:
+    def _reasoning_kwargs(self, reasoning_effort: str | None = None) -> dict[str, Any]:
+        effort = reasoning_effort or self.reasoning_effort
+        if effort is None:
             return {}
-        return {"reasoning": {"effort": self.reasoning_effort}}
+        return {"reasoning": {"effort": effort}}
 
     def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
@@ -135,8 +136,9 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
         response: Any,
         req_tools: Any,
         req_tool_choice: Any,
+        reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
-        kwargs = _build_chat_optional_kwargs(req_tools, req_tool_choice)
+        kwargs = _build_chat_optional_kwargs(req_tools, req_tool_choice, reasoning_effort)
         max_tokens = getattr(response, "max_output_tokens", None) if response is not None else None
         kwargs.setdefault("max_tokens", max_tokens or self.audio_max_tokens)
         kwargs.setdefault("temperature", self.audio_temperature)
@@ -171,8 +173,13 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
     def _serialize(self, active_chat: Chat) -> Any:
         return active_chat.to_responses_api_chat()
 
-    def _build_optional_kwargs(self, req_tools: Any, req_tool_choice: Any) -> dict[str, Any]:
-        optional_kwargs = self._reasoning_kwargs()
+    def _build_optional_kwargs(
+        self,
+        req_tools: Any,
+        req_tool_choice: Any,
+        reasoning_effort: str | None = None,
+    ) -> dict[str, Any]:
+        optional_kwargs = self._reasoning_kwargs(reasoning_effort)
         if req_tools is not None:
             optional_kwargs["tools"] = req_tools
         if req_tool_choice is not None:
