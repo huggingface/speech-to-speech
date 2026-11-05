@@ -32,6 +32,7 @@ from speech_to_speech.api.openai_realtime.input_state import (
     InputItemState,
     SpeechToSpeechInputAudioTranscriptionSnapshotEvent,
 )
+from speech_to_speech.api.openai_realtime.user_input_observation import user_item_kind
 from speech_to_speech.LLM.chat import ChatItemError, add_supported_item
 from speech_to_speech.pipeline.events import (
     PartialTranscriptionEvent,
@@ -314,7 +315,21 @@ class ConversationHandler(RealtimeBaseHandler):
 
         Raises :class:`ChatItemError` on validation failure or unsupported type.
         """
-        add_supported_item(self._state(conn_id).runtime_config.chat, item)
+        state = self._state(conn_id)
+        kind = None
+        classification_failed = False
+        if state._user_input_observations is not None:
+            # Capture only a fixed kind before the LM may consume/strip image content.
+            try:
+                kind = user_item_kind(item)
+            except Exception as exc:
+                classification_failed = True
+                logger.warning("Could not classify user input (%s)", type(exc).__name__)
+        add_supported_item(state.runtime_config.chat, item)
+        if classification_failed:
+            self._service.note_user_input_observation_loss(conn_id, 1)
+        elif kind is not None:
+            self._service.observe_user_input(conn_id, kind)
 
     # ── Pipeline event handlers ────────────────────
 

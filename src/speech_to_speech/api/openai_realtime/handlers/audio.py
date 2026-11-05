@@ -23,6 +23,7 @@ from speech_to_speech.api.openai_realtime.input_state import (
     InputTranscriptionTerminal,
     PendingInputTerminal,
 )
+from speech_to_speech.api.openai_realtime.user_input_observation import UserInputKind
 from speech_to_speech.api.openai_realtime.utils import StreamingPcm16Resampler
 from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEvent
 from speech_to_speech.pipeline.speculative_turns import TurnGateAction
@@ -126,6 +127,8 @@ class AudioHandler(RealtimeBaseHandler):
         if pending is None:
             pending = PendingInputTerminal()
             st.pending_input_terminals[item_id] = pending
+        elif (pending.turn_id, pending.turn_revision) != (turn_id, turn_revision):
+            pending.accepted_input_kind = None
         pending.turn_id = turn_id
         pending.turn_revision = turn_revision
         return pending
@@ -137,11 +140,13 @@ class AudioHandler(RealtimeBaseHandler):
         turn_id: str | None,
         turn_revision: int | None,
         terminal: InputTranscriptionTerminal | None = None,
+        accepted_input_kind: UserInputKind | None = None,
     ) -> None:
         """Close one input item, holding its terminal until the turn commits."""
         pending = self._pending_terminal(conn_id, item_id, turn_id, turn_revision)
         if terminal is not None:
             pending.transcription = terminal
+        pending.accepted_input_kind = accepted_input_kind
         pending.input_closed = True
 
     def resolve_input_terminals(
@@ -265,6 +270,9 @@ class AudioHandler(RealtimeBaseHandler):
         if pending.transcription is not None:
             events.append(pending.transcription)
             pending.transcription = None
+        if pending.accepted_input_kind is not None:
+            self._service.observe_user_input(conn_id, pending.accepted_input_kind)
+            pending.accepted_input_kind = None
         if pending.input_closed:
             st.pending_input_terminals.pop(item_id, None)
             self._release_input_item_state_by_id(conn_id, item_id)
