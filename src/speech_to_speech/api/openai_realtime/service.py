@@ -490,11 +490,7 @@ class RealtimeService:
             )
 
     def _state(self, conn_id: str) -> ConnState:
-        state = self._conns[conn_id]
-        # A server-side replacement must retain this connection's ownership.
-        # Public session.update only updates the nested session parameters.
-        state.runtime_config = state.runtime_config.for_trace_session(state.session_id)
-        return state
+        return self._conns[conn_id]
 
     def bind_response_latency_tracker(
         self,
