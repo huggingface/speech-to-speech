@@ -25,7 +25,9 @@ class ZeroGPUSTTHandler(BaseSTTHandler):
         self.start_language = self.last_language = None
         self.language_capabilities = SpeechLanguageCapabilities(
             languages=frozenset({"en"} if model_name.endswith("-v2") else PARAKEET_TDT_LANGUAGES),
-            supports_language_selection=False,
+            # Selection controls the conversation language; Parakeet itself
+            # always decodes automatically, just as it does in the native handler.
+            supports_language_selection=True,
             supports_auto=not model_name.endswith("-v2"),
         )
         self._language_detector = (

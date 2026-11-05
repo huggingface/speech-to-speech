@@ -47,12 +47,12 @@ def test_failed_final_transcription_reports_failure_without_generating_text(hand
     assert list(h.process(VADAudio(audio=np.zeros(1600), mode="progressive"))) == []
 
 
-def test_native_registry_configuration_and_language_capability():
+def test_native_registry_configuration_and_language_capability(handler):
     args = parse_arguments(["--stt", "zerogpu", "--llm_backend", "zerogpu", "--tts", "zerogpu"])
     assert [args.stt_backend.name, args.llm_backend.name, args.tts_backend.name] == ["zerogpu"] * 3
     assert args.llm_backend.config["compact_history"] is False
     assert args.llm_backend.config["gen_kwargs"]["max_new_tokens"] == 128
-    assert _stt_session_languages(BackendSelection(STT_BACKENDS["zerogpu"], {}), object()) == set()
+    assert "fr" in _stt_session_languages(BackendSelection(STT_BACKENDS["zerogpu"], {}), handler[0])
 
 
 def test_detected_language_is_automatic_and_session_state_resets(handler, monkeypatch):
@@ -63,7 +63,7 @@ def test_detected_language_is_automatic_and_session_state_resets(handler, monkey
     assert output.language_code == "fr-auto"
     assert h.last_language == "fr"
     assert "fr" in h.language_capabilities.languages
-    assert not h.language_capabilities.supports_language_selection
+    assert h.language_capabilities.supports_language_selection
     h.on_session_end()
     assert h.last_language is None
 
