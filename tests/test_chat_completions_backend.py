@@ -102,14 +102,7 @@ class _FakeClient:
         return self
 
 
-def _make_handler(
-    stream=True,
-    *,
-    base_url="http://fake/v1",
-    reasoning_effort=None,
-    audio_input=False,
-    audio_content_type="input_audio",
-):
+def _make_handler(stream=True, *, base_url="http://fake/v1", reasoning_effort=None):
     """Build a handler whose warmup hits the fake client (no network)."""
     orig_openai = base_mod.OpenAI
     base_mod.OpenAI = _FakeClient
@@ -126,8 +119,6 @@ def _make_handler(
                 disable_thinking=True,
                 reasoning_effort=reasoning_effort,
                 compact_history=False,
-                audio_input=audio_input,
-                audio_content_type=audio_content_type,
             ),
         )
     finally:
@@ -135,25 +126,10 @@ def _make_handler(
     return h
 
 
-@pytest.mark.parametrize(
-    "audio_input,audio_content_type", [(False, "input_audio"), (True, "input_audio"), (True, "audio_url")]
-)
-def test_warmup_uses_request_scoped_sdk_retries(audio_input, audio_content_type):
-    handler = _make_handler(audio_input=audio_input, audio_content_type=audio_content_type)
+def test_warmup_uses_request_scoped_sdk_retries():
+    handler = _make_handler()
 
     assert handler.client.last_options == {"max_retries": base_mod.WARMUP_MAX_RETRIES}
-    kwargs = handler.client.chat.completions.last_kwargs
-    assert kwargs["max_completion_tokens"] == 64
-    user = kwargs["messages"][-1]
-    if audio_input:
-        assert user["content"][0]["type"] == audio_content_type
-        part = user["content"][0][audio_content_type]
-        if audio_content_type == "input_audio":
-            assert part["format"] == "wav" and part["data"]
-        else:
-            assert part["url"].startswith("data:audio/wav;base64,")
-    else:
-        assert user["content"] == "Hello"
 
 
 def _chunk(content=None, tool_calls=None, usage=None):

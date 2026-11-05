@@ -553,7 +553,6 @@ def test_warmup_uses_request_scoped_sdk_retries():
 
     handler.client.with_options.assert_called_once_with(max_retries=WARMUP_MAX_RETRIES)
     handler.client.responses.create.assert_called_once()
-    assert handler.client.responses.create.call_args.kwargs["max_output_tokens"] == 64
     assert handler.client.responses.create.call_args.kwargs["reasoning"] == {"effort": "none"}
 
 

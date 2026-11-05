@@ -6,7 +6,6 @@ import time
 from collections.abc import Iterator
 from typing import Any, cast
 
-import numpy as np
 from openai import Stream
 from openai.types.chat import (
     ChatCompletionChunk,
@@ -16,7 +15,6 @@ from openai.types.chat import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolChoiceOptionParam,
     ChatCompletionToolParam,
-    ChatCompletionUserMessageParam,
 )
 from openai.types.chat.chat_completion_content_part_image_param import ImageURL
 from openai.types.chat.chat_completion_named_tool_choice_param import Function as NamedToolChoiceFunction
@@ -310,19 +308,14 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
     def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
         start = time.time()
-        user = ChatCompletionUserMessageParam(role="user", content="Hello")
-        if self.audio_input:
-            audio = self._audio_to_wav_base64(np.zeros(1600, dtype=np.float32), 16000)
-            user["content"] = [_to_chat_content_part({"type": "input_audio", "audio": audio}, self.audio_content_type)]
         self.client.with_options(max_retries=WARMUP_MAX_RETRIES).chat.completions.create(
             model=self.model_name,
             messages=[
                 {"role": "system", "content": "You are a helpful assistant"},
-                user,
+                {"role": "user", "content": "Hello"},
             ],
             extra_body=self._extra_body,
             timeout=self.request_timeout,
-            max_completion_tokens=64,
         )
         end = time.time()
         logger.info(f"{self.__class__.__name__}:  warmed up! time: {(end - start):.3f} s")

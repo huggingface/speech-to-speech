@@ -3,15 +3,13 @@ from __future__ import annotations
 from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any, Optional
-from unittest.mock import MagicMock
 
-import pytest
 from openai.types.realtime import RealtimeSessionCreateRequest
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat, make_system_message, make_user_message
-from speech_to_speech.LLM.language_model import BaseLanguageModelHandler, StreamContext, VisionLanguageModelHandler
+from speech_to_speech.LLM.language_model import BaseLanguageModelHandler, StreamContext
 from speech_to_speech.pipeline.messages import GenerateResponseRequest, LLMResponseChunk
 
 
@@ -110,21 +108,3 @@ def test_local_backend_keeps_injected_context_with_session_instructions():
         assert prompt.count("CURRENT CHAT SNAPSHOT") == 1
         assert chat.init_chat_message is snapshot
         assert snapshot.content[0].text == "CURRENT CHAT SNAPSHOT"
-
-
-@pytest.mark.parametrize("enable_thinking", [False, True])
-def test_vlm_templates_honor_configured_thinking_mode(enable_thinking):
-    handler = object.__new__(VisionLanguageModelHandler)
-    handler.enable_thinking = enable_thinking
-    handler.device = "cpu"
-    handler.processor = MagicMock()
-    handler.processor.apply_chat_template.return_value = "prompt"
-    handler.processor.return_value.to.return_value = {"input_ids": [[1, 2]]}
-    messages = [{"role": "user", "content": "Report the available result."}]
-
-    handler._prepare_vlm_inputs(messages)
-    handler._prepare_mlx_vlm_inputs(messages)
-
-    assert len(handler.processor.apply_chat_template.call_args_list) == 2
-    for call in handler.processor.apply_chat_template.call_args_list:
-        assert call.kwargs["enable_thinking"] is enable_thinking

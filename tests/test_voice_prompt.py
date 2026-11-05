@@ -545,14 +545,8 @@ def test_cancelled_local_tool_turn_rolls_back_fast_output():
     assert chat._provisional_generations == {}
 
 
-@pytest.mark.parametrize(
-    "block",
-    [
-        '<tool_call>\n{"name": "step_forward", "arguments": {"steps": 1}}\n</tool_call>',
-        "<tool_call>\n<function=step_forward>\n<parameter=steps>\n1\n</parameter>\n</function>\n</tool_call>",
-    ],
-)
-def test_local_tool_parser_accepts_native_tool_call_blocks(block):
+def test_local_tool_parser_accepts_native_json_tool_call_blocks():
+    """Models that fall back to <tool_call>{json}</tool_call> still produce tool calls."""
     handler = object.__new__(LanguageModelHandler)
     ctx = _stream_context("step_forward")
     ctx.function_tools = [
@@ -563,7 +557,7 @@ def test_local_tool_parser_accepts_native_tool_call_blocks(block):
             parameters={"type": "object", "properties": {"steps": {"type": "number"}}},
         )
     ]
-    text = "Sure. " + block
+    text = 'Sure. <tool_call>\n{"name": "step_forward", "arguments": {"steps": 1}}\n</tool_call>'
 
     chunks, tools, remaining = handler._process_printable_text(text, None, [], ctx)
 
@@ -656,7 +650,6 @@ def _generate_local_tool_response(text, *, modality, tool_choice="auto", instruc
     [
         '<tool_call>{"name":"dance","arguments":{}',
         '<tool_call>{"name":"dance","arguments":{"query":"unfinished </tool_call>',
-        "<tool_call>\n<function=dance>\n<parameter=query>unfinished </tool_call>",
         "<tool_ca",
         "<co",
         "<code>dance(",
@@ -674,14 +667,7 @@ def test_local_generation_discards_unfinished_tool_markup(modality, tool_choice,
 
 @pytest.mark.parametrize("modality", ["audio", "text"])
 @pytest.mark.parametrize("instructions", [None, ""])
-@pytest.mark.parametrize(
-    "block",
-    [
-        '<tool_call>{"name":"dance","arguments":{}}</tool_call>',
-        "<code>dance()</code>",
-        "<tool_call>\n<function=dance>\n</function>\n</tool_call>",
-    ],
-)
+@pytest.mark.parametrize("block", ['<tool_call>{"name":"dance","arguments":{}}</tool_call>', "<code>dance()</code>"])
 def test_local_generation_strips_disabled_tools_with_empty_instructions(modality, instructions, block):
     outputs, chat = _generate_local_tool_response(
         "Sure. " + block + " Done.", modality=modality, tool_choice="none", instructions=instructions
@@ -696,12 +682,8 @@ def test_local_generation_strips_disabled_tools_with_empty_instructions(modality
 @pytest.mark.parametrize("modality", ["audio", "text"])
 @pytest.mark.parametrize("split", [False, True])
 @pytest.mark.parametrize("query", ["Explain </tool_call> please.", 'A \\"quoted\\" </tool_call> and a backslash \\'])
-@pytest.mark.parametrize("syntax", ["json", "qwen"])
-def test_local_generation_preserves_closing_tags_in_native_arguments(modality, split, query, syntax):
-    if syntax == "json":
-        block = "<tool_call>" + json.dumps({"name": "dance", "arguments": {"query": query}}) + "</tool_call>"
-    else:
-        block = f"<tool_call>\n<function=dance>\n<parameter=query>\n{query}\n</parameter>\n</function>\n</tool_call>"
+def test_local_generation_preserves_closing_tags_in_json_arguments(modality, split, query):
+    block = "<tool_call>" + json.dumps({"name": "dance", "arguments": {"query": query}}) + "</tool_call>"
     outputs, chat = _generate_local_tool_response("Before. " + block + " After.", modality=modality, split=split)
 
     chunks = [output for output in outputs if isinstance(output, LLMResponseChunk)]
