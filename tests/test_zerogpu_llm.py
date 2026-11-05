@@ -212,3 +212,23 @@ def test_worker_deadline_is_failure_not_successful_partial_history(adapter, tmp_
         assert terminal.error is None
         assert terminal.history.complete
         assert "".join(chunk.text for chunk in results if isinstance(chunk, LLMResponseChunk)) == "The answer is 42."
+
+
+def test_zero_gpu_generation_counts_a_latency_round(adapter):
+    from speech_to_speech.LLM.language_model import StreamContext
+    from speech_to_speech.pipeline.turn_latency import TurnLatencyTracker, bind_active_turn_latency_tracker
+
+    module, worker = adapter
+
+    def tokens(*args, **kwargs):
+        yield "Hello."
+
+    worker.tokens = tokens
+    config = RuntimeConfig()
+    config.chat.add_item(make_user_message("Hello"))
+    tracker = TurnLatencyTracker()
+    h = handler(module, CancelScope())
+    ctx = StreamContext()
+    with bind_active_turn_latency_tracker(tracker):
+        list(h._generate(config.chat, "en", None, ctx))
+    assert tracker.llm_rounds == 1

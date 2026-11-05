@@ -3,6 +3,7 @@
 from threading import Event
 
 from speech_to_speech.LLM.language_model import BaseLanguageModelHandler
+from speech_to_speech.pipeline.turn_latency import active_turn_latency_tracker
 from speech_to_speech.zerogpu import runtime
 
 
@@ -36,6 +37,9 @@ class ZeroGPULLMHandler(BaseLanguageModelHandler):
         source = runtime.tokens(messages, self.gen_kwargs, cancelled=cancelled)
         if ctx.prefetch_transaction is not None:
             ctx.prefetch_transaction.register_abort(aborted.set)
+        tracker = active_turn_latency_tracker()
+        if tracker is not None:
+            tracker.start_llm()
         try:
             yield from self._stream_tokens(source, gen, language_code, ctx, runtime_config, response)
         finally:
