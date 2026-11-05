@@ -32,7 +32,7 @@ def test_turn_latency_tracker_format_log_line() -> None:
     )
     assert (
         tracker.format_log_line()
-        == "Turn turn_1 rev=0 latency: stt=0.14s llm=1.28s llm_total=1.28s llm_rounds=1 tts_ttfa=0.16s e2e=1.61s vad_decision=n/a hold=n/a smart_turn_status=n/a status=completed"
+        == "Turn turn_1 rev=0 latency: stt=0.14s llm=1.28s llm_first_tts=n/a llm_total=1.28s llm_rounds=1 tts_ttfa=0.16s e2e=1.61s vad_decision=n/a hold=n/a smart_turn_status=n/a status=completed"
         + (" mlx_lock_wait=0.00s" if sys.platform == "darwin" else "")
     )
 
@@ -256,7 +256,7 @@ def test_format_log_line_shows_settle_named_lock_and_cut_tts(monkeypatch) -> Non
     tracker.record_mlx_lock_hold(0.88, "Qwen3TTS")
 
     assert tracker.format_log_line() == (
-        "Turn turn_1 rev=2 latency: stt=0.12s llm=2.08s llm_total=2.08s llm_rounds=1 tts_ttfa=0.18s e2e=3.00s "
+        "Turn turn_1 rev=2 latency: stt=0.12s llm=2.08s llm_first_tts=n/a llm_total=2.08s llm_rounds=1 tts_ttfa=0.18s e2e=3.00s "
         "vad_settle=0.61s vad_decision=n/a hold=n/a smart_turn_status=n/a status=cancelled "
         "mlx_lock_wait=0.02s[ParakeetSTT-Progressive:0.02s] "
         "mlx_lock_hold=0.88s[Qwen3TTS:0.88s] tts=cut"
@@ -328,6 +328,7 @@ def test_log_platform_and_export_fields(monkeypatch):
         "smart_status",
         "stt_s",
         "llm_s",
+        "llm_first_tts_s",
         "llm_total_s",
         "llm_rounds",
         "tts_ttfa_s",

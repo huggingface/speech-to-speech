@@ -79,10 +79,10 @@ flowchart LR
 | Event | Description |
 |---|---|
 | `input_audio_buffer.append` | Stream base64 PCM audio. Decoded, resampled to 16 kHz, and chunked for the VAD. |
-| `session.update` | Deep-merge session config (instructions, tools, voice, turn detection, audio format). |
+| `session.update` | Deep-merge session config (instructions, tools, voice, turn detection, audio format, reasoning effort). |
 | `conversation.item.create` | Inject `input_text` or `function_call_output` into the LLM context without triggering generation. |
 | `conversation.item.truncate` | Accepted for stock WebSocket SDK interruption. Playback is client-owned, while an explicit `response.cancel` or automatic server-VAD cancellation already discards provisional generation, so this is an acknowledgement-free no-op. |
-| `response.create` | Trigger LLM generation. Supports per-response `instructions` and `tool_choice` overrides. |
+| `response.create` | Trigger LLM generation. Supports per-response `instructions`, `tool_choice`, and `reasoning` overrides. |
 | `response.cancel` | Cancel the in-progress or queued response and re-enable listening. |
 
 ### Server -> Client
@@ -495,6 +495,22 @@ A client sets the VAD threshold and turns off interruption for its session with 
 With `interrupt_response: false` the server still sends `input_audio_buffer.speech_started` and transcribes the user, but it keeps the active response. A client that clears its playback queue on `speech_started` will still cut the reply off, so clients should only do that when interruption is on. A cancelled `response.done` or an `output_audio_buffer.cleared` event should still clear playback. The packaged Python client follows these rules, and `talk --vad-threshold` / `--no-interrupt-response` (or `vad_threshold` / `interrupt_response` under YAML `runtime.client`) set the fields.
 
 This is not the same as `--block-mic-during-playback`. That option stops sending microphone audio while the assistant speaks, so nothing is heard or transcribed until playback ends.
+
+### Changing reasoning effort from a client
+
+Clients pick the LLM's reasoning effort with the OpenAI Realtime `reasoning` object. In `session.update` it applies to the rest of the session and is echoed in `session.updated`; in `response.create` it applies to that response only:
+
+```json
+{"type": "session.update", "session": {"type": "realtime", "reasoning": {"effort": "high"}}}
+{"type": "response.create", "response": {"reasoning": {"effort": "minimal"}}}
+```
+
+OpenAI documents `minimal`, `low`, `medium`, `high`, and `xhigh`. This server adds two extensions:
+
+- `none` is also accepted, to turn reasoning off on providers that support it. It matches the `--responses_api_reasoning_effort none` CLI default.
+- `"reasoning": null` in `session.update` clears the client's choice and restores the server's startup setting. A partial object such as `"reasoning": {}` keeps the current effort.
+
+Other values return an `invalid_request_error`. When the client sets no effort, the startup flags (`--responses_api_reasoning_effort`, `--responses_api_disable_thinking`) apply unchanged. A client effort is sent as `reasoning.effort` on Responses requests and as `reasoning_effort` on Chat Completions requests, and it replaces the startup `chat_template_kwargs.enable_thinking=false` for that request. The local transformers/mlx-lm backend ignores it.
 
 ---
 

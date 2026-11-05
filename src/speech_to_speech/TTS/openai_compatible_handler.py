@@ -25,6 +25,7 @@ from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.turn_latency import TTSResponseTimer
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
 from speech_to_speech.TTS.pcm_blocks import PCMBlockBuffer
+from speech_to_speech.utils.request_tracing import HttpRequestContext, HttpRequestTrace
 
 logger = logging.getLogger(__name__)
 
@@ -75,18 +76,22 @@ class HttpSpeechOperation:
         self._worker_loop: asyncio.AbstractEventLoop | None = None
         self._worker_task: asyncio.Task[None] | None = None
         self._deadline_exceeded = Event()
+        self.trace: HttpRequestTrace | None = None
 
     def iter_bytes(self, cancel_check: Callable[[], bool]) -> Iterator[bytes]:
+        trace = self.trace
         deadline_at_s = perf_counter() + self.timeout_s
         self._raise_if_stopped(cancel_check)
         results: Queue[tuple[bool, object]] = Queue(maxsize=_SPEECH_STREAM_QUEUE_MAXSIZE)
         headers = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        if trace is not None:
+            headers.update(trace.headers())
 
         worker = Thread(
             target=self._read_stream,
-            args=(headers, results, cancel_check),
+            args=(headers, results, cancel_check, trace),
             name="tts-http-reader",
             daemon=True,
         )
@@ -122,10 +127,11 @@ class HttpSpeechOperation:
         headers: dict[str, str],
         results: Queue[tuple[bool, object]],
         cancel_check: Callable[[], bool],
+        trace: HttpRequestTrace | None = None,
     ) -> None:
         result: tuple[bool, object] = (True, _SPEECH_STREAM_DONE)
         loop = asyncio.new_event_loop()
-        task = loop.create_task(self._read_stream_async(headers, results, cancel_check))
+        task = loop.create_task(self._read_stream_async(headers, results, cancel_check, trace))
         with self._transport_lock:
             self._worker_loop = loop
             self._worker_task = task
@@ -153,6 +159,7 @@ class HttpSpeechOperation:
         headers: dict[str, str],
         results: Queue[tuple[bool, object]],
         cancel_check: Callable[[], bool],
+        trace: HttpRequestTrace | None = None,
     ) -> None:
         client = httpx.AsyncClient(timeout=self.timeout_s)
         try:
@@ -160,6 +167,8 @@ class HttpSpeechOperation:
                 self._cancelled.set()
                 raise SpeechRequestCancelled
 
+            if trace is not None:
+                trace.dispatch()
             async with client.stream("POST", self.endpoint_url, headers=headers, json=self.payload) as response:
                 try:
                     response.raise_for_status()
@@ -487,6 +496,13 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
 
         first_audio = True
         timer = self._latency_timer(tts_input, also_cancelled=cancel_check)
+        trace_context = HttpRequestContext(
+            "tts",
+            session_id=tts_input.runtime_config.trace_session_id if tts_input.runtime_config is not None else None,
+            turn_id=tts_input.turn_id,
+            turn_revision=tts_input.turn_revision,
+            response_key=tts_input.response_key,
+        )
         operation: HttpSpeechOperation | None = None
 
         def record_first_provider_audio() -> None:
@@ -532,6 +548,7 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
                     language=language,
                     use_setup_language=False,
                 )
+            operation.trace = HttpRequestTrace(trace_context)
             with self._operation_lock:
                 self._active_operation = operation
             source_chunks = operation.iter_bytes(cancel_check)
