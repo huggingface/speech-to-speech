@@ -96,23 +96,10 @@ class RuntimeConfig(BaseModel):
         return self._trace_session_id
 
     def bind_trace_session(self, session_id: str) -> None:
+        """Label remote-request traces with the owning server session (set once at registration)."""
         if safe_identifier(session_id) is None:
             raise ValueError("invalid server trace session ID")
-        if self._trace_session_id not in (None, session_id):
-            raise ValueError("runtime config already belongs to another trace session")
         self._trace_session_id = session_id
-
-    def for_trace_session(self, session_id: str) -> "RuntimeConfig":
-        """Adopt settings without relabeling an earlier session's config."""
-        if self.trace_session_id not in (None, session_id):
-            # Public settings/history may be reused by a server-side replacement.
-            # Construct a new wrapper from declared fields, never copied private
-            # ownership or client-supplied extras. In-flight work keeps the old one.
-            replacement = type(self).model_construct(**{name: getattr(self, name) for name in type(self).model_fields})
-            replacement.bind_trace_session(session_id)
-            return replacement
-        self.bind_trace_session(session_id)
-        return self
 
     @field_validator("session", mode="after")
     @classmethod

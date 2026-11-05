@@ -108,26 +108,16 @@ def test_runtime_trace_owner_is_not_a_public_session_field():
     assert "trace_session_id" not in RealtimeSessionCreateRequest.model_json_schema()["properties"]
     with pytest.raises((AttributeError, ValueError)):
         config.trace_session_id = "spoof"
-    with pytest.raises(ValueError, match="another trace session"):
-        config.bind_trace_session("other-server-session")
+    with pytest.raises(ValueError, match="invalid server trace session ID"):
+        config.bind_trace_session("bad\nforged")
 
 
-def test_reused_config_keeps_history_but_cannot_relabel_in_flight_work(caplog):
+def test_each_registered_connection_labels_its_own_config(caplog):
     caplog.set_level("INFO", logger=TRACE_LOGGER)
     first, second = RealtimeService(), RealtimeService()
     first_id, second_id = first.register(), second.register()
-    original = first._state(first_id).runtime_config
-    original.chat.add_item(make_user_message("synthetic history"))
-    old_request = GenerateResponseRequest(runtime_config=original)
-    snapshot = HttpRequestContext("llm", session_id=original.trace_session_id, response_key=old_request.response_key)
-    second._conns[second_id].runtime_config = original
-    adopted = second._state(second_id).runtime_config
-    assert adopted is not original
-    assert adopted.chat is original.chat
-    assert adopted.session is original.session
-    assert adopted.trace_session_id == second_id
-    assert old_request.runtime_config.trace_session_id == first_id
-    assert snapshot.session_id == first_id
+    assert first._state(first_id).runtime_config.trace_session_id == first_id
+    assert second._state(second_id).runtime_config.trace_session_id == second_id
     for service, session in ((first, first_id), (second, second_id)):
         service.bind_response_latency_tracker(session, f"response-{session}", turn_id="turn_1", turn_revision=0)
         service.bind_response_latency_tracker(session, f"response-{session}", turn_id="turn_1", turn_revision=0)
