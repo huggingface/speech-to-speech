@@ -77,26 +77,31 @@ logger = logging.getLogger(__name__)
 
 # Played audio is mapped back to transcript for this many recent audio items.
 _AUDIO_ITEM_HISTORY = 32
+# Speaking rate assumed for a cancelled segment before enough finished speech
+# exists to measure one. Slower than typical TTS, so fewer words are kept.
+_FALLBACK_CHARS_PER_SECOND = 12
 
 
 def _heard_transcript(segments: list[list[Any]], played_samples: int) -> str:
     """Return the transcript heard within the first *played_samples* of audio.
 
-    Each segment is transcript text followed by the audio synthesized for it.
+    Each segment is ``[text, delivered_samples, duration_samples]``: transcript
+    text, the audio delivered after it, and the audio the whole text takes.
+    The two differ only for a segment whose synthesis was cancelled.
     Fully played segments are kept whole. In the segment playing at the cutoff,
-    words are kept in proportion to its played audio, by characters, and only
-    when they fit completely, so unheard words are never kept.
+    words are kept in proportion to its played duration, by characters, and
+    only when they fit completely, so unheard words are never kept.
     """
     heard: list[str] = []
     remaining = played_samples
-    for text, samples in segments:
-        if samples <= 0 or remaining <= 0:
+    for text, delivered, duration in segments:
+        if delivered <= 0 or remaining <= 0:
             break
-        if remaining >= samples:
+        if remaining >= duration:
             heard.append(text)
-            remaining -= samples
+            remaining -= duration
             continue
-        budget = len(text) * remaining / samples
+        budget = len(text) * remaining / duration
         words: list[str] = []
         used = 0
         for word in text.split():
@@ -989,7 +994,7 @@ class ResponseHandler(RealtimeBaseHandler):
             # TTS may synthesize consecutive transcript parts as one batch.
             segments[-1][0] = f"{segments[-1][0]} {text}".strip()
         else:
-            segments.append([text, 0])
+            segments.append([text, 0, 0])
 
     def record_audio_samples(self, conn_id: str, item_id: str, samples: int) -> None:
         """Record pipeline-rate assistant audio delivered to the transport."""
@@ -997,11 +1002,33 @@ class ResponseHandler(RealtimeBaseHandler):
             return
         segments = self._audio_segments(conn_id, item_id)
         if not segments:
-            segments.append(["", 0])
+            segments.append(["", 0, 0])
         segments[-1][1] += samples
+        segments[-1][2] += samples
 
-    def _heard_output(self, conn_id: str) -> list[RealtimeConversationItemAssistantMessage]:
-        """Build history for the speech a cancelled response already delivered."""
+    def _samples_per_char(self, conn_id: str, unfinished: list[Any]) -> float:
+        """Measure this session's speaking rate from completely synthesized segments."""
+        chars = samples = 0
+        for segments in self._state(conn_id).assistant_audio_segments.values():
+            for segment in segments:
+                if segment is not unfinished and segment[0] and segment[1]:
+                    chars += len(segment[0])
+                    samples += segment[2]
+        if samples < PIPELINE_SAMPLE_RATE:
+            return PIPELINE_SAMPLE_RATE / _FALLBACK_CHARS_PER_SECOND
+        return samples / chars
+
+    def _heard_output(
+        self,
+        conn_id: str,
+        open_item_id: str | None,
+    ) -> list[RealtimeConversationItemAssistantMessage]:
+        """Build history for the speech a cancelled response already delivered.
+
+        The last segment of the item whose audio was still streaming may not
+        have been fully synthesized, so its duration is estimated from the
+        session's speaking rate instead of the audio delivered so far.
+        """
         st = self._state(conn_id)
         if is_out_of_band(st.current_response_params) or not response_wants_audio(st.current_response_params):
             return []
@@ -1009,7 +1036,11 @@ class ResponseHandler(RealtimeBaseHandler):
         for pending in st.pending_text_outputs:
             item_id = str(pending["item_id"])
             segments = st.assistant_audio_segments.get(item_id, [])
-            text = _heard_transcript(segments, sum(samples for _, samples in segments))
+            if item_id == open_item_id and segments and segments[-1][1]:
+                unfinished = segments[-1]
+                estimate = round(len(unfinished[0]) * self._samples_per_char(conn_id, unfinished))
+                unfinished[2] = max(unfinished[1], estimate)
+            text = _heard_transcript(segments, sum(segment[1] for segment in segments))
             if text:
                 messages.append(
                     RealtimeConversationItemAssistantMessage(
@@ -1034,10 +1065,10 @@ class ResponseHandler(RealtimeBaseHandler):
             logger.debug("Ignoring truncation of in-progress assistant item %s", item_id)
             return
         played_samples = max(0, played_samples)
-        if played_samples >= sum(samples for _, samples in segments):
+        if played_samples >= sum(segment[1] for segment in segments):
             return
         text = _heard_transcript(segments, played_samples)
-        st.assistant_audio_segments[item_id] = [[text, played_samples]] if played_samples else []
+        st.assistant_audio_segments[item_id] = [[text, played_samples, played_samples]] if played_samples else []
         st.runtime_config.chat.truncate_assistant_message(item_id, text)
 
     def handle_conversation_item_truncate(self, conn_id: str, event: ConversationItemTruncateEvent) -> None:
@@ -1052,7 +1083,7 @@ class ResponseHandler(RealtimeBaseHandler):
         for item_id, segments in reversed(list(st.assistant_audio_segments.items())):
             if remaining <= 0:
                 break
-            delivered = sum(samples for _, samples in segments)
+            delivered = sum(segment[1] for segment in segments)
             unplayed = min(remaining, delivered)
             if unplayed:
                 self._truncate_audio_item(conn_id, item_id, delivered - unplayed)
@@ -1133,6 +1164,8 @@ class ResponseHandler(RealtimeBaseHandler):
         if response_key is not None and st.current_response_key not in (None, response_key):
             return events
         if st.in_response:
+            # Audio for this item was still streaming; finishing it clears the id.
+            open_item_id = st.pending_assistant_item_id
             if status == "completed" and st.response_failed:
                 status = "failed"
             elif status == "completed" and st.response_incomplete:
@@ -1186,7 +1219,7 @@ class ResponseHandler(RealtimeBaseHandler):
                     terminal_response.output or [],
                 )
                 self._service.history.finalize(conn_id, st.current_response_key)
-            heard = self._heard_output(conn_id) if status == "cancelled" else []
+            heard = self._heard_output(conn_id, open_item_id) if status == "cancelled" else []
             anchor = self._service.history.anchor(conn_id, st.current_response_key)
             # Ending the response closes its key, which rolls back unfinalized
             # history before deferred client items are applied below.

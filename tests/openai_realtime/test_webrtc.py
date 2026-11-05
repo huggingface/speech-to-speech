@@ -779,6 +779,8 @@ class TestWebRTCDispatch:
             AssistantOutputEvent(text="Sure, here are five ways to improve it.", response_key="response_1"),
         )
         unit.service.encode_audio_chunk(conn_id, bytes(16_000 * 2 * 2), "response_1")
+        # Synthesis finished; most of its audio is still queued on the track.
+        unit.service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key="response_1"))
         transport = _FakeTransport()
         transport.unplayed_ms = 1200.0
 

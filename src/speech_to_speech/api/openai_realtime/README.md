@@ -237,13 +237,18 @@ protocol layer. No custom SDK transport is used.
 Model history keeps only the assistant speech the user heard, so the next
 response does not assume an interrupted explanation was delivered.
 
-- A cancelled audio response keeps the transcript of the audio already sent to
-  the client, never text that was generated but not yet synthesized. With no
-  audio sent, no assistant message is kept.
+- A cancelled audio response keeps only the transcript of the audio already
+  sent to the client. Text whose audio was never synthesized is dropped. If the
+  last segment was still being synthesized, its full duration is estimated from
+  the session's measured speaking rate, or 12 characters per second before one
+  is measured. With no audio sent, no assistant message is kept.
 - WebSocket clients own playback and report its position with
-  `conversation.item.truncate`; the stock Agents SDK, the browser demo, and the
-  packaged `local`/`talk` client send it. This also covers a reply that finished
-  generating while most of its audio was still buffered.
+  `conversation.item.truncate`. A reply that finished generating while most of
+  its audio was still buffered is cut only if the client tracks playback past
+  `response.output_audio.done`. The browser demo and the packaged `local`/`talk`
+  client do. The pinned stock Agents SDK WebSocket transport resets its playback
+  position at that event, so it truncates only replies whose audio is still
+  streaming.
 - WebRTC playback is paced by the server. When barge-in, `response.cancel`, or
   `output_audio_buffer.clear` discards queued RTP audio, the discarded duration
   is removed from the newest assistant items.
@@ -254,8 +259,9 @@ response does not assume an interrupted explanation was delivered.
 The server records each transcript part with the audio synthesized after it.
 Parts whose audio played completely are kept. In the part playing at the cutoff,
 words are kept in proportion to its played audio, by characters, and only when
-they fit completely. Timing is therefore approximate within one TTS segment, and
-errs toward dropping a partly heard word. Truncation of an item whose response
+they fit completely. A segment can hold several sentences, because the LLM
+batches sentences for TTS. Timing is therefore approximate within one segment,
+and errs toward dropping a partly heard word. Truncation of an item whose response
 is still in progress is ignored; cancel the response first.
 
 ### Input transcription semantics

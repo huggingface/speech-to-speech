@@ -147,7 +147,35 @@ def test_truncating_an_in_progress_item_waits_for_its_response_to_end(service, c
     service.handle_conversation_item_truncate(conn_id, _truncate(item_id, 0))
     service.finish_response(conn_id, status="cancelled", reason="client_cancelled")
 
-    assert _history(service, conn_id) == [*EARLIER_TURNS, ("assistant", "incomplete", FIRST)]
+    # The ignored truncate leaves the cancellation's own estimate in place.
+    assert _history(service, conn_id) == [*EARLIER_TURNS, ("assistant", "incomplete", "Sure, here are five ways")]
+
+
+def test_cancel_during_synthesis_does_not_keep_unsynthesized_words(service, conn_id):
+    """0.9 s of a ~3 s sentence was synthesized when the user barged in."""
+    _start_conversation(service, conn_id)
+    item_id = _speak(service, conn_id, [(FIRST, 0.9)])
+
+    service.finish_response(conn_id, status="cancelled", reason="turn_detected")
+
+    # Without a measured speaking rate, 12 characters per second gives the
+    # 39-character sentence 3.25 s; 0.9 s of it covers 10.8 characters.
+    assert _history(service, conn_id)[-1] == ("assistant", "incomplete", "Sure, here")
+
+    service.handle_conversation_item_truncate(conn_id, _truncate(item_id, 800))
+
+    assert _history(service, conn_id)[-1] == ("assistant", "incomplete", "Sure,")
+
+
+def test_cancel_during_synthesis_uses_the_measured_speaking_rate(service, conn_id):
+    _start_conversation(service, conn_id)
+    _speak(service, conn_id, [(FIRST, 2.0), (SECOND, 1.0)])
+
+    service.finish_response(conn_id, status="cancelled", reason="turn_detected")
+
+    # The first segment took 2 s for 39 characters, so the 58-character second
+    # segment takes about 2.97 s; its 1 s delivered covers 19.5 characters.
+    assert _history(service, conn_id)[-1] == ("assistant", "incomplete", f"{FIRST} First, tighten the")
 
 
 def test_server_paced_playback_cuts_the_newest_items_by_unplayed_audio(service, conn_id):
@@ -220,6 +248,7 @@ async def test_websocket_truncate_updates_history_without_an_acknowledgement():
     conn_id = unit.service.register()
     _start_conversation(unit.service, conn_id)
     item_id = _speak(unit.service, conn_id, [(FIRST, 2.0)])
+    unit.service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=RESPONSE_KEY))
     unit.service.finish_response(conn_id, status="cancelled", reason="turn_detected")
     transport = _WebSocketTransport()
 
