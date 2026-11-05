@@ -162,6 +162,9 @@ class ConversationHandler(RealtimeBaseHandler):
     def _apply_delete(self, conn_id: str, event: ConversationItemDeleteEvent) -> list[ServerEvent]:
         st = self._state(conn_id)
         chat = st.runtime_config.chat
+        # Preserve commitments already witnessed before this deletion. A later
+        # tracker commit must not resurrect a successfully deleted provisional input.
+        self._service._collect_committed_audio_observations(conn_id, st)
         removed = chat.delete_item(event.item_id)
         # Committed speech is already on the wire while STT still owns its
         # input state; its Chat entry is only written when transcription ends.
@@ -184,6 +187,9 @@ class ConversationHandler(RealtimeBaseHandler):
                 None,
             )
         if reference is not None and reference[0] is not None:
+            accounting = st.input_turn_accounting.get(reference[0])
+            if accounting is not None:
+                accounting.pending_audio_observation_revision = None
             st.deleted_input_turn_ids[reference[0]] = None
             while len(st.deleted_input_turn_ids) > 128:
                 st.deleted_input_turn_ids.pop(next(iter(st.deleted_input_turn_ids)))

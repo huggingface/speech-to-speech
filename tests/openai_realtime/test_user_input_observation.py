@@ -627,3 +627,102 @@ async def test_partial_inline_dispatch_failure_still_drains_real_acceptance(obse
         )
     assert len(service._state(cid).runtime_config.chat.buffer) == 1
     assert len(transport.events) == 1 and transport.events[0].type == "speech_to_speech.user_input.accepted"
+
+
+@pytest.mark.parametrize("observe", [False, True])
+@pytest.mark.parametrize("commit_before_delete", [False, True])
+def test_protocol_neutral_audio_deletion_settles_pending_observation_at_actual_application(
+    observe, commit_before_delete
+):
+    service = RealtimeService(text_prompt_queue=Queue())
+    cid = service.register(observe_user_inputs=observe)
+    service.drain_user_input_observations(cid)
+    try:
+        _manual(service, cid)
+        turns = service.speculative_turns = SpeculativeTurnTracker()
+        turn, revision = turns.start_turn()
+        turns.segment_finalized(100)
+        service.dispatch_pipeline_event(
+            cid, AudioInputCompletedEvent(audio=np.zeros(160, dtype=np.float32), turn_id=turn, turn_revision=revision)
+        )
+        state = service._state(cid)
+        item_id = state.input_turn_accounting[turn].user_item_id
+        assert item_id is not None and len(state.runtime_config.chat.buffer) == 1
+        assert not turns.is_committed(turn, revision)
+        assert service.text_prompt_queue.empty()
+        if commit_before_delete:
+            turns.gate(turn, revision, commit=True)
+        # Deliberately do not drain a pre-existing commitment before deletion.
+        events = service.handle_conversation_item_delete(
+            cid, ConversationItemDeleteEvent(type="conversation.item.delete", item_id=item_id)
+        )
+        assert [event.type for event in events] == ["conversation.item.deleted"]
+        assert state.runtime_config.chat.buffer == [] and turn in state.deleted_input_turn_ids
+        assert turns.is_committed(turn, revision) == commit_before_delete
+        if not commit_before_delete:
+            turns.gate(turn, revision, commit=True)
+        accepted = _accepted(service, cid)
+        assert len(accepted) == int(observe and commit_before_delete)
+        if accepted:
+            assert (accepted[0].sequence, accepted[0].input_kind, accepted[0].dropped_events) == (1, "audio", 0)
+        assert _accepted(service, cid) == []
+        assert state.input_turn_accounting[turn].pending_audio_observation_revision is None
+        assert service.text_prompt_queue.empty()
+    finally:
+        service.unregister(cid)
+
+
+def test_failed_delete_does_not_retire_pending_protocol_neutral_audio(observed):
+    service, cid = observed
+    _manual(service, cid)
+    turns = service.speculative_turns = SpeculativeTurnTracker()
+    turn, revision = turns.start_turn()
+    turns.segment_finalized(100)
+    service.dispatch_pipeline_event(
+        cid, AudioInputCompletedEvent(audio=np.zeros(160, dtype=np.float32), turn_id=turn, turn_revision=revision)
+    )
+    events = service.handle_conversation_item_delete(
+        cid, ConversationItemDeleteEvent(type="conversation.item.delete", item_id="unknown-item")
+    )
+    assert [event.type for event in events] == ["error"]
+    assert service._state(cid).input_turn_accounting[turn].pending_audio_observation_revision == revision
+    turns.gate(turn, revision, commit=True)
+    assert [event.input_kind for event in _accepted(service, cid)] == ["audio"]
+
+
+def test_deferred_delete_uses_commit_before_actual_apply_rather_than_request_time(observed):
+    service, cid = observed
+    _manual(service, cid)
+    turns = service.speculative_turns = SpeculativeTurnTracker()
+    turn, revision = turns.start_turn()
+    turns.segment_finalized(100)
+    service.dispatch_pipeline_event(
+        cid, AudioInputCompletedEvent(audio=np.zeros(160, dtype=np.float32), turn_id=turn, turn_revision=revision)
+    )
+    state = service._state(cid)
+    item_id = state.input_turn_accounting[turn].user_item_id
+    state.in_response = True
+    assert (
+        service.handle_conversation_item_delete(
+            cid, ConversationItemDeleteEvent(type="conversation.item.delete", item_id=item_id)
+        )
+        == []
+    )
+    assert state.input_turn_accounting[turn].pending_audio_observation_revision == revision
+    turns.gate(turn, revision, commit=True)
+    state.in_response = False
+    assert [event.type for event in service.conversation.flush_deferred_items(cid)] == ["conversation.item.deleted"]
+    assert state.runtime_config.chat.buffer == []
+    assert [event.input_kind for event in _accepted(service, cid)] == ["audio"]
+
+
+def test_later_deletion_preserves_already_accepted_text_without_prior_drain(observed):
+    service, cid = observed
+    item_id = _add(service, cid)[0].item.id
+    assert (
+        service.handle_conversation_item_delete(
+            cid, ConversationItemDeleteEvent(type="conversation.item.delete", item_id=item_id)
+        )[0].type
+        == "conversation.item.deleted"
+    )
+    assert [event.input_kind for event in _accepted(service, cid)] == ["text"]

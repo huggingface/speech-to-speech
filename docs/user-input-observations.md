@@ -62,6 +62,14 @@ exact timestamp of the tracker's internal mutation. Observation never commits a
 turn itself. Consumers needing receipt timing or clock-skew detection must record
 their own receipt clock as a separate fact.
 
+At successful application of an item deletion, a pending protocol-neutral audio
+observation is retired. A tracker commitment witnessed before that removal is
+first preserved as a historical acceptance, even if observations were not yet
+drained. Requesting a deferred deletion does not retire it before application.
+This observer adds no lock coupling between chat deletion and the tracker: a
+physical-thread commitment racing between the pre-deletion witness and removal
+can be missed, rather than inferred after the input has been deleted.
+
 ## What counts
 
 An observation means meaningful input was accepted in the session's **default
