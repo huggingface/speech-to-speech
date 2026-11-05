@@ -667,7 +667,9 @@ def test_pinned_sdk_parses_and_serializes_reasoning_tool_continuation(stream, re
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("first", ["A", "B"])
 @pytest.mark.parametrize("unrelated_user", [False, True])
-def test_pending_parallel_results_preserve_conversation_and_shared_context(stream, first, unrelated_user):
+@pytest.mark.parametrize("async_calls", [(False, False), (True, True), (True, False)])
+def test_pending_parallel_results_preserve_conversation_and_shared_context(stream, first, unrelated_user, async_calls):
+    native_async = all(async_calls)
     handler = _make_handler(stream=stream)
     request = _make_request(chat_size=10)
     chat = request.runtime_config.chat
@@ -681,6 +683,10 @@ def test_pending_parallel_results_preserve_conversation_and_shared_context(strea
     )
     message = _message()
     call_b = _items("B")[1]
+    if any(async_calls):
+        request.runtime_config.session.tools = [{"type": "function", "name": "lookup", "async": True}]
+    call_a = call_a.model_copy(update={"async": async_calls[0]})
+    call_b = call_b.model_copy(update={"async": async_calls[1]})
     replies = iter(
         [
             [reasoning, message, call_a, call_b],
@@ -706,8 +712,10 @@ def test_pending_parallel_results_preserve_conversation_and_shared_context(strea
         ]
     )
     captured = []
+    includes = []
 
     def create(**kwargs):
+        includes.append(kwargs.get("include"))
         captured.append(kwargs["input"])
         items = next(replies)
         return _stream(items) if stream else _make_response(items)
@@ -733,6 +741,25 @@ def test_pending_parallel_results_preserve_conversation_and_shared_context(strea
         outputs = list(drive_llm(handler, request))
         assert next(item for item in outputs if isinstance(item, EndOfResponse)).error is None
         chat.finalize_provisional_generation(request.response_key)
+    if native_async:
+        originals = [item.model_dump(exclude_unset=True) for item in (reasoning, message, call_a, call_b)]
+        for snapshot in captured[1:]:
+            assert snapshot[2:6] == originals
+            assert "Context records" not in json.dumps(snapshot)
+        final = captured[-1]
+        index = next(i for i, item in enumerate(final) if item.get("id") == "msg_unrelated")
+        tail = final[index:]
+        assert [item["type"] for item in tail] == ["message", "function_call_output", "message", "function_call_output"]
+        assert tail[1]["output"] == "42" and tail[3]["output"] == "84"
+        assert tail[1]["call_id"] == f"call_{first}"
+        assert tail[3]["call_id"] == ("call_B" if first == "A" else "call_A")
+        assert reasoning in chat.buffer
+        assert not chat.has_pending_tool_calls()
+        assert len([item for item in chat.buffer if item.type == "function_call_output"]) == 2
+        assert all(include == ["reasoning.encrypted_content"] for include in includes)
+        return
+    if any(async_calls):
+        assert all(include == ["reasoning.encrypted_content"] for include in includes)
     for snapshot in captured[1:]:
         assert not any(item.get("type") in {"reasoning", "function_call", "function_call_output"} for item in snapshot)
     for snapshot in [*captured[1:], chat.to_transformers_chat()]:

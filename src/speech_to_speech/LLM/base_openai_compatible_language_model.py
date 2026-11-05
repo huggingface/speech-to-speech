@@ -178,6 +178,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
     usage, out-of-band handling and error termination.
     """
 
+    _native_async_tool_history = False
+
     # ── setup ─────────────────────────────────────────────────────────────────
 
     def setup(
@@ -779,7 +781,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         try:
             generation_started_at_s = perf_counter()
             try:
-                tool_projection_ids = active_chat.prepare_tool_history()
+                tool_projection_ids = active_chat.prepare_tool_history(
+                    native_async=serialize_fn is None and self._native_async_tool_history
+                )
                 api_input = (serialize_fn or self._serialize)(active_chat)
                 # Images the model actually sees this turn; only these are stripped on
                 # write-back, so an image a fast client injects mid-generation for the

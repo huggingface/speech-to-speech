@@ -83,6 +83,10 @@ class ResponsesFunctionCall(RealtimeConversationItemFunctionCall):
 
     response_item: ResponseFunctionToolCall
 
+    @property
+    def is_async(self) -> bool:
+        return self.response_item.model_dump(by_alias=True).get("async") is True
+
 
 # SDK parsing defers these serializers. Build them during module initialization,
 # before concurrent sessions replay messages with omitted optional content fields.
@@ -478,16 +482,21 @@ class Chat:
             assert isinstance(recorded, RealtimeConversationItemFunctionCall)
             return recorded
 
-    def prepare_tool_history(self) -> frozenset[str]:
+    def prepare_tool_history(self, *, native_async: bool = False) -> frozenset[str]:
         """Choose portable history on a generation snapshot with unresolved tools.
 
-        Strict providers cannot replay a partial native tool/reasoning chain.
+        Native async Responses calls can stay pending in provider history.
+        Synchronous calls need a complete native tool/reasoning chain.
         Keep that chain's visible messages and real results as ordinary text.
         The successful history proposal retains this choice on the live chat.
         """
         with self._lock:
             unowned: set[str] = set()
-            for call_id in self._pending_tool_calls:
+            for call_id, call in self._pending_tool_calls.items():
+                if native_async and isinstance(call, ResponsesFunctionCall) and call.is_async:
+                    continue
+                if call.id is not None:
+                    self._tool_projection_ids.add(call.id)
                 context = self._ordered_pending_calls.get(call_id)
                 if context:
                     self._tool_projection_ids.update(context)
@@ -496,9 +505,6 @@ class Chat:
             # Client-injected/legacy calls have no generating response. Preserve
             # their whole user-turn context rather than split opaque reasoning.
             self._tool_projection_ids.update(self._responses_tool_context_ids(unowned, include_local=True))
-            self._tool_projection_ids.update(
-                call.id for call in self._pending_tool_calls.values() if call.id is not None
-            )
             return frozenset(self._tool_projection_ids)
 
     def retain_tool_projection(self, item_ids: frozenset[str]) -> None:
@@ -990,7 +996,9 @@ class Chat:
                         replacement_added = True
                 item.content = compacted
 
-    def _drop_unpaired_ordered_turns_locked(self, items: Sequence[SupportedItem]) -> list[SupportedItem]:
+    def _drop_unpaired_ordered_turns_locked(
+        self, items: Sequence[SupportedItem], *, native_async: bool = False
+    ) -> list[SupportedItem]:
         """Drop each unpaired ordered call and the rest of the turn it opened.
 
         A local model can emit text after a tool call in the same response, and
@@ -1008,8 +1016,10 @@ class Chat:
         for item in items:
             if isinstance(item, RealtimeConversationItemUserMessage):
                 skipping = False
-            elif isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id in (
-                self._ordered_pending_calls
+            elif (
+                isinstance(item, RealtimeConversationItemFunctionCall)
+                and item.call_id in self._ordered_pending_calls
+                and not (native_async and isinstance(item, ResponsesFunctionCall) and item.is_async)
             ):
                 # Reasoning can require its following message/call context.
                 # Gate that prefix with the call, without touching live history
@@ -1037,7 +1047,7 @@ class Chat:
 
         Streaming dispatch stays immediate. Only provider-item positions change;
         concurrent user inputs and client tool results keep their positions.
-        Serializers already place tool results adjacent to their matching calls.
+        Native async Responses history also keeps results at arrival positions.
         """
         with self._lock:
             order = {item_id: index for index, item_id in enumerate(item_ids)}
@@ -1046,15 +1056,21 @@ class Chat:
             for index, item in zip(positions, ordered):
                 self.buffer[index] = item
 
-    def _with_adjacent_tool_outputs(self, items: Sequence[SupportedItem]) -> list[SupportedItem]:
+    def _with_adjacent_tool_outputs(
+        self, items: Sequence[SupportedItem], *, native_responses: bool = False
+    ) -> list[SupportedItem]:
         """Return a backend-safe snapshot without rewriting canonical chronology."""
         # Deleting a call does not delete its output from wire history, but the
         # remaining result cannot be submitted to a model without that call.
         items = [item for item in items if item.id not in self._deleted_tool_output_ids]
+        # Native Responses replay preserves the full provider sequence, including
+        # mixed sync/async calls that may share one opaque reasoning item.
         call_ids = {
             item.call_id
             for item in items
-            if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None
+            if isinstance(item, RealtimeConversationItemFunctionCall)
+            and item.call_id is not None
+            and not (native_responses and isinstance(item, ResponsesFunctionCall))
         }
         outputs_by_call_id: dict[str, list[RealtimeConversationItemFunctionCallOutput]] = {}
         for item in items:
@@ -1087,8 +1103,10 @@ class Chat:
         """Body of :meth:`to_responses_api_chat`. Caller must hold ``_lock``."""
         buffer_items = self._drop_unpaired_ordered_turns_locked(
             self._with_adjacent_tool_outputs(
-                self._project_tool_history_locked(items, include_pending_context=include_pending_context)
-            )
+                self._project_tool_history_locked(items, include_pending_context=include_pending_context),
+                native_responses=any(isinstance(item, ResponsesFunctionCall) and item.is_async for item in items),
+            ),
+            native_async=True,
         )
         provider_call_ids = {
             item.call_id: item.response_item.call_id for item in buffer_items if isinstance(item, ResponsesFunctionCall)
@@ -1143,7 +1161,7 @@ class Chat:
             elif isinstance(item, ResponseReasoningItem):
                 result.append(cast(ResponseInputItemParam, item.model_dump(exclude_unset=True)))
             elif isinstance(item, ResponsesFunctionCall):
-                if item.call_id not in self._pending_tool_calls:
+                if item.is_async or item.call_id not in self._pending_tool_calls:
                     result.append(cast(ResponseInputItemParam, item.response_item.model_dump(exclude_unset=True)))
             elif isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None:
                 if item.call_id in self._pending_tool_calls:
