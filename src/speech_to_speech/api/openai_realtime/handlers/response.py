@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from openai.types.realtime import (
     ConversationItem,
     RealtimeConversationItemFunctionCall,
+    RealtimeConversationItemFunctionCallOutput,
     RealtimeResponse,
     ResponseAudioDeltaEvent,
     ResponseAudioDoneEvent,
@@ -100,7 +101,13 @@ class ResponseHandler(RealtimeBaseHandler):
 
     def _log_turn_latency(self, st: ConnState, status: _ResponseStatus, response_key: str | None) -> None:
         assert status != "in_progress", "Latency is only finalized for terminal responses"
-        tracker = self._service.turn_latency_store.pop(response_key, session_id=st.session_id)
+        tracker = self._service.turn_latency_store.pop(
+            response_key,
+            session_id=st.session_id,
+            tool_call_ids=[call.call_id for call in st.pending_function_calls.values() if call.call_id is not None]
+            if status == "completed" and not is_out_of_band(st.current_response_params)
+            else (),
+        )
         if tracker is None:
             return
         if tracker.speech_anchor is not None and (status != "completed" or not st.pending_function_calls):
@@ -242,6 +249,7 @@ class ResponseHandler(RealtimeBaseHandler):
             request.response_key,
             turn_id=request.turn_id,
             turn_revision=request.turn_revision,
+            parent_response_key=origin_response_key if source == "tool" else None,
             source=source,
             speech_anchor=anchor,
         )
@@ -872,11 +880,20 @@ class ResponseHandler(RealtimeBaseHandler):
             speech_stopped_at_s=None if out_of_band else speech_stopped_at_s,
         )
         if not out_of_band:
+            parent_call_id = next(
+                (
+                    item.call_id
+                    for item in reversed(candidate_chat.buffer)
+                    if isinstance(item, RealtimeConversationItemFunctionCallOutput)
+                ),
+                None,
+            )
             self._service.bind_response_latency_tracker(
                 conn_id,
                 request.response_key,
                 turn_id=request.turn_id,
                 turn_revision=request.turn_revision,
+                parent_call_id=parent_call_id if source == "tool" else None,
                 source=source,
                 speech_anchor=anchor,
             )

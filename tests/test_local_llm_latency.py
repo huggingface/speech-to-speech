@@ -9,6 +9,7 @@ import speech_to_speech.LLM.language_model as language_model
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.LLM.language_model import LanguageModelHandler, VisionLanguageModelHandler
+from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.messages import EndOfResponse, GenerateResponseRequest, LLMResponseChunk
 from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 
@@ -24,8 +25,11 @@ def test_local_ttft_precedes_sentence_batching_and_trailing_reply(monkeypatch, t
         clock[0] = 10.25
         if tail:
             yield SimpleNamespace(text=tail)
+            clock[0] = 10.75
+            yield SimpleNamespace(text=" Goodbye.")
 
     monkeypatch.setattr(language_model, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     monkeypatch.setattr(language_model, "mlx_stream_generate", tokens, raising=False)
     monkeypatch.setattr(language_model, "MLXLockContext", lambda **kwargs: nullcontext(True), raising=False)
     monkeypatch.setattr(language_model, "mx", SimpleNamespace(clear_cache=lambda: None), raising=False)
@@ -54,11 +58,20 @@ def test_local_ttft_precedes_sentence_batching_and_trailing_reply(monkeypatch, t
     )
     tracker = store.get_or_create_response(request.response_key, turn_id="turn_1", turn_revision=0)
 
-    outputs = list(handler.process(request))
+    processor = object.__new__(LMOutputProcessor)
+    processor.setup()
+    processor.turn_latency_store = store
+    outputs = []
+    for output in handler.process(request):
+        outputs.append(output)
+        list(processor.process(output))
 
     assert any(isinstance(output, LLMResponseChunk) and "Hello" in output.text for output in outputs)
     assert tracker.llm_ttft_s == pytest.approx(0.05)
-    assert tracker.llm_s == pytest.approx(0.25)
+    assert tracker.llm_first_tts_s == pytest.approx(0.25)
+    assert tracker.llm_s == pytest.approx(0.75 if tail else 0.25)
+    assert tracker.llm_total_s == pytest.approx(0.75 if tail else 0.25)
+    assert tracker.llm_rounds == 1
 
 
 @pytest.mark.parametrize("handler_type", [LanguageModelHandler, VisionLanguageModelHandler])

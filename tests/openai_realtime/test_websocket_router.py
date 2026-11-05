@@ -19,8 +19,7 @@ from openai.types.realtime import RealtimeConversationItemFunctionCall, Realtime
 from starlette.testclient import TestClient
 
 import speech_to_speech.api.openai_realtime.websocket_router as router_module
-from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
-from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService
+from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES
 from speech_to_speech.api.openai_realtime.tool_followup import (
     TOOL_FOLLOWUP_COVERED,
     TOOL_FOLLOWUP_METADATA_KEY,
@@ -30,7 +29,6 @@ from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.LLM.chat import make_assistant_message, make_user_message
 from speech_to_speech.LLM.language_model import LanguageModelHandler
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
-from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
@@ -59,7 +57,9 @@ from speech_to_speech.pipeline.messages import (
     ResponsePrefetchTransaction,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.speech_languages import SpeechLanguageCapabilities
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
+from tests.openai_realtime.conftest import make_pipeline_unit
 from tests.test_response_overrides import _RecordingLocalHandler
 from tests.turns import reopen
 
@@ -168,42 +168,19 @@ def setup():
     service unregistered) must drain SESSION_END themselves — see
     `_simulate_session_end_drain` below.
     """
-    text_prompt_queue: Queue = Queue()
-    should_listen = ThreadingEvent()
-    should_listen.set()
-    service = RealtimeService(
-        text_prompt_queue=text_prompt_queue,
-        should_listen=should_listen,
-    )
-    input_queue: Queue = Queue()
-    output_queue: Queue = Queue()
-    text_output_queue: Queue = Queue()
+    unit = make_pipeline_unit()
     stop_event = ThreadingEvent()
-    response_playing = ThreadingEvent()
-    cancel_scope = CancelScope()
-    unit = PipelineUnit(
-        index=0,
-        service=service,
-        cancel_scope=cancel_scope,
-        should_listen=should_listen,
-        response_playing=response_playing,
-        input_queue=input_queue,
-        output_queue=output_queue,
-        text_output_queue=text_output_queue,
-        text_prompt_queue=text_prompt_queue,
-        handlers=[],
-    )
     app = create_app(pool=[unit], stop_event=stop_event)
     return (
         app,
-        service,
-        input_queue,
-        output_queue,
-        text_output_queue,
-        should_listen,
+        unit.service,
+        unit.input_queue,
+        unit.output_queue,
+        unit.text_output_queue,
+        unit.should_listen,
         stop_event,
-        response_playing,
-        cancel_scope,
+        unit.response_playing,
+        unit.cancel_scope,
     )
 
 
@@ -624,7 +601,12 @@ class TestClientEventDispatch:
                 output_queue.put(_pcm_bytes(256))
                 output_queue.put(AssistantOutputEvent(text="stale"))
                 ws.send_json({"type": "response.cancel"})
-                assert ws.receive_json()["type"] == "response.done"
+                # Event-driven wakeup (#692) can deliver a chunk that already left
+                # the queue before cancel runs; drain until the cancel terminal.
+                while True:
+                    event = ws.receive_json()
+                    if event["type"] == "response.done":
+                        break
                 time.sleep(0.1)
                 assert output_queue.empty()
                 assert text_output_queue.empty()
@@ -1939,25 +1921,76 @@ class TestDrainRelease:
 # ===================================================================
 
 
-def _make_unit(index: int) -> PipelineUnit:
-    text_prompt_queue: Queue = Queue()
-    should_listen = ThreadingEvent()
-    should_listen.set()
-    return PipelineUnit(
-        index=index,
-        service=RealtimeService(text_prompt_queue=text_prompt_queue, should_listen=should_listen),
-        cancel_scope=CancelScope(),
-        should_listen=should_listen,
-        response_playing=ThreadingEvent(),
-        input_queue=Queue(),
-        output_queue=Queue(),
-        text_output_queue=Queue(),
-        text_prompt_queue=text_prompt_queue,
-        handlers=[],
-    )
+def _make_unit(index: int):
+    return make_pipeline_unit(index=index)
 
 
 class TestPool:
+    @pytest.mark.parametrize(
+        ("stt_languages", "tts_languages", "selection", "shared", "selectable"),
+        [
+            ({"en", "es"}, {"en", "fr"}, True, ["en"], ["en"]),
+            ({"en", "es"}, {"en", "es"}, False, ["en", "es"], []),
+            (None, {"en"}, True, None, None),
+            ({"en"}, None, True, None, None),
+            (None, None, False, None, []),
+            (set(), {"en"}, True, [], []),
+            ({"es"}, {"en"}, True, [], []),
+        ],
+    )
+    def test_language_capabilities_preserve_unknown_and_separate_coverage_from_selection(
+        self, stt_languages, tts_languages, selection, shared, selectable
+    ):
+        unit = _make_unit(0)
+        service = unit.service
+        service.stt_language_capabilities = SpeechLanguageCapabilities(
+            None if stt_languages is None else frozenset(stt_languages), selection, True
+        )
+        service.tts_language_capabilities = SpeechLanguageCapabilities(
+            None if tts_languages is None else frozenset(tts_languages), True, None
+        )
+        service.stt_supported_languages = stt_languages
+        service.tts_supported_languages = tts_languages
+        service.stt_auto_reset_supported = False
+        app = create_app(pool=[unit, _make_unit(1)], stop_event=ThreadingEvent())
+        with TestClient(app) as client:
+            response = client.get("/v1/realtime/capabilities")
+            assert response.status_code == 200
+            pipelines = response.json()["pipelines"]
+            assert [pipeline["index"] for pipeline in pipelines] == [0, 1]
+            discovered = pipelines[0]
+
+            def codes(languages):
+                return None if languages is None else [language["code"] for language in languages]
+
+            assert codes(discovered["stt"]["languages"]) == (None if stt_languages is None else sorted(stt_languages))
+            assert codes(discovered["tts"]["languages"]) == (None if tts_languages is None else sorted(tts_languages))
+            assert codes(discovered["conversation"]["languages"]) == shared
+            assert codes(discovered["conversation"]["selectable_languages"]) == selectable
+            assert discovered["stt"]["supports_language_selection"] is selection
+            assert discovered["stt"]["supports_auto"] is True
+            assert discovered["tts"]["supports_auto"] is None
+            assert discovered["conversation"]["session_auto_supported"] is False
+            assert pipelines[1]["conversation"]["languages"] is None
+            assert client.get("/v1/pool").json()["in_use"] == 0
+            assert service.get_usage()["connections"] == 0
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                assert client.get("/v1/realtime/capabilities").json() == response.json()
+                for language in discovered["conversation"]["selectable_languages"] or []:
+                    ws.send_json(
+                        {
+                            "type": "session.update",
+                            "session": {
+                                "type": "realtime",
+                                "audio": {"input": {"transcription": {"language": language["name"].title()}}},
+                            },
+                        }
+                    )
+                    updated = ws.receive_json()
+                    assert updated["type"] == "session.updated"
+                    assert updated["session"]["audio"]["input"]["transcription"]["language"] == language["code"]
+
     def test_pool_endpoint_reports_idle_state(self):
         pool = [_make_unit(0), _make_unit(1)]
         app = create_app(pool=pool, stop_event=ThreadingEvent())

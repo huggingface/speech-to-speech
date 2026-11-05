@@ -41,7 +41,7 @@ def _quiet_console(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_records_ttfa_before_resample_and_e2e_on_first_yield(monkeypatch: pytest.MonkeyPatch) -> None:
     clock = [100.0]
-    monkeypatch.setattr(omnivoice_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
 
     def slow_resample(chunk, up, down):
         clock[0] = 100.40
@@ -79,7 +79,7 @@ def test_records_ttfa_before_resample_and_e2e_on_first_yield(monkeypatch: pytest
 
 def test_preserves_first_audio_across_later_segments(monkeypatch: pytest.MonkeyPatch) -> None:
     clock = [50.0]
-    monkeypatch.setattr(omnivoice_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
 
     def first_generate(**_kwargs):
         clock[0] = 50.08
@@ -131,7 +131,7 @@ def test_preserves_first_audio_across_later_segments(monkeypatch: pytest.MonkeyP
 @pytest.mark.parametrize("audios", [[], [np.array([], dtype=np.float32)]])
 def test_empty_audio_leaves_latency_unset(monkeypatch: pytest.MonkeyPatch, audios: list[np.ndarray]) -> None:
     clock = [1.0]
-    monkeypatch.setattr(omnivoice_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
 
     handler = _handler()
     handler.model.generate = lambda **_kwargs: audios
@@ -148,7 +148,7 @@ def test_cancelled_or_discarded_audio_cannot_record_another_response(
     monkeypatch: pytest.MonkeyPatch, cancel_at: str
 ) -> None:
     clock = [10.0]
-    monkeypatch.setattr(omnivoice_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     handler = _handler(cancel_scope=CancelScope())
     store = handler.turn_latency_store = TurnLatencyStore()
     tracker = store.get_or_create_response("old")

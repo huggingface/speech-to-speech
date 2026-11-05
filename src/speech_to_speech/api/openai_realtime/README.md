@@ -116,6 +116,74 @@ that viseme events arrive before the corresponding audio plays.
 Standard Realtime audio events and the current endpoints stay unchanged. See the
 [viseme guide](../../STV/README.md) for the event schema, timing, and model limits.
 
+### Discovering speech languages
+
+`GET /v1/realtime/capabilities` reports the active handlers' language capabilities
+before a client opens a session. It does not claim a pipeline slot, run inference,
+or contact a remote provider. It remains available while all slots are busy.
+The response lists each pipeline by its `/v1/pool` index:
+
+```json
+{
+  "pipelines": [{
+    "index": 0,
+    "stt": {
+      "languages": [{"code": "en", "name": "english"}],
+      "supports_language_selection": true,
+      "supports_auto": null
+    },
+    "tts": {
+      "languages": [{"code": "en", "name": "english"}],
+      "supports_language_selection": true,
+      "supports_auto": null
+    },
+    "conversation": {
+      "languages": [{"code": "en", "name": "english"}],
+      "selectable_languages": [{"code": "en", "name": "english"}],
+      "session_auto_supported": true
+    }
+  }]
+}
+```
+
+`languages: null` means coverage is unknown; an empty array means the declared
+set is empty. Unknown names appear as `name: null`. Codes and known names use the
+same trimming, lowercase normalization, and name-to-code mapping as session
+language validation.
+
+`conversation.languages` is the intersection when both coverage sets are known.
+Build a session language selector from `conversation.selectable_languages`: choices
+the adapters can honor and session validation accepts. A `null` value means complete
+coverage is unknown. Some adapters accept hints they ignore; that does not establish
+selection support. Parakeet TDT v3 has multilingual coverage but no selectable
+session languages because its decoder accepts no hint.
+
+Each handler's `supports_auto` describes automatic language selection; `null`
+means unknown. `conversation.session_auto_supported` says whether validation
+accepts `"auto"`. That value can be true for a fixed-language model: `"auto"` uses
+the adapter's configured behavior and does not turn a fixed model into a detector.
+
+After pipeline construction, handlers expose native metadata as an immutable
+`SpeechLanguageCapabilities` value through `language_capabilities`; custom handlers
+can supply it as a read-only property. Deployment declarations affect the service's
+response without changing that metadata. Remote model aliases, `/v1/models`, and
+Whisper decoder language tokens do not establish coverage. Multilingual Whisper
+architectures can hold English-only checkpoints, so they report unknown coverage.
+For these models or providers such as vLLM/vLLM-Omni without discovery, declare
+coverage explicitly:
+
+```bash
+speech-to-speech serve --stt openai --tts openai \
+  --stt_supported_languages en es --tts_supported_languages en fr \
+  --stt_auto_language_supported true --tts_auto_language_supported false
+```
+
+These declarations fill missing metadata and constrain named session choices;
+they cannot add a language control that the adapter lacks. A declaration that
+conflicts with known backend metadata raises a startup error. Omit a flag to
+retain discovered metadata or report unknown. Check the deployed model's
+configuration rather than inferring support from its served name.
+
 ### Terminal status details
 
 For the Chat Completions and Responses LLM backends, an explicit provider token
@@ -399,6 +467,34 @@ sequenceDiagram
 6. **Discard guard**: while `cancel_scope.discarding` is True, the send loop drops audio chunks and assistant output whose `cancel_generation` is not current (see `_generation_is_discardable` above), while preserving provider-reported usage for billing. The guard clears when a `__RESPONSE_DONE__` with a matching generation arrives (via `cancel_scope.response_done(gen)`), or when an explicit `response.create` starts a new response (`cancel_scope.new_response()`).
 7. **Client-initiated cancel**: `response.cancel` calls `cancel_scope.cancel()` when a response is active or queued, removes queued model requests while preserving pipeline-control sentinels, flushes the output queues with the same preservation rules, clears pending response keys, triggers `finish_response(status="cancelled", reason="client_cancelled")` for an opened response, re-enables `should_listen`, and clears `response_playing`.
 8. **Spurious cancel safety**: if no response is active, `cancel_scope.cancel()` is not called, preventing the discard guard from being set without a `__RESPONSE_DONE__` to clear it.
+
+### Turning off barge-in from a client
+
+A client sets the VAD threshold and turns off interruption for its session with `session.update`:
+
+```json
+{
+  "type": "session.update",
+  "session": {
+    "type": "realtime",
+    "audio": {
+      "input": {
+        "turn_detection": {
+          "type": "server_vad",
+          "threshold": 0.8,
+          "interrupt_response": false
+        }
+      }
+    }
+  }
+}
+```
+
+`threshold` is optional and must be between 0 and 1. Without it the server keeps its `--thresh` value. The 0.8 above is only an example, not a preset for noisy rooms. A higher threshold can reduce false triggers, but it cannot tell the intended speaker apart from other people talking nearby.
+
+With `interrupt_response: false` the server still sends `input_audio_buffer.speech_started` and transcribes the user, but it keeps the active response. A client that clears its playback queue on `speech_started` will still cut the reply off, so clients should only do that when interruption is on. A cancelled `response.done` or an `output_audio_buffer.cleared` event should still clear playback. The packaged Python client follows these rules, and `talk --vad-threshold` / `--no-interrupt-response` (or `vad_threshold` / `interrupt_response` under YAML `runtime.client`) set the fields.
+
+This is not the same as `--block-mic-during-playback`. That option stops sending microphone audio while the assistant speaks, so nothing is heard or transcribed until playback ends.
 
 ---
 
