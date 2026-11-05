@@ -18,6 +18,8 @@ def handler(monkeypatch):
         transcribe=lambda audio: "Hello.",
     )
     monkeypatch.setattr(zerogpu_handler, "runtime", runtime)
+    monkeypatch.setattr(zerogpu_handler, "warm_language_detector", lambda languages: object())
+    monkeypatch.setattr(zerogpu_handler, "detect_language_from_text", lambda text, detector: None)
     return zerogpu_handler.ZeroGPUSTTHandler(Event(), Queue(), Queue()), runtime
 
 
@@ -50,4 +52,23 @@ def test_native_registry_configuration_and_language_capability():
     assert [args.stt_backend.name, args.llm_backend.name, args.tts_backend.name] == ["zerogpu"] * 3
     assert args.llm_backend.config["compact_history"] is False
     assert args.llm_backend.config["gen_kwargs"]["max_new_tokens"] == 128
-    assert _stt_session_languages(BackendSelection(STT_BACKENDS["zerogpu"], {}), object()) == {"en"}
+    assert _stt_session_languages(BackendSelection(STT_BACKENDS["zerogpu"], {}), object()) == set()
+
+
+def test_detected_language_is_automatic_and_session_state_resets(handler, monkeypatch):
+    h, runtime = handler
+    runtime.transcribe = lambda audio: "Bonjour, comment allez-vous aujourd’hui ?"
+    monkeypatch.setattr(zerogpu_handler, "detect_language_from_text", lambda text, detector: "fr")
+    (output,) = h.process(VADAudio(audio=np.zeros(1600), mode="final"))
+    assert output.language_code == "fr-auto"
+    assert h.last_language == "fr"
+    assert "fr" in h.language_capabilities.languages
+    assert not h.language_capabilities.supports_language_selection
+    h.on_session_end()
+    assert h.last_language is None
+
+
+def test_short_transcript_does_not_get_mislabeled_english(handler):
+    h, _ = handler
+    (output,) = h.process(VADAudio(audio=np.zeros(1600), mode="final"))
+    assert output.language_code is None

@@ -573,8 +573,6 @@ def _build_handlers(
 
 
 def _stt_session_languages(selection: BackendSelection, handler: Any) -> set[str] | None:
-    if selection.name == "zerogpu":
-        return {"en"}
     if selection.name == "nemotron-streaming" and getattr(handler, "_is_farsi", False):
         return {"fa"}
     if selection.name == "faster-whisper":
@@ -586,7 +584,14 @@ def _stt_session_languages(selection: BackendSelection, handler: Any) -> set[str
         return set() if getattr(generation_config, "is_multilingual", None) is False else None
     if selection.name == "qwen3-asr":
         return set(modules[type(handler).__module__].SUPPORTED_LANGUAGES)
-    if selection.name in {"parakeet-tdt", "parakeet-unified", "paraformer", "openai-realtime", "vllm-realtime"}:
+    if selection.name in {
+        "zerogpu",
+        "parakeet-tdt",
+        "parakeet-unified",
+        "paraformer",
+        "openai-realtime",
+        "vllm-realtime",
+    }:
         return set()
     return None
 
