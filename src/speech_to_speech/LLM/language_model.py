@@ -683,6 +683,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             tracker = store.get_response(request.response_key) if store else None
             llm_start_s = perf_counter()
             ctx.llm_start_s = llm_start_s
+            if tracker is not None:
+                tracker.record_llm_start(llm_start_s)
             try:
                 with bind_active_turn_latency_tracker(tracker):
                     for chunk in self._generate(active_chat, language_code, gen, ctx, runtime_config, response):

@@ -58,6 +58,7 @@ from speech_to_speech.pipeline.messages import (
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
+from speech_to_speech.utils.request_tracing import HttpRequestContext, HttpRequestTrace
 from speech_to_speech.utils.utils import audio_to_wav_base64, is_out_of_band, response_wants_audio
 
 logger = logging.getLogger(__name__)
@@ -775,9 +776,18 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         consumed_image_ids: set[str] = set()
         store = getattr(self, "turn_latency_store", None)
         tracker = store.get_response(turn.response_key) if store else None
+        trace_context = HttpRequestContext(
+            "llm",
+            session_id=getattr(turn.runtime_config, "trace_session_id", None),
+            turn_id=turn.turn_id,
+            turn_revision=turn.turn_revision,
+            response_key=turn.response_key,
+        )
 
         try:
             generation_started_at_s = perf_counter()
+            if tracker is not None:
+                tracker.record_llm_start(generation_started_at_s)
             try:
                 api_input = (serialize_fn or self._serialize)(active_chat)
                 # Images the model actually sees this turn; only these are stripped on
@@ -796,7 +806,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         provider_request_started = True
                         if tracker is not None:
                             tracker.start_llm()
-                        return (request_fn or self._request)(api_input, optional_kwargs)
+                        trace = HttpRequestTrace(trace_context)
+                        trace.dispatch()
+                        return (request_fn or self._request)(api_input, trace.request_options(optional_kwargs))
 
                     if turn.prefetch_transaction is not None:
                         events = self._iter_prefetch_events_interruptibly(
