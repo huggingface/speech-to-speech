@@ -5,7 +5,7 @@ includes its turn, revision, response key, terminal status, and available stage
 durations:
 
 ```text
-Turn turn_3 rev=0 latency: stt=0.18s llm=1.24s llm_total=1.24s llm_rounds=1 tts_ttfa=0.12s e2e=2.01s vad_settle=0.61s vad_decision=0.36s hold=0.24s smart_turn_status=complete status=completed mlx_lock_wait=0.02s[ParakeetSTT-Progressive:0.02s] mlx_lock_hold=0.88s[Qwen3TTS:0.88s]
+Turn turn_3 rev=0 latency: stt=0.18s llm=1.24s llm_first_tts=0.42s llm_total=1.24s llm_rounds=1 tts_ttfa=0.12s e2e=2.01s vad_settle=0.61s vad_decision=0.36s hold=0.24s smart_turn_status=complete status=completed mlx_lock_wait=0.02s[ParakeetSTT-Progressive:0.02s] mlx_lock_hold=0.88s[Qwen3TTS:0.88s]
 ```
 
 The same record is available with `speech-to-speech local` and
@@ -20,7 +20,7 @@ reserved `response.metadata["speech_to_speech.turn_latency"]` key. Realtime
 metadata values are strings, so the value is compact JSON with this schema:
 
 ```json
-{"e2e_s":2.013482,"hold_s":0.24,"llm_rounds":1,"llm_s":1.241907,"llm_total_s":1.241907,"response_key":"...","smart_status":"complete","source":"speech","status":"completed","stt_s":0.181284,"tts_ttfa_s":0.121775,"turn_id":"turn_3","turn_revision":0,"vad_decision_s":0.36,"version":2}
+{"e2e_s":2.013482,"hold_s":0.24,"llm_first_tts_s":0.42,"llm_rounds":1,"llm_s":1.241907,"llm_total_s":1.241907,"response_key":"...","smart_status":"complete","source":"speech","status":"completed","stt_s":0.181284,"tts_ttfa_s":0.121775,"turn_id":"turn_3","turn_revision":0,"vad_decision_s":0.36,"version":2}
 ```
 
 Version 2 changes `e2e_s` from VAD handoff to **estimated speech end** to
@@ -46,7 +46,7 @@ are added only to terminal responses.
 | Stage | Backends with a measured field | Backends with `n/a` pending coverage |
 | --- | --- | --- |
 | `stt` | `parakeet-tdt`, `openai`, `openai-realtime`, `vllm-realtime`, `whisper`, `whisper-mlx`, `mlx-audio-whisper`, `faster-whisper`, `qwen3-asr`, `parakeet-unified`, `nemotron-streaming`, `orukeet`, `paraformer`, `sense-voice` | None of the built-in STT backends (`--stt none` excluded) |
-| `llm` | `transformers`, `mlx-lm`, `responses-api`, `chat-completions` | None of the built-in LLM backends |
+| `llm`, `llm_first_tts` | `transformers`, `mlx-lm`, `responses-api`, `chat-completions` | None of the built-in LLM backends |
 | `tts_ttfa`, `e2e` | `qwen3`, `openai`, `pocket`, `kokoro`, `facebookMMS`, `chatTTS`, `omnivoice`, `kitten`, `supertonic` | None |
 
 `--stt none` deliberately has no STT measurement. Any field is also `n/a`
@@ -66,6 +66,21 @@ that lock is not contended, and hold is omitted entirely when nothing held it.
 - `llm` / `llm_s` covers generation for this response key, from serialization
   through consumption of provider output, including model lock and provider
   waits. It is recorded even if the request fails.
+- `llm_first_tts` / `llm_first_tts_s` uses that same generation-start timestamp
+  and ends immediately before the output processor yields its first nonempty,
+  audio-enabled text input to TTS. It includes sentence batching or final flush,
+  the LLM-to-processor queue, speculative output gates, and language processing.
+  It excludes the downstream TTS queue, synthesis, and playback, so it is neither
+  provider first-token time nor first-audio time. Nonstreaming replies measure
+  the handoff after the complete reply. Failure fallback text also counts when
+  it is forwarded; inspect terminal `status` rather than treating that as a
+  successful model reply. Later text batches cannot overwrite the measurement.
+  Text-only or tool-only responses, missing generation origins, stale output,
+  discarded trackers and already discarded prefetches leave it unavailable.
+  Tool follow-ups start their own measurement; they do not inherit the parent's
+  first-batch time. A forwarded input does not guarantee that TTS later produces
+  audio. This optional, additive version 2 field uses nine decimal places and is
+  absent from older records.
 - `llm_total_s` sums measured LLM generation durations across the initial request
   and its tool-result follow-ups. It excludes tool execution and waits between
   requests. Three generations of 0.7s, 0.9s and 0.8s produce 2.4s total, while
