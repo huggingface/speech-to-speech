@@ -193,3 +193,59 @@ and clears them on session teardown.
 Remote timings are measured by this server. They include network transfer and
 provider waits within the operation, so they are not provider-only inference
 times. Stages can overlap; these fields are not an additive breakdown.
+
+## Correlating remote requests with workers
+
+Remote HTTP STT (including the Nemotron profile), conversational Chat
+Completions/Responses requests, and OpenAI-compatible TTS batches send a generated
+opaque `X-Speech-Request-Id`. INFO logs from
+`speech_to_speech.utils.request_tracing` are bounded JSON records containing only
+technical identifiers:
+
+```json
+{"event":"speech_response_binding","session_id":"session-example","response_key":"response-example","turn_id":"turn_1","turn_revision":1,"source":"speech"}
+{"event":"speech_http_stt_result","request_id":"0123456789abcdef0123456789abcdef","stage":"stt","session_id":"session-example","turn_id":"turn_1","turn_revision":1,"response_key":null,"mode":"final"}
+{"event":"speech_http_dispatch","request_id":"abcdef0123456789abcdef0123456789","stage":"tts","session_id":"session-example","turn_id":"turn_1","turn_revision":1,"response_key":"response-example","mode":null}
+```
+
+Start with the slow record's `response_key`. Its binding identifies the server
+session and turn/revision; match accepted STT results on those fields, and LLM/TTS
+dispatches on the response key. Turn names such as `turn_1` reset between sessions,
+so never join different sessions by turn name alone. A proxy that implements this
+header contract can log each ID alongside its selected worker and forward it to
+worker timing logs. These upstream logs alone cannot establish which worker was
+selected. Custom-header preservation through a deployment's ingress must be
+validated separately.
+
+Each HTTP STT operation, logical LLM provider request and nonempty TTS batch has
+its own ID. Multiple synthesis batches can use different workers. The SDK and a
+proxy may reuse a logical operation ID across retries: find all matching attempt
+records, rather than treating an ID as one physical network attempt. Dispatch
+means an attempt, not proof of worker receipt, success or stream completion.
+Cancellation before dispatch emits no dispatch record; failed and cancelled
+dispatched STT operations retain their owning session/turn identity even when
+there is no accepted transcription or response.
+
+Accepted final STT records include the IDs actually used by that result,
+including cached prefix windows from earlier revisions. Associations are emitted
+only after the current result passes the existing publication gate. Partial
+captions do not create final-result associations. Private results retain one
+fixed-width ID per already-retained window, with the existing pruning and session
+teardown; there is no global request history. Memory follows the existing window
+cache, whose window count has no absolute cap for an arbitrarily long utterance.
+Each association is a separate bounded log record, not an unbounded metadata
+array.
+
+The server session binding is private, distinct from client session parameters,
+and snapshotted before worker/thread handoff. Reusing settings/history for a new
+session adopts a new wrapper; queued or in-flight calls keep their original
+owner. Unbound standalone configurations have an unavailable session ID. Warmup
+and background history-compaction calls do not borrow the active response's
+identity and are outside this conversational-request contract.
+
+No request ID is added to transcript events or terminal timing metadata, so this
+does not consume Realtime metadata space. The logs contain no request/response
+content, URLs or credentials; unsafe correlation values are omitted instead of
+rewritten. IDs are diagnostic, never authentication or deduplication tokens.
+Tracing needs retained technical logs for the relevant time range; the timing
+metadata is not a persistent archive of every worker attempt.

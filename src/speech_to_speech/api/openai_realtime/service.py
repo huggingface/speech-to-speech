@@ -89,6 +89,7 @@ from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, 
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
 from speech_to_speech.pipeline.turn_latency import SpeechLatencyAnchor, TurnLatencyStore
 from speech_to_speech.speech_languages import SpeechLanguageCapabilities
+from speech_to_speech.utils.request_tracing import log_response_binding
 from speech_to_speech.utils.utils import _generate_id, audio_to_wav_base64
 
 logger = logging.getLogger(__name__)
@@ -462,6 +463,7 @@ class RealtimeService:
                 ),
             )
         )
+        state.runtime_config.bind_trace_session(state.session_id)
         self._conns[state.session_id] = state
         self.total_usage.connections += 1
         return state.session_id
@@ -488,7 +490,11 @@ class RealtimeService:
             )
 
     def _state(self, conn_id: str) -> ConnState:
-        return self._conns[conn_id]
+        state = self._conns[conn_id]
+        # A server-side replacement must retain this connection's ownership.
+        # Public session.update only updates the nested session parameters.
+        state.runtime_config = state.runtime_config.for_trace_session(state.session_id)
+        return state
 
     def bind_response_latency_tracker(
         self,
@@ -502,6 +508,7 @@ class RealtimeService:
         source: Literal["speech", "client", "tool"] = "speech",
         speech_anchor: SpeechLatencyAnchor | None = None,
     ) -> None:
+        existing = self.turn_latency_store.get_response(response_key)
         tracker = self.turn_latency_store.get_or_create_response(
             response_key,
             turn_id=turn_id,
@@ -511,6 +518,14 @@ class RealtimeService:
             parent_call_id=parent_call_id,
         )
         tracker.source = source
+        if existing is None:
+            log_response_binding(
+                session_id=self._state(conn_id).session_id,
+                response_key=response_key,
+                turn_id=turn_id,
+                turn_revision=turn_revision,
+                source=source,
+            )
         if source == "speech" and speech_anchor is None and turn_id is not None:
             speech_anchor = self._state(conn_id).speech_latency_anchors.get((turn_id, turn_revision))
         tracker.speech_anchor = speech_anchor
