@@ -19,13 +19,10 @@ from hf_s2s_smart_turn import SmartTurnAnalyzer
 analyzer = SmartTurnAnalyzer(model_path="/models/smart-turn-v3.2-cpu.onnx")
 audio = np.asarray(recent_mono_audio, dtype=np.float32)
 result = analyzer.predict(audio, sample_rate=16000)
-if result.complete:
-    # The application, not this classifier, decides when to release the turn.
-    schedule_turn_release()
+print(result.complete, result.probability)
 ```
 
-`recent_mono_audio` and `schedule_turn_release` are application-owned. Supply
-the post-processing waveform that the caller intends to classify. The analyzer
+`recent_mono_audio` is the caller's processed audio. The analyzer
 resamples to 16 kHz, keeps at most the latest eight seconds, left-pads shorter
 input, extracts Whisper features and returns `complete`, `probability` and
 `inference_ms`. `predict` is synchronous CPU work; an async application should
@@ -54,9 +51,3 @@ uv run --project packages/smart-turn ruff format --check packages/smart-turn
 ```
 
 CI also exercises the full application's compatibility import.
-
-Before a framework release, publish the matching analyzer version using the
-manual Publish workflow with `package_path=packages/smart-turn`. Maintainers must
-first configure its PyPI project and trusted publisher. The local UV source and
-CI's wheel-pair installation support validation before publication; framework
-publication requires the analyzer dependency to be available from the index.
