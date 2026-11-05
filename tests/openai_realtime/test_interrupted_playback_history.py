@@ -81,6 +81,10 @@ def test_interrupting_after_a_few_words_keeps_only_the_played_portion(service, c
     request = service._state(conn_id).runtime_config.chat.to_transformers_chat()
     assert "five ways" not in str(request)
     assert "thesis" not in str(request)
+    # Replayed Responses assistant messages need provider-style message ids.
+    replayed = service._state(conn_id).runtime_config.chat.to_responses_api_chat()[-1]
+    assert replayed["id"].startswith("msg_")
+    assert replayed["status"] == "incomplete"
 
 
 def test_cancelled_reply_keeps_only_speech_already_delivered(service, conn_id):
@@ -217,11 +221,14 @@ def test_provider_native_message_is_replaced_by_its_heard_text():
         RealtimeConversationItemAssistantMessage,
         type(chat.buffer[0]),
     ]
-    assert chat.buffer[1].id == "msg_1"
     assert chat.buffer[1].content[0].text == "Sure, here"
     request = chat.to_responses_api_chat()
     assert all(item.get("type") != "reasoning" for item in request)
     assert "five ways" not in str(request)
+    assert request[1]["id"].startswith("msg_")
+    # The original id still addresses the replacement.
+    assert chat.truncate_assistant_message("msg_1", "Sure,")
+    assert chat.buffer[1].content[0].text == "Sure,"
 
 
 class _WebSocketTransport(SessionTransport):

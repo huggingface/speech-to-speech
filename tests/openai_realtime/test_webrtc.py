@@ -834,6 +834,45 @@ class TestBargeInAfterResponseDone:
                 assert unit.cancel_scope.generation == generation_before
         stop_event.set()
 
+    def test_speech_start_during_a_reply_keeps_only_played_speech(self):
+        unit = _make_unit()
+        stop_event = ThreadingEvent()
+        app = router_module.create_app(pool=[unit], stop_event=stop_event)
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                assert unit.session is not None
+                session_id = unit.session.session_id
+                service = unit.service
+                chat = service._state(session_id).runtime_config.chat
+                chat.add_item(make_user_message("How can I improve my essay?"))
+                first = "Sure, here are five ways to improve it."
+                second = "First, tighten the thesis so every paragraph supports it."
+                service.dispatch_pipeline_event(session_id, AssistantOutputEvent(text=first, response_key="response_1"))
+                service.encode_audio_chunk(session_id, bytes(16_000 * 2 * 2), "response_1")
+                service.dispatch_pipeline_event(
+                    session_id, AssistantOutputEvent(text=second, response_key="response_1")
+                )
+                service.encode_audio_chunk(session_id, bytes(16_000 * 2 * 3), "response_1")
+                assert service._state(session_id).in_response
+                spy = _FakeTransport()
+                spy.unplayed_ms = 4200.0
+                unit.session.transport = spy
+
+                unit.text_output_queue.put(SpeechStartedEvent())
+
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline and chat.buffer[-1].role != "assistant":
+                    time.sleep(0.02)
+                while time.monotonic() < deadline and chat.buffer[-1].content[0].text != "Sure, here are":
+                    time.sleep(0.02)
+                assert spy.discards == 1
+                assert [(item.role, item.content[0].text) for item in chat.buffer] == [
+                    ("user", "How can I improve my essay?"),
+                    ("assistant", "Sure, here are"),
+                ]
+        stop_event.set()
+
     def test_speech_start_cuts_completed_reply_to_played_audio(self):
         unit = _make_unit()
         stop_event = ThreadingEvent()

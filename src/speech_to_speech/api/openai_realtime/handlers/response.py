@@ -1022,8 +1022,8 @@ class ResponseHandler(RealtimeBaseHandler):
         self,
         conn_id: str,
         open_item_id: str | None,
-    ) -> list[RealtimeConversationItemAssistantMessage]:
-        """Build history for the speech a cancelled response already delivered.
+    ) -> list[tuple[str, str]]:
+        """Return ``(item_id, heard text)`` for speech a cancelled response delivered.
 
         The last segment of the item whose audio was still streaming may not
         have been fully synthesized, so its duration is estimated from the
@@ -1032,7 +1032,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st = self._state(conn_id)
         if is_out_of_band(st.current_response_params) or not response_wants_audio(st.current_response_params):
             return []
-        messages: list[RealtimeConversationItemAssistantMessage] = []
+        messages: list[tuple[str, str]] = []
         for pending in st.pending_text_outputs:
             item_id = str(pending["item_id"])
             segments = st.assistant_audio_segments.get(item_id, [])
@@ -1042,15 +1042,7 @@ class ResponseHandler(RealtimeBaseHandler):
                 unfinished[2] = max(unfinished[1], estimate)
             text = _heard_transcript(segments, sum(segment[1] for segment in segments))
             if text:
-                messages.append(
-                    RealtimeConversationItemAssistantMessage(
-                        type="message",
-                        role="assistant",
-                        id=item_id,
-                        status="incomplete",
-                        content=[Content(type="output_text", text=text)],
-                    )
-                )
+                messages.append((item_id, text))
         return messages
 
     def _truncate_audio_item(self, conn_id: str, item_id: str, played_samples: int) -> None:
@@ -1226,8 +1218,8 @@ class ResponseHandler(RealtimeBaseHandler):
             self._end_response(conn_id, status)
             # Speech already delivered stays in history, cut to its audio; a
             # client truncate or WebRTC playback position can cut it further.
-            for message in heard:
-                st.runtime_config.chat.add_item(message, after_item_id=anchor)
+            for item_id, text in heard:
+                st.runtime_config.chat.add_heard_assistant_message(item_id, text, after_item_id=anchor)
         # Apply any client items that arrived mid-generation now that in_response
         # is cleared and the generation's own write-back has landed. Done outside
         # the in_response guard so a stray terminal call still drains the buffer.

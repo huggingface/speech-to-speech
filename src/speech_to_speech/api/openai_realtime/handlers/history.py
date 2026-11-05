@@ -33,7 +33,10 @@ class _ResponseHistoryState:
 
 
 class HistoryHandler(RealtimeBaseHandler):
-    """The only writer of model output to a session's chat.
+    """The only writer of model proposals to a session's chat.
+
+    Interrupted speech is written from the audio the client heard instead, by
+    :meth:`ResponseHandler.finish_response` and conversation item truncation.
 
     Models attach cumulative :class:`ResponseHistory` proposals to their
     output. ``hold`` keeps the newest proposal per response. ``accept`` runs

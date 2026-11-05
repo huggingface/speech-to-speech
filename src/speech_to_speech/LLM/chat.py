@@ -591,6 +591,31 @@ class Chat:
         self._compact_in_flight = False
         return removed
 
+    def _heard_message_locked(self, item_id: str, text: str) -> RealtimeConversationItemAssistantMessage:
+        """Build an interrupted reply addressed by Realtime *item_id*; caller holds ``_lock``.
+
+        The Responses API accepts only ``msg``-prefixed ids on replayed
+        assistant messages, so the item id becomes an alias of a new one.
+        """
+        message = RealtimeConversationItemAssistantMessage(
+            type="message",
+            role="assistant",
+            id=_generate_id("msg"),
+            status="incomplete",
+            content=[AssistantContent(type="output_text", text=text)],
+        )
+        assert message.id is not None
+        self._assistant_item_aliases[item_id] = {message.id}
+        return message
+
+    def add_heard_assistant_message(self, item_id: str, text: str, *, after_item_id: str | None = None) -> None:
+        """Add the heard part of an interrupted reply, addressed by its Realtime *item_id*."""
+        with self._lock:
+            self._add_item_locked(
+                self._heard_message_locked(item_id, text),
+                insert_at=self._turn_insertion_index_locked(after_item_id),
+            )
+
     def truncate_assistant_message(self, item_id: str, text: str) -> bool:
         """Keep only *text*, the heard prefix, of one delivered assistant message.
 
@@ -626,13 +651,7 @@ class Chat:
             retained_ids = {item.id for item in self.buffer}
             self.buffer.insert(
                 sum(preceding_id in retained_ids for preceding_id in preceding_ids),
-                RealtimeConversationItemAssistantMessage(
-                    type="message",
-                    role="assistant",
-                    id=item_id,
-                    status="incomplete",
-                    content=[AssistantContent(type="output_text", text=text)],
-                ),
+                self._heard_message_locked(item_id, text),
             )
             return True
 
