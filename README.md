@@ -39,7 +39,7 @@ pip install speech-to-speech
 speech-to-speech local
 ```
 
-Then talk: speak, pause, and the assistant answers through your speakers. Stop with `Ctrl+C`. The first run downloads the models, so give it a few minutes. Use headphones so the assistant does not hear itself, or add `--local_audio_block_mic_during_playback`.
+Then talk: speak, pause, and the assistant answers through your speakers. Stop with `Ctrl+C`. The first run downloads the models, so give it a few minutes. On speakers, add `--echo-cancellation` so the assistant does not hear itself and you can still interrupt it by voice; headphones don't need it. See [echo cancellation](docs/echo-cancellation.md) for requirements and limits.
 
 By default, `local` and `talk` show final user transcripts and streaming assistant
 replies once, hiding backend transcript copies, routine logs, tool details, and protocol
@@ -128,7 +128,7 @@ It listens at `ws://127.0.0.1:8765/v1/realtime`. Connect with:
 
 The pipeline is a cascade of four components, each running in its own thread and connected by queues:
 
-1. **Voice Activity Detection (VAD)**: [Silero VAD v5](https://github.com/snakers4/silero-vad) detects speech boundaries and turn-taking.
+1. **Voice Activity Detection (VAD)**: [Silero VAD](https://github.com/snakers4/silero-vad) detects speech boundaries and turn-taking.
 2. **Speech to Text (STT)**: transcribes the user's turn, with optional live partial transcripts.
 3. **Language Model (LLM)**: generates the response, streaming text and tool calls.
 4. **Text to Speech (TTS)**: synthesizes audio and streams it back to the client.
@@ -238,7 +238,7 @@ This installs the package in editable mode. With the environment activated, use 
 
 | Component | Backend | Platforms | Install |
 |---|---|---|---|
-| VAD | [Silero VAD v5](https://github.com/snakers4/silero-vad) | all | built-in |
+| VAD | [Silero VAD](https://github.com/snakers4/silero-vad) | all | built-in |
 | VAD | [FireRed Stream-VAD](https://huggingface.co/FireRedTeam/FireRedVAD) | CUDA / CPU | `fireredvad` |
 | STT | [Parakeet TDT](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (default) | CUDA / CPU through nano-parakeet, Apple Silicon through MLX | built-in |
 | STT | [Parakeet Unified](https://huggingface.co/nvidia/parakeet-unified-en-0.6b) | CUDA / CPU | `nemo` |
@@ -307,6 +307,18 @@ response, while a smaller value starts sooner but is more sensitive to jitter.
 This setting only controls the packaged Python client's speakers; browser and
 other Realtime clients manage their own playback buffers.
 
+By default, user speech interrupts the assistant: the server cancels the
+response and the packaged client drops the audio it has queued. Pass
+`talk --no-interrupt-response` or `local --local_audio_interrupt_response false`
+to let the reply finish. The microphone stays open and your speech is still
+transcribed, unlike `--block-mic-during-playback`, which stops sending
+microphone audio. `talk --vad-threshold <0-1>` and
+`local --local_audio_vad_threshold <0-1>` set the session VAD threshold;
+without them the server's `--thresh` applies. A higher threshold can reduce false
+triggers in a noisy room, but it cannot tell your voice apart from other people
+talking nearby. See [Interruption Handling](./src/speech_to_speech/api/openai_realtime/README.md#interruption-handling)
+for the session fields other clients send.
+
 The packaged client can opt in to local Python tools with `talk --tool-module <module>` or `local --tool-module <module>`. The module contract, programmatic API, and web-search examples (Serper, or keyless You.com) are documented in [Tool calling design](./src/speech_to_speech/api/openai_realtime/README.md#packaged-python-client-tools).
 
 ### Migrating from `--mode`
@@ -341,7 +353,8 @@ The compose file starts a llama.cpp server with Gemma 4 and the Realtime server,
 ## Realtime API
 
 The server logs per-response STT, LLM, first TTS audio, and speech-to-audio
-durations for supported backends, including vLLM-backed STT and TTS. See the
+durations for supported backends, including vLLM-backed STT and TTS. Tool-assisted
+replies also report total LLM time and the number of model rounds. See the
 [response latency guide](./docs/response-latency.md) for the coverage matrix
 and measurement boundaries.
 
@@ -757,6 +770,8 @@ The default checkpoint is [`gradium/phonon-31m-en`](https://huggingface.co/gradi
 `local --tts phonon` lets you cycle through these voices using the terminal's left/right or up/down arrows. The selected voice is displayed immediately and applied after the current reply finishes, preserving the conversation. This requires an interactive macOS or Linux terminal. The standalone `talk` client can opt in with `--voices Zoey Harper Easton` and select its initial voice with `--voice Zoey`.
 
 Phonon uses four native CPU threads by default, which performed better than the runtime's twelve-thread default on an Apple M3 Pro in local testing. Use `--phonon_tts_num_threads N` to tune it at startup; the setting is shared by all Phonon pipelines in the process.
+
+Phonon ends each utterance with a long quiet tail, which adds a pause between sentence-streamed chunks. `--phonon_tts_max_trailing_silence_ms 120` shortens that tail toward a 120 ms target (minimum setting 40); omitting it, the default, preserves native audio. Audio below -60 dBFS RMS in 10 ms windows counts as quiet. Leading audio and internal pauses are kept. At most one second is removed per utterance, so a tail more than one second over the target stays longer than it, and the last output block's padding (up to 32 ms at the default block size) can add more. Speech is not delayed: only quiet audio beyond the target is held, until speech resumes or the utterance ends. Very quiet voices may need native audio.
 
 Phonon runs on CPU even when STT or the LLM uses a GPU. Native audio is resampled to the pipeline's 16 kHz PCM16 output, and interruption closes the native stream. `--phonon_tts_language` fixes text normalization at startup; use `en` (the default), `fr`, `de`, `es`, `pt`, or `none`. Session language changes are restricted to that configured language. See the [TTS component guide](./src/speech_to_speech/TTS/README.md#10-phonon---tts-phonon) for installation and checkpoint options.
 

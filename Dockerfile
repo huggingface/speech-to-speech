@@ -17,7 +17,9 @@ RUN apt-get update \
         python3-pip \
         python3-venv \
     && rm -rf /var/lib/apt/lists/*
-RUN python3 -m pip install --no-cache-dir --break-system-packages uv
+# Install the latest pip alongside the distribution-managed copy.
+RUN python3 -m pip install --no-cache-dir --break-system-packages --ignore-installed --upgrade pip \
+    && python3 -m pip install --no-cache-dir --break-system-packages "uv>=0.13.4"
 
 COPY pyproject.toml README.md LICENSE MANIFEST.in ./
 RUN uv sync --python /usr/bin/python3 --no-install-project --no-dev

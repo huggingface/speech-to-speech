@@ -265,6 +265,67 @@ class FunctionToolCall(BaseModel):
 
 # ── Public API ───────────────────────────────────────────────────────
 
+# Many open models (Qwen, Hermes-style fine-tunes, ...) have a native tool-call
+# syntax, ``<tool_call>{"name": ..., "arguments": {...}}</tool_call>``. They
+# tend to fall back to it once earlier tool calls appear in the chat history,
+# because chat templates render past calls that way. Recognising it keeps those
+# calls from being spoken aloud as text.
+JSON_TOOL_CALL_ENTER = "<tool_call>"
+JSON_TOOL_CALL_END = "</tool_call>"
+
+
+def find_json_tool_call_end(block: str) -> int | None:
+    """Return the closing tag's end offset, ignoring tags inside JSON strings."""
+    in_string = False
+    escaped = False
+    for index, char in enumerate(block):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif block.startswith(JSON_TOOL_CALL_END, index):
+            return index + len(JSON_TOOL_CALL_END)
+    return None
+
+
+def parse_json_tool_call_block(block: str) -> List[FunctionToolCall]:
+    """Parse one ``<tool_call>{json}</tool_call>`` block into function calls.
+
+    Accepts a single object or a list of objects, each with ``name`` and
+    ``arguments`` (or ``parameters``); ``arguments`` may itself be a JSON string.
+    Returns an empty list when the block isn't valid JSON of that shape.
+    """
+    inner = block.strip()
+    if inner.startswith(JSON_TOOL_CALL_ENTER):
+        inner = inner[len(JSON_TOOL_CALL_ENTER) :]
+    if inner.endswith(JSON_TOOL_CALL_END):
+        inner = inner[: -len(JSON_TOOL_CALL_END)]
+    try:
+        payload = json.loads(inner.strip())
+    except json.JSONDecodeError:
+        logger.warning("Ignoring malformed <tool_call> block: %r", block[:200])
+        return []
+    items = payload if isinstance(payload, list) else [payload]
+    calls: List[FunctionToolCall] = []
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            continue
+        args = item.get("arguments", item.get("parameters", {}))
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                continue
+        if not isinstance(args, dict):
+            continue
+        calls.append(FunctionToolCall(function_name=item["name"], parameters=args, original_string=block))
+    return calls
+
 
 def parse_function_call(function_string: str, pattern_to_match: list[str] = []) -> List[FunctionToolCall]:
     """Parse a function call string and extract all function calls found.

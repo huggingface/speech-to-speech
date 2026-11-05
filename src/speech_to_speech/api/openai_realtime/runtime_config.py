@@ -2,9 +2,10 @@ from openai.types.realtime import RealtimeSessionCreateRequest
 from openai.types.realtime.realtime_audio_config import RealtimeAudioConfig
 from openai.types.realtime.realtime_audio_config_input import RealtimeAudioConfigInput
 from openai.types.realtime.realtime_audio_config_output import RealtimeAudioConfigOutput
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 from speech_to_speech.LLM.chat import Chat
+from speech_to_speech.utils.request_tracing import safe_identifier
 
 
 def _apply_update(current: BaseModel, update: BaseModel) -> None:
@@ -43,6 +44,31 @@ class RuntimeConfig(BaseModel):
         validate_default=True,
     )
     last_assistant_language: str | None = Field(default=None, exclude=True)
+    _trace_session_id: str | None = PrivateAttr(default=None)
+
+    @property
+    def trace_session_id(self) -> str | None:
+        """Server ownership, separate from client-editable session parameters."""
+        return self._trace_session_id
+
+    def bind_trace_session(self, session_id: str) -> None:
+        if safe_identifier(session_id) is None:
+            raise ValueError("invalid server trace session ID")
+        if self._trace_session_id not in (None, session_id):
+            raise ValueError("runtime config already belongs to another trace session")
+        self._trace_session_id = session_id
+
+    def for_trace_session(self, session_id: str) -> "RuntimeConfig":
+        """Adopt settings without relabeling an earlier session's config."""
+        if self.trace_session_id not in (None, session_id):
+            # Public settings/history may be reused by a server-side replacement.
+            # Construct a new wrapper from declared fields, never copied private
+            # ownership or client-supplied extras. In-flight work keeps the old one.
+            replacement = type(self).model_construct(**{name: getattr(self, name) for name in type(self).model_fields})
+            replacement.bind_trace_session(session_id)
+            return replacement
+        self.bind_trace_session(session_id)
+        return self
 
     @field_validator("session", mode="after")
     @classmethod

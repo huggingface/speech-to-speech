@@ -42,3 +42,19 @@ class OpenAICompatibleSTTHandlerArguments:
             "help": "Maximum audio duration per HTTP upload (seconds, at least 1). Unset preserves whole-turn uploads."
         },
     )
+    openai_stt_profile: str = field(
+        default="transcription",
+        metadata={"help": "transcription uses the Audio API; nemotron uses native vLLM audio chat with annotations."},
+    )
+    openai_stt_recognition_context: str = field(
+        default="",
+        metadata={"help": "Optional recognition context for the nemotron profile; not assistant instructions."},
+    )
+    openai_stt_context_terms: list[str] = field(
+        default_factory=list,
+        metadata={"help": "Optional vocabulary spellings for the nemotron profile, listed once in the prompt."},
+    )
+    openai_stt_max_output_tokens: int = field(
+        default=384,
+        metadata={"help": "Output token budget for the nemotron profile. Truncated transcripts fail the request."},
+    )

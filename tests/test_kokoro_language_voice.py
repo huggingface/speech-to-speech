@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Iterator
+from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 
+import httpx
 import numpy as np
 import pytest
+from huggingface_hub.errors import HfHubHTTPError
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
@@ -183,3 +186,147 @@ def test_english_fallback_uses_configured_variant(kokoro_calls, language):
     handler = _handler("a", "af_heart")
     list(handler._process_kokoro("Hello", language_code=language))
     assert (handler.lang_code, handler.voice) == ("a", "af_heart")
+
+
+@pytest.fixture
+def voice_audio_backend(voice_backend, monkeypatch):
+    handler, calls = voice_backend
+    pipeline = handler._pipeline if handler.backend == "mlx" else handler.pipeline
+    pipeline_type = type(pipeline)
+    load_voice = pipeline_type.load_voice
+    available = {"af_heart", "af_alloy", "am_puck", "am_michael", "ef_dora"}
+
+    def checked_load(self, voice):
+        suffix = ".safetensors" if handler.backend == "mlx" else ".pt"
+        if voice.endswith(suffix):
+            Path(voice).read_bytes()
+        elif not all(part in available for part in voice.split(",")):
+            response = httpx.Response(404, request=httpx.Request("GET", "https://huggingface.co/missing"))
+            raise HfHubHTTPError(f"Missing voice {voice}", response=response)
+        load_voice(self, voice)
+
+    def generate(self, *args, voice, **kwargs):
+        if handler.backend == "kokoro":
+            self.load_voice(voice)
+        calls["spoken"].append((self.lang_code, voice, self._voice_tensor))
+        audio = np.full(24, 0.1, dtype=np.float32)
+        if handler.backend == "mlx":
+            yield SimpleNamespace(audio=audio.reshape(1, -1))
+        else:
+            yield ("Hello", "", audio)
+
+    monkeypatch.setattr(pipeline_type, "load_voice", checked_load)
+    monkeypatch.setattr(pipeline_type, "__call__", generate)
+    return handler, calls
+
+
+@pytest.mark.parametrize("requested", ["af_typo", "xx_name", "unknown"])
+def test_missing_client_voice_falls_back_and_emits_audio(voice_audio_backend, requested, caplog):
+    handler, calls = voice_audio_backend
+
+    chunks = _speak(handler, _session(requested))
+
+    assert calls["spoken"][-1][1:] == ("af_heart", "af_heart")
+    assert any(np.any(chunk) for chunk in chunks)
+    assert requested in caplog.text
+    assert "falling back to 'af_heart'" in caplog.text
+
+
+def test_missing_voice_restores_setup_voice_after_language_switch(voice_audio_backend):
+    handler, calls = voice_audio_backend
+    config = _session("unknown")
+
+    _speak(handler, config, "es")
+    chunks = _speak(handler, config, "en")
+
+    assert [voice for _, voice, _ in calls["spoken"]] == ["ef_dora", "af_heart"]
+    assert any(np.any(chunk) for chunk in chunks)
+
+
+def test_missing_voice_does_not_reuse_previous_response_voice(voice_audio_backend):
+    handler, calls = voice_audio_backend
+    config = _session("unknown")
+    response = RealtimeResponseCreateParams(audio={"output": {"voice": "am_michael"}})
+
+    _speak(handler, config, response=response)
+    _speak(handler, config)
+
+    assert [voice for _, voice, _ in calls["spoken"]] == ["am_michael", "af_heart"]
+
+
+@pytest.mark.parametrize("relative", [False, True])
+def test_client_voice_file_is_preserved(voice_audio_backend, tmp_path, monkeypatch, relative):
+    handler, calls = voice_audio_backend
+    monkeypatch.chdir(tmp_path)
+    suffix = ".safetensors" if handler.backend == "mlx" else ".pt"
+    voice_path = Path(f"custom{suffix}")
+    voice_path.write_bytes(b"voice fixture")
+    requested = str(voice_path if relative else voice_path.resolve())
+
+    chunks = _speak(handler, _session(requested))
+
+    assert calls["spoken"][-1][1] == requested
+    assert any(np.any(chunk) for chunk in chunks)
+
+
+def test_missing_voice_file_falls_back(voice_audio_backend):
+    handler, calls = voice_audio_backend
+    suffix = ".safetensors" if handler.backend == "mlx" else ".pt"
+
+    chunks = _speak(handler, _session(f"missing{suffix}"))
+
+    assert calls["spoken"][-1][1] == "af_heart"
+    assert any(np.any(chunk) for chunk in chunks)
+
+
+def test_client_voice_blend_is_preserved(voice_audio_backend):
+    handler, calls = voice_audio_backend
+
+    chunks = _speak(handler, _session("af_heart,am_puck"))
+
+    assert calls["spoken"][-1][1] == "af_heart,am_puck"
+    assert any(np.any(chunk) for chunk in chunks)
+
+
+@pytest.mark.parametrize("response_override", [False, True])
+def test_alloy_alias_emits_audio(voice_audio_backend, response_override):
+    handler, calls = voice_audio_backend
+    response = RealtimeResponseCreateParams(audio={"output": {"voice": "alloy"}}) if response_override else None
+    config = _session("am_puck" if response_override else "alloy")
+
+    chunks = _speak(handler, config, response=response)
+
+    assert calls["spoken"][-1][1] == "af_alloy"
+    assert any(np.any(chunk) for chunk in chunks)
+
+
+def test_failed_fallback_load_is_not_retried(voice_backend):
+    handler, _ = voice_backend
+    attempted = []
+
+    def fail(voice):
+        attempted.append(voice)
+        raise FileNotFoundError(voice)
+
+    with pytest.raises(FileNotFoundError, match="af_heart"):
+        handler._load_requested_voice(SimpleNamespace(load_voice=fail), "af_typo")
+    assert attempted == ["af_typo", "af_heart"]
+
+    attempted.clear()
+    with pytest.raises(FileNotFoundError, match="af_heart"):
+        handler._load_requested_voice(SimpleNamespace(load_voice=fail), "af_heart")
+    assert attempted == ["af_heart"]
+
+
+def test_synthesis_failure_does_not_retry_with_another_voice(voice_audio_backend, monkeypatch):
+    handler, calls = voice_audio_backend
+    pipeline = handler._pipeline if handler.backend == "mlx" else handler.pipeline
+
+    def fail(self, *args, **kwargs):
+        raise RuntimeError("synthesis failed")
+
+    monkeypatch.setattr(type(pipeline), "__call__", fail)
+
+    with pytest.raises(RuntimeError, match="synthesis failed"):
+        _speak(handler, _session("am_puck"))
+    assert calls["loaded"] == [("a", "am_puck")]

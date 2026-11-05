@@ -17,7 +17,7 @@ import nltk
 import torch
 from transformers import HfArgumentParser
 
-from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
+from speech_to_speech.api.openai_realtime.pipeline_unit import NotifyingQueue, OutputSignal, PipelineUnit
 from speech_to_speech.arguments_classes.language_model_arguments import MLX_DEFAULT_LM_MODEL
 from speech_to_speech.arguments_classes.local_audio_arguments import LocalAudioArguments
 from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
@@ -53,6 +53,7 @@ from speech_to_speech.pipeline.transcript_logging import (
     warn_if_log_transcripts_enabled,
 )
 from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
+from speech_to_speech.speech_languages import SpeechLanguageCapabilities, backend_language_capabilities
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 from speech_to_speech.utils.thread_manager import ThreadManager
 from speech_to_speech.utils.utils import resolve_device
@@ -338,6 +339,11 @@ def apply_torch_num_threads(module_kwargs: ModuleArguments) -> None:
 
 def prepare_module_args(module_kwargs: ModuleArguments, llm_backend: BackendSelection) -> None:
     validate_torch_num_threads(module_kwargs.torch_num_threads)
+    for kind in ("stt", "tts"):
+        declared = getattr(module_kwargs, f"{kind}_supported_languages")
+        if declared is not None:
+            normalized = SpeechLanguageCapabilities(languages=frozenset(declared)).languages
+            setattr(module_kwargs, f"{kind}_supported_languages", sorted(normalized or ()))
     if module_kwargs.diarization_model_name and module_kwargs.stt == "none":
         raise ValueError("Speaker-aware conversation requires an STT backend; --stt none does not produce transcripts.")
     if module_kwargs.diarization_model_name and not 0 < module_kwargs.diarization_threshold < 1:
@@ -431,7 +437,7 @@ def _build_handlers(
         if diarization_device == "cpu":
             logger.warning(
                 "Diarization is using CPU; sustained speech can outpace inference and disable speaker labels "
-                "until reconnect. CUDA or MPS is recommended for live sessions."
+                "until reconnect. CUDA, NPU, or MPS is recommended for live sessions."
             )
         diarizer = StreamingDiarizer.from_pretrained(
             module_kwargs.diarization_model_name,
@@ -614,14 +620,15 @@ def _build_pipeline_unit(
     speculative_turns = SpeculativeTurnTracker()
     turn_latency_store = TurnLatencyStore()
     speculative_turns.wait_observer = turn_latency_store.record_smart_wait
+    output_signal = OutputSignal()
     recv_audio_chunks_queue: Queue[AudioInItem] = Queue()
-    send_audio_chunks_queue: Queue[AudioOutItem] = Queue()
+    send_audio_chunks_queue: Queue[AudioOutItem] = NotifyingQueue(signal=output_signal)
     spoken_prompt_queue: Queue[VADOutItem] = Queue()
     stt_output_queue: Queue[STTOutItem] = Queue()
     text_prompt_queue: Queue[TextPromptItem] = Queue()
     lm_response_queue: Queue[LMOutItem] = Queue()
     lm_processed_queue: Queue[TTSInItem] = Queue()
-    text_output_queue: Queue[TextEventItem] = Queue()
+    text_output_queue: Queue[TextEventItem] = NotifyingQueue(signal=output_signal)
 
     chat_size = llm_selection.config.get("chat_size", 10)
     default_instructions = llm_selection.config.get("init_chat_prompt")
@@ -665,14 +672,17 @@ def _build_pipeline_unit(
         h.turn_latency_store = turn_latency_store
 
     # Validate only against language sets already known to the active backends.
-    # Faster Whisper reports the loaded checkpoint's actual language set.
-    service.stt_supported_languages = _stt_session_languages(stt_selection, handlers[1])
+    # The fixed suffix is STT → [notifier] → LM → processor → TTS → [visemes].
+    tts_index = -2 if module_kwargs.enable_visemes else -1
+    stt_index = tts_index - (3 if stt_selection.spec.capabilities.bypasses_transcription_notifier else 4)
+    stt_handler = handlers[stt_index]
+    service.stt_supported_languages = _stt_session_languages(stt_selection, stt_handler)
     setup_language = stt_selection.config.get("language")
     service.stt_auto_reset_supported = not (
         stt_selection.name == "openai-realtime" and isinstance(setup_language, str) and bool(setup_language.strip())
     )
 
-    tts_handler = handlers[-2] if module_kwargs.enable_visemes else handlers[-1]
+    tts_handler = handlers[tts_index]
     tts_module = modules[type(tts_handler).__module__]
     if tts_selection.name == "kokoro":
         service.tts_supported_languages = {"en", "ja", "zh", "fr", "es", "it", "pt", "hi"}
@@ -690,6 +700,27 @@ def _build_pipeline_unit(
         language = tts_handler.language
         service.tts_supported_languages = {language} if language != "none" else set()
 
+    for selection, handler in ((stt_selection, stt_handler), (tts_selection, tts_handler)):
+        kind = selection.kind
+        capabilities = backend_language_capabilities(kind, selection.name, selection.config, handler)
+        if not isinstance(getattr(handler, "language_capabilities", None), SpeechLanguageCapabilities):
+            handler.language_capabilities = capabilities
+        declared = getattr(module_kwargs, f"{kind}_supported_languages")
+        automatic = getattr(module_kwargs, f"{kind}_auto_language_supported")
+        if declared is not None:
+            if capabilities.languages is not None and capabilities.languages != frozenset(declared):
+                raise ValueError(f"--{kind}_supported_languages conflicts with the active backend's declared coverage.")
+            capabilities = replace(capabilities, languages=frozenset(declared))
+        if automatic is not None:
+            if capabilities.supports_auto is not None and capabilities.supports_auto != automatic:
+                raise ValueError(f"--{kind}_auto_language_supported conflicts with the active backend's auto support.")
+            capabilities = replace(capabilities, supports_auto=automatic)
+        setattr(service, f"{kind}_language_capabilities", capabilities)
+        if capabilities.languages is not None:
+            allowed = getattr(service, f"{kind}_supported_languages")
+            known = set(capabilities.languages)
+            setattr(service, f"{kind}_supported_languages", known if allowed is None else allowed & known)
+
     return PipelineUnit(
         index=index,
         service=service,
@@ -700,6 +731,7 @@ def _build_pipeline_unit(
         output_queue=send_audio_chunks_queue,
         text_output_queue=text_output_queue,
         text_prompt_queue=text_prompt_queue,
+        output_signal=output_signal,
         handlers=handlers,
     )
 
@@ -762,9 +794,25 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
     tool_response_create = True
     if local_audio.local_audio_tool_module:
         tools, tool_executor, tool_response_create = load_realtime_tool_module(local_audio.local_audio_tool_module)
+    # Validate the client config before loading models.
+    client_config = RealtimeAudioClientConfig(
+        url=f"ws://127.0.0.1:{args.realtime_server_kwargs.port}/v1/realtime",
+        api_key="local",
+        chunk_size=local_audio.local_audio_chunk_size,
+        playback_buffer_ms=playback_buffer_ms,
+        input_device=local_audio.local_audio_input_device,
+        output_device=local_audio.local_audio_output_device,
+        print_json=local_audio.local_audio_print_json,
+        verbose=local_audio.verbose,
+        block_mic_during_playback=local_audio.local_audio_block_mic_during_playback,
+        vad_threshold=local_audio.local_audio_vad_threshold,
+        interrupt_response=local_audio.local_audio_interrupt_response,
+        echo_cancellation=local_audio.local_audio_echo_cancellation,
+        tools=tools,
+        tool_executor=tool_executor,
+        tool_response_create=tool_response_create,
+    )
     server_manager = build_pipeline(args, stop_event, host="127.0.0.1")
-    voice_choices: list[str] = []
-    voice = None
     if args.tts_backend.name == "phonon":
         from speech_to_speech.TTS.phonon_tts_handler import PhononTTSHandler
 
@@ -774,27 +822,9 @@ def build_local_pipeline(args: ParsedArguments, stop_event: Event) -> ThreadMana
                 if "default" in voice_choices:
                     voice_choices.remove("default")
                     voice_choices.insert(0, "default")
-                voice = handler.voice
+                client_config = replace(client_config, voice=handler.voice, voice_choices=voice_choices)
                 break
-    client = RealtimeAudioClient(
-        stop_event,
-        RealtimeAudioClientConfig(
-            url=f"ws://127.0.0.1:{args.realtime_server_kwargs.port}/v1/realtime",
-            api_key="local",
-            voice=voice,
-            voice_choices=voice_choices,
-            chunk_size=local_audio.local_audio_chunk_size,
-            playback_buffer_ms=playback_buffer_ms,
-            input_device=local_audio.local_audio_input_device,
-            output_device=local_audio.local_audio_output_device,
-            print_json=local_audio.local_audio_print_json,
-            verbose=local_audio.verbose,
-            block_mic_during_playback=local_audio.local_audio_block_mic_during_playback,
-            tools=tools,
-            tool_executor=tool_executor,
-            tool_response_create=tool_response_create,
-        ),
-    )
+    client = RealtimeAudioClient(stop_event, client_config)
     return ThreadManager([*server_manager.handlers, client])
 
 

@@ -43,7 +43,13 @@ from speech_to_speech.LLM.chat import (
 )
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
 from speech_to_speech.LLM.text_prompt import build_text_system_prompt
-from speech_to_speech.LLM.tool_call.function_call import extract_function_calls_from_text
+from speech_to_speech.LLM.tool_call.function_call import (
+    JSON_TOOL_CALL_END,
+    JSON_TOOL_CALL_ENTER,
+    extract_function_calls_from_text,
+    find_json_tool_call_end,
+    parse_json_tool_call_block,
+)
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.LLM.tool_call.tool_prompt import END_CODE, ENTER_CODE, build_block_regex, build_tool_system_prompt
 from speech_to_speech.LLM.utils import (
@@ -135,6 +141,7 @@ class StreamContext(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    stream_exhausted: bool = False
     cancelled: bool = False
     stopped: bool = False
     raw_generated_text: str = ""
@@ -257,14 +264,17 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         """Close the MLX generator to release resources immediately."""
         token_iter.close()
 
-    def _finish_transformers_generation(self, thread: Thread) -> None:
-        """Signal the stopping criteria, drain the streamer, and join the thread."""
+    def _finish_transformers_generation(self, thread: Thread, ctx: StreamContext) -> None:
+        """Stop generation, drain unfinished output, and join the thread."""
         self._cancel_criteria.cancel()
-        try:
-            for _ in self.streamer:
+        # TextIteratorStreamer consumes its end marker once; reading again waits
+        # for its queue timeout even though generation has already finished.
+        if not ctx.stream_exhausted:
+            try:
+                for _ in self.streamer:
+                    pass
+            except Empty:
                 pass
-        except Empty:
-            pass
         thread.join(timeout=5.0)
 
     # ------------------------------------------------------------------
@@ -282,12 +292,11 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         *,
         language_name: str | None = None,
     ) -> None:
-        if not instructions and not language_name:
-            return
-
         raw_tools = raw_tools or []
 
         function_tools = [FunctionTool(**t.model_dump()) for t in raw_tools if t.type == "function"]
+        if not instructions and not language_name and not function_tools:
+            return
 
         build_system_prompt = build_voice_system_prompt if wants_audio else build_text_system_prompt
 
@@ -301,6 +310,16 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             block_regex = build_block_regex()
             enter_code = ENTER_CODE
             end_code = END_CODE
+        elif function_tools:
+            # tool_choice="none": tools exist but this response must not call them.
+            # Models that saw earlier tool calls may still emit one; keep detecting
+            # tool blocks so they are stripped from speech, but expose no tools so
+            # nothing gets executed.
+            full_instructions = build_system_prompt(instructions or "", language_name=language_name)
+            block_regex = build_block_regex()
+            enter_code = ENTER_CODE
+            end_code = END_CODE
+            function_tools = []
         else:
             full_instructions = build_system_prompt(instructions or "", language_name=language_name)
             block_regex = None
@@ -348,26 +367,44 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 cancel_generation=ctx.cancel_generation,
             )
 
-        while ctx.enter_code and ctx.enter_code in printable_text:
-            idx = printable_text.index(ctx.enter_code)
+        # Tool-call blocks we recognise: the prompted ``<code>name(...)</code>``
+        # form, plus the ``<tool_call>{json}</tool_call>`` form many models fall
+        # back to. Only active when tools are in play.
+        markers: list[tuple[str, str, str]] = []
+        if ctx.enter_code and ctx.end_code:
+            markers = [(ctx.enter_code, ctx.end_code, "code"), (JSON_TOOL_CALL_ENTER, JSON_TOOL_CALL_END, "json")]
+
+        while True:
+            found = [(printable_text.index(m[0]), m) for m in markers if m[0] in printable_text]
+            if not found:
+                break
+            idx, (enter, end, kind) = min(found, key=lambda f: f[0])
             before = printable_text[:idx]
             code_and_after = printable_text[idx:]
             if text_only and before:
                 chunks.append(text_chunk(before))
             elif before.strip():
+                before = remove_unspeechable(before)
                 for s in sent_tokenize_preserving_markdown_code(before, sent_tokenize):
                     ctx.sentence_batch.append(remove_markdown(s))
             if ctx.sentence_batch:
                 chunks.append(text_chunk(" ".join(ctx.sentence_batch)))
                 ctx.sentence_batch = []
-            if not ctx.block_regex or not ctx.end_code or ctx.end_code not in code_and_after:
+            if kind == "json":
+                block_end = find_json_tool_call_end(code_and_after)
+            else:
+                block_end = code_and_after.index(end) + len(end) if ctx.block_regex and end in code_and_after else None
+            if block_end is None:
                 # Preserve the incomplete block until more streamed text arrives.
                 return chunks, tools, code_and_after
 
-            block_end = code_and_after.index(ctx.end_code) + len(ctx.end_code)
             complete_block = code_and_after[:block_end]
             printable_text = code_and_after[block_end:]
-            _, func_calls = extract_function_calls_from_text(complete_block, ctx.block_regex)
+            if kind == "code":
+                assert ctx.block_regex is not None
+                _, func_calls = extract_function_calls_from_text(complete_block, ctx.block_regex)
+            else:
+                func_calls = parse_json_tool_call_block(complete_block)
             parsed_tools: list[ResponseFunctionToolCall] = []
             for fc in func_calls:
                 try:
@@ -396,18 +433,20 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             # the longest suffix that could become ``<code>`` in the next token.
             # This keeps text-only output verbatim without exposing tool syntax.
             pending_marker = ""
-            if ctx.enter_code:
-                max_prefix_length = min(len(ctx.enter_code) - 1, len(printable_text))
-                for prefix_length in range(max_prefix_length, 0, -1):
-                    if printable_text.endswith(ctx.enter_code[:prefix_length]):
+            for enter, _end, _kind in markers:
+                max_prefix_length = min(len(enter) - 1, len(printable_text))
+                for prefix_length in range(max_prefix_length, len(pending_marker), -1):
+                    if printable_text.endswith(enter[:prefix_length]):
                         pending_marker = printable_text[-prefix_length:]
-                        printable_text = printable_text[:-prefix_length]
                         break
+            if pending_marker:
+                printable_text = printable_text[: -len(pending_marker)]
             if printable_text:
                 chunks.append(text_chunk(printable_text))
             return chunks, tools, pending_marker
 
         if printable_text:
+            printable_text = remove_unspeechable(printable_text)
             trailing_whitespace = printable_text[len(printable_text.rstrip()) :]
             sentences = sent_tokenize_preserving_markdown_code(printable_text, sent_tokenize)
             if len(sentences) > 1:
@@ -487,13 +526,14 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         response: RealtimeResponseCreateParams | None = None,
     ) -> Iterator[LLMResponseChunk]:
         """Consume *token_iter*, accumulate text in *ctx*, yield sentence chunks."""
-        # Text-only output keeps every character; only audio strips TTS-unfriendly
-        # symbols via remove_unspeechable.
+        # Keep the parsing buffer raw: speech filtering can invalidate JSON or
+        # change tool arguments. _process_printable_text filters audio prose only.
         wants_audio = response_wants_audio(response)
         while True:
             try:
                 token = next(token_iter)
             except StopIteration:
+                ctx.stream_exhausted = True
                 break
             except Empty:
                 if self._check_stop(gen, ctx):
@@ -511,7 +551,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             ctx.raw_generated_text += raw_text
             clean = raw_text if not wants_audio else remove_unspeechable(raw_text)
             ctx.generated_text += clean
-            ctx.printable_text += clean
+            ctx.printable_text += raw_text
             chunks, ctx.tools, ctx.printable_text = self._process_printable_text(
                 ctx.printable_text,
                 language_code,
@@ -525,6 +565,18 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 logger.info("LLM generation cancelled (stale speculative turn)")
                 break
             yield from chunks
+
+        if ctx.enter_code and ctx.end_code and not ctx.interrupted:
+            # Pending tool syntax must not reach either the sentence-batch flush
+            # below or process()'s final text chunk when generation ends early.
+            for marker in (ctx.enter_code, JSON_TOOL_CALL_ENTER):
+                if ctx.printable_text.startswith(marker):
+                    ctx.printable_text = ""
+                    break
+                for length in range(min(len(marker) - 1, len(ctx.printable_text)), 0, -1):
+                    if ctx.printable_text.endswith(marker[:length]):
+                        ctx.printable_text = ctx.printable_text[:-length]
+                        break
 
         if ctx.sentence_batch and not ctx.interrupted:
             if ctx.printable_text.strip():
@@ -636,6 +688,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             tracker = store.get_response(request.response_key) if store else None
             llm_start_s = perf_counter()
             ctx.llm_start_s = llm_start_s
+            if tracker is not None:
+                tracker.record_llm_start(llm_start_s)
             try:
                 with bind_active_turn_latency_tracker(tracker):
                     for chunk in self._generate(active_chat, language_code, gen, ctx, runtime_config, response):
@@ -817,6 +871,9 @@ class LanguageModelHandler(BaseLanguageModelHandler):
 
         if self.backend == "mlx":
             with MLXLockContext(handler_name="MLX-LLM", timeout=10.0):
+                tracker = active_turn_latency_tracker()
+                if tracker is not None:
+                    tracker.start_llm()
                 token_iter = mlx_stream_generate(
                     self.model,  # type: ignore[arg-type]
                     self.tokenizer,  # type: ignore[arg-type]
@@ -847,15 +904,18 @@ class LanguageModelHandler(BaseLanguageModelHandler):
             if ctx.prefetch_transaction is not None:
                 ctx.prefetch_transaction.register_abort(self._cancel_criteria.cancel)
             lock = self._transformers_lock
+            tracker = active_turn_latency_tracker()
 
             def _locked_pipe() -> None:
                 with lock:
+                    if tracker is not None:
+                        tracker.start_llm()
                     self.pipe(chat_prompt, **self.gen_kwargs)
 
             thread = Thread(target=_locked_pipe)
             thread.start()
             yield from self._stream_tokens(self.streamer, gen, language_code, ctx, runtime_config, response)
-            self._finish_transformers_generation(thread)
+            self._finish_transformers_generation(thread, ctx)
             if self.device == "mps":
                 torch.mps.empty_cache()
 
@@ -1003,6 +1063,9 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             logger.debug("MLX VLM prompt token count: %d", ctx.input_tokens)
 
             with MLXLockContext(handler_name="MLX-VLM", timeout=10.0):
+                tracker = active_turn_latency_tracker()
+                if tracker is not None:
+                    tracker.start_llm()
                 token_iter = mlx_vlm_stream_generate(  # type: ignore[arg-type]
                     self.model,
                     self.processor,
@@ -1042,15 +1105,18 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
                 "stopping_criteria": StoppingCriteriaList([self._cancel_criteria]),
             }
             lock = self._transformers_lock
+            tracker = active_turn_latency_tracker()
 
             def _locked_generate() -> None:
                 with lock:
+                    if tracker is not None:
+                        tracker.start_llm()
                     self.model.generate(**generate_kwargs)  # type: ignore[union-attr,operator]
 
             thread = Thread(target=_locked_generate)
             thread.start()
             yield from self._stream_tokens(self.streamer, gen, language_code, ctx, runtime_config, response)
-            self._finish_transformers_generation(thread)
+            self._finish_transformers_generation(thread, ctx)
             if self.device == "mps":
                 torch.mps.empty_cache()
 
