@@ -130,7 +130,7 @@ def _gpu_models():
 
 LEASE_ROOT = Path("/tmp/s2s-zerogpu-leases")
 LEASE_ROOT.mkdir(mode=0o700, exist_ok=True)
-LEASE_ADMISSION_SECONDS = 65.0
+LEASE_ADMISSION_SECONDS = 95.0
 LEASE_IDLE_SECONDS = 15.0
 log = logging.getLogger("s2s.zerogpu.executor")
 
@@ -147,7 +147,7 @@ def _lease_directory(lease_id):
     return LEASE_ROOT / lease_id
 
 
-@spaces.GPU(duration=90)
+@spaces.GPU(duration=120)
 def lease_worker(lease_id):
     """Bounded inference executor, with no session/history/turn state in child.
 
@@ -176,7 +176,7 @@ def lease_worker(lease_id):
                 _tokens(
                     [{"role": "user", "content": "Say hello."}],
                     {"max_new_tokens": 8, "do_sample": False},
-                    deadline=started + 83,
+                    deadline=started + 113,
                 )
             ),
         ),
@@ -224,7 +224,7 @@ def lease_worker(lease_id):
                         for token in _tokens(
                             payload["messages"],
                             payload["gen_kwargs"],
-                            started + 83,
+                            started + 113,
                             abandoned,
                         ):
                             emit("text", token)
@@ -281,7 +281,7 @@ def lease_worker(lease_id):
         # new allocation, but accepted commands must never be replayed.
         (directory / "closed").touch()
         for thread in threads:
-            thread.join(timeout=max(0, 85 - (time.monotonic() - started)))
+            thread.join(timeout=max(0, 115 - (time.monotonic() - started)))
         if any(thread.is_alive() for thread in threads):
             raise RuntimeError("Inference exceeded bounded GPU allocation")
         log.info("lease %s released after %.3fs", lease_id, time.monotonic() - started)
