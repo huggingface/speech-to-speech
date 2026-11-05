@@ -57,9 +57,10 @@ async def transcribe(audio_chunks):
 ```
 
 Await `push()` in audio order and call `commit()` at the intended boundary.
-Changed partials arrive during audio delivery. A segment limit produces a marked
-forced final; every explicit commit still returns one final, including an empty
-final when no audio follows a forced boundary.
+Partials arrive during audio delivery as full transcript snapshots; later
+partials may revise earlier words. A segment limit produces a marked forced
+final; every explicit commit still returns one final, including an empty final
+when no audio follows a forced boundary.
 
 `model` accepts a repository ID or local snapshot directory. Download and verify
 a pinned snapshot before startup when reproducible model assets are required.
