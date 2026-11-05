@@ -299,11 +299,11 @@ Without it, aiortc defaults apply (host candidates + Google STUN). Deployments w
 
 Tool calling works through two distinct paths depending on the LLM backend, but both converge to the same wire protocol for the client.
 
-### Local LLM path (`LanguageModelHandler` -- transformers / mlx-lm)
+### Local text and vision paths (Transformers / MLX)
 
-Tools defined in `session.update` are converted to `FunctionTool` objects. Each tool's JSON Schema `parameters` are turned into a Python `inspect.Signature` (via `signature_from_schema`), and `to_code_prompt()` renders a human-readable `def name(...): """docstring"""` block.
+Tools defined in `session.update` become `FunctionTool` objects. For Qwen templates that declare `<function=...>` and `<parameter=...>` inside `<tool_call>` blocks, the handler passes tool schemas to the native chat template. This keeps the requested syntax consistent with the template's rendering of past calls.
 
-These tool signatures are injected into the system prompt using a Jinja2 template (`tool_prompt.py`) that instructs the model to wrap tool calls in `<code>...</code>` delimiters:
+Other templates use Python-style signatures in the system prompt and request calls inside `<code>...</code>` delimiters:
 
 ```
 <code>
@@ -311,7 +311,7 @@ function_name(arg_name_1=value1, arg_name_2='string_value')
 </code>
 ```
 
-After generation, `_extract_tools` uses a regex to find `<code>` blocks, then `extract_function_calls_from_text` parses each `name(kwargs)` call and validates it against registered tools. Valid calls become `ResponseFunctionToolCall` dicts with generated `call_id`s.
+The stream parser accepts these Python calls, JSON tool blocks, and Qwen function/parameter blocks. Qwen parameters use the declared schema to distinguish raw strings from JSON values. Valid calls become structured `ResponseFunctionToolCall` objects with generated `call_id`s; tool markup stays out of speech.
 
 ### OpenAI API path (`ResponsesApiModelHandler`)
 

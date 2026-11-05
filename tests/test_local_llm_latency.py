@@ -61,3 +61,28 @@ def test_local_ttft_precedes_sentence_batching_and_trailing_reply(monkeypatch, t
     assert tracker.llm_s == pytest.approx(0.25)
     assert tracker.llm_total_s == pytest.approx(0.25)
     assert tracker.llm_rounds == 1
+
+
+def test_transformers_stops_at_chat_end_before_generating_another_role():
+    import torch
+    from transformers import GPT2Config, GPT2LMHeadModel
+
+    from speech_to_speech.LLM.language_model import _set_chat_eos
+
+    model = GPT2LMHeadModel(
+        GPT2Config(vocab_size=8, n_embd=8, n_layer=1, n_head=1, bos_token_id=0, eos_token_id=2, pad_token_id=2)
+    ).eval()
+    prompt = torch.tensor([[0]])
+    # A completed assistant turn (3, 1), then an invented user turn (4, 2).
+    continuation = [3, 1, 4, 2]
+    kwargs = dict(
+        max_new_tokens=4,
+        do_sample=False,
+        attention_mask=torch.ones_like(prompt),
+        prefix_allowed_tokens_fn=lambda _, ids: [continuation[len(ids) - 1]],
+    )
+    assert model.generate(prompt, **kwargs).tolist() == [[0, 3, 1, 4, 2]]
+    _set_chat_eos(model, SimpleNamespace(eos_token_id=1))
+    assert model.generate(prompt, **kwargs).tolist() == [[0, 3, 1]]
+    # Explicit generation overrides still take precedence.
+    assert model.generate(prompt, eos_token_id=2, **kwargs).tolist() == [[0, 3, 1, 4, 2]]

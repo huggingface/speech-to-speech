@@ -293,6 +293,83 @@ def find_json_tool_call_end(block: str) -> int | None:
     return None
 
 
+def find_tool_call_end(block: str) -> int | None:
+    """Find a native block's end without treating parameter text as markup."""
+    inner = block.removeprefix(JSON_TOOL_CALL_ENTER).lstrip()
+    if not inner.startswith("<function="):
+        return find_json_tool_call_end(block)
+    # Qwen parameters are raw text, not XML-escaped or JSON-quoted strings.
+    index = 0
+    while index < len(block):
+        if block.startswith("<parameter=", index):
+            end = block.find("</parameter>", index)
+            if end < 0:
+                return None
+            index = end + len("</parameter>")
+        elif block.startswith(JSON_TOOL_CALL_END, index):
+            return index + len(JSON_TOOL_CALL_END)
+        else:
+            index += 1
+    return None
+
+
+def parse_tool_call_block(block: str, function_tools: list[FunctionTool]) -> List[FunctionToolCall]:
+    """Decode native JSON or Qwen function/parameter tags into a common call."""
+    inner = block.removeprefix(JSON_TOOL_CALL_ENTER).removesuffix(JSON_TOOL_CALL_END).strip()
+    if not inner.startswith("<function="):
+        return parse_json_tool_call_block(block)
+    try:
+        match = re.fullmatch(r"<function=([^<>\s]+)>\s*(.*?)\s*</function>", inner, re.DOTALL)
+        if match is None:
+            raise ValueError("incomplete function block")
+        name, body = match.groups()
+        tool = next((tool for tool in function_tools if tool.name == name), None)
+        if tool is None:
+            raise ValueError(f"undeclared function {name!r}")
+        schema = tool.parameters if isinstance(tool.parameters, dict) else {}
+        properties = schema.get("properties", {})
+        if not isinstance(properties, dict):
+            raise ValueError("invalid parameter schema")
+        arguments: dict[str, Any] = {}
+        while body.strip():
+            parameter = re.match(r"\s*<parameter=([^<>\s]+)>(.*?)</parameter>", body, re.DOTALL)
+            if parameter is None:
+                raise ValueError("invalid parameter block")
+            key, value = parameter.groups()
+            if key in arguments or key not in properties:
+                raise ValueError(f"duplicate or undeclared parameter {key!r}")
+            # The native template puts one newline around each value. Preserve
+            # the value itself, including quotes and significant whitespace.
+            value = value.removeprefix("\n").removesuffix("\n")
+            schema = properties[key]
+            if not isinstance(schema, dict):
+                raise ValueError(f"invalid schema for parameter {key!r}")
+            kind = schema.get("type")
+            kinds = [kind] if isinstance(kind, str) else kind or []
+            if not kinds:
+                kinds = [branch.get("type") for branch in schema.get("anyOf", [])]
+            if kinds and "string" not in kinds:
+                decoded = json.loads(value)
+                types = {
+                    "integer": (int,),
+                    "number": (int, float),
+                    "boolean": (bool,),
+                    "object": (dict,),
+                    "array": (list,),
+                    "null": (type(None),),
+                }
+                if not any(type(decoded) in types.get(kind, ()) for kind in kinds):
+                    raise ValueError(f"wrong type for parameter {key!r}")
+                arguments[key] = decoded
+            else:
+                arguments[key] = value
+            body = body[parameter.end() :]
+        return [FunctionToolCall(function_name=name, parameters=arguments, original_string=block)]
+    except (ValueError, TypeError) as exc:
+        logger.warning("Ignoring invalid Qwen tool call: %s", exc)
+        return []
+
+
 def parse_json_tool_call_block(block: str) -> List[FunctionToolCall]:
     """Parse one ``<tool_call>{json}</tool_call>`` block into function calls.
 
