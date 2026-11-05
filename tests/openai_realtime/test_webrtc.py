@@ -52,6 +52,7 @@ from speech_to_speech.api.openai_realtime.webrtc_session import (  # noqa: E402
     PipelineAudioTrack,
     WebRTCSession,
 )
+from speech_to_speech.LLM.chat import make_assistant_message, make_user_message  # noqa: E402
 from speech_to_speech.pipeline.events import (  # noqa: E402
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
@@ -59,6 +60,7 @@ from speech_to_speech.pipeline.events import (  # noqa: E402
     SpeechStartedEvent,
     TokenUsageEvent,
 )
+from speech_to_speech.pipeline.history import ResponseHistory  # noqa: E402
 from speech_to_speech.pipeline.messages import (  # noqa: E402
     AUDIO_RESPONSE_DONE,
     AssistantTextPart,
@@ -89,6 +91,7 @@ class _FakeTransport(SessionTransport):
     def __init__(self):
         self.sent: list[dict] = []
         self.discards = 0
+        self.unplayed_ms = 0.0
 
     async def send_events(self, events):
         self.sent.extend(e.model_dump() for e in events)
@@ -104,6 +107,7 @@ class _FakeTransport(SessionTransport):
 
     def discard_pending_audio(self):
         self.discards += 1
+        return self.unplayed_ms
 
     async def close(self):
         pass
@@ -503,6 +507,16 @@ class TestOutboundAudioPackets:
         ]
         assert max(np.max(np.abs(frame)) for frame in frames) < 100
 
+    async def test_interruption_reports_the_unplayed_audio_it_discards(self, captured_audio_sender):
+        session, _, _ = captured_audio_sender
+        session._track.write(bytes(WEBRTC_SAMPLE_RATE * 2))
+
+        unplayed_ms = session.discard_pending_audio()
+
+        # Paced playback can send at most a frame or two before the discard.
+        assert 1000 - 3 * AUDIO_PTIME * 1000 <= unplayed_ms <= 1000
+        assert session.discard_pending_audio() == 0
+
     async def test_interruption_during_encoding_drops_in_flight_packet(self, captured_audio_sender, monkeypatch):
         session, sender, capture = captured_audio_sender
         encoding = ThreadingEvent()
@@ -755,6 +769,32 @@ class TestWebRTCDispatch:
 
         assert transport.discards == 1
 
+    async def test_response_cancel_keeps_only_played_speech_in_history(self):
+        unit = _make_unit()
+        conn_id = unit.service.register()
+        chat = unit.service._state(conn_id).runtime_config.chat
+        chat.add_item(make_user_message("How can I improve my essay?"))
+        unit.service.dispatch_pipeline_event(
+            conn_id,
+            AssistantOutputEvent(text="Sure, here are five ways to improve it.", response_key="response_1"),
+        )
+        unit.service.encode_audio_chunk(conn_id, bytes(16_000 * 2 * 2), "response_1")
+        transport = _FakeTransport()
+        transport.unplayed_ms = 1200.0
+
+        await router_module._dispatch_client_event(
+            unit,
+            conn_id,
+            {"type": "response.cancel"},
+            transport,
+            transport_kind="webrtc",
+        )
+
+        assert [(item.role, item.content[0].text) for item in chat.buffer] == [
+            ("user", "How can I improve my essay?"),
+            ("assistant", "Sure, here are"),
+        ]
+
 
 # ---------------------------------------------------------------------------
 # Send-loop barge-in against transport-buffered audio
@@ -790,6 +830,47 @@ class TestBargeInAfterResponseDone:
                 assert spy.discards == 1
                 # Nothing to cancel: no response was active.
                 assert unit.cancel_scope.generation == generation_before
+        stop_event.set()
+
+    def test_speech_start_cuts_completed_reply_to_played_audio(self):
+        unit = _make_unit()
+        stop_event = ThreadingEvent()
+        app = router_module.create_app(pool=[unit], stop_event=stop_event)
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                assert unit.session is not None
+                session_id = unit.session.session_id
+                service = unit.service
+                chat = service._state(session_id).runtime_config.chat
+                chat.add_item(make_user_message("How can I improve my essay?"))
+                text = "Sure, here are five ways to improve it."
+                history = ResponseHistory.capture(
+                    chat,
+                    [make_assistant_message(text)],
+                    after_item_id=chat.history_anchor_id(),
+                    complete=True,
+                )
+                service.dispatch_pipeline_event(
+                    session_id,
+                    AssistantOutputEvent(text=text, response_key="response_1", history=history),
+                )
+                service.encode_audio_chunk(session_id, bytes(16_000 * 2 * 2), "response_1")
+                service.finish_response(session_id, response_key="response_1")
+                spy = _FakeTransport()
+                spy.unplayed_ms = 1200.0
+                unit.session.transport = spy
+
+                unit.text_output_queue.put(SpeechStartedEvent())
+
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline and chat.buffer[-1].content[0].text == text:
+                    time.sleep(0.02)
+                assert spy.discards == 1
+                assert [(item.role, item.content[0].text) for item in chat.buffer] == [
+                    ("user", "How can I improve my essay?"),
+                    ("assistant", "Sure, here are"),
+                ]
         stop_event.set()
 
 

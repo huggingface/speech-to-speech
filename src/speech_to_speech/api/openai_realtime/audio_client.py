@@ -16,6 +16,7 @@ import multiprocessing
 import signal
 import sys
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, field
@@ -244,10 +245,25 @@ def build_session_update(config: RealtimeAudioClientConfig) -> dict[str, Any]:
     return {"type": "session.update", "session": session}
 
 
-class PlaybackBuffer:
-    """Thread-safe audio state shared by the Realtime loop and sounddevice callbacks."""
+_AudioItem = tuple[str, int]
+# Assistant audio cut off by an interruption: (item_id, content_index, played ms).
+_PlaybackTruncation = tuple[str, int, int]
 
-    def __init__(self, recv_rate: int, startup_buffer_ms: float = _PLAYBACK_START_BUFFER_MS) -> None:
+
+class PlaybackBuffer:
+    """Thread-safe audio state shared by the Realtime loop and sounddevice callbacks.
+
+    Audio appended with its assistant item is tracked through playback. When
+    ``clear()`` discards an item's unplayed audio, ``on_interrupted`` receives
+    how much of that item played so the server can truncate its history.
+    """
+
+    def __init__(
+        self,
+        recv_rate: int,
+        startup_buffer_ms: float = _PLAYBACK_START_BUFFER_MS,
+        on_interrupted: Callable[[list[_PlaybackTruncation]], None] | None = None,
+    ) -> None:
         if recv_rate <= 0:
             raise ValueError("recv_rate must be positive")
         if not 0 <= startup_buffer_ms < float("inf"):
@@ -260,6 +276,10 @@ class PlaybackBuffer:
         self._active_until = 0.0
         self._playing = False
         self._input_complete = False
+        self._on_interrupted = on_interrupted
+        # Queued bytes per item, in playback order, and bytes already played.
+        self._queued_items: deque[list[Any]] = deque()
+        self._played_bytes: dict[_AudioItem, int] = {}
 
     def clear(self) -> None:
         with self._lock:
@@ -267,8 +287,21 @@ class PlaybackBuffer:
             self._audio.clear()
             self._playing = False
             self._input_complete = False
+            interrupted = dict.fromkeys(item for item, _ in self._queued_items if item is not None)
+            truncations = [
+                (
+                    item_id,
+                    content_index,
+                    self._played_bytes.get((item_id, content_index), 0) * 1000 // (2 * self.recv_rate),
+                )
+                for item_id, content_index in interrupted
+            ]
+            self._queued_items.clear()
+            self._played_bytes.clear()
+        if truncations and self._on_interrupted is not None:
+            self._on_interrupted(truncations)
 
-    def append(self, audio: bytes) -> None:
+    def append(self, audio: bytes, item: _AudioItem | None = None) -> None:
         if not audio:
             return
         with self._lock:
@@ -276,6 +309,14 @@ class PlaybackBuffer:
                 self._playing = False
             self._input_complete = False
             self._audio.extend(audio)
+            if self._queued_items and self._queued_items[-1][0] == item:
+                self._queued_items[-1][1] += len(audio)
+            else:
+                # Audio items arrive one after another, so an item that is
+                # neither queued nor receiving this audio has finished playing.
+                queued = {entry[0] for entry in self._queued_items}
+                self._played_bytes = {key: n for key, n in self._played_bytes.items() if key in queued or key == item}
+                self._queued_items.append([item, len(audio)])
             self._active_until = time.monotonic() + max(0.15, len(audio) / (2 * self.recv_rate))
 
     def finish(self) -> None:
@@ -301,11 +342,24 @@ class PlaybackBuffer:
             if available:
                 outdata[:available] = self._audio[:available]
                 del self._audio[:available]
+                self._mark_played(available)
             if available < needed:
                 outdata[available:] = b"\x00" * (needed - available)
                 self._playing = False
             if not self._audio and self._input_complete:
                 self._playing = False
+
+    def _mark_played(self, played: int) -> None:
+        """Attribute bytes just rendered to their queued items; caller holds the lock."""
+        while played and self._queued_items:
+            entry = self._queued_items[0]
+            count = min(played, entry[1])
+            entry[1] -= count
+            played -= count
+            if entry[0] is not None:
+                self._played_bytes[entry[0]] = self._played_bytes.get(entry[0], 0) + count
+            if entry[1] == 0:
+                self._queued_items.popleft()
 
     @property
     def buffered_bytes(self) -> int:
@@ -532,7 +586,9 @@ def handle_server_event(
     elif event.type in {"response.output_item.added", "response.output_item.done"}:
         return
     elif event.type == "response.output_audio.delta":
-        playback.append(base64.b64decode(event.delta))
+        item_id = getattr(event, "item_id", None)
+        item = (item_id, getattr(event, "content_index", 0)) if item_id is not None else None
+        playback.append(base64.b64decode(event.delta), item)
     elif event.type == "response.output_audio.done":
         playback.finish()
         renderer.finish_live_assistant_text()
@@ -1143,15 +1199,15 @@ class _PlaybackCommands:
     def __init__(self, commands: Any) -> None:
         self._commands = commands
 
-    def append(self, audio: bytes) -> None:
+    def append(self, audio: bytes, item: _AudioItem | None = None) -> None:
         if audio:
-            self._commands.put_nowait(("append", audio))
+            self._commands.put_nowait(("append", audio, item))
 
     def clear(self) -> None:
-        self._commands.put_nowait(("clear", b""))
+        self._commands.put_nowait(("clear", b"", None))
 
     def finish(self) -> None:
-        self._commands.put_nowait(("finish", b""))
+        self._commands.put_nowait(("finish", b"", None))
 
 
 def _run_audio_worker(
@@ -1161,23 +1217,25 @@ def _run_audio_worker(
     stop_event: Any,
     errors: Any,
     ready: Any,
+    truncations: Any,
 ) -> None:
     # The parent handles Ctrl-C and requests orderly stream shutdown.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     if stop_event.is_set():
         mic_queue.cancel_join_thread()
+        truncations.cancel_join_thread()
         errors.close()
         return
-    playback = PlaybackBuffer(config.recv_rate, config.playback_buffer_ms)
+    playback = PlaybackBuffer(config.recv_rate, config.playback_buffer_ms, truncations.put_nowait)
 
     def receive_playback() -> None:
         while not stop_event.is_set():
             try:
-                command, audio = commands.get(timeout=0.1)
+                command, audio, item = commands.get(timeout=0.1)
             except Empty:
                 continue
             if command == "append":
-                playback.append(audio)
+                playback.append(audio, item)
             elif command == "clear":
                 playback.clear()
             elif command == "finish":
@@ -1200,6 +1258,7 @@ def _run_audio_worker(
         receiver.join(timeout=1)
         # The parent stops consuming microphone audio during shutdown.
         mic_queue.cancel_join_thread()
+        truncations.cancel_join_thread()
         errors.close()
 
 
@@ -1209,6 +1268,7 @@ class _AudioWorker:
     def __init__(self, config: RealtimeAudioClientConfig) -> None:
         context = multiprocessing.get_context("spawn")
         self.mic_queue = context.Queue(maxsize=128)
+        self.truncations = context.Queue()
         self._commands = context.Queue()
         # Pending playback can be discarded when the worker exits.
         self._commands._ignore_epipe = True  # type: ignore[attr-defined]
@@ -1229,7 +1289,15 @@ class _AudioWorker:
         )
         self._process = context.Process(
             target=_run_audio_worker,
-            args=(worker_config, self.mic_queue, self._commands, self._stop, self._error_sender, self._ready),
+            args=(
+                worker_config,
+                self.mic_queue,
+                self._commands,
+                self._stop,
+                self._error_sender,
+                self._ready,
+                self.truncations,
+            ),
             name="realtime-audio",
         )
 
@@ -1242,6 +1310,7 @@ class _AudioWorker:
         # Only the child writes microphone PCM. Keeping this duplicate open would
         # leave a read of a partial queue message blocked if the child dies.
         self.mic_queue._writer.close()  # type: ignore[attr-defined]
+        self.truncations._writer.close()  # type: ignore[attr-defined]
         # Only the child reads playback. Close our duplicate so its exit also
         # releases the queue feeder when it is blocked writing pending audio.
         self._commands._reader.close()  # type: ignore[attr-defined]
@@ -1271,6 +1340,7 @@ class _AudioWorker:
         self._commands.cancel_join_thread()
         self._commands.close()
         self.mic_queue.close()
+        self.truncations.close()
         self._errors.close()
         self._error_sender.close()
 
@@ -1282,10 +1352,11 @@ async def _run_audio_session(
 ) -> None:
     worker = _AudioWorker(config) if config.echo_cancellation else None
     mic_queue: Any = worker.mic_queue if worker is not None else Queue(maxsize=128)
+    truncations: Any = worker.truncations if worker is not None else Queue()
     playback: PlaybackBuffer | _PlaybackCommands
     audio_context: AbstractContextManager[Any]
     if worker is None:
-        playback = PlaybackBuffer(config.recv_rate, config.playback_buffer_ms)
+        playback = PlaybackBuffer(config.recv_rate, config.playback_buffer_ms, truncations.put_nowait)
         audio_context = _open_audio_streams(config, playback, mic_queue)
     else:
         playback = worker.playback
@@ -1326,6 +1397,27 @@ async def _run_audio_session(
                 }
             )
 
+    async def send_truncations() -> None:
+        """Tell the server how much interrupted assistant audio actually played."""
+        while not stop_event.is_set():
+            try:
+                interrupted = await asyncio.to_thread(truncations.get, True, 0.1)
+            except Empty:
+                continue
+            except (EOFError, OSError):
+                if worker is None:
+                    raise
+                await worker.wait_for_failure()
+            for item_id, content_index, audio_end_ms in interrupted:
+                await conn.send(
+                    {
+                        "type": "conversation.item.truncate",
+                        "item_id": item_id,
+                        "content_index": content_index,
+                        "audio_end_ms": audio_end_ms,
+                    }
+                )
+
     async def receive_events() -> None:
         while worker is not None and not worker._ready.is_set():
             await asyncio.sleep(0.01)
@@ -1348,6 +1440,7 @@ async def _run_audio_session(
         streams.enter_context(audio_context)
         tasks = {
             asyncio.create_task(send_audio()),
+            asyncio.create_task(send_truncations()),
             asyncio.create_task(receive_events()),
             asyncio.create_task(_wait_for_stop(stop_event)),
             asyncio.create_task(tool_calls.wait_for_failure()),

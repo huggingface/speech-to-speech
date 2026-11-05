@@ -526,75 +526,115 @@ class Chat:
     def delete_item(self, item_id: str) -> SupportedItem | None:
         """Delete exactly one retained item and repair its history bookkeeping."""
         with self._lock:
-            removed: SupportedItem | None = None
-            target_ids = self._assistant_item_aliases.pop(item_id, {item_id})
-            # Native reasoning requires its following provider message/call.
-            # Find that companion before deleting it, allowing interleaved user
-            # inputs and tool results without consuming another response's pair.
-            reasoning_prefix: set[str] = set()
-            orphaned_reasoning_ids: set[str] = set()
-            for item in self.buffer:
-                if isinstance(item, ResponseReasoningItem):
-                    reasoning_prefix.add(item.id)
-                elif isinstance(item, (RealtimeConversationItemAssistantMessage, RealtimeConversationItemFunctionCall)):
-                    if isinstance(item, (ResponsesAssistantMessage, ResponsesFunctionCall)) and item.id in target_ids:
-                        orphaned_reasoning_ids.update(reasoning_prefix)
-                    reasoning_prefix.clear()
-            if self.init_chat_message is not None and self.init_chat_message.id == item_id:
-                removed = self.init_chat_message
-                self.init_chat_message = None
-            else:
-                for index, item in enumerate(self.buffer):
-                    if item.id in target_ids:
-                        removed = self.buffer.pop(index)
-                        break
-                if removed is not None and len(target_ids) > 1:
-                    self.buffer = [item for item in self.buffer if item.id not in target_ids]
-                if removed is None:
-                    removed = next((call for call in self._pending_tool_calls.values() if call.id == item_id), None)
+            return self._delete_item_locked(item_id)
+
+    def _delete_item_locked(self, item_id: str) -> SupportedItem | None:
+        removed: SupportedItem | None = None
+        target_ids = self._assistant_item_aliases.pop(item_id, {item_id})
+        # Native reasoning requires its following provider message/call.
+        # Find that companion before deleting it, allowing interleaved user
+        # inputs and tool results without consuming another response's pair.
+        reasoning_prefix: set[str] = set()
+        orphaned_reasoning_ids: set[str] = set()
+        for item in self.buffer:
+            if isinstance(item, ResponseReasoningItem):
+                reasoning_prefix.add(item.id)
+            elif isinstance(item, (RealtimeConversationItemAssistantMessage, RealtimeConversationItemFunctionCall)):
+                if isinstance(item, (ResponsesAssistantMessage, ResponsesFunctionCall)) and item.id in target_ids:
+                    orphaned_reasoning_ids.update(reasoning_prefix)
+                reasoning_prefix.clear()
+        if self.init_chat_message is not None and self.init_chat_message.id == item_id:
+            removed = self.init_chat_message
+            self.init_chat_message = None
+        else:
+            for index, item in enumerate(self.buffer):
+                if item.id in target_ids:
+                    removed = self.buffer.pop(index)
+                    break
+            if removed is not None and len(target_ids) > 1:
+                self.buffer = [item for item in self.buffer if item.id not in target_ids]
             if removed is None:
-                return None
-            if orphaned_reasoning_ids:
-                self.buffer = [item for item in self.buffer if item.id not in orphaned_reasoning_ids]
-                target_ids = target_ids | orphaned_reasoning_ids
-            if isinstance(removed, RealtimeConversationItemUserMessage):
-                self._user_turn_count -= 1
-            elif isinstance(removed, RealtimeConversationItemFunctionCall):
-                if removed.call_id is not None:
-                    self._deleted_tool_output_ids.update(
-                        item.id
-                        for item in self.buffer
-                        if item.type == "function_call_output"
-                        and item.call_id == removed.call_id
-                        and item.id is not None
-                    )
-                    self._pending_tool_calls.pop(removed.call_id, None)
-                    self._ordered_pending_calls.pop(removed.call_id, None)
-            elif isinstance(removed, RealtimeConversationItemFunctionCallOutput):
-                if not any(
-                    item.type == "function_call_output" and item.call_id == removed.call_id for item in self.buffer
-                ):
-                    call = next(
-                        (
-                            item
-                            for item in self.buffer
-                            if item.type == "function_call" and item.call_id == removed.call_id
-                        ),
-                        None,
-                    )
-                    if call is not None:
-                        self._pending_tool_calls[removed.call_id] = call
-            self._deleted_tool_output_ids.intersection_update(item.id for item in self.buffer if item.id is not None)
-            for tracked_ids, tracked_call_ids in self._provisional_generations.values():
-                tracked_ids.difference_update(target_ids)
-                if isinstance(removed, RealtimeConversationItemFunctionCall) and removed.call_id is not None:
-                    tracked_call_ids.discard(removed.call_id)
-            for context in self._ordered_pending_calls.values():
-                context.difference_update(target_ids)
-            # A summary calculated before deletion must not restore deleted text.
-            self._gen_counter += 1
-            self._compact_in_flight = False
-            return removed
+                removed = next((call for call in self._pending_tool_calls.values() if call.id == item_id), None)
+        if removed is None:
+            return None
+        if orphaned_reasoning_ids:
+            self.buffer = [item for item in self.buffer if item.id not in orphaned_reasoning_ids]
+            target_ids = target_ids | orphaned_reasoning_ids
+        if isinstance(removed, RealtimeConversationItemUserMessage):
+            self._user_turn_count -= 1
+        elif isinstance(removed, RealtimeConversationItemFunctionCall):
+            if removed.call_id is not None:
+                self._deleted_tool_output_ids.update(
+                    item.id
+                    for item in self.buffer
+                    if item.type == "function_call_output" and item.call_id == removed.call_id and item.id is not None
+                )
+                self._pending_tool_calls.pop(removed.call_id, None)
+                self._ordered_pending_calls.pop(removed.call_id, None)
+        elif isinstance(removed, RealtimeConversationItemFunctionCallOutput):
+            if not any(item.type == "function_call_output" and item.call_id == removed.call_id for item in self.buffer):
+                call = next(
+                    (item for item in self.buffer if item.type == "function_call" and item.call_id == removed.call_id),
+                    None,
+                )
+                if call is not None:
+                    self._pending_tool_calls[removed.call_id] = call
+        self._deleted_tool_output_ids.intersection_update(item.id for item in self.buffer if item.id is not None)
+        for tracked_ids, tracked_call_ids in self._provisional_generations.values():
+            tracked_ids.difference_update(target_ids)
+            if isinstance(removed, RealtimeConversationItemFunctionCall) and removed.call_id is not None:
+                tracked_call_ids.discard(removed.call_id)
+        for context in self._ordered_pending_calls.values():
+            context.difference_update(target_ids)
+        # A summary calculated before deletion must not restore deleted text.
+        self._gen_counter += 1
+        self._compact_in_flight = False
+        return removed
+
+    def truncate_assistant_message(self, item_id: str, text: str) -> bool:
+        """Keep only *text*, the heard prefix, of one delivered assistant message.
+
+        The message becomes ``incomplete``. Empty *text* removes it, so an
+        unheard reply is not replayed as delivered. Provider-native messages
+        are replaced by plain text; their reasoning companions are dropped as
+        :meth:`delete_item` does.
+        """
+        with self._lock:
+            target_ids = self._assistant_item_aliases.get(item_id, {item_id})
+            index = next(
+                (
+                    index
+                    for index, item in enumerate(self.buffer)
+                    if item.id in target_ids and isinstance(item, RealtimeConversationItemAssistantMessage)
+                ),
+                None,
+            )
+            if index is None:
+                return False
+            if not text:
+                self._delete_item_locked(item_id)
+                return True
+            message = self.buffer[index]
+            if len(target_ids) == 1 and type(message) is RealtimeConversationItemAssistantMessage:
+                message.content = [AssistantContent(type="output_text", text=text)]
+                message.status = "incomplete"
+                self._gen_counter += 1
+                self._compact_in_flight = False
+                return True
+            preceding_ids = [item.id for item in self.buffer[:index]]
+            self._delete_item_locked(item_id)
+            retained_ids = {item.id for item in self.buffer}
+            self.buffer.insert(
+                sum(preceding_id in retained_ids for preceding_id in preceding_ids),
+                RealtimeConversationItemAssistantMessage(
+                    type="message",
+                    role="assistant",
+                    id=item_id,
+                    status="incomplete",
+                    content=[AssistantContent(type="output_text", text=text)],
+                ),
+            )
+            return True
 
     def bind_assistant_item_ids(self, response_key: str | None, output_items: Sequence[ConversationItem]) -> None:
         """Give delivered assistant history the IDs exposed by Realtime."""

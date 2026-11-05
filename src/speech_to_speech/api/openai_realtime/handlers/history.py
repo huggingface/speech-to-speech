@@ -77,6 +77,11 @@ class HistoryHandler(RealtimeBaseHandler):
         if proposal is not None:
             proposal.resolve()
 
+    def anchor(self, conn_id: str, key: str | None) -> str | None:
+        """Return the history position a response's output follows, if known."""
+        state = self._responses.get((conn_id, key)) if key is not None else None
+        return state.proposal.after_item_id if state is not None and state.proposal is not None else None
+
     def finalize(self, conn_id: str, key: str | None) -> None:
         """Make a completed response's history permanent."""
         self._state(conn_id).runtime_config.chat.finalize_provisional_generation(key)

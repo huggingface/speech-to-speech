@@ -2143,6 +2143,7 @@ async def test_ready_waits_for_audio_devices_and_session_acknowledgement(monkeyp
     class Worker:
         def __init__(self):
             self.mic_queue = audio_client_module.Queue()
+            self.truncations = audio_client_module.Queue()
             self.playback = PlaybackBuffer(16000)
             self._ready = Event()
 
@@ -2241,3 +2242,92 @@ def test_voice_status_prints_lines_without_a_terminal(capsys):
     renderer = _FriendlyEventRenderer(conversation_only=False)
     renderer.show_status("Voice [2/38]: Zoey — selected")
     assert capsys.readouterr().out == "Voice [2/38]: Zoey — selected\n"
+
+
+def test_playback_buffer_reports_how_much_interrupted_audio_played():
+    interrupted = []
+    playback = PlaybackBuffer(1000, on_interrupted=interrupted.append)
+    playback.append(b"\x01" * 1000, ("item_done", 0))
+    playback.append(b"\x02" * 1000, ("item_cut", 0))
+    playback.append(b"\x03" * 400, ("item_unheard", 0))
+
+    playback.write(bytearray(1400))
+    playback.clear()
+
+    # 2 bytes per sample at 1 kHz: 400 played bytes are 200 ms.
+    assert interrupted == [[("item_cut", 0, 200), ("item_unheard", 0, 0)]]
+
+
+def test_playback_buffer_does_not_report_fully_played_audio():
+    interrupted = []
+    playback = PlaybackBuffer(1000, on_interrupted=interrupted.append)
+    playback.append(b"\x01" * 100, ("item_done", 0))
+
+    playback.write(bytearray(200))
+    playback.clear()
+
+    assert interrupted == []
+
+
+async def test_barge_in_tells_the_server_how_much_assistant_audio_played(monkeypatch):
+    stop = Event()
+    sent = []
+
+    class Stream:
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    class Connection:
+        def __init__(self):
+            self.events = [
+                SimpleNamespace(
+                    type="response.output_audio.delta",
+                    delta=base64.b64encode(bytes(3200)).decode(),
+                    item_id="item_1",
+                    content_index=0,
+                ),
+                SimpleNamespace(type="input_audio_buffer.speech_started"),
+            ]
+
+        async def send(self, event):
+            sent.append(event)
+            if event["type"] == "conversation.item.truncate":
+                stop.set()
+
+        async def recv(self):
+            if self.events:
+                return self.events.pop(0)
+            await asyncio.Future()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sounddevice",
+        SimpleNamespace(RawInputStream=lambda **_: Stream(), RawOutputStream=lambda **_: Stream()),
+    )
+
+    await asyncio.wait_for(
+        audio_client_module._run_audio_session(Connection(), RealtimeAudioClientConfig(), stop),
+        2,
+    )
+
+    # The speaker callback never ran, so none of the reply was heard.
+    assert sent == [{"type": "conversation.item.truncate", "item_id": "item_1", "content_index": 0, "audio_end_ms": 0}]
+
+
+def test_playback_buffer_counts_audio_played_before_an_underrun():
+    interrupted = []
+    playback = PlaybackBuffer(1000, on_interrupted=interrupted.append)
+    playback.append(b"\x01" * 600, ("item_slow", 0))
+    playback.write(bytearray(800))  # Plays everything queued, then underruns.
+    playback.append(b"\x01" * 600, ("item_slow", 0))
+    playback.write(bytearray(200))
+
+    playback.clear()
+
+    assert interrupted == [[("item_slow", 0, 400)]]

@@ -81,7 +81,7 @@ flowchart LR
 | `input_audio_buffer.append` | Stream base64 PCM audio. Decoded, resampled to 16 kHz, and chunked for the VAD. |
 | `session.update` | Deep-merge session config (instructions, tools, voice, turn detection, audio format, reasoning effort). |
 | `conversation.item.create` | Inject `input_text` or `function_call_output` into the LLM context without triggering generation. |
-| `conversation.item.truncate` | Accepted for stock WebSocket SDK interruption. Playback is client-owned, while an explicit `response.cancel` or automatic server-VAD cancellation already discards provisional generation, so this is an acknowledgement-free no-op. |
+| `conversation.item.truncate` | Cuts the assistant item's history to the transcript heard before `audio_end_ms` (see [Interrupted replies](#interrupted-replies)). No `conversation.item.truncated` is sent: the stock Agents SDK answers it with `conversation.item.retrieve`, which this server does not implement. |
 | `response.create` | Trigger LLM generation. Supports per-response `instructions`, `tool_choice`, and `reasoning` overrides. |
 | `response.cancel` | Cancel the in-progress or queued response and re-enable listening. |
 
@@ -217,7 +217,7 @@ changed.
 | Microphone input | `input_audio_buffer.append` | RTP audio track |
 | Assistant audio | `response.output_audio.delta` | RTP audio track |
 | Input and output transcription events | ✅ | ✅ |
-| Explicit cancellation | `response.cancel` + accepted `conversation.item.truncate` | `response.cancel` + `output_audio_buffer.clear` |
+| Explicit cancellation | `response.cancel` + `conversation.item.truncate` | `response.cancel` + `output_audio_buffer.clear` |
 | Server-VAD barge-in | `speech_started` cancels with `turn_detected`; adapter clears local PCM playback | `speech_started` cancels with `turn_detected`; server clears pending RTP audio |
 | Function call execution, output submission, and follow-up response | ✅ | ✅ |
 
@@ -231,6 +231,32 @@ list is empty, so the adapter uses the stock transport's `sendEvent` hook for
 an explicit `session.update` with `tools: []`. HF queueing, authentication,
 metering, camera capture, and device selection remain outside the Realtime
 protocol layer. No custom SDK transport is used.
+
+### Interrupted replies
+
+Model history keeps only the assistant speech the user heard, so the next
+response does not assume an interrupted explanation was delivered.
+
+- A cancelled audio response keeps the transcript of the audio already sent to
+  the client, never text that was generated but not yet synthesized. With no
+  audio sent, no assistant message is kept.
+- WebSocket clients own playback and report its position with
+  `conversation.item.truncate`; the stock Agents SDK, the browser demo, and the
+  packaged `local`/`talk` client send it. This also covers a reply that finished
+  generating while most of its audio was still buffered.
+- WebRTC playback is paced by the server. When barge-in, `response.cancel`, or
+  `output_audio_buffer.clear` discards queued RTP audio, the discarded duration
+  is removed from the newest assistant items.
+- An item cut this way becomes `incomplete` and its text is the heard prefix. No
+  marker is added to the text. An item with no heard audio is removed. Replies
+  that play to the end are unchanged.
+
+The server records each transcript part with the audio synthesized after it.
+Parts whose audio played completely are kept. In the part playing at the cutoff,
+words are kept in proportion to its played audio, by characters, and only when
+they fit completely. Timing is therefore approximate within one TTS segment, and
+errs toward dropping a partly heard word. Truncation of an item whose response
+is still in progress is ignored; cancel the response first.
 
 ### Input transcription semantics
 

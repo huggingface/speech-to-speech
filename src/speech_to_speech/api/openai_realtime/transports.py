@@ -45,12 +45,13 @@ class SessionTransport(ABC):
         """Deliver a pipeline-rate PCM16 chunk to the client."""
 
     @abstractmethod
-    def discard_pending_audio(self) -> None:
+    def discard_pending_audio(self) -> float:
         """Drop transport-buffered audio that has not reached the client yet.
 
         WebSocket clients buffer audio on their side, so this is a no-op there;
         the WebRTC transport paces playback server-side and must flush its
         track buffer for barge-in to actually silence the assistant.
+        Returns the duration of discarded audio in milliseconds.
         """
 
     @abstractmethod
@@ -103,10 +104,10 @@ class WebSocketTransport(SessionTransport):
     ) -> None:
         await self.send_events(service.encode_audio_chunk(session_id, pcm, response_key))
 
-    def discard_pending_audio(self) -> None:
+    def discard_pending_audio(self) -> float:
         # Unplayed audio lives client-side over WebSocket; truncation is the
         # client's responsibility.
-        pass
+        return 0.0
 
     async def close(self) -> None:
         try:
