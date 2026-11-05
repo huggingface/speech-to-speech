@@ -1019,3 +1019,38 @@ if __name__ == "__main__":
             print(f"FAIL  {t.__name__}: {type(e).__name__}: {e}")
     print(f"\n{len(tests) - failed}/{len(tests)} passed")
     raise SystemExit(1 if failed else 0)
+
+
+def test_generation_proceeds_while_a_client_tool_call_is_pending():
+    h = _make_handler(stream=False)
+    chat = Chat(10)
+    chat.add_item(make_user_message("run the slow tool"))
+    chat.add_ordered_function_call(
+        RealtimeConversationItemFunctionCall(type="function_call", call_id="call_slow", name="slow", arguments="{}")
+    )
+
+    text, _tools, _usage, chat, end = _drive(h, user="unrelated question", chat=chat)
+
+    sent = h.client.chat.completions.last_kwargs["messages"]
+    assert text == "ok"
+    assert end is not None and end.error is None
+    # The provider never sees an unpaired tool call, but it does see the newer turn.
+    assert "call_slow" not in str(sent)
+    assert "unrelated question" in str(sent)
+    assert chat.has_pending_tool_calls()
+    # The model is told the tool is still running, so it does not call it again.
+    assert sent[-1]["role"] == "system" and "slow({})" in sent[-1]["content"]
+
+    chat.append_tool_output(
+        "call_slow",
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output", call_id="call_slow", output="late result"
+        ),
+    )
+    _drive(h, user="and now?", chat=chat)
+
+    sent = h.client.chat.completions.last_kwargs["messages"]
+    call_index = next(i for i, m in enumerate(sent) if "call_slow" in str(m.get("tool_calls", "")))
+    assert sent[call_index + 1]["role"] == "tool"
+    assert sent[call_index + 1]["tool_call_id"] == "call_slow"
+    assert "still running" not in str(sent)

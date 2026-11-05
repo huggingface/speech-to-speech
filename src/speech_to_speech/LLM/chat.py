@@ -59,6 +59,37 @@ AUDIO_INPUT_HISTORY_PLACEHOLDER = "[User audio input]"
 HISTORY_START_ANCHOR = ""
 
 
+PENDING_NOTICE_PREFIX = "IMPORTANT: these tool calls"
+
+
+def fold_pending_notice(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Move a trailing pending-calls system note into the last user message.
+
+    Some chat templates and providers reject a system message that is not first.
+    Messages are in Chat Completions, Responses or transformers shape.
+    """
+    if not messages or messages[-1].get("role") != "system":
+        return messages
+    notice = messages[-1].get("content")
+    if not isinstance(notice, str) or not notice.startswith(PENDING_NOTICE_PREFIX):
+        return messages
+    rest = [dict(m) for m in messages[:-1]]
+    for message in reversed(rest):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            message["content"] = f"{content}\n\n{notice}"
+        elif isinstance(content, list):
+            kind = content[0].get("type") if content and isinstance(content[0], dict) else None
+            part_type = "input_text" if kind in ("input_text", "input_image") else "text"
+            message["content"] = [*content, {"type": part_type, "text": notice}]
+        else:
+            continue
+        return rest
+    return [*rest, {"role": "user", "content": notice}]
+
+
 class ChatItemError(Exception):
     """Raised when a conversation item fails validation in :meth:`Chat.add_item`."""
 
@@ -280,6 +311,14 @@ class Chat:
 
     def _append_tool_output_locked(self, call_id: str, output_item: RealtimeConversationItemFunctionCallOutput) -> None:
         """Body of :meth:`append_tool_output`. Caller must hold ``_lock``."""
+        if any(
+            isinstance(item, RealtimeConversationItemFunctionCallOutput)
+            and item.call_id == call_id
+            and item.id not in self._deleted_tool_output_ids
+            for item in self.buffer
+        ):
+            raise ChatItemError(f"function_call_output for call_id '{call_id}' was already submitted.")
+
         if self._has_call_id_in_buffer(call_id):
             self._pending_tool_calls.pop(call_id, None)
             self._mark_call_completed(call_id, output_item.status)
@@ -448,6 +487,26 @@ class Chat:
                 else ""
             )
             self.init_chat_message = make_system_message("\n\n".join(text for text in (instructions, context) if text))
+
+    def pending_tool_calls_notice(self) -> str | None:
+        """Text telling the model which client tool calls are still running, or None.
+
+        A pending call is omitted from the request because providers reject a call
+        without its output. Without this note the model cannot see that the tool
+        already ran and tends to call it again.
+        """
+        with self._lock:
+            calls = list(self._pending_tool_calls.values())
+        if not calls:
+            return None
+        running = "\n".join(f"- {call.name}({call.arguments})" for call in calls)
+        return (
+            f"{PENDING_NOTICE_PREFIX} were already made for an earlier request and are still running. "
+            "Their results are not available yet:\n"
+            f"{running}\n"
+            "Do not call them again and do not guess or make up their results. Respond to the latest user "
+            "message or tool result, even if it is about something else, and use these results once they arrive."
+        )
 
     def add_ordered_function_call(
         self, item: RealtimeConversationItemFunctionCall, *, after_item_id: str | None = None
@@ -836,18 +895,33 @@ class Chat:
         but later turns, which a non-interrupting speaker may have appended
         while the call was still unpaired, stay in the snapshot.
 
+        Other calls of the same turn that already have an output are kept with
+        that output: with parallel tool calls one result can arrive while another
+        call is still running, and the model has to see the finished one.
+
         Runs on the output of :meth:`_with_adjacent_tool_outputs` so a result
         that arrived after the unpaired call has already been moved next to the
         call it completes, instead of being skipped with the unpaired turn.
         """
         kept: list[SupportedItem] = []
         skipping = False
-        for item in items:
+        for index, item in enumerate(items):
             if isinstance(item, RealtimeConversationItemUserMessage):
                 skipping = False
             elif isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id in (
                 self._ordered_pending_calls
             ):
+                # A finished call later in this turn still needs the reasoning that
+                # precedes the parallel calls, so only an unshared prefix is dropped.
+                finished_call_follows = False
+                for later in items[index + 1 :]:
+                    if isinstance(later, RealtimeConversationItemUserMessage):
+                        break
+                    if isinstance(later, RealtimeConversationItemFunctionCall) and (
+                        later.call_id not in self._ordered_pending_calls
+                    ):
+                        finished_call_follows = True
+                        break
                 # Reasoning can require its following message/call context.
                 # Gate that prefix with the call, without touching live history
                 # or any earlier completed response, even without a tool.
@@ -862,11 +936,18 @@ class Chat:
                     prefix_start -= 1
                     if isinstance(kept[prefix_start], ResponseReasoningItem):
                         reasoning_start = prefix_start
-                if reasoning_start is not None:
+                if reasoning_start is not None and not finished_call_follows:
                     del kept[reasoning_start:]
                 skipping = True
-            if not skipping:
-                kept.append(item)
+                continue
+            if skipping and not isinstance(
+                item, (RealtimeConversationItemFunctionCall, RealtimeConversationItemFunctionCallOutput)
+            ):
+                continue
+            if skipping and isinstance(item, RealtimeConversationItemFunctionCall):
+                if item.call_id in self._ordered_pending_calls:
+                    continue
+            kept.append(item)
         return kept
 
     def order_response_items(self, item_ids: Sequence[str]) -> None:
@@ -883,28 +964,65 @@ class Chat:
             for index, item in zip(positions, ordered):
                 self.buffer[index] = item
 
+    @staticmethod
+    def _answered_turn_between(items: Sequence[SupportedItem]) -> bool:
+        """Whether a later user turn was already answered inside *items*."""
+        spoken = False
+        for item in items:
+            if isinstance(item, RealtimeConversationItemUserMessage):
+                spoken = True
+            elif spoken and isinstance(item, (RealtimeConversationItemAssistantMessage, ResponsesAssistantMessage)):
+                return True
+        return False
+
     def _with_adjacent_tool_outputs(self, items: Sequence[SupportedItem]) -> list[SupportedItem]:
-        """Return a backend-safe snapshot without rewriting canonical chronology."""
+        """Return a backend-safe snapshot without rewriting canonical chronology.
+
+        A result sits next to its call, as providers require. A result that arrives after
+        a later user turn was already answered instead takes the position where it arrived,
+        and its call (with the reasoning that must precede it) moves there too. Otherwise
+        the request would end with the assistant's reply to that later turn, and a
+        follow-up response would have nothing new to answer.
+        """
         # Deleting a call does not delete its output from wire history, but the
         # remaining result cannot be submitted to a model without that call.
         items = [item for item in items if item.id not in self._deleted_tool_output_ids]
-        call_ids = {
-            item.call_id
-            for item in items
+        call_index = {
+            item.call_id: index
+            for index, item in enumerate(items)
             if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None
         }
-        outputs_by_call_id: dict[str, list[RealtimeConversationItemFunctionCallOutput]] = {}
-        for item in items:
-            if isinstance(item, RealtimeConversationItemFunctionCallOutput) and item.call_id in call_ids:
-                outputs_by_call_id.setdefault(item.call_id, []).append(item)
+        outputs_by_call_id: dict[str, list[tuple[int, RealtimeConversationItemFunctionCallOutput]]] = {}
+        for index, item in enumerate(items):
+            if isinstance(item, RealtimeConversationItemFunctionCallOutput) and item.call_id in call_index:
+                outputs_by_call_id.setdefault(item.call_id, []).append((index, item))
 
+        # call_id -> (output position, call plus the items that must stay glued to it)
+        moved: dict[str, tuple[int, list[SupportedItem]]] = {}
+        moved_indexes: set[int] = set()
+        for call_id, outputs in outputs_by_call_id.items():
+            call_at, output_at = call_index[call_id], outputs[0][0]
+            if not self._answered_turn_between(items[call_at:output_at]):
+                continue
+            start = call_at
+            while start and isinstance(items[start - 1], (ResponseReasoningItem, ResponsesAssistantMessage)):
+                start -= 1
+            moved[call_id] = (output_at, list(items[start : call_at + 1]))
+            moved_indexes.update(range(start, call_at + 1))
+
+        moved_at = {output_at: call_id for call_id, (output_at, _) in moved.items()}
         normalized: list[SupportedItem] = []
-        for item in items:
-            if isinstance(item, RealtimeConversationItemFunctionCallOutput) and item.call_id in call_ids:
+        for index, item in enumerate(items):
+            if index in moved_indexes:
+                continue
+            if isinstance(item, RealtimeConversationItemFunctionCallOutput) and item.call_id in call_index:
+                if moved_at.get(index) == item.call_id:
+                    normalized.extend(moved[item.call_id][1])
+                    normalized.extend(output for _, output in outputs_by_call_id[item.call_id])
                 continue
             normalized.append(item)
             if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None:
-                normalized.extend(outputs_by_call_id.get(item.call_id, []))
+                normalized.extend(output for _, output in outputs_by_call_id.get(item.call_id, []))
         return normalized
 
     def to_responses_api_chat(self, items: list[SupportedItem] | None = None) -> ResponseInputParam:

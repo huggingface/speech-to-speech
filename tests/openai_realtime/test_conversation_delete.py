@@ -103,20 +103,18 @@ def test_delete_call_preserves_output_but_omits_orphan_from_model():
     assert chat.delete_item(output.id) is output
 
 
-def test_delete_output_requires_replacement_before_response(service, conn_id):
+def test_deleted_output_leaves_call_pending_without_blocking_response(service, conn_id):
     chat = service._state(conn_id).runtime_config.chat
     chat.add_item(_call())
     chat.add_item(_output())
     assert chat.delete_item("client_output").type == "function_call_output"
     assert chat.has_pending_tool_calls()
-    result = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
-    assert result.type == "error"
-    assert result.error.type == "function_call_output_pending"
-    chat.add_item(_output())
-    assert not chat.has_pending_tool_calls()
+    # The call is pending again, but a pending call no longer blocks a response.
     assert (
         service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create")).type == "response.created"
     )
+    chat.add_item(_output())
+    assert not chat.has_pending_tool_calls()
 
 
 def test_delete_invalidates_compaction_snapshot():

@@ -4,13 +4,13 @@ from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any, Optional
 
-from openai.types.realtime import RealtimeSessionCreateRequest
+from openai.types.realtime import RealtimeConversationItemFunctionCall, RealtimeSessionCreateRequest
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat, make_system_message, make_user_message
-from speech_to_speech.LLM.language_model import BaseLanguageModelHandler, StreamContext
-from speech_to_speech.pipeline.messages import GenerateResponseRequest, LLMResponseChunk
+from speech_to_speech.LLM.language_model import BaseLanguageModelHandler, StreamContext, _messages_with_pending_notice
+from speech_to_speech.pipeline.messages import EndOfResponse, GenerateResponseRequest, LLMResponseChunk
 
 
 class _RecordingLocalHandler(BaseLanguageModelHandler):
@@ -108,3 +108,34 @@ def test_local_backend_keeps_injected_context_with_session_instructions():
         assert prompt.count("CURRENT CHAT SNAPSHOT") == 1
         assert chat.init_chat_message is snapshot
         assert snapshot.content[0].text == "CURRENT CHAT SNAPSHOT"
+
+
+def test_local_backend_generates_while_a_client_tool_call_is_pending():
+    handler = object.__new__(_RecordingLocalHandler)
+    handler.cancel_scope = None
+    handler.speculative_turns = None
+    handler.enable_lang_prompt = False
+    handler.compactor = None
+    handler.tokenizer = SimpleNamespace(encode=lambda _text: [])
+    handler.emit_text = True
+    chat = Chat(10)
+    chat.add_item(make_user_message("run the slow tool"))
+    chat.add_ordered_function_call(
+        RealtimeConversationItemFunctionCall(type="function_call", call_id="call_slow", name="slow", arguments="{}")
+    )
+    chat.add_item(make_user_message("unrelated question"))
+    request = GenerateResponseRequest(
+        runtime_config=RuntimeConfig(chat=chat, session=RealtimeSessionCreateRequest(type="realtime"))
+    )
+
+    outputs = list(handler.process(request))
+
+    assert any(isinstance(item, LLMResponseChunk) and item.text for item in outputs)
+    assert not any(isinstance(item, EndOfResponse) and item.error for item in outputs)
+    assert "call_slow" not in str(handler.seen_chat.to_transformers_chat())
+    assert "unrelated question" in str(handler.seen_chat.to_transformers_chat())
+    assert chat.has_pending_tool_calls()
+    # The model request ends with a note naming the tool that is still running.
+    request_messages = _messages_with_pending_notice(handler.seen_chat)
+    assert request_messages[-1]["role"] == "system" and "slow({})" in request_messages[-1]["content"]
+    assert "slow(" not in str(chat.to_transformers_chat())  # the note is never stored in history

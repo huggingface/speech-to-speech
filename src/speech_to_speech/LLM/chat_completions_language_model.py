@@ -359,20 +359,25 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
     # ── base hooks ──────────────────────────────────────────────────────────--
 
     def _serialize(self, active_chat: Chat) -> list[dict[str, Any]]:
-        return self._chat_messages(active_chat, audio_content_type=self.audio_content_type)
+        messages = self._chat_messages(active_chat, audio_content_type=self.audio_content_type)
+        # Last, so it outweighs the system prompt's "use tools immediately" rules.
+        return self._with_pending_notice(messages, active_chat)
 
     def _build_optional_kwargs(self, req_tools: Any, req_tool_choice: Any) -> dict[str, Any]:
         return _build_chat_optional_kwargs(req_tools, req_tool_choice)
 
     def _request(self, api_input: list[dict[str, Any]], optional_kwargs: dict[str, Any]) -> Any:
-        return _request_chat_completions(
-            client=self.client,
-            model_name=self.model_name,
-            messages=api_input,
-            stream=self.stream,
-            extra_body=self._extra_body,
-            timeout=self.request_timeout,
-            optional_kwargs=optional_kwargs,
+        return self._send_with_notice_fallback(
+            api_input,
+            lambda messages: _request_chat_completions(
+                client=self.client,
+                model_name=self.model_name,
+                messages=messages,
+                stream=self.stream,
+                extra_body=self._extra_body,
+                timeout=self.request_timeout,
+                optional_kwargs=optional_kwargs,
+            ),
         )
 
     def _iter_stream_events(self, api_response: Stream[ChatCompletionChunk]) -> Iterator[ProviderEvent]:
