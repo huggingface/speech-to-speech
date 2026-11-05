@@ -93,6 +93,16 @@ def _int16(raw: bytes) -> np.ndarray:
 RATES = [(44100, 16000), (22050, 16000), (48000, 16000), (32000, 16000), (24000, 16000), (16000, 44100)]
 
 
+def test_equal_rate_passthrough_has_no_pending_output():
+    resampler = StreamingPcm16Resampler(16000, 16000)
+    chunk = np.arange(160, dtype="<i2").tobytes()
+    for incoming in (chunk, b"", chunk):
+        assert resampler.push(incoming) == incoming
+        assert resampler.pending_output_samples == 0
+    assert resampler.flush() == b""
+    assert resampler.pending_output_samples == 0
+
+
 @pytest.mark.parametrize(("from_rate", "to_rate"), RATES)
 def test_matches_the_previous_implementation(from_rate, to_rate):
     """Same samples as before the change, including where each push cuts the output."""

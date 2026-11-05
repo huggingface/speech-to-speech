@@ -42,6 +42,7 @@ class StreamingPcm16Resampler:
             return b""
         if self._up == self._down:
             self._input_samples += np.frombuffer(audio_int16, dtype="<i2").size
+            self._output_samples = self._input_samples
             return audio_int16
 
         incoming = np.frombuffer(audio_int16, dtype="<i2").astype(np.float64)
