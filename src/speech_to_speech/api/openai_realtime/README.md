@@ -529,3 +529,7 @@ them before a delayed logical-completion event arrives on the text side channel.
 To see the failures before the fixes, use commit `d2df091` and add `--runxfail` to
 that command. The local case emits no acknowledgement and requests another reply;
 the trimmed-history case accepts the delayed duplicate. Both fail with exit status 1.
+
+## Opt-in input observations
+
+Internal WebSocket proxies can negotiate payload-free observations of committed user input, including accepted input without a response. See [the versioned protocol and coverage limits](../../../../docs/user-input-observations.md). Existing unnegotiated clients receive no new events.

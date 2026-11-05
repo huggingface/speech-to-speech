@@ -32,6 +32,10 @@ from speech_to_speech.api.openai_realtime.transports import (
     WebSocketTransport,
     send_ws_event,
 )
+from speech_to_speech.api.openai_realtime.user_input_observation import (
+    USER_INPUT_OBSERVATION_HEADER,
+    USER_INPUT_OBSERVATION_VERSION,
+)
 from speech_to_speech.api.openai_realtime.visemes import SpeechToSpeechVisemesEvent
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import (
@@ -397,7 +401,40 @@ def _release_session(unit: PipelineUnit, session_id: str) -> None:
     task.add_done_callback(_release_tasks.discard)
 
 
+async def _send_user_input_observations(unit: PipelineUnit, session_id: str, transport: SessionTransport) -> None:
+    session = unit.session
+    if session is None or session.session_id != session_id or session.released_at is not None:
+        return
+    events = unit.service.drain_user_input_observations(session_id)
+    if not events:
+        return
+    try:
+        # The existing transport lock serializes this bounded batch with ordinary output.
+        await transport.send_events(list(events))
+    except asyncio.CancelledError:
+        unit.service.note_user_input_observation_loss(session_id, len(events))
+        raise
+    except Exception as exc:
+        unit.service.note_user_input_observation_loss(session_id, len(events))
+        logger.warning("Could not send user-input observations (%s)", type(exc).__name__)
+
+
 async def _dispatch_client_event(
+    unit: PipelineUnit,
+    session_id: str,
+    raw: dict[str, Any],
+    transport: SessionTransport,
+    *,
+    transport_kind: str = "websocket",
+) -> None:
+    try:
+        await _apply_client_event(unit, session_id, raw, transport, transport_kind=transport_kind)
+    finally:
+        # Partial inline application may have committed input before a later item fails.
+        await _send_user_input_observations(unit, session_id, transport)
+
+
+async def _apply_client_event(
     unit: PipelineUnit,
     session_id: str,
     raw: dict[str, Any],
@@ -662,7 +699,11 @@ def create_app(
         # releases the unit, even if session setup fails.
         session_id = ""
         try:
-            session_id = unit.service.register()
+            observe_user_inputs = ws.headers.get(USER_INPUT_OBSERVATION_HEADER) == USER_INPUT_OBSERVATION_VERSION
+            if observe_user_inputs:
+                session_id = unit.service.register(observe_user_inputs=True)
+            else:
+                session_id = unit.service.register()
             unit.session.session_id = session_id
             logger.info(f"Client connected to pipeline {unit.index} (session {session_id})")
 
@@ -670,7 +711,11 @@ def create_app(
             # previous session that survived SESSION_END propagation doesn't leak.
             _clean_unit(unit)
 
-            await send_ws_event(ws, unit.service.build_session_created(session_id))
+            if observe_user_inputs:
+                await transport.send_events([unit.service.build_session_created(session_id)])
+            else:
+                await send_ws_event(ws, unit.service.build_session_created(session_id))
+            await _send_user_input_observations(unit, session_id, transport)
 
             while not stop_event.is_set():
                 try:
@@ -1234,6 +1279,8 @@ def create_app(
                 except Empty:
                     pass
 
+                if transport is not None and session_id:
+                    await _send_user_input_observations(unit, session_id, transport)
                 await _wait_for_pipeline_output(unit)
 
             except asyncio.CancelledError:

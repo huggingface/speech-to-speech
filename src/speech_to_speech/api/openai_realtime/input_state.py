@@ -7,6 +7,8 @@ from openai.types.realtime import (
 )
 from pydantic import BaseModel
 
+from speech_to_speech.api.openai_realtime.user_input_observation import UserInputKind
+
 InputTranscriptionTerminal = Union[
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionFailedEvent,
@@ -50,3 +52,5 @@ class PendingInputTerminal(BaseModel):
     # Set once the pipeline has finished with this item, so publishing it also
     # releases its routing and transcript state.
     input_closed: bool = False
+    # Payload-free eligibility follows this exact revision's existing commit gate.
+    accepted_input_kind: UserInputKind | None = None

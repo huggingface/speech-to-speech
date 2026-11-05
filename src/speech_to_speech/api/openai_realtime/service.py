@@ -49,7 +49,7 @@ from openai.types.realtime.conversation_item_input_audio_transcription_completed
     UsageTranscriptTextUsageDuration,
 )
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
 from speech_to_speech.api.openai_realtime.handlers import (
     AudioHandler,
@@ -65,6 +65,13 @@ from speech_to_speech.api.openai_realtime.input_state import (
     SpeechToSpeechInputAudioTranscriptionSnapshotEvent,
 )
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.api.openai_realtime.user_input_observation import (
+    InputObservation,
+    UserInputAccepted,
+    UserInputKind,
+    UserInputObservations,
+    UserInputObservationStarted,
+)
 from speech_to_speech.api.openai_realtime.visemes import SpeechToSpeechVisemesEvent
 from speech_to_speech.LLM.chat import Chat, make_user_audio_message, make_user_message
 from speech_to_speech.LLM.utils import WHISPER_LANGUAGE_TO_LLM_LANGUAGE
@@ -156,6 +163,8 @@ ServerEvent = Union[
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionFailedEvent,
     SpeechToSpeechInputAudioTranscriptionSnapshotEvent,
+    UserInputObservationStarted,
+    UserInputAccepted,
     ResponseCreatedEvent,
     ResponseDoneEvent,
     ResponseAudioDeltaEvent,
@@ -226,12 +235,15 @@ class InputTurnAccounting(BaseModel):
     user_item_id: str | None = None
     audio_duration_s: float = 0.0
     speech_stopped_at_s: float | None = None
+    # Protocol-neutral direct audio may have no pending wire terminal to own this marker.
+    pending_audio_observation_revision: int | None = Field(default=None, exclude=True)
 
 
 class ConnState(BaseModel):
     """Per-connection mutable state, including all protocol-level IDs."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+    _user_input_observations: UserInputObservations | None = PrivateAttr(default=None)
 
     session_id: str = Field(default_factory=lambda: _generate_id("session"))
     conversation_id: str = Field(default_factory=lambda: _generate_id("conv"))
@@ -450,7 +462,7 @@ class RealtimeService:
 
     # ── Connection lifecycle ─────────────────────
 
-    def register(self) -> str:
+    def register(self, *, observe_user_inputs: bool = False) -> str:
         """Register a new connection and return its session_id."""
         if self.speculative_turns:
             self.speculative_turns.reset()
@@ -465,8 +477,60 @@ class RealtimeService:
         )
         state.runtime_config.bind_trace_session(state.session_id)
         self._conns[state.session_id] = state
+        if observe_user_inputs:
+            state._user_input_observations = UserInputObservations(state.session_id)
         self.total_usage.connections += 1
         return state.session_id
+
+    def observe_user_input(self, conn_id: str, kind: UserInputKind) -> None:
+        """Queue a fact after its existing mutation/commit gate; never change input policy."""
+        state = self._conns.get(conn_id)
+        if state is not None and state._user_input_observations is not None:
+            try:
+                state._user_input_observations.accepted(kind)
+            except Exception as exc:
+                state._user_input_observations.lost(1)
+                logger.warning("Could not observe accepted user input (%s)", type(exc).__name__)
+
+    def drain_user_input_observations(self, conn_id: str) -> list[InputObservation]:
+        state = self._conns.get(conn_id)
+        if state is not None:
+            self._collect_committed_audio_observations(conn_id, state)
+        return state._user_input_observations.drain() if state and state._user_input_observations else []
+
+    def note_user_input_observation_loss(self, conn_id: str, count: int) -> None:
+        state = self._conns.get(conn_id)
+        if state is not None and state._user_input_observations is not None:
+            state._user_input_observations.lost(count)
+
+    def _hold_direct_audio_observation(self, conn_id: str, item_id: str, event: AudioInputCompletedEvent) -> None:
+        state = self._conns[conn_id]
+        if state._user_input_observations is None or not event.audio.size:
+            return
+        if item_id in state.pending_input_terminals:
+            state.pending_input_terminals[item_id].accepted_input_kind = "audio"
+        elif self.speculative_turns is None or event.turn_id is None or event.turn_revision is None:
+            self.observe_user_input(conn_id, "audio")
+        else:
+            # Observe the existing tracker; creating a wire terminal here would itself
+            # commit/close a protocol-neutral turn and change pipeline behavior.
+            accounting = self._input_turn_accounting(conn_id, event.turn_id)
+            assert accounting is not None
+            accounting.pending_audio_observation_revision = event.turn_revision
+
+    def _collect_committed_audio_observations(self, conn_id: str, state: ConnState) -> None:
+        turns = self.speculative_turns
+        if state._user_input_observations is None or turns is None:
+            return
+        for turn_id, accounting in state.input_turn_accounting.items():
+            revision = accounting.pending_audio_observation_revision
+            if revision is None:
+                continue
+            if turns.is_committed(turn_id, revision):
+                accounting.pending_audio_observation_revision = None
+                self.observe_user_input(conn_id, "audio")
+            elif not turns.is_latest(turn_id, revision):
+                accounting.pending_audio_observation_revision = None
 
     def unregister(self, conn_id: str) -> None:
         self.history.close_session(conn_id)
@@ -850,7 +914,9 @@ class RealtimeService:
     def _input_turn_accounting(self, conn_id: str, turn_id: str | None) -> InputTurnAccounting | None:
         if turn_id is None:
             return None
-        records = self._state(conn_id).input_turn_accounting
+        state = self._state(conn_id)
+        self._collect_committed_audio_observations(conn_id, state)
+        records = state.input_turn_accounting
         if turn_id not in records:
             # A new input turn cannot revise the preceding turn's chat entry.
             records.clear()
@@ -933,6 +999,7 @@ class RealtimeService:
             event.turn_id,
             event.turn_revision,
             terminal=completed_events[0],
+            accepted_input_kind="speech" if event.transcript.strip() else None,
         )
         return self.audio.resolve_input_terminals(conn_id)
 
@@ -997,6 +1064,8 @@ class RealtimeService:
                     conn_id, retained_item.id, event.turn_id, event.turn_revision, event.speech_stopped_at_s
                 )
             self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
+            if retained_item.id is not None:
+                self._hold_direct_audio_observation(conn_id, retained_item.id, event)
             return self.audio.resolve_input_terminals(conn_id)
 
         queue = self.text_prompt_queue
@@ -1022,6 +1091,7 @@ class RealtimeService:
             )
             st.mark_response_pending(request.response_key)
             queue.put(request)
+            self._hold_direct_audio_observation(conn_id, input_item_id, event)
         return self.audio.resolve_input_terminals(conn_id)
 
     # ── Metrics ────────────────────────────────────

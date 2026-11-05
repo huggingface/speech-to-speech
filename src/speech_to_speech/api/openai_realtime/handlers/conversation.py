@@ -32,6 +32,7 @@ from speech_to_speech.api.openai_realtime.input_state import (
     InputItemState,
     SpeechToSpeechInputAudioTranscriptionSnapshotEvent,
 )
+from speech_to_speech.api.openai_realtime.user_input_observation import user_item_kind
 from speech_to_speech.LLM.chat import ChatItemError, add_supported_item
 from speech_to_speech.pipeline.events import (
     PartialTranscriptionEvent,
@@ -161,6 +162,9 @@ class ConversationHandler(RealtimeBaseHandler):
     def _apply_delete(self, conn_id: str, event: ConversationItemDeleteEvent) -> list[ServerEvent]:
         st = self._state(conn_id)
         chat = st.runtime_config.chat
+        # Preserve commitments already witnessed before this deletion. A later
+        # tracker commit must not resurrect a successfully deleted provisional input.
+        self._service._collect_committed_audio_observations(conn_id, st)
         removed = chat.delete_item(event.item_id)
         # Committed speech is already on the wire while STT still owns its
         # input state; its Chat entry is only written when transcription ends.
@@ -183,6 +187,9 @@ class ConversationHandler(RealtimeBaseHandler):
                 None,
             )
         if reference is not None and reference[0] is not None:
+            accounting = st.input_turn_accounting.get(reference[0])
+            if accounting is not None:
+                accounting.pending_audio_observation_revision = None
             st.deleted_input_turn_ids[reference[0]] = None
             while len(st.deleted_input_turn_ids) > 128:
                 st.deleted_input_turn_ids.pop(next(iter(st.deleted_input_turn_ids)))
@@ -314,7 +321,21 @@ class ConversationHandler(RealtimeBaseHandler):
 
         Raises :class:`ChatItemError` on validation failure or unsupported type.
         """
-        add_supported_item(self._state(conn_id).runtime_config.chat, item)
+        state = self._state(conn_id)
+        kind = None
+        classification_failed = False
+        if state._user_input_observations is not None:
+            # Capture only a fixed kind before the LM may consume/strip image content.
+            try:
+                kind = user_item_kind(item)
+            except Exception as exc:
+                classification_failed = True
+                logger.warning("Could not classify user input (%s)", type(exc).__name__)
+        add_supported_item(state.runtime_config.chat, item)
+        if classification_failed:
+            self._service.note_user_input_observation_loss(conn_id, 1)
+        elif kind is not None:
+            self._service.observe_user_input(conn_id, kind)
 
     # ── Pipeline event handlers ────────────────────
 
