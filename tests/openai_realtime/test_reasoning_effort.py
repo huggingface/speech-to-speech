@@ -68,6 +68,14 @@ def test_session_update_null_reasoning_restores_server_default(service, conn_id,
     assert resolve_reasoning_effort(runtime_config) is None
 
 
+def test_session_update_empty_reasoning_object_keeps_effort(service, conn_id, runtime_config):
+    service.handle_session_update(conn_id, _session_update({"reasoning": {"effort": "high"}}))
+    assert service.handle_session_update(conn_id, _session_update({"reasoning": {}})) is None
+    assert resolve_reasoning_effort(runtime_config) == "high"
+    updated = service.build_session_updated(conn_id).model_dump(exclude_none=True)
+    assert updated["session"]["reasoning"] == {"effort": "high"}
+
+
 @pytest.mark.parametrize("reasoning", [{"effort": "maximum"}, {"effort": 3}, "high"])
 def test_session_update_rejects_invalid_reasoning(service, conn_id, runtime_config, reasoning):
     error = service.handle_session_update(conn_id, _session_update({"reasoning": reasoning}))
@@ -122,6 +130,23 @@ def test_responses_backend_sends_client_effort(session_effort, response, expecte
         response=_response(response) if response else None,
     )
     assert _drive_responses(handler, request)["reasoning"] == expected
+
+
+@pytest.mark.parametrize(("session_effort", "response"), [("high", None), (None, "high")])
+def test_responses_backend_client_effort_drops_startup_disable_thinking(session_effort, response):
+    handler = _make_responses_handler(disable_thinking=True, reasoning_effort=None)
+    request = GenerateResponseRequest(
+        runtime_config=_runtime_config(session_effort),
+        response=_response(response) if response else None,
+    )
+    captured = _drive_responses(handler, request)
+    assert captured["reasoning"] == {"effort": "high"}
+    assert captured["extra_body"] is None
+    # Startup defaults are untouched; turns without a client effort keep them.
+    assert handler._extra_body == {"chat_template_kwargs": {"enable_thinking": False}}
+    captured = _drive_responses(handler, GenerateResponseRequest(runtime_config=_runtime_config()))
+    assert captured["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert "reasoning" not in captured
 
 
 def test_responses_backend_client_effort_without_startup_default():

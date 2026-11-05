@@ -172,6 +172,17 @@ class RuntimeConfig(BaseModel):
     def apply_session_update(self, update: RealtimeSessionCreateRequest) -> None:
         """Merge non-None, explicitly-set fields from 'update' into the
         current 'session', preserving any fields not present in the update."""
+        # The pinned SDK keeps ``reasoning`` as a plain dict extra, which
+        # _apply_update would replace wholesale; merge its keys so a partial
+        # object (e.g. ``{}``) keeps the current effort. ``null`` still resets.
+        old_reasoning = getattr(self.session, "reasoning", None)
+        new_reasoning = getattr(update, "reasoning", None)
+        if (
+            "reasoning" in update.model_fields_set
+            and isinstance(new_reasoning, dict)
+            and isinstance(old_reasoning, dict)
+        ):
+            setattr(update, "reasoning", {**old_reasoning, **new_reasoning})
         _apply_update(self.session, update)
 
     @property

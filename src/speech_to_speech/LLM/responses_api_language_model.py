@@ -180,6 +180,11 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
         reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
         optional_kwargs = self._reasoning_kwargs(reasoning_effort)
+        if reasoning_effort:
+            # Mirror _build_extra_body: an explicit effort drops the startup
+            # chat_template_kwargs.enable_thinking=false, which vLLM would
+            # otherwise honour over reasoning.effort.
+            optional_kwargs["extra_body"] = None
         if req_tools is not None:
             optional_kwargs["tools"] = req_tools
         if req_tool_choice is not None:
@@ -187,13 +192,15 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
         return optional_kwargs
 
     def _request(self, api_input: Any, optional_kwargs: dict[str, Any]) -> Any:
+        create_kwargs = dict(optional_kwargs)
+        extra_body = create_kwargs.pop("extra_body", self._extra_body)
         return self.client.responses.create(
             model=self.model_name,
             input=api_input,
             stream=self.stream,
-            extra_body=self._extra_body,
+            extra_body=extra_body,
             timeout=self.request_timeout,
-            **optional_kwargs,
+            **create_kwargs,
         )
 
     @staticmethod
