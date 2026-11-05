@@ -439,3 +439,93 @@ class TestJsonToolCallBlocks:
         block = '<tool_call>[{"name":"bad","arguments":"{broken}"},{"name":"dance","arguments":{}}]</tool_call>'
         calls = parse_json_tool_call_block(block)
         assert [(call.function_name, call.parameters) for call in calls] == [("dance", {})]
+
+
+def test_qwen_native_calls_preserve_schema_types_and_raw_strings():
+    from speech_to_speech.LLM.tool_call.function_call import parse_tool_call_block
+
+    tool = _make_tool("get_weather", {})
+    (call,) = parse_tool_call_block("<tool_call>\n<function=get_weather>\n</function>\n</tool_call>", [tool])
+    assert json.loads(call.to_realtime_function_tool_call([tool]).arguments) == {}
+
+    values = {
+        "label": '  007 & "quoted"\nnext line  ',
+        "count": 7,
+        "enabled": False,
+        "unset": None,
+        "options": {"a": [1, None]},
+    }
+    tool = _make_tool(
+        "configure",
+        {
+            "label": {"type": "string"},
+            "count": {"type": "integer"},
+            "enabled": {"type": "boolean"},
+            "unset": {"type": "null"},
+            "options": {"$ref": "#/$defs/Options"},
+        },
+    )
+    tool.parameters["$defs"] = {"Options": {"type": "object"}}
+    parameters = "".join(
+        f"<parameter={key}>\n{json.dumps(value) if isinstance(value, (dict, list)) else str(value)}\n</parameter>\n"
+        for key, value in values.items()
+    )
+    (call,) = parse_tool_call_block(f"<tool_call><function=configure>\n{parameters}</function></tool_call>", [tool])
+    assert json.loads(call.to_realtime_function_tool_call([tool]).arguments) == values
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "<function=unknown></function>",
+        "<function=get_weather><parameter=location>Rome</parameter></function>",
+        "<function=get_weather><parameter=count>1</parameter><parameter=count>2</parameter></function>",
+        '<function=get_weather><parameter=count>"one"</parameter></function>',
+        "<function=get_weather><parameter=count>true</parameter></function>",
+        "<function=get_weather><parameter=count>1</function>",
+        "<function=get_weather>unparsed content</function>",
+        "<function=get_weather></function>trailing content",
+    ],
+)
+def test_qwen_native_calls_reject_invalid_or_undeclared_arguments(body):
+    from speech_to_speech.LLM.tool_call.function_call import parse_tool_call_block
+
+    tool = _make_tool("get_weather", {"count": {"type": "integer"}})
+    assert parse_tool_call_block(f"<tool_call>{body}</tool_call>", [tool]) == []
+
+
+@pytest.mark.parametrize(
+    "schema, value, expected",
+    [
+        ({"type": "boolean"}, "True", True),
+        ({"type": "boolean"}, "false", False),
+        ({"type": ["integer", "null"]}, "null", None),
+        ({"anyOf": [{"type": "integer"}, {"type": "null"}]}, "None", None),
+        ({"allOf": [{"type": "array"}, {"minItems": 1}]}, "[1, null]", [1, None]),
+        ({"enum": [False, True]}, "False", False),
+        ({"type": "string"}, "False", "False"),
+        ({"type": ["string", "integer"]}, "007", "007"),
+        ({"type": ["string", "null"]}, "None", "None"),
+        ({"type": "string"}, '"quoted"', '"quoted"'),
+    ],
+)
+def test_qwen_native_parameter_decoding_uses_schema(schema, value, expected):
+    tool = _make_tool("configure", {"value": schema})
+    block = f"<tool_call><function=configure><parameter=value>{value}</parameter></function></tool_call>"
+    (call,) = function_call_module.parse_tool_call_block(block, [tool])
+    assert call.parameters == {"value": expected}
+
+
+def test_qwen_native_calls_validate_referenced_and_required_arguments():
+    tool = _make_tool("configure", {"value": {"$ref": "#/$defs/Options"}})
+    tool.parameters.update(
+        required=["value"],
+        **{
+            "$defs": {
+                "Options": {"type": "object", "properties": {"count": {"type": "integer"}}, "required": ["count"]}
+            }
+        },
+    )
+    for body in ('<parameter=value>{"count": "wrong"}</parameter>', "<parameter=value>{}</parameter>", ""):
+        block = f"<tool_call><function=configure>{body}</function></tool_call>"
+        assert function_call_module.parse_tool_call_block(block, [tool]) == []

@@ -96,6 +96,7 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
                 {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello"}]},
             ],
             timeout=self.request_timeout,
+            max_output_tokens=64,
             **self._reasoning_kwargs(),
         )
         end = time.time()
