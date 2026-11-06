@@ -246,16 +246,18 @@ response does not assume an interrupted explanation was delivered.
   `conversation.item.truncate`. A reply that finished generating while most of
   its audio was still buffered is cut only if the client tracks playback past
   `response.output_audio.done`. The browser demo and the packaged `local`/`talk`
-  client do. The pinned stock Agents SDK WebSocket transport resets its playback
-  position at that event. On server-VAD barge-in this server sends the
-  cancelled response's `response.output_audio.done` before
-  `input_audio_buffer.speech_started`, so that transport sends no truncate.
-  Its cancelled replies keep the transcript of all audio already sent, not only
-  what played; it truncates only when application code calls
-  `session.interrupt()` while audio is still streaming.
+  client do. The stock Agents SDK WebSocket transport does from 0.20.0. Earlier
+  versions, including the 0.14.3 pinned here, reset their playback position at
+  that event. On server-VAD barge-in this server sends the cancelled response's
+  `response.output_audio.done` before `input_audio_buffer.speech_started`, so
+  those versions send no truncate. Their cancelled replies keep the transcript
+  of all audio already sent, not only what played. Newer versions need
+  `conversation.item.retrieve`, which this server does not implement yet.
 - WebRTC playback is paced by the server. When barge-in, `response.cancel`, or
   `output_audio_buffer.clear` discards queued RTP audio, the discarded duration
-  is removed from the newest assistant items.
+  is removed from the newest assistant items. Send `response.cancel` before
+  `output_audio_buffer.clear`: a clear alone leaves the active reply's history
+  untouched.
 - An item cut this way becomes `incomplete` and its text is the heard prefix. No
   marker is added to the text. An item with no heard audio is removed. Replies
   that play to the end are unchanged.
