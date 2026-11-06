@@ -355,8 +355,8 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
   The server cuts the item's model history to the transcript heard in that
   time; see [Interrupted replies](../src/speech_to_speech/api/openai_realtime/README.md#interrupted-replies).
   After each truncate the client sends `conversation.item.retrieve`, and the
-  history panel replaces the reply's row with the text the server kept, marked
-  Interrupted. Over WebRTC, where the server measures playback, the client
+  reply's history row, and its bubble while still on screen, show the text the
+  server kept, marked Interrupted. Over WebRTC, where the server measures playback, the client
   retrieves the items of the last two replies after each barge-in. Only an
   item the server cut (status `incomplete`, or removed) changes its row.
   See the [Realtime interruption guidance](https://developers.openai.com/api/docs/guides/realtime-conversations#handling-interruptions).

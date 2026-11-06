@@ -69,9 +69,12 @@ export class ChatView {
     // ── Assistant transcript state (keyed by response_id) ──────────────────
     /** @type {Map<string, { bubble: HTMLElement, hist: HTMLElement }>} */
     this._asstByResp = new Map();
-    // History rows outlive their response so its heard text can rewrite them.
+    // History rows and bubbles outlive their response so its heard text can
+    // rewrite them.
     /** @type {Map<string, HTMLElement>} */
     this._histByResp = new Map();
+    /** @type {Map<string, HTMLElement>} */
+    this._bubbleByResp = new Map();
 
     // ── Ephemeral bubble auto-dismiss ──────────────────────────────────────
     // Per-element expiry (epoch ms). A bubble fades once its expiry passes —
@@ -409,16 +412,38 @@ export class ChatView {
     while (this._histByResp.size > 32) this._histByResp.delete(this._histByResp.keys().next().value);
   }
 
+  /** @param {string} responseId @param {HTMLElement} bubble */
+  _rememberBubble(responseId, bubble) {
+    this._bubbleByResp.set(responseId, bubble);
+    while (this._bubbleByResp.size > 32) this._bubbleByResp.delete(this._bubbleByResp.keys().next().value);
+  }
+
   /**
    * The server cut an interrupted reply to the speech the user heard: show
    * the history row as the text the model will see.
    * @param {{ responseId: string; text: string }} detail
    */
   onAssistantHeard(detail) {
+    const note = detail.text ? "Interrupted" : "Interrupted before you heard it";
     const hist = this._asstByResp.get(detail.responseId)?.hist ?? this._histByResp.get(detail.responseId);
-    if (!hist?.isConnected) return;
-    this._updateHistMsg(hist, detail.text, false);
-    this._markHistInterrupted(hist, detail.text ? "Interrupted" : "Interrupted before you heard it");
+    if (hist?.isConnected) {
+      this._updateHistMsg(hist, detail.text, false);
+      this._markHistInterrupted(hist, note);
+    }
+    // A bubble still on screen shows the correction too; a faded one stays gone.
+    const bubble = this._asstByResp.get(detail.responseId)?.bubble ?? this._bubbleByResp.get(detail.responseId);
+    if (bubble?.isConnected && !bubble.classList.contains("out")) {
+      this._updateBubbleText(bubble, detail.text);
+      bubble.classList.add("interrupted");
+      let tag = bubble.querySelector(".bubble-note");
+      if (!tag) {
+        tag = document.createElement("div");
+        tag.className = "bubble-note";
+        bubble.appendChild(tag);
+      }
+      tag.textContent = note;
+      this._bumpDismiss(bubble);
+    }
   }
 
   /** Render a captured webcam frame in the transcript (the camera tool result).
@@ -451,6 +476,7 @@ export class ChatView {
     this._assistantDismissedUserItemId = "";
     this._asstByResp.clear();
     this._histByResp.clear();
+    this._bubbleByResp.clear();
   }
 
   // ── Client event handlers ─────────────────────────────────────────────────
@@ -545,6 +571,7 @@ export class ChatView {
         const hist = this._appendHistMsg("assistant", d.text, false);
         this._asstByResp.set(rid, { bubble, hist });
         this._rememberHist(rid, hist);
+        this._rememberBubble(rid, bubble);
         this._bumpDismiss(bubble);
       } else {
         this._updateBubbleText(entry.bubble, d.text);

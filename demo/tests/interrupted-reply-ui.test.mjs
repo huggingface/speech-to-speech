@@ -50,5 +50,26 @@ test("history rewrites an interrupted reply to what the user heard", async (t) =
   assert.equal(await rows.nth(0).locator(".hist-note").textContent(), "Interrupted");
   assert.equal(await rows.nth(1).locator(".hist-body").isHidden(), true);
   assert.equal(await rows.nth(1).locator(".hist-note").textContent(), "Interrupted before you heard it");
+
+  // The reply's bubble, still on screen, shows the same text.
+  const bubbles = page.locator(".bubble.assistant:not(.out)");
+  assert.equal(await bubbles.count(), 2);
+  assert.equal(await bubbles.nth(0).locator(".bubble-body").textContent(), "Sure, here are");
+  assert.equal(await bubbles.nth(0).locator(".bubble-note").textContent(), "Interrupted");
+  assert.equal(await bubbles.nth(1).locator(".bubble-body").isHidden(), true);
+  assert.equal(await bubbles.nth(1).locator(".bubble-note").textContent(), "Interrupted before you heard it");
+  if (process.env.S2S_UI_SCREENSHOTS) {
+    await page.evaluate(() => chat._closePanel());
+    await page.waitForTimeout(500);
+    await page.screenshot({ path: `${process.env.S2S_UI_SCREENSHOTS}/interrupted-reply.png` });
+  }
+  // A faded bubble is not brought back.
+  await page.evaluate(() => {
+    const bubble = document.querySelector(".bubble.assistant");
+    chat._dismissBubble(bubble);
+    chat.onAssistantHeard({ responseId: "r1", text: "Sure," });
+  });
+  assert.equal(await bubbles.count(), 1);
+  assert.equal(await rows.nth(0).locator(".hist-body").textContent(), "Sure,");
   await page.close();
 });
