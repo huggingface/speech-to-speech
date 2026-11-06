@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 import os
@@ -14,7 +15,7 @@ from urllib.parse import urlparse
 
 import httpx
 from nltk import sent_tokenize
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemAssistantMessage,
     RealtimeConversationItemFunctionCall,
@@ -129,7 +130,7 @@ class ProviderResponseEnd(BaseModel):
 
 ProviderEvent = TextDelta | AssistantMessage | ToolCall | ResponseReasoningItem | Usage | ProviderResponseEnd
 SerializeFn = Callable[[Chat], Any]
-RequestFn = Callable[[Any, dict[str, Any]], Any]
+RequestFn = Callable[..., Any]
 EventIteratorFn = Callable[[Any], Iterator[ProviderEvent]]
 
 
@@ -234,6 +235,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         ):
             api_key = "none"
         self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self._async_runner: asyncio.Runner | None = None
+        self._async_client: AsyncOpenAI | None = None
         self._extra_body = self._build_extra_body(base_url, disable_thinking, reasoning_effort)
         self._prefetch_worker_slots = BoundedSemaphore(PREFETCH_PROVIDER_WORKER_LIMIT)
         self._prefetch_workers_lock = Lock()
@@ -308,7 +311,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         ...
 
     @abstractmethod
-    def _request(self, api_input: Any, optional_kwargs: dict[str, Any]) -> Any:
+    def _request(self, api_input: Any, optional_kwargs: dict[str, Any], *, client: Any = None) -> Any:
         """Issue the create() call and return the response or stream."""
         ...
 
@@ -365,8 +368,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         kwargs.setdefault("temperature", self.audio_temperature)
         return kwargs
 
-    def _request_audio(self, api_input: Any, optional_kwargs: dict[str, Any]) -> Any:
-        return self._request(api_input, optional_kwargs)
+    def _request_audio(self, api_input: Any, optional_kwargs: dict[str, Any], *, client: Any = None) -> Any:
+        return self._request(api_input, optional_kwargs, client=client)
 
     def _iter_audio_events(self, api_response: Any) -> Iterator[ProviderEvent]:
         yield from self._iter_events(api_response)
@@ -374,10 +377,22 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
     _audio_to_wav_base64 = staticmethod(audio_to_wav_base64)
 
     def cleanup(self) -> None:
-        client = getattr(self, "client", None)
-        if client is not None:
-            del self.client
-            client.close()
+        runner = getattr(self, "_async_runner", None)
+        client = getattr(self, "_async_client", None)
+        self._async_runner = None
+        self._async_client = None
+        try:
+            if runner is not None:
+                try:
+                    if client is not None:
+                        runner.run(client.close())
+                finally:
+                    runner.close()
+        finally:
+            client = getattr(self, "client", None)
+            if client is not None:
+                del self.client
+                client.close()
 
     # ── speculative-turn / cancellation gating ─────────────────────────────────
 
@@ -427,6 +442,57 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             self._prefetch_worker_slots.release()
             raise
         return worker
+
+    def _make_async_client(self) -> AsyncOpenAI:
+        return AsyncOpenAI(
+            api_key=self.client.api_key,
+            base_url=self.client.base_url,
+            organization=self.client.organization,
+            project=self.client.project,
+            max_retries=self.client.max_retries,
+        )
+
+    def _iter_stream_chunks_interruptibly(self, request: Callable[..., Any], turn: _Turn) -> Iterator[Any]:
+        """Advance async provider reads on the serial handler's persistent loop."""
+        if self._async_runner is None:
+            # Keep this private loop out of the calling thread's event-loop policy.
+            self._async_runner = asyncio.Runner(loop_factory=asyncio.new_event_loop)
+        loop = self._async_runner.get_loop()
+        stopped = object()
+
+        async def stream_chunks():
+            if self._async_client is None:
+                self._async_client = self._make_async_client()
+            response = await request(client=self._async_client)
+            async with response:
+                async for chunk in response:
+                    yield chunk
+
+        chunks = stream_chunks()
+
+        async def read_chunk():
+            pending = asyncio.create_task(anext(chunks))
+            try:
+                while not self.stop_event.is_set() and not self._turn_is_cancelled(turn):
+                    ready, _ = await asyncio.wait({pending}, timeout=0.05)
+                    if ready:
+                        return pending.result()
+                return stopped
+            finally:
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+
+        try:
+            while not self.stop_event.is_set() and not self._turn_is_cancelled(turn):
+                try:
+                    chunk = loop.run_until_complete(read_chunk())
+                except StopAsyncIteration:
+                    return
+                if chunk is stopped:
+                    return
+                yield chunk
+        finally:
+            loop.run_until_complete(chunks.aclose())
 
     def _iter_prefetch_events_interruptibly(
         self,
@@ -812,14 +878,17 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     error_message = "Cannot generate a response: no instructions and no input were provided."
                 else:
 
-                    def make_request() -> Any:
+                    def make_request(*, client: Any = None) -> Any:
                         nonlocal provider_request_started
                         provider_request_started = True
                         if tracker is not None:
                             tracker.start_llm()
                         trace = HttpRequestTrace(trace_context)
                         trace.dispatch()
-                        return (request_fn or self._request)(api_input, trace.request_options(optional_kwargs))
+                        options = trace.request_options(optional_kwargs)
+                        if client is None:
+                            return (request_fn or self._request)(api_input, options)
+                        return (request_fn or self._request)(api_input, options, client=client)
 
                     if turn.prefetch_transaction is not None:
                         events = self._iter_prefetch_events_interruptibly(
@@ -828,7 +897,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                             turn,
                         )
                     else:
-                        api_response = make_request()
+                        api_response = (
+                            self._iter_stream_chunks_interruptibly(make_request, turn)
+                            if self.stream
+                            else make_request()
+                        )
                         events = (event_iterator_fn or self._iter_events)(api_response)
                 if events is not None:
 
@@ -863,6 +936,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 if error_message is None:
                     error_message = f"Language model generation failed: {exc}"
             finally:
+                self._close_response(events)
+                self._close_response(api_response)
                 # Store elapsed provider work before an error terminal can finish
                 # the response on the service thread.
                 if tracker is not None and provider_request_started:
@@ -1030,9 +1105,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             item for item in active_chat.buffer if isinstance(item, RealtimeConversationItemUserMessage)
         ]
 
-        # CancelScope.is_stale(gen) is checked when the stream iterator advances; a
-        # blocked read inside httpx cannot be aborted by cancel_scope.cancel() from
-        # the websocket router. Mitigations: request_timeout_s / ReadTimeout.
         turn = _Turn(
             language_code=language_code,
             selected_language=request.selected_language,
@@ -1136,9 +1208,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             resolve_reasoning_effort(runtime_config, response),
         )
 
-        # CancelScope.is_stale(gen) is checked when the stream iterator advances; a
-        # blocked read inside httpx cannot be aborted by cancel_scope.cancel() from
-        # the websocket router. Mitigations: request_timeout_s / ReadTimeout.
         turn = _Turn(
             language_code=language_code,
             selected_language=request.selected_language,

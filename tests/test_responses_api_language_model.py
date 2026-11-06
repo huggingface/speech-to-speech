@@ -47,7 +47,8 @@ from speech_to_speech.pipeline.messages import (
     TokenUsage,
 )
 from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
-from tests.llm_history import drive_llm
+from tests.llm_history import close_llm_runners as close_llm_runners
+from tests.llm_history import drive_llm, mock_async_client
 
 
 def _make_text_delta_event(text):
@@ -233,6 +234,10 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None, rea
     )
     handler._prefetch_workers_lock = Lock()
     handler._prefetch_workers = set()
+    handler.stop_event = Event()
+    handler._async_runner = None
+    handler._async_client = None
+    handler._make_async_client = lambda: mock_async_client(handler)
     return handler
 
 
