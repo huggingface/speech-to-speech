@@ -691,7 +691,9 @@ def handle_server_event(
         playback.clear()
     elif event.type == "conversation.item.retrieved":
         item = event.item
-        if getattr(item, "role", None) == "assistant" and item.id is not None:
+        # Only a cut item carries heard text; a reply still generating or one
+        # that played to the end keeps the transcript already shown.
+        if getattr(item, "role", None) == "assistant" and item.id is not None and item.status == "incomplete":
             renderer.render_heard_assistant_text(item.id, _assistant_item_text(item))
     elif (
         event.type == "error"

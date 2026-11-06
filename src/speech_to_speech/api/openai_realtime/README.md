@@ -271,7 +271,9 @@ response does not assume an interrupted explanation was delivered.
   playing the cancelled reply while its history is cut by the estimate.
 - WebRTC playback is paced by the server. When barge-in, `response.cancel`, or
   `output_audio_buffer.clear` discards queued RTP audio, the discarded duration
-  is removed from the newest assistant items. Send `response.cancel` before
+  is removed from the newest assistant items. On barge-in this happens before
+  `input_audio_buffer.speech_started` is sent, so a client that then retrieves
+  the reply sees the cut. Send `response.cancel` before
   `output_audio_buffer.clear`: a clear alone leaves the active reply's history
   untouched.
 - An item cut this way becomes `incomplete` and its text is the heard prefix. No

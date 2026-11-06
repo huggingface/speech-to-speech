@@ -2556,3 +2556,18 @@ def test_rewrite_counts_rows_of_a_multi_line_reply():
     assert output.getvalue() == (
         "ASSISTANT: First line.\nSecond :smile: line.\n\x1b[2F\x1b[JASSISTANT: First line. [interrupted]\n"
     )
+
+
+def test_retrieved_reply_that_was_not_cut_keeps_its_line():
+    renderer, output = _terminal_renderer(width=80)
+    _stream_assistant(renderer, "Sure, here are five ways to improve it.")
+
+    for status in ("in_progress", "completed"):
+        handle_server_event(
+            _retrieved("item_1", "Sure, here are five ways to improve it. First,", status=status),
+            playback=SimpleNamespace(clear=lambda: None),
+            renderer=renderer,
+            print_json=False,
+        )
+
+    assert output.getvalue() == "ASSISTANT: Sure, here are five ways to improve it.\n"

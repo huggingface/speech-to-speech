@@ -69,6 +69,9 @@ export class ChatView {
     // ── Assistant transcript state (keyed by response_id) ──────────────────
     /** @type {Map<string, { bubble: HTMLElement, hist: HTMLElement }>} */
     this._asstByResp = new Map();
+    // History rows outlive their response so its heard text can rewrite them.
+    /** @type {Map<string, HTMLElement>} */
+    this._histByResp = new Map();
 
     // ── Ephemeral bubble auto-dismiss ──────────────────────────────────────
     // Per-element expiry (epoch ms). A bubble fades once its expiry passes —
@@ -387,14 +390,35 @@ export class ChatView {
   }
 
   /** Tag an assistant history row as interrupted (user barged in mid-reply).
-   *  @param {HTMLElement | null} hist */
-  _markHistInterrupted(hist) {
-    if (!hist || hist.querySelector(".hist-note")) return;
+   *  @param {HTMLElement | null} hist @param {string} [text] */
+  _markHistInterrupted(hist, text = "Interrupted") {
+    if (!hist) return;
     hist.classList.add("interrupted");
-    const note = document.createElement("div");
-    note.className = "hist-note";
-    note.textContent = "Interrupted";
-    hist.appendChild(note);
+    let note = hist.querySelector(".hist-note");
+    if (!note) {
+      note = document.createElement("div");
+      note.className = "hist-note";
+      hist.appendChild(note);
+    }
+    note.textContent = text;
+  }
+
+  /** @param {string} responseId @param {HTMLElement} hist */
+  _rememberHist(responseId, hist) {
+    this._histByResp.set(responseId, hist);
+    while (this._histByResp.size > 32) this._histByResp.delete(this._histByResp.keys().next().value);
+  }
+
+  /**
+   * The server cut an interrupted reply to the speech the user heard: show
+   * the history row as the text the model will see.
+   * @param {{ responseId: string; text: string }} detail
+   */
+  onAssistantHeard(detail) {
+    const hist = this._asstByResp.get(detail.responseId)?.hist ?? this._histByResp.get(detail.responseId);
+    if (!hist?.isConnected) return;
+    this._updateHistMsg(hist, detail.text, false);
+    this._markHistInterrupted(hist, detail.text ? "Interrupted" : "Interrupted before you heard it");
   }
 
   /** Render a captured webcam frame in the transcript (the camera tool result).
@@ -426,6 +450,7 @@ export class ChatView {
     this._activeUserItemId = "";
     this._assistantDismissedUserItemId = "";
     this._asstByResp.clear();
+    this._histByResp.clear();
   }
 
   // ── Client event handlers ─────────────────────────────────────────────────
@@ -517,7 +542,9 @@ export class ChatView {
       const entry = this._asstByResp.get(rid);
       if (!entry) {
         const bubble = this._spawnBubble("assistant", d.text);
-        this._asstByResp.set(rid, { bubble, hist: this._appendHistMsg("assistant", d.text, false) });
+        const hist = this._appendHistMsg("assistant", d.text, false);
+        this._asstByResp.set(rid, { bubble, hist });
+        this._rememberHist(rid, hist);
         this._bumpDismiss(bubble);
       } else {
         this._updateBubbleText(entry.bubble, d.text);
@@ -607,7 +634,10 @@ export class ChatView {
     const entry = this._asstByResp.get(responseId);
     let hist = entry?.hist ?? null;
     if (detail.latency) {
-      hist ??= this._appendHistMsg("assistant", transcript || "", false);
+      if (!hist) {
+        hist = this._appendHistMsg("assistant", transcript || "", false);
+        this._rememberHist(responseId, hist);
+      }
       this._appendTimings(hist, detail.latency);
       this._markUnread();
     }
@@ -618,6 +648,7 @@ export class ChatView {
       // from the text carried in response.done.
       if (!hist && transcript) {
         hist = this._appendHistMsg("assistant", transcript, false);
+        this._rememberHist(responseId, hist);
       } else if (hist && transcript) {
         this._updateHistMsg(hist, transcript, false);
       }

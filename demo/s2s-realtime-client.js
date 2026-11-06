@@ -56,6 +56,10 @@ export const AUDIO_SAMPLE_RATE = 24_000;
 export const AUDIO_WORKLET_VERSION = "timings-20261105";
 export const DEFAULT_PLAYBACK_BUFFER_MS = 0;
 const MIC_CHUNK_MS = 40;
+// Retrieves the client sends to learn what an interrupted reply left in history.
+const HEARD_TEXT_EVENT_PREFIX = "heard_text_";
+const ASSISTANT_ITEM_HISTORY = 64;
+const ASSISTANT_REPLIES_CHECKED = 2;
 const CAPTURE_CONFIG_TIMEOUT_MS = 2_000;
 const SPEAKING_OPEN_DB = -50;
 const SPEAKING_HANG_MS = 250;
@@ -141,6 +145,10 @@ export class S2sRealtimeClient extends EventTarget {
     this._audibleResponses = new Set();
     this._asstTranscriptByResp = new Map();
     this._asstFullByResp = new Map();
+    // Assistant transcript items, kept after their response ends so an
+    // interrupted reply can be shown as the text the server kept.
+    /** @type {Map<string, { responseId: string, text: string }>} */
+    this._asstItems = new Map();
     // Input transcription deltas are append-only and may overlap across turns.
     // Keep each unresolved prefix until its authoritative completion arrives.
     this._userTranscriptByItem = new Map();
@@ -534,7 +542,57 @@ export class S2sRealtimeClient extends EventTarget {
         content_index: item.contentIndex,
         audio_end_ms: Math.max(0, Math.floor(samples / AUDIO_SAMPLE_RATE * 1000)),
       });
+      this._requestHeardText(item.itemId);
     }
+  }
+
+  /** Ask the server for an assistant item; its answer carries the heard text.
+   * @param {string} itemId */
+  _requestHeardText(itemId) {
+    if (!itemId) return;
+    this._transport?.sendEvent({
+      type: "conversation.item.retrieve",
+      event_id: `${HEARD_TEXT_EVENT_PREFIX}${itemId}`,
+      item_id: itemId,
+    });
+  }
+
+  /** WebRTC playback is cut by the server, which never says which items it
+   * cut, so check the items of the last two replies after each barge-in: a
+   * reply spoken before a tool call can still be playing during its follow-up. */
+  _requestLatestHeardText() {
+    const items = [...this._asstItems];
+    const responses = [...new Set(items.map(([, item]) => item.responseId))].slice(-ASSISTANT_REPLIES_CHECKED);
+    for (const [itemId, item] of items) {
+      if (responses.includes(item.responseId)) this._requestHeardText(itemId);
+    }
+  }
+
+  /** @param {unknown} itemId @param {string} responseId @param {string} [text] */
+  _rememberAssistantItem(itemId, responseId, text) {
+    if (typeof itemId !== "string" || !itemId) return;
+    const item = this._asstItems.get(itemId);
+    if (item) {
+      if (text !== undefined) item.text = text;
+      return;
+    }
+    this._asstItems.set(itemId, { responseId, text: text ?? "" });
+    while (this._asstItems.size > ASSISTANT_ITEM_HISTORY) {
+      this._asstItems.delete(this._asstItems.keys().next().value);
+    }
+  }
+
+  /** Report a reply as the text the server kept for one of its items.
+   * @param {string} itemId @param {string} text */
+  _onHeardText(itemId, text) {
+    const item = this._asstItems.get(itemId);
+    if (!item || item.text.split(/\s+/).join(" ") === text.split(/\s+/).join(" ")) return;
+    item.text = text;
+    const reply = [...this._asstItems.values()]
+      .filter((entry) => entry.responseId === item.responseId && entry.text)
+      .map((entry) => entry.text)
+      .join(" ");
+    this.dispatchEvent(new CustomEvent("assistant-heard", { detail: { responseId: item.responseId, text: reply } }));
   }
 
   _clearPlayback() {
@@ -576,7 +634,10 @@ export class S2sRealtimeClient extends EventTarget {
       }
       case "input_audio_buffer.speech_started": {
         // WebSocket calls interrupt() after dispatching this raw event.
-        if (this.options.transport !== "websocket") this._clearPlayback();
+        if (this.options.transport !== "websocket") {
+          this._clearPlayback();
+          this._requestLatestHeardText();
+        }
         const itemId = typeof event.item_id === "string" ? event.item_id : "";
         this._currentUserItemId = itemId;
         if (this.options.transport === "websocket") {
@@ -686,6 +747,7 @@ export class S2sRealtimeClient extends EventTarget {
       case "response.output_audio_transcript.delta": {
         const responseId = typeof event.response_id === "string" ? event.response_id : "";
         const delta = typeof event.delta === "string" ? event.delta : "";
+        this._rememberAssistantItem(event.item_id, responseId);
         if (delta) {
           this._asstTranscriptByResp.set(responseId, (this._asstTranscriptByResp.get(responseId) || "") + delta);
           this.dispatchEvent(new CustomEvent("transcript", { detail: {
@@ -699,6 +761,7 @@ export class S2sRealtimeClient extends EventTarget {
         const responseId = typeof event.response_id === "string" ? event.response_id : "";
         const segment = event.transcript || this._asstTranscriptByResp.get(responseId) || "";
         this._asstTranscriptByResp.delete(responseId);
+        this._rememberAssistantItem(event.item_id, responseId, segment);
         if (segment) {
           const previous = this._asstFullByResp.get(responseId) || "";
           this._asstFullByResp.set(responseId, previous ? `${previous} ${segment}` : segment);
@@ -730,7 +793,25 @@ export class S2sRealtimeClient extends EventTarget {
         this._asstFullByResp.delete(responseId);
         break;
       }
+      case "conversation.item.retrieved": {
+        const item = event.item;
+        // Only a cut item carries heard text. A reply still generating, or one
+        // that played to the end, keeps the transcript already shown.
+        if (item?.role !== "assistant" || typeof item.id !== "string" || item.status !== "incomplete") break;
+        const text = (item.content ?? [])
+          .map((part) => (part?.transcript ?? part?.text ?? "").trim())
+          .filter(Boolean)
+          .join(" ");
+        this._onHeardText(item.id, text);
+        break;
+      }
       case "error": {
+        const eventId = typeof event.error?.event_id === "string" ? event.error.event_id : "";
+        if (event.error?.type === "conversation_item_not_found" && eventId.startsWith(HEARD_TEXT_EVENT_PREFIX)) {
+          // The interrupted reply was removed from history: none of it was heard.
+          this._onHeardText(eventId.slice(HEARD_TEXT_EVENT_PREFIX.length), "");
+          break;
+        }
         const message = event.error?.message ?? "Server error";
         this.dispatchEvent(new CustomEvent("server-error", { detail: { error: new Error(message) } }));
         break;

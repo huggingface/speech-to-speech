@@ -975,6 +975,7 @@ def create_app(
                         was_in_response = st.in_response
                         was_response_pending = st.response_pending
 
+                    events: list[Any] = []
                     if (
                         transport is not None
                         and isinstance(text_msg, PipelineEvent)
@@ -989,9 +990,8 @@ def create_app(
                             pending_items = session.pending_text_output_items
                             pending_items.insert(len(pending_items) if parked_index is None else parked_index, text_msg)
                             events = []
-                        if events:
-                            await transport.send_events(events)
 
+                    interrupt_enabled = False
                     if isinstance(text_msg, SpeechStartedEvent) and session_id:
                         active_cfg = unit.service._state(session_id).runtime_config
                         interrupt_enabled = text_msg.interrupt_response and (
@@ -1003,7 +1003,14 @@ def create_app(
                             # done-sentinel was already observed —
                             # finish_response() runs on the sentinel, not when
                             # playback completes. WebSocket only estimates it.
+                            # Cut history before speech_started goes out, so a
+                            # client that retrieves the reply sees the cut.
                             unit.service.truncate_unplayed_audio(session_id, transport.discard_pending_audio())
+
+                    if events and transport is not None:
+                        await transport.send_events(events)
+
+                    if isinstance(text_msg, SpeechStartedEvent) and session_id:
                         if was_in_response or was_response_pending:
                             if interrupt_enabled:
                                 unit.cancel_scope.cancel()

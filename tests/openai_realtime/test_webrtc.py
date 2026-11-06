@@ -873,6 +873,52 @@ class TestBargeInAfterResponseDone:
                 ]
         stop_event.set()
 
+    def test_history_is_cut_before_speech_started_reaches_the_client(self):
+        """A client that retrieves the reply on speech_started sees the cut."""
+        unit = _make_unit()
+        stop_event = ThreadingEvent()
+        app = router_module.create_app(pool=[unit], stop_event=stop_event)
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                assert unit.session is not None
+                session_id = unit.session.session_id
+                service = unit.service
+                chat = service._state(session_id).runtime_config.chat
+                chat.add_item(make_user_message("How can I improve my essay?"))
+                text = "Sure, here are five ways to improve it."
+                history = ResponseHistory.capture(
+                    chat,
+                    [make_assistant_message(text)],
+                    after_item_id=chat.history_anchor_id(),
+                    complete=True,
+                )
+                service.dispatch_pipeline_event(
+                    session_id,
+                    AssistantOutputEvent(text=text, response_key="response_1", history=history),
+                )
+                service.encode_audio_chunk(session_id, bytes(16_000 * 2 * 2), "response_1")
+                service.finish_response(session_id, response_key="response_1")
+                seen_at_speech_start = []
+
+                class Spy(_FakeTransport):
+                    async def send_events(self, events):
+                        if any(event.type == "input_audio_buffer.speech_started" for event in events):
+                            seen_at_speech_start.append(chat.buffer[-1].content[0].text)
+                        await super().send_events(events)
+
+                spy = Spy()
+                spy.unplayed_ms = 1200.0
+                unit.session.transport = spy
+
+                unit.text_output_queue.put(SpeechStartedEvent())
+
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline and not seen_at_speech_start:
+                    time.sleep(0.02)
+                assert seen_at_speech_start == ["Sure, here are"]
+        stop_event.set()
+
     def test_speech_start_cuts_completed_reply_to_played_audio(self):
         unit = _make_unit()
         stop_event = ThreadingEvent()
