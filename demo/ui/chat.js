@@ -439,46 +439,50 @@ export class ChatView {
    * @param {{ responseId: string; text: string }} detail
    */
   onAssistantHeard(detail) {
-    const note = detail.text ? "Interrupted" : "Interrupted before you heard it";
+    // Both keep the full reply and strike through the words never said; only
+    // the bubble animates it. A faded bubble stays gone.
     const hist = this._asstByResp.get(detail.responseId)?.hist ?? this._histByResp.get(detail.responseId);
     if (hist?.isConnected) {
-      this._updateHistMsg(hist, detail.text, false);
-      this._markHistInterrupted(hist, note);
+      if (!this._strikeUnheard(hist.querySelector(".hist-body"), detail.text)) {
+        this._updateHistMsg(hist, detail.text, false);
+      }
+      this._markHistInterrupted(hist);
     }
-    // A bubble still on screen strikes through the words that were never
-    // said; a faded one stays gone.
     const bubble = this._asstByResp.get(detail.responseId)?.bubble ?? this._bubbleByResp.get(detail.responseId);
     if (bubble?.isConnected && !bubble.classList.contains("out")) {
-      this._strikeUnheard(bubble, detail.text);
+      if (!this._strikeUnheard(bubble.querySelector(".bubble-body"), detail.text)) {
+        this._updateBubbleText(bubble, detail.text);
+      }
       this._bumpDismiss(bubble);
     }
   }
 
   /**
-   * Keep a bubble's full reply, striking through what follows the heard text.
-   * @param {HTMLElement} bubble @param {string} heard
+   * Keep a message's full reply, striking through what follows the heard
+   * text. Returns false, changing nothing, when the heard text does not match
+   * the start of the message.
+   * @param {Element | null} body @param {string} heard
    */
-  _strikeUnheard(bubble, heard) {
-    const body = /** @type {HTMLElement | null} */ (bubble.querySelector(".bubble-body"));
-    if (!body) return;
+  _strikeUnheard(body, heard) {
+    if (!(body instanceof HTMLElement)) return false;
     // The text content still includes words struck by an earlier correction.
     const shown = body.textContent || "";
     const cut = heardPrefixLength(shown, heard);
-    if (cut < 0) {
-      this._updateBubbleText(bubble, heard);
-      return;
-    }
+    if (cut < 0) return false;
     const kept = shown.slice(0, cut).trimEnd();
     const unheard = shown.slice(cut).trim();
     body.replaceChildren();
     if (kept) body.append(kept);
     if (unheard) {
       const struck = document.createElement("s");
-      struck.className = "bubble-unheard";
+      struck.className = "unheard";
       struck.textContent = unheard;
+      // Longer tails take longer to cross out, within limits.
+      struck.style.setProperty("--strike-ms", `${Math.min(1400, Math.max(450, unheard.length * 22))}ms`);
       body.append(kept ? " " : "", struck);
     }
     body.hidden = !shown;
+    return true;
   }
 
   /** Render a captured webcam frame in the transcript (the camera tool result).

@@ -46,14 +46,19 @@ test("history rewrites an interrupted reply to what the user heard", async (t) =
     chat.onAssistantHeard({ responseId: "r2", text: "" });
   });
 
-  assert.equal(await rows.nth(0).locator(".hist-body").textContent(), "Sure, here are");
+  // History rows keep the reply and strike through what was never said.
+  const struckIn = (body) => body.locator("s.unheard").allTextContents();
+  assert.equal(await rows.nth(0).locator(".hist-body").textContent(), "Sure, here are five ways to improve it.");
+  assert.deepEqual(await struckIn(rows.nth(0).locator(".hist-body")), ["five ways to improve it."]);
   assert.equal(await rows.nth(0).locator(".hist-note").textContent(), "Interrupted");
-  assert.equal(await rows.nth(1).locator(".hist-body").isHidden(), true);
-  assert.equal(await rows.nth(1).locator(".hist-note").textContent(), "Interrupted before you heard it");
+  assert.deepEqual(await struckIn(rows.nth(1).locator(".hist-body")), ["First, tighten the thesis."]);
+  assert.equal(await rows.nth(1).locator(".hist-note").textContent(), "Interrupted");
+  // Only the bubble animates the strike.
+  assert.equal(await rows.locator("s.unheard").first().evaluate((el) => getComputedStyle(el).animationName), "none");
 
   // The reply's bubble, still on screen, strikes through the words never said.
   const bubbles = page.locator(".bubble.assistant:not(.out)");
-  const struck = (bubble) => bubble.locator(".bubble-body s").allTextContents();
+  const struck = (bubble) => bubble.locator(".bubble-body s.unheard").allTextContents();
   assert.equal(await bubbles.count(), 2);
   assert.equal(await bubbles.nth(0).locator(".bubble-body").textContent(), "Sure, here are five ways to improve it.");
   assert.deepEqual(await struck(bubbles.nth(0)), ["five ways to improve it."]);
@@ -75,7 +80,7 @@ test("history rewrites an interrupted reply to what the user heard", async (t) =
     chat.onAssistantHeard({ responseId: "r1", text: "Sure," });
   });
   assert.equal(await bubbles.count(), 1);
-  assert.equal(await rows.nth(0).locator(".hist-body").textContent(), "Sure,");
+  assert.deepEqual(await struckIn(rows.nth(0).locator(".hist-body")), ["here are five ways to improve it."]);
   // Text that does not match the bubble is shown as is, with nothing struck.
   await page.evaluate(() => {
     chat.onTranscript({ role: "assistant", text: "Hello there.", partial: false, responseId: "r3" });
