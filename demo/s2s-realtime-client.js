@@ -766,7 +766,7 @@ export class S2sRealtimeClient extends EventTarget {
     this._agent = this._buildAgent();
     const clearTools = tools.length === 0;
     void this._session.updateAgent(this._agent).then(() => {
-      // @openai/agents 0.14.3 omits the `tools` field when its list is empty.
+      // @openai/agents (0.21.0 included) omits the `tools` field when its list is empty.
       // Send the explicit GA clear through the stock transport hook so the
       // server does not retain tools from its deep-merged session config.
       if (clearTools && this._tools.length === 0) {
