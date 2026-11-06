@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from openai.types.realtime import (
     ConversationItemCreateEvent,
     ConversationItemDeleteEvent,
+    ConversationItemRetrieveEvent,
     ConversationItemTruncateEvent,
     InputAudioBufferAppendEvent,
     InputAudioBufferCommitEvent,
@@ -496,10 +497,14 @@ async def _dispatch_client_event(
         if events:
             await send_correlated(events)
 
+    elif isinstance(event, ConversationItemRetrieveEvent):
+        # The stock Agents SDK (>= 0.20) sends this after every completed
+        # input transcription to refresh its local copy of the user item.
+        await send_correlated(service.handle_conversation_item_retrieve(session_id, event))
+
     elif isinstance(event, ConversationItemTruncateEvent):
-        # The client's playback position replaces the server's estimate. Keep
-        # this acknowledgement-free: the stock Agents SDK answers
-        # conversation.item.truncated with conversation.item.retrieve.
+        # The client's playback position replaces the server's estimate. No
+        # conversation.item.truncated acknowledgement is sent.
         service.handle_conversation_item_truncate(session_id, event)
 
     elif isinstance(event, ResponseCreateEvent):

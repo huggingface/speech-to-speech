@@ -81,7 +81,8 @@ flowchart LR
 | `input_audio_buffer.append` | Stream base64 PCM audio. Decoded, resampled to 16 kHz, and chunked for the VAD. |
 | `session.update` | Deep-merge session config (instructions, tools, voice, turn detection, audio format, reasoning effort). |
 | `conversation.item.create` | Inject `input_text` or `function_call_output` into the LLM context without triggering generation. |
-| `conversation.item.truncate` | Cuts the assistant item's history to the transcript heard before `audio_end_ms` (see [Interrupted replies](#interrupted-replies)). No `conversation.item.truncated` is sent: the stock Agents SDK answers it with `conversation.item.retrieve`, which this server does not implement. |
+| `conversation.item.truncate` | Cuts the assistant item's history to the transcript heard before `audio_end_ms` (see [Interrupted replies](#interrupted-replies)). No `conversation.item.truncated` acknowledgement is sent. |
+| `conversation.item.retrieve` | Return the server's current copy of a user, assistant, or function item the client has seen. Speech transcribed by the STT stage comes back as `input_audio` with the transcript the client was sent and no audio bytes. An assistant item keeps the shape it was delivered in, during and after its response: `output_audio` with a transcript for audio replies, `output_text` for text replies. Unknown IDs get an `error` with type `conversation_item_not_found`. |
 | `response.create` | Trigger LLM generation. Supports per-response `instructions`, `tool_choice`, and `reasoning` overrides. |
 | `response.cancel` | Cancel the in-progress or queued response and re-enable listening. |
 
@@ -95,6 +96,7 @@ flowchart LR
 | `input_audio_buffer.speech_started` | VAD detected user speech. |
 | `input_audio_buffer.speech_stopped` | End of user speech segment. |
 | `conversation.item.created` | Acknowledges injected `input_text` from `conversation.item.create`. |
+| `conversation.item.retrieved` | Answers `conversation.item.retrieve` with the full item. |
 | `conversation.item.input_audio_transcription.delta` | Incremental transcript text for the active input-audio content part (when live transcription is enabled). |
 | `conversation.item.input_audio_transcription.completed` | Final transcript for the user turn (with duration usage). |
 | `speech_to_speech.input_audio_transcription.snapshot` | Cumulative, replaceable speculative transcript hypothesis for the active input item (opt-in via `session.extensions`). |
@@ -206,7 +208,7 @@ uv run pytest tests/test_provider_response_status.py -q
 
 ### Official Agents SDK compatibility
 
-CI pins `@openai/agents` 0.14.3 and runs independent integration jobs against
+CI pins `@openai/agents` 0.21.0 and runs independent integration jobs against
 the SDK's stock `OpenAIRealtimeWebSocket` and `OpenAIRealtimeWebRTC`
 transports. Both use a normal `RealtimeSession` with only its endpoint URL
 changed.
@@ -226,7 +228,7 @@ Unlisted events, hosted features, and every future SDK behavior are not implied
 to be supported. The browser demo uses the same stock transports through a
 narrow adapter; its lower-level transport hooks only feed visualization,
 WebSocket PCM playback/replay, and existing UI events. One pinned-SDK gap is
-handled there as well: `@openai/agents` 0.14.3 omits `tools` when the updated
+handled there as well: `@openai/agents` 0.21.0 still omits `tools` when the updated
 list is empty, so the adapter uses the stock transport's `sendEvent` hook for
 an explicit `session.update` with `tools: []`. HF queueing, authentication,
 metering, camera capture, and device selection remain outside the Realtime
@@ -256,15 +258,13 @@ response does not assume an interrupted explanation was delivered.
   `conversation.item.truncate`. The position is measured against the item's
   original audio and replaces the server's estimate, so it can also restore
   words the estimate removed, unless the estimate removed the whole item. The
-  browser demo and the packaged `local`/`talk` client send it. The stock Agents
-  SDK WebSocket transport does from 0.20.0. Earlier versions, including the
-  0.14.3 pinned here, reset their playback position at
-  `response.output_audio.done`, which this server sends before
-  `input_audio_buffer.speech_started` on server-VAD barge-in. They then send
-  no truncate and emit no `audio_interrupted`, so apps that flush their player
-  on that event keep playing the cancelled reply while its history is cut by
-  the estimate. Newer versions need `conversation.item.retrieve`, which this
-  server does not implement yet.
+  browser demo, the packaged `local`/`talk` client, and the stock Agents SDK
+  WebSocket transport from 0.20.0 (0.21.0 is pinned here) send it. Earlier SDK
+  versions reset their playback position at `response.output_audio.done`,
+  which this server sends before `input_audio_buffer.speech_started` on
+  server-VAD barge-in. They then send no truncate and emit no
+  `audio_interrupted`, so apps that flush their player on that event keep
+  playing the cancelled reply while its history is cut by the estimate.
 - WebRTC playback is paced by the server. When barge-in, `response.cancel`, or
   `output_audio_buffer.clear` discards queued RTP audio, the discarded duration
   is removed from the newest assistant items. Send `response.cancel` before

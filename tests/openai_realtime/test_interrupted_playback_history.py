@@ -4,7 +4,7 @@ import asyncio
 import time
 from threading import Event as ThreadingEvent
 
-from openai.types.realtime import ConversationItemTruncateEvent
+from openai.types.realtime import ConversationItemRetrieveEvent, ConversationItemTruncateEvent
 from openai.types.realtime.conversation_item import RealtimeConversationItemAssistantMessage
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText, ResponseReasoningItem
 from starlette.testclient import TestClient
@@ -274,8 +274,7 @@ async def test_websocket_truncate_updates_history_without_an_acknowledgement():
         transport_kind="websocket",
     )
 
-    # The stock Agents SDK answers conversation.item.truncated with an
-    # unsupported conversation.item.retrieve, so the server stays silent.
+    # No conversation.item.truncated acknowledgement is sent.
     assert transport.sent == []
     assert _history(unit.service, conn_id)[-1] == ("assistant", "incomplete", "Sure, here are")
 
@@ -459,3 +458,36 @@ def test_websocket_server_vad_barge_in_cuts_an_active_reply_to_playback():
             assert _history(service, conn_id) == [*EARLIER_TURNS, ("assistant", "incomplete", "Sure, here are")]
             assert chat.buffer[-1].role == "assistant"
     stop_event.set()
+
+
+def test_retrieve_returns_the_heard_transcript_of_a_truncated_reply(service, conn_id):
+    _start_conversation(service, conn_id)
+    item_id = _speak(service, conn_id, [(FIRST, 2.0), (SECOND, 3.0)])
+    service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=RESPONSE_KEY))
+    service.finish_response(conn_id, response_key=RESPONSE_KEY)
+    service.handle_conversation_item_truncate(conn_id, _truncate(item_id, 800))
+
+    [event] = service.handle_conversation_item_retrieve(
+        conn_id,
+        ConversationItemRetrieveEvent(type="conversation.item.retrieve", item_id=item_id),
+    )
+
+    assert event.type == "conversation.item.retrieved"
+    assert event.item.id == item_id
+    assert event.item.status == "incomplete"
+    assert [(part.type, part.transcript) for part in event.item.content] == [("output_audio", "Sure, here are")]
+
+
+def test_retrieve_of_a_reply_nobody_heard_reports_it_missing(service, conn_id):
+    _start_conversation(service, conn_id)
+    item_id = _speak(service, conn_id, [(FIRST, 2.0)])
+    service.finish_response(conn_id, status="cancelled", reason="turn_detected")
+    service.handle_conversation_item_truncate(conn_id, _truncate(item_id, 0))
+
+    [event] = service.handle_conversation_item_retrieve(
+        conn_id,
+        ConversationItemRetrieveEvent(type="conversation.item.retrieve", item_id=item_id),
+    )
+
+    assert event.type == "error"
+    assert event.error.type == "conversation_item_not_found"
