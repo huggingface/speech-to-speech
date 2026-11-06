@@ -41,6 +41,7 @@ from openai.types.realtime.response_content_part_added_event import Part as Adde
 from openai.types.realtime.response_content_part_done_event import Part as DoneContentPart
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
+from speech_to_speech.api.openai_realtime.runtime_config import validate_reasoning
 from speech_to_speech.api.openai_realtime.tool_followup import (
     TOOL_FOLLOWUP_ACK_LIMIT,
     TOOL_FOLLOWUP_COVERED,
@@ -799,6 +800,9 @@ class ResponseHandler(RealtimeBaseHandler):
                     message="Only string tool_choice values are supported for now (auto, required, none).",
                     _type="tool_choice_not_supported",
                 )
+            reasoning_error = validate_reasoning(event.response)
+            if reasoning_error is not None:
+                return self.make_error(message=reasoning_error, _type="invalid_request_error")
         metadata = event.response.metadata if event.response else None
         followup_ids = tool_call_ids(metadata.get(TOOL_FOLLOWUP_METADATA_KEY)) if metadata else set()
         if not is_out_of_band(event.response) and followup_ids and followup_ids <= st.answered_tool_call_ids.keys():

@@ -2678,6 +2678,7 @@ class TestFinishAudioResponse:
             "response_key": response_key,
             "stt_s": 0.181284123,
             "llm_s": 1.241907456,
+            "llm_first_tts_s": None,
             "llm_total_s": 1.241907456,
             "llm_rounds": 1,
             "tts_ttfa_s": 0.121775789,
