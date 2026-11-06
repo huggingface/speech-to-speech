@@ -85,9 +85,20 @@ def _to_chat_tool_choice(tool_choice: Any) -> ChatCompletionToolChoiceOptionPara
     return cast("ChatCompletionToolChoiceOptionParam", tool_choice)
 
 
-def _build_chat_optional_kwargs(req_tools: Any, req_tool_choice: Any) -> dict[str, Any]:
-    """Build Chat Completions tool arguments from the Responses-style session config."""
+def _build_chat_optional_kwargs(
+    req_tools: Any,
+    req_tool_choice: Any,
+    reasoning_effort: str | None = None,
+) -> dict[str, Any]:
+    """Build Chat Completions tool arguments from the Responses-style session config.
+
+    A client-selected ``reasoning_effort`` replaces the startup ``extra_body``,
+    matching the precedence of ``_build_extra_body`` (effort wins over the
+    provider-specific ``enable_thinking`` flag).
+    """
     optional_kwargs: dict[str, Any] = {}
+    if reasoning_effort:
+        optional_kwargs["extra_body"] = {"reasoning_effort": reasoning_effort}
     chat_tools = _to_chat_tools(req_tools)
     if chat_tools is not None:
         optional_kwargs["tools"] = chat_tools
@@ -170,8 +181,13 @@ def _request_chat_completions(
     timeout: Any,
     optional_kwargs: dict[str, Any],
 ) -> Any:
-    """Issue a Chat Completions request with consistent streaming usage accounting."""
+    """Issue a Chat Completions request with consistent streaming usage accounting.
+
+    ``optional_kwargs`` may carry an ``extra_body`` that replaces the startup one
+    for this request (a client-selected reasoning effort).
+    """
     create_kwargs = dict(optional_kwargs)
+    extra_body = create_kwargs.pop("extra_body", extra_body)
     if stream:
         create_kwargs["stream_options"] = {"include_usage": True}
     return client.chat.completions.create(
@@ -368,8 +384,13 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
     def _serialize(self, active_chat: Chat) -> list[dict[str, Any]]:
         return self._chat_messages(active_chat, audio_content_type=self.audio_content_type)
 
-    def _build_optional_kwargs(self, req_tools: Any, req_tool_choice: Any) -> dict[str, Any]:
-        return _build_chat_optional_kwargs(req_tools, req_tool_choice)
+    def _build_optional_kwargs(
+        self,
+        req_tools: Any,
+        req_tool_choice: Any,
+        reasoning_effort: str | None = None,
+    ) -> dict[str, Any]:
+        return _build_chat_optional_kwargs(req_tools, req_tool_choice, reasoning_effort)
 
     def _request(self, api_input: list[dict[str, Any]], optional_kwargs: dict[str, Any]) -> Any:
         return _request_chat_completions(

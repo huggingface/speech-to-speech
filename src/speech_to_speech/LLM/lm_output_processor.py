@@ -285,7 +285,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                     self._response_tts_language = detected or selected
                 self._response_language_resolved = True
             selected = self._response_selected_language
-            yield TTSInput(
+            tts_input = TTSInput(
                 text=part.text,
                 language_code=language_code,
                 selected_language=selected,
@@ -302,6 +302,19 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 response_key=response_key,
                 prefetch_transaction=lm_output.prefetch_transaction,
             )
+            store = getattr(self, "turn_latency_store", None)
+            tracker = store.get_response(response_key) if store is not None else None
+            transaction = lm_output.prefetch_transaction
+            if (
+                tracker is not None
+                and (transaction is None or not transaction.discarded)
+                and (
+                    self.speculative_turns is None
+                    or self.speculative_turns.is_latest(lm_output.turn_id, lm_output.turn_revision)
+                )
+            ):
+                tracker.record_llm_first_tts()
+            yield tts_input
 
     def on_session_end(self) -> None:
         self._reset_response()

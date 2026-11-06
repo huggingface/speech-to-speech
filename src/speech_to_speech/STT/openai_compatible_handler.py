@@ -11,7 +11,7 @@ import wave
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from threading import Event, Lock, RLock, Thread, current_thread
 from time import perf_counter
 from typing import Any, Iterator, Literal
@@ -30,6 +30,7 @@ from speech_to_speech.pipeline.messages import (
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
+from speech_to_speech.utils.request_tracing import HttpRequestContext, HttpRequestTrace
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ class TranscriptionRequestCancelled(RuntimeError):
 class HttpTranscriptionResult:
     text: str
     language: str | None = None
+    request_ids: tuple[str, ...] = field(default=(), repr=False, compare=False)
 
 
 @dataclass
@@ -65,6 +67,7 @@ class HttpTranscriptionOperation:
     response_format: str
     timeout_s: float
     extra_fields: dict[str, Any] | None = None
+    trace: HttpRequestTrace | None = field(default=None, repr=False)
     _cancelled: Event = field(default_factory=Event, init=False, repr=False)
     _transport_lock: Any = field(default_factory=Lock, init=False, repr=False)
     _cancel_reason: str = field(default="superseded", init=False, repr=False)
@@ -147,14 +150,20 @@ class HttpTranscriptionOperation:
         raise TranscriptionRequestCancelled(self._cancel_reason)
 
     async def _request_async(self) -> HttpTranscriptionResult:
+        trace = self.trace
         headers = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        if trace is not None:
+            headers.update(trace.headers())
         client = httpx.AsyncClient(timeout=self.timeout_s)
         try:
+            if trace is not None:
+                trace.dispatch()
             response = await client.post(self.endpoint_url, headers=headers, **self._request_kwargs())
             response.raise_for_status()
-            return self._parse_response(response.content, response.headers.get("content-type", ""))
+            result = self._parse_response(response.content, response.headers.get("content-type", ""))
+            return replace(result, request_ids=(trace.request_id,)) if trace is not None else result
         except httpx.HTTPStatusError as exc:
             raise TranscriptionRequestError(self._rejection_message(exc.response)) from exc
         except httpx.TimeoutException as exc:
@@ -245,6 +254,7 @@ class _TranscriptionRequest:
     operation: HttpTranscriptionOperation | None = None
     cancelled: bool = False
     elapsed_s: float | None = None
+    trace_context: HttpRequestContext | None = None
 
 
 @dataclass
@@ -356,7 +366,9 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         failed_requests: list[_TranscriptionRequest] = []
         failure_message = "transcription worker could not start"
         with self._request_lock:
-            request = _TranscriptionRequest(vad_audio, self._session_generation)
+            request = _TranscriptionRequest(
+                vad_audio, self._session_generation, trace_context=self._trace_context(vad_audio)
+            )
             if not self._request_is_current(request):
                 return
             for active in self._active.values():
@@ -478,6 +490,8 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         elapsed = perf_counter() - started_at_s
         request.elapsed_s = elapsed
         if self._publish_output(request, output):
+            if request.trace_context is not None:
+                request.trace_context.accepted_stt_result(result.request_ids)
             self._times.append(elapsed)
             logger.info(
                 "OpenAI-compatible STT request completed turn=%s rev=%s mode=%s in %.3fs",
@@ -496,12 +510,25 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             operation = self._make_operation(
                 audio, language=None if selected == "auto" else selected, use_setup_language=False
             )
+        if request.trace_context is None:
+            request.trace_context = self._trace_context(request.source)
+        operation.trace = HttpRequestTrace(request.trace_context)
         with self._request_lock:
             request.operation = operation
             if not self._request_is_current(request):
                 operation.cancel("superseded")
                 raise TranscriptionRequestCancelled("superseded")
         return operation.run(cancel_check=lambda: not self._request_is_current(request))
+
+    @staticmethod
+    def _trace_context(source: VADAudio) -> HttpRequestContext:
+        return HttpRequestContext(
+            "stt",
+            session_id=source.runtime_config.trace_session_id if source.runtime_config is not None else None,
+            turn_id=source.turn_id,
+            turn_revision=source.turn_revision,
+            mode="progressive" if source.mode == "progressive" else "final",
+        )
 
     @staticmethod
     def _audio_fingerprint(audio: np.ndarray) -> bytes:
@@ -584,7 +611,11 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             separator = "" if text and cjk(text[-1]) and cjk(part[0]) else " "
             text = f"{text}{separator if text else ''}{part}"
         detected = next((r.language for r in reversed(results) if r.language), language)
-        return HttpTranscriptionResult(text=text, language=detected)
+        return HttpTranscriptionResult(
+            text=text,
+            language=detected,
+            request_ids=tuple(dict.fromkeys(request_id for result in results for request_id in result.request_ids)),
+        )
 
     def _publish_failure(self, request: _TranscriptionRequest, message: str) -> None:
         if not self._request_is_current(request):

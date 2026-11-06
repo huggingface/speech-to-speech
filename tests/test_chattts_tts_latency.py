@@ -51,13 +51,13 @@ def test_stream_records_ttfa_before_resample_and_e2e_on_first_yield(monkeypatch,
     clock = [100.0]
     monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
 
-    def slow_resample(chunk, *, orig_sr, target_sr):
-        clock[0] = 100.40
-        # Keep length roughly stable for block assembly.
-        return chunk[: int(len(chunk) * target_sr / orig_sr)].astype(np.float32)
+    original_push = chatTTS_handler.soxr.ResampleStream.resample_chunk
 
-    # Replace the module attribute so lazy librosa/numba is never imported in tests.
-    monkeypatch.setattr(chatTTS_handler, "librosa", SimpleNamespace(resample=slow_resample))
+    def slow_push(self, pcm, **kwargs):
+        clock[0] = 100.40
+        return original_push(self, pcm, **kwargs)
+
+    monkeypatch.setattr(chatTTS_handler.soxr.ResampleStream, "resample_chunk", slow_push)
 
     def infer(*_a, **_k):
         clock[0] = 100.05
@@ -90,15 +90,6 @@ def test_stream_preserves_first_audio_across_later_segments(monkeypatch, chattts
     chatTTS_handler, ChatTTSHandler = chattts_modules
     clock = [50.0]
     monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
-    monkeypatch.setattr(
-        chatTTS_handler,
-        "librosa",
-        SimpleNamespace(
-            resample=lambda chunk, *, orig_sr, target_sr: chunk[: int(len(chunk) * target_sr / orig_sr)].astype(
-                np.float32
-            )
-        ),
-    )
 
     def first_infer(*_a, **_k):
         clock[0] = 50.08
