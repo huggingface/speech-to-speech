@@ -169,6 +169,35 @@ def test_retrieve_generated_assistant_by_wire_id(service, conn_id):
     assert "response_item" not in held.model_dump()
 
 
+def test_retrieve_completed_audio_reply_keeps_output_audio(service, conn_id):
+    service.handle_response_create(
+        conn_id, ResponseCreateEvent(type="response.create", response={"output_modalities": ["audio"]})
+    )
+    request = service.text_prompt_queue.get_nowait()
+    handler = object.__new__(_RecordingLocalHandler)
+    handler.cancel_scope = handler.speculative_turns = handler.compactor = None
+    handler.enable_lang_prompt = False
+    handler.tokenizer = SimpleNamespace(encode=lambda _text: [])
+    handler.emit_text = True
+    list(drive_llm(handler, request, service=service, conn_id=conn_id))
+    events = service.dispatch_pipeline_event(
+        conn_id, AssistantOutputEvent(parts=[AssistantTextPart(text="ok")], response_key=request.response_key)
+    )
+    wire_item_id = next(e.item.id for e in events if e.type == "response.output_item.added")
+    live = _retrieve(service, conn_id, wire_item_id)[0].item
+    assert [part.type for part in live.content] == ["output_audio"]
+
+    done = next(e for e in service.finish_response(conn_id) if e.type == "response.done")
+    assert [part.type for part in done.response.output[0].content] == ["output_audio"]
+    held_text = service._state(conn_id).runtime_config.chat.get_item(wire_item_id).content[0].text
+
+    retrieved = _retrieve(service, conn_id, wire_item_id)[0].item
+    assert retrieved.status == "completed"
+    assert [(part.type, part.transcript, part.text) for part in retrieved.content] == [
+        ("output_audio", held_text.strip(), None)
+    ]
+
+
 def test_chat_get_item_merges_aliased_provider_fragments():
     chat = Chat(10)
     before = [make_assistant_message("first"), make_assistant_message("second")]

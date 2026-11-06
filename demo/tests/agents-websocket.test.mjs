@@ -127,7 +127,20 @@ test("RealtimeSession covers the core GA flow over the stock WebSocket transport
   await waitFor(() => rawEvents.some((event) => event.type === "response.output_audio_transcript.done"));
   await waitFor(() => rawEvents.some((event) => event.type === "response.output_audio.delta"));
   await waitFor(() => audio.length > 0);
-  await waitFor(() => rawEvents.some((event) => event.type === "response.done" && event.response?.status === "completed"));
+  const firstDone = await waitFor(() => rawEvents.find(
+    (event) => event.type === "response.done" && event.response?.status === "completed",
+  ));
+  // Retrieving a finished audio reply must keep it an audio entry in history.
+  const reply = firstDone.response.output.find((item) => item.type === "message");
+  transport.sendEvent({ type: "conversation.item.retrieve", item_id: reply.id });
+  const retrievedReply = await waitFor(() => rawEvents.find(
+    (event) => event.type === "conversation.item.retrieved" && event.item?.id === reply.id,
+  ));
+  assert.deepEqual(retrievedReply.item.content.map((part) => part.type), ["output_audio"]);
+  const replyHistory = await waitFor(() => session.history.find(
+    (item) => item.itemId === reply.id && item.content?.[0]?.type === "output_audio",
+  ));
+  assert.ok(replyHistory.content[0].transcript);
 
   const completedBeforeInterrupt = rawEvents.filter((event) => event.type === "response.done").length;
   const audioBeforeInterrupt = audio.length;

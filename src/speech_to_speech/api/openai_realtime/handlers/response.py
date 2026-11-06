@@ -572,6 +572,20 @@ class ResponseHandler(RealtimeBaseHandler):
             ),
         )
 
+    def _record_audio_output_items(self, conn_id: str, output: list[ConversationItem]) -> None:
+        """Remember which delivered assistant messages were audio, bounded by retained history."""
+        st = self._state(conn_id)
+        retained_ids = st.runtime_config.chat.item_ids()
+        audio_ids = {item_id: None for item_id in st.audio_output_item_ids if item_id in retained_ids}
+        for item in output:
+            if (
+                isinstance(item, RealtimeConversationItemAssistantMessage)
+                and item.id is not None
+                and any(part.type == "output_audio" for part in item.content)
+            ):
+                audio_ids[item.id] = None
+        st.audio_output_item_ids = audio_ids
+
     @staticmethod
     def _response_voice_id(voice: object | None) -> str | None:
         """Return the protocol string for a built-in or custom voice."""
@@ -1054,6 +1068,8 @@ class ResponseHandler(RealtimeBaseHandler):
                     response=terminal_response,
                 )
             )
+            if not is_out_of_band(st.current_response_params):
+                self._record_audio_output_items(conn_id, terminal_response.output or [])
             tool_inputs = st.response_tool_inputs.pop(st.current_response_key or "", set())
             if status == "completed" and terminal_response.output and not is_out_of_band(st.current_response_params):
                 for call_id in sorted(tool_inputs):

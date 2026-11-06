@@ -277,6 +277,9 @@ class ConnState(BaseModel):
     # chat may hold different text (speaker annotations) or nothing (empty
     # transcripts), so conversation.item.retrieve answers from here.
     published_input_transcripts: dict[str, str] = Field(default_factory=dict)
+    # Delivered assistant messages that were audio. The chat holds their text,
+    # so retrieval restores the output_audio shape the client saw.
+    audio_output_item_ids: dict[str, None] = Field(default_factory=dict)
     current_response_params: RealtimeResponseCreateParams | None = None
     pending_assistant_item_id: Optional[str] = None
     pending_assistant_output_index: Optional[int] = None

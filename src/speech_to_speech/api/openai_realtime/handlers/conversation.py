@@ -22,6 +22,9 @@ from openai.types.realtime.conversation_item_input_audio_transcription_failed_ev
     Error as InputAudioTranscriptionError,
 )
 from openai.types.realtime.realtime_conversation_item_assistant_message import (
+    Content as AssistantContent,
+)
+from openai.types.realtime.realtime_conversation_item_assistant_message import (
     RealtimeConversationItemAssistantMessage,
 )
 from openai.types.realtime.realtime_conversation_item_function_call import (
@@ -278,7 +281,13 @@ class ConversationHandler(RealtimeBaseHandler):
                 # with its speaker. Return the input_audio item the client saw,
                 # with the transcript it was sent (null until it is published).
                 return self._user_audio_item(item_id, published.get(item_id))
-            return self._wire_item(held)
+            wire = self._wire_item(held)
+            if isinstance(wire, RealtimeConversationItemAssistantMessage) and item_id in st.audio_output_item_ids:
+                # The chat holds an audio reply as LLM text. Restore the
+                # output_audio part, joined the way the transcript streamed.
+                transcript = " ".join(part.text.strip() for part in wire.content if part.text and part.text.strip())
+                wire.content = [AssistantContent(type="output_audio", transcript=transcript)]
+            return wire
         if item_id in st.input_items:
             # Committed speech whose transcription has not finished yet.
             return self._user_audio_item(item_id, None)
