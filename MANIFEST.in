@@ -1,3 +1,7 @@
+include packages/smart-turn/pyproject.toml
+include packages/smart-turn/README.md
+include packages/smart-turn/LICENSE
+recursive-include packages/smart-turn/src *.py py.typed
 prune tests
 global-exclude __pycache__
 global-exclude *.py[cod]

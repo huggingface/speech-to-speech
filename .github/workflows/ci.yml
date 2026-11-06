@@ -113,13 +113,40 @@ jobs:
         with:
           version: "latest"
       - name: Build distributions
-        run: uv build
+        run: |
+          uv build packages/smart-turn --out-dir dist
+          uv build
       - name: Check package metadata
         run: uvx twine check --strict dist/*
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist
           path: dist/*
+
+  smart-turn-headless:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.14"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "latest"
+      - run: uv sync --project packages/smart-turn --group dev
+      - name: Check the minimum Transformers version
+        if: matrix.python-version == '3.11'
+        run: uv sync --project packages/smart-turn --group dev --upgrade-package 'transformers==4.57.6'
+      - run: uv run --project packages/smart-turn ruff check packages/smart-turn
+      - run: uv run --project packages/smart-turn ruff format --check packages/smart-turn
+      - run: uv run --project packages/smart-turn mypy packages/smart-turn/src
+      - run: uv run --project packages/smart-turn pytest -q packages/smart-turn/tests
+      - run: uv build packages/smart-turn --out-dir packages/smart-turn/dist
+      - run: uvx twine check --strict packages/smart-turn/dist/*
 
   # Optional OmniVoice compatibility checks live in omnivoice.yml.
   # Keep these checks focused on the default installation on every PR.
@@ -155,7 +182,8 @@ jobs:
           source .venv-smoke/bin/activate
           python -m pip install --upgrade pip
           wheel=$(find dist -name 'speech_to_speech-*.whl' -print -quit)
-          python -m pip install "${wheel}"
+          smart_turn_wheel=$(find dist -name 'speech_to_speech_smart_turn-*.whl' -print -quit)
+          python -m pip install "${wheel}" "${smart_turn_wheel}"
           python -m pip check
       - name: Run installed CLI smoke test
         shell: bash
