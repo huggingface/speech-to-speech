@@ -259,8 +259,9 @@ response does not assume an interrupted explanation was delivered.
   `output_audio_buffer.clear`: a clear alone leaves the active reply's history
   untouched.
 - An item cut this way becomes `incomplete` and its text is the heard prefix. No
-  marker is added to the text. An item with no heard audio is removed. Replies
-  that play to the end are unchanged.
+  marker is added to the text. An item with no heard audio is removed, so later
+  references to its id get `conversation_item_not_found`. Replies that play to
+  the end are unchanged.
 
 The server records each transcript part with the audio synthesized after it.
 Parts whose audio played completely are kept. In the part playing at the cutoff,
