@@ -116,6 +116,10 @@ DEFAULT_STARTUP_GREETING = (
 # Exposed to the browser through /api/config. Set an empty value to disable the
 # automatic greeting without changing the client bundle.
 STARTUP_GREETING = os.environ.get("STARTUP_GREETING", DEFAULT_STARTUP_GREETING).strip()
+# Whether the s2s backend accepts image input. A vision-capable model name is not
+# enough: e.g. llama.cpp without an mmproj rejects images. When off, the browser
+# neither starts the webcam nor offers the camera tool to the model.
+VISION = os.environ.get("VISION", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _webrtc_calls_url(s2s_url: str) -> str:
@@ -254,6 +258,7 @@ def config():
         "rtc": bool(SPEECH_TO_SPEECH_URL),
         "iceServers": RTC_ICE_SERVERS,
         "startupGreeting": STARTUP_GREETING,
+        "vision": VISION,
         "auth": AUTH_ENABLED,
     }
 
