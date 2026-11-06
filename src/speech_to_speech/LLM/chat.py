@@ -57,6 +57,8 @@ AUDIO_INPUT_HISTORY_PLACEHOLDER = "[User audio input]"
 # messages that arrive while it runs.
 # Client item IDs are nonempty, so this internal marker cannot collide with one.
 HISTORY_START_ANCHOR = ""
+# Replies removed as unheard that a later playback report can still restore.
+_UNHEARD_ASSISTANT_ITEM_LIMIT = 32
 
 
 class ChatItemError(Exception):
@@ -160,6 +162,9 @@ class Chat:
         self._provisional_generations: dict[str, tuple[set[str], set[str]]] = {}
         self._provisional_output_items: dict[str, list[tuple[str, str, str | None]]] = {}
         self._assistant_item_aliases: dict[str, set[str]] = {}
+        # Realtime item id of each reply removed as unheard -> ids of the items
+        # that preceded it, so a later playback report can put it back.
+        self._unheard_assistant_items: dict[str, list[str | None]] = {}
         self._deleted_tool_output_ids: set[str] = set()
         self._user_turn_count: int = 0
 
@@ -556,6 +561,8 @@ class Chat:
     def delete_item(self, item_id: str) -> SupportedItem | None:
         """Delete exactly one retained item and repair its history bookkeeping."""
         with self._lock:
+            # An explicit delete is final: a later playback report must not restore it.
+            self._unheard_assistant_items.pop(item_id, None)
             return self._delete_item_locked(item_id)
 
     def _delete_item_locked(self, item_id: str) -> SupportedItem | None:
@@ -650,9 +657,10 @@ class Chat:
         """Keep only *text*, the heard prefix, of one delivered assistant message.
 
         The message becomes ``incomplete``. Empty *text* removes it, so an
-        unheard reply is not replayed as delivered. Provider-native messages
-        are replaced by plain text; their reasoning companions are dropped as
-        :meth:`delete_item` does.
+        unheard reply is not replayed as delivered; non-empty *text* for a
+        message removed that way puts it back where it was. Provider-native
+        messages are replaced by plain text; their reasoning companions are
+        dropped as :meth:`delete_item` does.
         """
         with self._lock:
             target_ids = self._assistant_item_aliases.get(item_id, {item_id})
@@ -665,8 +673,23 @@ class Chat:
                 None,
             )
             if index is None:
-                return False
+                preceding = self._unheard_assistant_items.get(item_id)
+                if preceding is None or not text:
+                    return False
+                del self._unheard_assistant_items[item_id]
+                positions = {item.id: position for position, item in enumerate(self.buffer)}
+                anchors = [positions[i] + 1 for i in preceding if i in positions]
+                if (preceding and not anchors) or item_id in positions:
+                    # Its turn was evicted or compacted, or a new item took its id.
+                    return False
+                self.buffer.insert(max(anchors, default=0), self._heard_message_locked(item_id, text))
+                self._gen_counter += 1
+                self._compact_in_flight = False
+                return True
             if not text:
+                self._unheard_assistant_items[item_id] = [item.id for item in self.buffer[:index]]
+                while len(self._unheard_assistant_items) > _UNHEARD_ASSISTANT_ITEM_LIMIT:
+                    self._unheard_assistant_items.pop(next(iter(self._unheard_assistant_items)))
                 self._delete_item_locked(item_id)
                 return True
             message = self.buffer[index]
@@ -1255,6 +1278,7 @@ class Chat:
             self._user_turn_count = 0
             self._deleted_tool_output_ids.clear()
             self._assistant_item_aliases.clear()
+            self._unheard_assistant_items.clear()
 
     def close(self) -> None:
         """Permanently shut down the chat. In-flight compaction splice is suppressed.

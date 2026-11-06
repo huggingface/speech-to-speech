@@ -257,7 +257,8 @@ response does not assume an interrupted explanation was delivered.
 - A client that tracks playback can report its position with
   `conversation.item.truncate`. The position is measured against the item's
   original audio and replaces the server's estimate, so it can also restore
-  words the estimate removed, unless the estimate removed the whole item. The
+  words the estimate removed, or the whole item in its original place. An item
+  the client deleted with `conversation.item.delete` stays deleted. The
   browser demo, the packaged `local`/`talk` client, and the stock Agents SDK
   WebSocket transport from 0.20.0 (0.21.0 is pinned here) send it. Earlier SDK
   versions reset their playback position at `response.output_audio.done`,
@@ -272,8 +273,8 @@ response does not assume an interrupted explanation was delivered.
   untouched.
 - An item cut this way becomes `incomplete` and its text is the heard prefix. No
   marker is added to the text. An item with no heard audio is removed, so later
-  references to its id get `conversation_item_not_found`. Replies that play to
-  the end are unchanged.
+  references to its id get `conversation_item_not_found` until a playback
+  report restores it. Replies that play to the end are unchanged.
 
 The server records each transcript part with the audio synthesized after it.
 Parts whose audio played completely are kept. In the part playing at the cutoff,

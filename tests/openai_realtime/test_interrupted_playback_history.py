@@ -4,7 +4,11 @@ import asyncio
 import time
 from threading import Event as ThreadingEvent
 
-from openai.types.realtime import ConversationItemRetrieveEvent, ConversationItemTruncateEvent
+from openai.types.realtime import (
+    ConversationItemDeleteEvent,
+    ConversationItemRetrieveEvent,
+    ConversationItemTruncateEvent,
+)
 from openai.types.realtime.conversation_item import RealtimeConversationItemAssistantMessage
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText, ResponseReasoningItem
 from starlette.testclient import TestClient
@@ -491,3 +495,94 @@ def test_retrieve_of_a_reply_nobody_heard_reports_it_missing(service, conn_id):
 
     assert event.type == "error"
     assert event.error.type == "conversation_item_not_found"
+
+
+async def _estimate_removes_a_completed_reply():
+    """Cancel a fully sent two-second reply before any of it plays."""
+    unit, conn_id, transport, clock = _websocket_session()
+    service = unit.service
+    await _speak_over(transport, service, conn_id, [(FIRST, 2.0)])
+    service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=RESPONSE_KEY))
+    service.finish_response(conn_id, response_key=RESPONSE_KEY)
+    item_id = next(iter(service._state(conn_id).assistant_audio_segments))
+    await _cancel(unit, conn_id, transport)
+    assert _history(service, conn_id) == EARLIER_TURNS
+    # The user's next turn arrives before the client reports its position.
+    service._state(conn_id).runtime_config.chat.add_item(make_user_message("Wait"))
+    return unit, conn_id, item_id
+
+
+async def test_client_truncate_restores_a_reply_the_estimate_removed():
+    unit, conn_id, item_id = await _estimate_removes_a_completed_reply()
+
+    unit.service.handle_conversation_item_truncate(conn_id, _truncate(item_id, 800))
+
+    assert _history(unit.service, conn_id) == [
+        *EARLIER_TURNS,
+        ("assistant", "incomplete", "Sure, here are"),
+        ("user", None, "Wait"),
+    ]
+    request = unit.service._state(conn_id).runtime_config.chat.to_responses_api_chat()
+    assert request[-2]["id"].startswith("msg_")
+    # The restored reply is addressed by its Realtime id again.
+    unit.service.handle_conversation_item_truncate(conn_id, _truncate(item_id, 400))
+    assert _history(unit.service, conn_id)[-2] == ("assistant", "incomplete", "Sure,")
+
+
+async def test_client_truncate_does_not_restore_an_explicitly_deleted_reply():
+    unit, conn_id, item_id = await _estimate_removes_a_completed_reply()
+    unit.service.handle_conversation_item_delete(
+        conn_id,
+        ConversationItemDeleteEvent(type="conversation.item.delete", item_id=item_id),
+    )
+
+    unit.service.handle_conversation_item_truncate(conn_id, _truncate(item_id, 800))
+
+    assert _history(unit.service, conn_id) == [*EARLIER_TURNS, ("user", None, "Wait")]
+
+
+def _chat_with_unheard_reply(size=10):
+    chat = Chat(size=size)
+    chat.add_item(make_user_message("Hi"))
+    chat.add_item(make_assistant_message("Hello there, how can I help?"))
+    reply_id = chat.buffer[-1].id
+    assert chat.truncate_assistant_message(reply_id, "")
+    return chat, reply_id
+
+
+def test_unheard_reply_is_not_restored_once_its_turn_is_gone():
+    chat, reply_id = _chat_with_unheard_reply(size=1)
+    for text in ("Second", "Third", "Fourth"):
+        chat.add_item(make_user_message(text))
+    assert "Hi" not in str(chat.buffer)
+
+    assert not chat.truncate_assistant_message(reply_id, "Hello there")
+
+    assert all(item.role == "user" for item in chat.buffer)
+
+
+def test_unheard_reply_is_not_restored_over_a_new_item_with_its_id():
+    chat, reply_id = _chat_with_unheard_reply()
+    reused = make_user_message("Wait")
+    reused.id = reply_id
+    chat.add_item(reused)
+
+    assert not chat.truncate_assistant_message(reply_id, "Hello there")
+
+    assert [item.role for item in chat.buffer] == ["user", "user"]
+    assert chat.get_item(reply_id).role == "user"
+
+
+def test_restored_reply_can_be_removed_and_restored_again():
+    chat, reply_id = _chat_with_unheard_reply()
+    chat.add_item(make_user_message("Wait"))
+
+    assert chat.truncate_assistant_message(reply_id, "Hello there,")
+    assert chat.truncate_assistant_message(reply_id, "")
+    assert chat.truncate_assistant_message(reply_id, "Hello")
+
+    assert [(item.role, item.content[0].text) for item in chat.buffer] == [
+        ("user", "Hi"),
+        ("assistant", "Hello"),
+        ("user", "Wait"),
+    ]
