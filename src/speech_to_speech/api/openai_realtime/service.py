@@ -285,6 +285,8 @@ class ConnState(BaseModel):
     # pipeline-rate samples delivered after each. Truncation maps a playback
     # position back to the transcript the user heard.
     assistant_audio_segments: dict[str, list[list[Any]]] = Field(default_factory=dict)
+    # Played position (pipeline samples) each truncated assistant item was cut to.
+    assistant_audio_cuts: dict[str, int] = Field(default_factory=dict)
     # Keyed by output index so response.done can preserve interleaving with
     # assistant message items.
     pending_function_calls: dict[int, RealtimeConversationItemFunctionCall] = Field(default_factory=dict)

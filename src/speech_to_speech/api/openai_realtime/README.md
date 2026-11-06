@@ -242,17 +242,29 @@ response does not assume an interrupted explanation was delivered.
   last segment was still being synthesized, its full duration is estimated from
   the session's measured speaking rate, or 12 characters per second before one
   is measured. With no audio sent, no assistant message is kept.
-- WebSocket clients own playback and report its position with
-  `conversation.item.truncate`. A reply that finished generating while most of
-  its audio was still buffered is cut only if the client tracks playback past
-  `response.output_audio.done`. The browser demo and the packaged `local`/`talk`
-  client do. The stock Agents SDK WebSocket transport does from 0.20.0. Earlier
-  versions, including the 0.14.3 pinned here, reset their playback position at
-  that event. On server-VAD barge-in this server sends the cancelled response's
-  `response.output_audio.done` before `input_audio_buffer.speech_started`, so
-  those versions send no truncate. Their cancelled replies keep the transcript
-  of all audio already sent, not only what played. Newer versions need
-  `conversation.item.retrieve`, which this server does not implement yet.
+- Over WebSocket, the server estimates playback: it assumes the client plays
+  each audio chunk in real time from the moment it is sent. On server-VAD
+  barge-in with `interrupt_response` enabled, and on `response.cancel`, audio
+  sent but not yet played by that estimate is removed from the newest assistant
+  items. This covers clients that only flush their player and never send
+  `conversation.item.truncate`. The estimate assumes the client stops playback
+  at that point. It ignores network delay and the client's startup buffering
+  and output latency, so it can count a little more as heard than actually
+  played. A client that keeps playing after those events loses heard speech
+  from history instead.
+- A client that tracks playback can report its position with
+  `conversation.item.truncate`. The position is measured against the item's
+  original audio and replaces the server's estimate, so it can also restore
+  words the estimate removed, unless the estimate removed the whole item. The
+  browser demo and the packaged `local`/`talk` client send it. The stock Agents
+  SDK WebSocket transport does from 0.20.0. Earlier versions, including the
+  0.14.3 pinned here, reset their playback position at
+  `response.output_audio.done`, which this server sends before
+  `input_audio_buffer.speech_started` on server-VAD barge-in. They then send
+  no truncate and emit no `audio_interrupted`, so apps that flush their player
+  on that event keep playing the cancelled reply while its history is cut by
+  the estimate. Newer versions need `conversation.item.retrieve`, which this
+  server does not implement yet.
 - WebRTC playback is paced by the server. When barge-in, `response.cancel`, or
   `output_audio_buffer.clear` discards queued RTP audio, the discarded duration
   is removed from the newest assistant items. Send `response.cancel` before

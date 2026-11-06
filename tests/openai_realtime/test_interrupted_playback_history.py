@@ -1,13 +1,20 @@
 """History follows the assistant audio the user actually heard (#801)."""
 
+import asyncio
+import time
+from threading import Event as ThreadingEvent
+
 from openai.types.realtime import ConversationItemTruncateEvent
 from openai.types.realtime.conversation_item import RealtimeConversationItemAssistantMessage
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText, ResponseReasoningItem
+from starlette.testclient import TestClient
+from starlette.websockets import WebSocketState
 
+import speech_to_speech.api.openai_realtime.handlers.response as response_module
 import speech_to_speech.api.openai_realtime.websocket_router as router_module
-from speech_to_speech.api.openai_realtime.transports import SessionTransport
+from speech_to_speech.api.openai_realtime.transports import SessionTransport, WebSocketTransport
 from speech_to_speech.LLM.chat import Chat, ResponsesAssistantMessage, make_assistant_message, make_user_message
-from speech_to_speech.pipeline.events import AssistantOutputEvent, AssistantResponseDoneEvent
+from speech_to_speech.pipeline.events import AssistantOutputEvent, AssistantResponseDoneEvent, SpeechStartedEvent
 from speech_to_speech.pipeline.history import ResponseHistory
 from tests.openai_realtime.conftest import make_pipeline_unit
 
@@ -271,3 +278,184 @@ async def test_websocket_truncate_updates_history_without_an_acknowledgement():
     # unsupported conversation.item.retrieve, so the server stays silent.
     assert transport.sent == []
     assert _history(unit.service, conn_id)[-1] == ("assistant", "incomplete", "Sure, here are")
+
+
+# ── Clients that never send conversation.item.truncate ─────────────────────
+
+
+class _FakeWebSocket:
+    application_state = WebSocketState.CONNECTED
+
+    def __init__(self):
+        self.sent = []
+
+    async def send_json(self, data):
+        self.sent.append(data)
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 100.0
+
+    def __call__(self):
+        return self.now
+
+
+async def _speak_over(transport, service, conn_id, parts_with_seconds, *, complete=True):
+    """Like ``_speak``, but audio reaches the client through *transport*."""
+    chat = service._state(conn_id).runtime_config.chat
+    full_text = " ".join(text for text, _ in parts_with_seconds)
+    history = ResponseHistory.capture(
+        chat,
+        [make_assistant_message(full_text)],
+        after_item_id=chat.history_anchor_id(),
+        complete=complete,
+    )
+    for text, seconds in parts_with_seconds:
+        service.dispatch_pipeline_event(
+            conn_id,
+            AssistantOutputEvent(text=text, response_key=RESPONSE_KEY, history=history),
+        )
+        for _ in range(int(seconds * 10)):
+            await transport.send_audio_chunk(service, conn_id, b"\x00\x00" * (RATE // 10), RESPONSE_KEY)
+
+
+def _websocket_session():
+    unit = make_pipeline_unit()
+    conn_id = unit.service.register()
+    _start_conversation(unit.service, conn_id)
+    clock = _Clock()
+    transport = WebSocketTransport(_FakeWebSocket(), clock=clock)
+    return unit, conn_id, transport, clock
+
+
+async def _cancel(unit, conn_id, transport):
+    await router_module._dispatch_client_event(
+        unit,
+        conn_id,
+        {"type": "response.cancel"},
+        transport,
+        transport_kind="websocket",
+    )
+
+
+async def test_websocket_transport_estimates_audio_the_client_has_not_played():
+    clock = _Clock()
+    transport = WebSocketTransport(_FakeWebSocket(), clock=clock)
+    service = make_pipeline_unit().service
+    conn_id = service.register()
+
+    await transport.send_audio_chunk(service, conn_id, b"\x00\x00" * RATE * 2, RESPONSE_KEY)
+    clock.now += 0.5
+    assert transport.discard_pending_audio() == 1500.0
+    # The client flushed what was left, so nothing is pending any more.
+    assert transport.discard_pending_audio() == 0.0
+
+    # Audio that arrives after playback caught up starts a new playback run.
+    clock.now += 10
+    await transport.send_audio_chunk(service, conn_id, b"\x00\x00" * RATE, RESPONSE_KEY)
+    clock.now += 0.25
+    assert transport.discard_pending_audio() == 750.0
+
+
+async def test_websocket_cancel_without_truncate_cuts_a_completed_reply_to_playback():
+    """A client that only cancels and flushes its player (e.g. Reachy Mini)."""
+    unit, conn_id, transport, clock = _websocket_session()
+    service = unit.service
+    await _speak_over(transport, service, conn_id, [(FIRST, 2.0), (SECOND, 3.0)])
+    service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=RESPONSE_KEY))
+    service.finish_response(conn_id, response_key=RESPONSE_KEY)
+    assert _history(service, conn_id)[-1] == ("assistant", None, f"{FIRST} {SECOND}")
+
+    clock.now += 2.6
+    await _cancel(unit, conn_id, transport)
+
+    assert _history(service, conn_id) == [*EARLIER_TURNS, ("assistant", "incomplete", f"{FIRST} First,")]
+
+
+async def test_websocket_cancel_without_truncate_cuts_an_active_reply_to_playback():
+    unit, conn_id, transport, clock = _websocket_session()
+    service = unit.service
+    await _speak_over(transport, service, conn_id, [(FIRST, 2.0), (SECOND, 3.0)])
+    assert service._state(conn_id).in_response
+
+    clock.now += 0.8
+    await _cancel(unit, conn_id, transport)
+
+    assert _history(service, conn_id) == [*EARLIER_TURNS, ("assistant", "incomplete", "Sure, here are")]
+
+
+async def test_websocket_reply_that_finished_playing_is_kept_whole():
+    unit, conn_id, transport, clock = _websocket_session()
+    service = unit.service
+    await _speak_over(transport, service, conn_id, [(FIRST, 2.0), (SECOND, 3.0)])
+    service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=RESPONSE_KEY))
+    service.finish_response(conn_id, response_key=RESPONSE_KEY)
+
+    clock.now += 6.0
+    await _cancel(unit, conn_id, transport)
+
+    assert _history(service, conn_id)[-1] == ("assistant", None, f"{FIRST} {SECOND}")
+
+
+async def test_client_truncate_replaces_the_server_estimate():
+    unit, conn_id, transport, clock = _websocket_session()
+    service = unit.service
+    await _speak_over(transport, service, conn_id, [(FIRST, 2.0), (SECOND, 3.0)])
+    service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=RESPONSE_KEY))
+    service.finish_response(conn_id, response_key=RESPONSE_KEY)
+    item_id = next(iter(service._state(conn_id).assistant_audio_segments))
+    clock.now += 2.6
+    await _cancel(unit, conn_id, transport)
+    assert _history(service, conn_id)[-1] == ("assistant", "incomplete", f"{FIRST} First,")
+
+    # The client heard less than estimated: the cut is measured from the
+    # original segments, so 0.2 s of the second part keeps none of it.
+    service.handle_conversation_item_truncate(conn_id, _truncate(item_id, 2200))
+    assert _history(service, conn_id)[-1] == ("assistant", "incomplete", FIRST)
+
+    # The client heard more than estimated: its position wins.
+    service.handle_conversation_item_truncate(conn_id, _truncate(item_id, 4000))
+    assert _history(service, conn_id)[-1] == ("assistant", "incomplete", f"{FIRST} First, tighten the thesis so every")
+
+
+def test_forgotten_audio_items_drop_their_cuts(service, conn_id, monkeypatch):
+    monkeypatch.setattr(response_module, "_AUDIO_ITEM_HISTORY", 1)
+    st = service._state(conn_id)
+    service.response.record_audio_samples(conn_id, "item_old", RATE)
+    st.assistant_audio_cuts["item_old"] = RATE // 2
+
+    service.response.record_audio_samples(conn_id, "item_new", RATE)
+
+    assert list(st.assistant_audio_segments) == ["item_new"]
+    assert st.assistant_audio_cuts == {}
+
+
+def test_websocket_server_vad_barge_in_cuts_an_active_reply_to_playback():
+    """Server VAD cancels the reply before the unplayed audio is removed."""
+    unit = make_pipeline_unit()
+    stop_event = ThreadingEvent()
+    app = router_module.create_app(pool=[unit], stop_event=stop_event)
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/realtime") as ws:
+            ws.receive_json()  # session.created
+            assert unit.session is not None
+            conn_id = unit.session.session_id
+            service = unit.service
+            _start_conversation(service, conn_id)
+            clock = _Clock()
+            transport = WebSocketTransport(_FakeWebSocket(), clock=clock)
+            unit.session.transport = transport
+            asyncio.run(_speak_over(transport, service, conn_id, [(FIRST, 2.0), (SECOND, 3.0)]))
+            assert service._state(conn_id).in_response
+
+            clock.now += 0.8
+            unit.text_output_queue.put(SpeechStartedEvent())
+
+            chat = service._state(conn_id).runtime_config.chat
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and _history(service, conn_id)[-1][2] != "Sure, here are":
+                time.sleep(0.02)
+            assert _history(service, conn_id) == [*EARLIER_TURNS, ("assistant", "incomplete", "Sure, here are")]
+            assert chat.buffer[-1].role == "assistant"
+    stop_event.set()

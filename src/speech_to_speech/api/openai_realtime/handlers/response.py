@@ -979,12 +979,15 @@ class ResponseHandler(RealtimeBaseHandler):
     # ── Played assistant audio ────────────────────
 
     def _audio_segments(self, conn_id: str, item_id: str) -> list[list[Any]]:
-        segments_by_item = self._state(conn_id).assistant_audio_segments
+        st = self._state(conn_id)
+        segments_by_item = st.assistant_audio_segments
         segments = segments_by_item.get(item_id)
         if segments is None:
             segments = segments_by_item[item_id] = []
             while len(segments_by_item) > _AUDIO_ITEM_HISTORY:
-                segments_by_item.pop(next(iter(segments_by_item)))
+                oldest = next(iter(segments_by_item))
+                del segments_by_item[oldest]
+                st.assistant_audio_cuts.pop(oldest, None)
         return segments
 
     def _record_audio_text(self, conn_id: str, item_id: str, text: str) -> None:
@@ -1056,11 +1059,14 @@ class ResponseHandler(RealtimeBaseHandler):
             # only delivered speech, and a later truncate can cut it further.
             logger.debug("Ignoring truncation of in-progress assistant item %s", item_id)
             return
-        played_samples = max(0, played_samples)
-        if played_samples >= sum(segment[1] for segment in segments):
+        delivered = sum(segment[1] for segment in segments)
+        played_samples = min(max(0, played_samples), delivered)
+        if played_samples == st.assistant_audio_cuts.get(item_id, delivered):
             return
+        # Cuts are measured from the original segments, so a client position
+        # replaces an earlier server estimate instead of compounding it.
+        st.assistant_audio_cuts[item_id] = played_samples
         text = _heard_transcript(segments, played_samples)
-        st.assistant_audio_segments[item_id] = [[text, played_samples, played_samples]] if played_samples else []
         st.runtime_config.chat.truncate_assistant_message(item_id, text)
 
     def handle_conversation_item_truncate(self, conn_id: str, event: ConversationItemTruncateEvent) -> None:
@@ -1069,16 +1075,16 @@ class ResponseHandler(RealtimeBaseHandler):
         self._truncate_audio_item(conn_id, event.item_id, played_samples)
 
     def truncate_unplayed_audio(self, conn_id: str, unplayed_ms: float) -> None:
-        """Remove audio a server-paced transport discarded from the newest items."""
+        """Remove audio the client did not play from the newest items."""
         remaining = round(unplayed_ms * PIPELINE_SAMPLE_RATE / 1000)
         st = self._state(conn_id)
         for item_id, segments in reversed(list(st.assistant_audio_segments.items())):
             if remaining <= 0:
                 break
-            delivered = sum(segment[1] for segment in segments)
-            unplayed = min(remaining, delivered)
+            end = st.assistant_audio_cuts.get(item_id, sum(segment[1] for segment in segments))
+            unplayed = min(remaining, end)
             if unplayed:
-                self._truncate_audio_item(conn_id, item_id, delivered - unplayed)
+                self._truncate_audio_item(conn_id, item_id, end - unplayed)
                 remaining -= unplayed
 
     def finish_audio_output(

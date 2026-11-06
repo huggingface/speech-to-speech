@@ -497,8 +497,8 @@ async def _dispatch_client_event(
             await send_correlated(events)
 
     elif isinstance(event, ConversationItemTruncateEvent):
-        # WebSocket clients own playback and report where it stopped. Keep this
-        # acknowledgement-free: the stock Agents SDK answers
+        # The client's playback position replaces the server's estimate. Keep
+        # this acknowledgement-free: the stock Agents SDK answers
         # conversation.item.truncated with conversation.item.retrieve.
         service.handle_conversation_item_truncate(session_id, event)
 
@@ -993,11 +993,11 @@ def create_app(
                             active_cfg is None or active_cfg.interrupt_response_enabled
                         )
                         if interrupt_enabled and transport is not None:
-                            # Flush even when no response is active: the WebRTC
-                            # track can still hold unplayed audio from a response
-                            # whose done-sentinel was already observed —
+                            # Flush even when no response is active: the client
+                            # can still hold unplayed audio from a response whose
+                            # done-sentinel was already observed —
                             # finish_response() runs on the sentinel, not when
-                            # playback completes. No-op over WebSocket.
+                            # playback completes. WebSocket only estimates it.
                             unit.service.truncate_unplayed_audio(session_id, transport.discard_pending_audio())
                         if was_in_response or was_response_pending:
                             if interrupt_enabled:
