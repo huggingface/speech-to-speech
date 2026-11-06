@@ -51,18 +51,23 @@ test("history rewrites an interrupted reply to what the user heard", async (t) =
   assert.equal(await rows.nth(1).locator(".hist-body").isHidden(), true);
   assert.equal(await rows.nth(1).locator(".hist-note").textContent(), "Interrupted before you heard it");
 
-  // The reply's bubble, still on screen, shows the same text.
+  // The reply's bubble, still on screen, strikes through the words never said.
   const bubbles = page.locator(".bubble.assistant:not(.out)");
+  const struck = (bubble) => bubble.locator(".bubble-body s").allTextContents();
   assert.equal(await bubbles.count(), 2);
-  assert.equal(await bubbles.nth(0).locator(".bubble-body").textContent(), "Sure, here are");
-  assert.equal(await bubbles.nth(0).locator(".bubble-note").textContent(), "Interrupted");
-  assert.equal(await bubbles.nth(1).locator(".bubble-body").isHidden(), true);
-  assert.equal(await bubbles.nth(1).locator(".bubble-note").textContent(), "Interrupted before you heard it");
+  assert.equal(await bubbles.nth(0).locator(".bubble-body").textContent(), "Sure, here are five ways to improve it.");
+  assert.deepEqual(await struck(bubbles.nth(0)), ["five ways to improve it."]);
+  assert.deepEqual(await struck(bubbles.nth(1)), ["First, tighten the thesis."]);
+  assert.equal(await bubbles.locator(".bubble-note").count(), 0);
   if (process.env.S2S_UI_SCREENSHOTS) {
     await page.evaluate(() => chat._closePanel());
     await page.waitForTimeout(500);
     await page.screenshot({ path: `${process.env.S2S_UI_SCREENSHOTS}/interrupted-reply.png` });
   }
+  // A later correction is measured against the whole reply again.
+  await page.evaluate(() => chat.onAssistantHeard({ responseId: "r2", text: "First," }));
+  assert.deepEqual(await struck(bubbles.nth(1)), ["tighten the thesis."]);
+  assert.equal(await bubbles.nth(1).locator(".bubble-body").textContent(), "First, tighten the thesis.");
   // A faded bubble is not brought back.
   await page.evaluate(() => {
     const bubble = document.querySelector(".bubble.assistant");
@@ -71,5 +76,13 @@ test("history rewrites an interrupted reply to what the user heard", async (t) =
   });
   assert.equal(await bubbles.count(), 1);
   assert.equal(await rows.nth(0).locator(".hist-body").textContent(), "Sure,");
+  // Text that does not match the bubble is shown as is, with nothing struck.
+  await page.evaluate(() => {
+    chat.onTranscript({ role: "assistant", text: "Hello there.", partial: false, responseId: "r3" });
+    chat.onAssistantHeard({ responseId: "r3", text: "Goodbye" });
+  });
+  const latest = bubbles.last();
+  assert.equal(await latest.locator(".bubble-body").textContent(), "Goodbye");
+  assert.deepEqual(await struck(latest), []);
   await page.close();
 });

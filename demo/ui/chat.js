@@ -22,6 +22,21 @@ const WRENCH_PATH = `<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l
 const CHAT_BUBBLE_SVG = `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`;
 const EMPTY_STATE_HTML = `<div id="chat-empty" class="chat-empty">${CHAT_BUBBLE_SVG}<span class="chat-empty-title">No messages yet</span><span class="chat-empty-hint">Tap the orb and start talking</span></div>`;
 
+/**
+ * Length of the start of *shown* that matches *heard*, ignoring whitespace,
+ * or -1 when *heard* is not a prefix of it.
+ * @param {string} shown @param {string} heard
+ */
+function heardPrefixLength(shown, heard) {
+  let index = 0;
+  for (const char of heard.replace(/\s+/g, "")) {
+    while (index < shown.length && /\s/.test(shown[index])) index += 1;
+    if (shown[index] !== char) return -1;
+    index += 1;
+  }
+  return index;
+}
+
 export class ChatView {
   /**
    * @param {{ onUserAudioPlaybackChange?: (playing: boolean) => void }} [options]
@@ -430,20 +445,40 @@ export class ChatView {
       this._updateHistMsg(hist, detail.text, false);
       this._markHistInterrupted(hist, note);
     }
-    // A bubble still on screen shows the correction too; a faded one stays gone.
+    // A bubble still on screen strikes through the words that were never
+    // said; a faded one stays gone.
     const bubble = this._asstByResp.get(detail.responseId)?.bubble ?? this._bubbleByResp.get(detail.responseId);
     if (bubble?.isConnected && !bubble.classList.contains("out")) {
-      this._updateBubbleText(bubble, detail.text);
-      bubble.classList.add("interrupted");
-      let tag = bubble.querySelector(".bubble-note");
-      if (!tag) {
-        tag = document.createElement("div");
-        tag.className = "bubble-note";
-        bubble.appendChild(tag);
-      }
-      tag.textContent = note;
+      this._strikeUnheard(bubble, detail.text);
       this._bumpDismiss(bubble);
     }
+  }
+
+  /**
+   * Keep a bubble's full reply, striking through what follows the heard text.
+   * @param {HTMLElement} bubble @param {string} heard
+   */
+  _strikeUnheard(bubble, heard) {
+    const body = /** @type {HTMLElement | null} */ (bubble.querySelector(".bubble-body"));
+    if (!body) return;
+    // The text content still includes words struck by an earlier correction.
+    const shown = body.textContent || "";
+    const cut = heardPrefixLength(shown, heard);
+    if (cut < 0) {
+      this._updateBubbleText(bubble, heard);
+      return;
+    }
+    const kept = shown.slice(0, cut).trimEnd();
+    const unheard = shown.slice(cut).trim();
+    body.replaceChildren();
+    if (kept) body.append(kept);
+    if (unheard) {
+      const struck = document.createElement("s");
+      struck.className = "bubble-unheard";
+      struck.textContent = unheard;
+      body.append(kept ? " " : "", struck);
+    }
+    body.hidden = !shown;
   }
 
   /** Render a captured webcam frame in the transcript (the camera tool result).

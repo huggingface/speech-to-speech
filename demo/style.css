@@ -2423,18 +2423,9 @@ body.cam-on .footer {
 .hist-msg.interrupted .hist-body {
   opacity: 0.7;
 }
-.bubble-note {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 500;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+/* Words of an interrupted reply the user never heard. */
+.bubble-unheard {
   color: var(--text-faint);
-  margin-top: 4px;
-  text-align: right;
-}
-.bubble.interrupted .bubble-body {
-  opacity: 0.7;
 }
 
 /* Captured webcam frame shown in the transcript (camera tool result). */
