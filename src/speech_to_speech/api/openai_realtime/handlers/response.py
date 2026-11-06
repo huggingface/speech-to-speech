@@ -115,6 +115,20 @@ def _heard_transcript(segments: list[list[Any]], played_samples: int) -> str:
     return " ".join(part for part in heard if part)
 
 
+def _log_heard(item_id: str, segments: list[list[Any]], heard: str, source: str) -> None:
+    """Log what an interrupted reply keeps in model history."""
+    if logger.isEnabledFor(logging.DEBUG):
+        full = " ".join(segment[0] for segment in segments if segment[0])
+        logger.debug(
+            "Interrupted reply %s kept in history (%s): %r, dropped %d of %d chars",
+            item_id,
+            source,
+            heard,
+            max(0, len(full) - len(heard)),
+            len(full),
+        )
+
+
 class ResponseHandler(RealtimeBaseHandler):
     """Owns the response lifecycle: create, cancel, finish, and ID management."""
 
@@ -1065,7 +1079,7 @@ class ResponseHandler(RealtimeBaseHandler):
                 messages.append((item_id, text))
         return messages
 
-    def _truncate_audio_item(self, conn_id: str, item_id: str, played_samples: int) -> None:
+    def _truncate_audio_item(self, conn_id: str, item_id: str, played_samples: int, source: str) -> None:
         """Cut one ended assistant item's history to its first *played_samples*."""
         st = self._state(conn_id)
         segments = st.assistant_audio_segments.get(item_id)
@@ -1085,11 +1099,12 @@ class ResponseHandler(RealtimeBaseHandler):
         st.assistant_audio_cuts[item_id] = played_samples
         text = _heard_transcript(segments, played_samples)
         st.runtime_config.chat.truncate_assistant_message(item_id, text)
+        _log_heard(item_id, segments, text, source)
 
     def handle_conversation_item_truncate(self, conn_id: str, event: ConversationItemTruncateEvent) -> None:
         """Remove the unplayed part of an assistant reply from model history."""
         played_samples = event.audio_end_ms * PIPELINE_SAMPLE_RATE // 1000
-        self._truncate_audio_item(conn_id, event.item_id, played_samples)
+        self._truncate_audio_item(conn_id, event.item_id, played_samples, "client playback position")
 
     def truncate_unplayed_audio(self, conn_id: str, unplayed_ms: float) -> None:
         """Remove audio the client did not play from the newest items."""
@@ -1101,7 +1116,7 @@ class ResponseHandler(RealtimeBaseHandler):
             end = st.assistant_audio_cuts.get(item_id, sum(segment[1] for segment in segments))
             unplayed = min(remaining, end)
             if unplayed:
-                self._truncate_audio_item(conn_id, item_id, end - unplayed)
+                self._truncate_audio_item(conn_id, item_id, end - unplayed, "unplayed audio discarded")
                 remaining -= unplayed
 
     def finish_audio_output(
@@ -1245,6 +1260,7 @@ class ResponseHandler(RealtimeBaseHandler):
             # client truncate or WebRTC playback position can cut it further.
             for item_id, text in heard:
                 st.runtime_config.chat.add_heard_assistant_message(item_id, text, after_item_id=anchor)
+                _log_heard(item_id, st.assistant_audio_segments.get(item_id, []), text, "audio sent before cancel")
         # Apply any client items that arrived mid-generation now that in_response
         # is cleared and the generation's own write-back has landed. Done outside
         # the in_response guard so a stray terminal call still drains the buffer.

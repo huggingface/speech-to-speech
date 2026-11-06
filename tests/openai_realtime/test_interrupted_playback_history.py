@@ -1,6 +1,7 @@
 """History follows the assistant audio the user actually heard (#801)."""
 
 import asyncio
+import logging
 import time
 from threading import Event as ThreadingEvent
 
@@ -674,3 +675,20 @@ def test_unheard_reply_is_not_restored_once_compacted():
 
     assert not chat.truncate_assistant_message(greeting_id, "Welcome")
     assert [item.content[0].text for item in chat.buffer] == ["Earlier", "Summary"]
+
+
+def test_cut_replies_are_logged_at_debug(service, conn_id, caplog):
+    _start_conversation(service, conn_id)
+    item_id = _speak(service, conn_id, [(FIRST, 2.0)])
+
+    with caplog.at_level(logging.DEBUG, logger="speech_to_speech.api.openai_realtime.handlers.response"):
+        service.finish_response(conn_id, status="cancelled", reason="turn_detected")
+        service.handle_conversation_item_truncate(conn_id, _truncate(item_id, 800))
+
+    lines = [record.getMessage() for record in caplog.records if "kept in history" in record.getMessage()]
+    assert lines == [
+        f"Interrupted reply {item_id} kept in history (audio sent before cancel): 'Sure, here are five ways', "
+        "dropped 15 of 39 chars",
+        f"Interrupted reply {item_id} kept in history (client playback position): 'Sure,', dropped 34 of 39 chars",
+    ]
+    assert all(record.levelno == logging.DEBUG for record in caplog.records if "kept in history" in record.getMessage())
