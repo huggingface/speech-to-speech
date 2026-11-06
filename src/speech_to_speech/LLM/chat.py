@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Container, Sequence
 from copy import deepcopy
 from typing import Any, Literal, Union, cast
 
@@ -233,6 +233,7 @@ class Chat:
             return False
         removed = self.buffer[start:end]
         del self.buffer[start:end]
+        self._forget_unheard_in_locked({item.id for item in removed}, head_removed=start == 0)
         removed_call_ids: set[str] = set()
 
         def record_call(item: SupportedItem) -> None:
@@ -522,11 +523,14 @@ class Chat:
     def item_ids(self) -> set[str]:
         """IDs of retained items, including staged function calls."""
         with self._lock:
-            items: list[SupportedItem] = [*self.buffer, *self._pending_tool_calls.values()]
-            if self.init_chat_message is not None:
-                items.append(self.init_chat_message)
-            ids = {item.id for item in items if item.id is not None}
-            return ids | {wire_id for wire_id, message_ids in self._assistant_item_aliases.items() if message_ids & ids}
+            return self._item_ids_locked()
+
+    def _item_ids_locked(self) -> set[str]:
+        items: list[SupportedItem] = [*self.buffer, *self._pending_tool_calls.values()]
+        if self.init_chat_message is not None:
+            items.append(self.init_chat_message)
+        ids = {item.id for item in items if item.id is not None}
+        return ids | {wire_id for wire_id, message_ids in self._assistant_item_aliases.items() if message_ids & ids}
 
     def get_item(self, item_id: str) -> SupportedItem | None:
         """Return a copy of one retained item, resolving a delivered wire ID.
@@ -628,6 +632,18 @@ class Chat:
         self._compact_in_flight = False
         return removed
 
+    def _forget_unheard_in_locked(self, removed_ids: Container[str | None], *, head_removed: bool) -> None:
+        """Forget unheard replies whose turn left history; caller holds ``_lock``.
+
+        A removed reply belongs to the turn of the item just before it, or to
+        the head of history when nothing preceded it.
+        """
+        self._unheard_assistant_items = {
+            item_id: preceding
+            for item_id, preceding in self._unheard_assistant_items.items()
+            if not (preceding[-1] in removed_ids if preceding else head_removed)
+        }
+
     def _heard_message_locked(self, item_id: str, text: str) -> RealtimeConversationItemAssistantMessage:
         """Build an interrupted reply addressed by Realtime *item_id*; caller holds ``_lock``.
 
@@ -648,6 +664,7 @@ class Chat:
     def add_heard_assistant_message(self, item_id: str, text: str, *, after_item_id: str | None = None) -> None:
         """Add the heard part of an interrupted reply, addressed by its Realtime *item_id*."""
         with self._lock:
+            self._unheard_assistant_items.pop(item_id, None)
             self._add_item_locked(
                 self._heard_message_locked(item_id, text),
                 insert_at=self._turn_insertion_index_locked(after_item_id),
@@ -663,6 +680,21 @@ class Chat:
         dropped as :meth:`delete_item` does.
         """
         with self._lock:
+            preceding = self._unheard_assistant_items.get(item_id)
+            if preceding is not None:
+                # The reply was removed as unheard. An item holding its id now
+                # is a different item, which its playback report must not edit.
+                if not text or item_id in self._item_ids_locked():
+                    return False
+                positions = {item.id: position for position, item in enumerate(self.buffer)}
+                del self._unheard_assistant_items[item_id]
+                anchors = [positions[i] + 1 for i in preceding if i in positions]
+                if preceding and not anchors:
+                    return False  # Its turn was evicted or compacted.
+                self.buffer.insert(max(anchors, default=0), self._heard_message_locked(item_id, text))
+                self._gen_counter += 1
+                self._compact_in_flight = False
+                return True
             target_ids = self._assistant_item_aliases.get(item_id, {item_id})
             index = next(
                 (
@@ -673,19 +705,7 @@ class Chat:
                 None,
             )
             if index is None:
-                preceding = self._unheard_assistant_items.get(item_id)
-                if preceding is None or not text:
-                    return False
-                del self._unheard_assistant_items[item_id]
-                positions = {item.id: position for position, item in enumerate(self.buffer)}
-                anchors = [positions[i] + 1 for i in preceding if i in positions]
-                if (preceding and not anchors) or item_id in positions:
-                    # Its turn was evicted or compacted, or a new item took its id.
-                    return False
-                self.buffer.insert(max(anchors, default=0), self._heard_message_locked(item_id, text))
-                self._gen_counter += 1
-                self._compact_in_flight = False
-                return True
+                return False
             if not text:
                 self._unheard_assistant_items[item_id] = [item.id for item in self.buffer[:index]]
                 while len(self._unheard_assistant_items) > _UNHEARD_ASSISTANT_ITEM_LIMIT:
@@ -1509,6 +1529,7 @@ class Chat:
             asst_msg.id = _generate_id("msg")
 
             self.buffer = [user_msg, asst_msg, *remaining]
+            self._forget_unheard_in_locked(drop_ids, head_removed=True)
             self._user_turn_count = sum(1 for x in self.buffer if isinstance(x, RealtimeConversationItemUserMessage))
             logger.info(
                 "Chat compaction applied: buffer now %d item(s), %d user turn(s)",

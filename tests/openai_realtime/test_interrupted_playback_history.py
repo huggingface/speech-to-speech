@@ -17,7 +17,13 @@ from starlette.websockets import WebSocketState
 import speech_to_speech.api.openai_realtime.handlers.response as response_module
 import speech_to_speech.api.openai_realtime.websocket_router as router_module
 from speech_to_speech.api.openai_realtime.transports import SessionTransport, WebSocketTransport
-from speech_to_speech.LLM.chat import Chat, ResponsesAssistantMessage, make_assistant_message, make_user_message
+from speech_to_speech.LLM.chat import (
+    Chat,
+    CompactionResult,
+    ResponsesAssistantMessage,
+    make_assistant_message,
+    make_user_message,
+)
 from speech_to_speech.pipeline.events import AssistantOutputEvent, AssistantResponseDoneEvent, SpeechStartedEvent
 from speech_to_speech.pipeline.history import ResponseHistory
 from tests.openai_realtime.conftest import make_pipeline_unit
@@ -586,3 +592,53 @@ def test_restored_reply_can_be_removed_and_restored_again():
         ("assistant", "Hello"),
         ("user", "Wait"),
     ]
+
+
+def test_unheard_reply_is_not_restored_over_a_new_assistant_message_with_its_id():
+    chat, reply_id = _chat_with_unheard_reply()
+    reused = make_assistant_message("A new unrelated assistant message")
+    reused.id = reply_id
+    chat.add_item(reused)
+
+    # Late playback reports for the removed reply's audio leave it untouched.
+    assert not chat.truncate_assistant_message(reply_id, "Hello there")
+    assert not chat.truncate_assistant_message(reply_id, "")
+
+    assert [(item.role, item.status, item.content[0].text) for item in chat.buffer] == [
+        ("user", None, "Hi"),
+        ("assistant", None, "A new unrelated assistant message"),
+    ]
+
+
+def _chat_with_unheard_greeting():
+    """An unheard greeting that opened the conversation, before any user turn."""
+    chat = Chat(size=1)
+    chat.add_item(make_assistant_message("Welcome!"))
+    greeting_id = chat.buffer[0].id
+    assert chat.truncate_assistant_message(greeting_id, "")
+    return chat, greeting_id
+
+
+def test_unheard_first_reply_is_not_restored_once_evicted():
+    chat, greeting_id = _chat_with_unheard_greeting()
+    for text in ("First", "Second", "Third", "Fourth"):
+        chat.add_item(make_user_message(text))
+
+    assert not chat.truncate_assistant_message(greeting_id, "Welcome")
+
+    assert all(item.role == "user" for item in chat.buffer)
+
+
+def test_unheard_reply_is_not_restored_once_compacted():
+    chat, greeting_id = _chat_with_unheard_greeting()
+    chat.add_item(make_user_message("First"))
+    first_id = chat.buffer[0].id
+
+    chat._apply_compaction(
+        CompactionResult(user_summary="Earlier", assistant_summary="Summary"),
+        {first_id},
+        chat._gen_counter,
+    )
+
+    assert not chat.truncate_assistant_message(greeting_id, "Welcome")
+    assert [item.content[0].text for item in chat.buffer] == ["Earlier", "Summary"]
