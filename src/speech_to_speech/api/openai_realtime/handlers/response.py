@@ -32,6 +32,7 @@ from openai.types.realtime.realtime_response_status import Error as RealtimeResp
 from openai.types.realtime.realtime_response_status import RealtimeResponseStatus
 from openai.types.realtime.realtime_response_usage import RealtimeResponseUsage
 from openai.types.realtime.realtime_response_usage_input_token_details import (
+    CachedTokensDetails,
     RealtimeResponseUsageInputTokenDetails,
 )
 from openai.types.realtime.realtime_response_usage_output_token_details import (
@@ -556,6 +557,8 @@ class ResponseHandler(RealtimeBaseHandler):
                 input_token_details=RealtimeResponseUsageInputTokenDetails(
                     audio_tokens=0,
                     cached_tokens=0,
+                    # The Agents SDK (>= 0.21) rejects a null entry here.
+                    cached_tokens_details=CachedTokensDetails(audio_tokens=0, image_tokens=0, text_tokens=0),
                     image_tokens=0,
                     text_tokens=st.response_usage.input_tokens,
                 ),

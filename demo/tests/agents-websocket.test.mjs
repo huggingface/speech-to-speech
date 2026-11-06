@@ -110,7 +110,20 @@ test("RealtimeSession covers the core GA flow over the stock WebSocket transport
   await waitFor(async () => (await state(server.http)).inputChunks > 0);
 
   await post(server.http, "/test/voice");
-  await waitFor(() => rawEvents.some((event) => event.type === "conversation.item.input_audio_transcription.completed"));
+  const transcribed = await waitFor(() => rawEvents.find(
+    (event) => event.type === "conversation.item.input_audio_transcription.completed",
+  ));
+  // The SDK refreshes each transcribed user item with conversation.item.retrieve.
+  const retrieved = await waitFor(() => rawEvents.find(
+    (event) => event.type === "conversation.item.retrieved" && event.item?.id === transcribed.item_id,
+  ));
+  assert.deepEqual(
+    retrieved.item.content.map((part) => [part.type, part.transcript]),
+    [["input_audio", transcribed.transcript]],
+  );
+  await waitFor(() => session.history.some(
+    (item) => item.itemId === transcribed.item_id && item.content?.[0]?.transcript === transcribed.transcript,
+  ));
   await waitFor(() => rawEvents.some((event) => event.type === "response.output_audio_transcript.done"));
   await waitFor(() => rawEvents.some((event) => event.type === "response.output_audio.delta"));
   await waitFor(() => audio.length > 0);

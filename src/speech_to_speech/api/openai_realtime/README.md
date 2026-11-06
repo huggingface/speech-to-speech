@@ -82,6 +82,7 @@ flowchart LR
 | `session.update` | Deep-merge session config (instructions, tools, voice, turn detection, audio format, reasoning effort). |
 | `conversation.item.create` | Inject `input_text` or `function_call_output` into the LLM context without triggering generation. |
 | `conversation.item.truncate` | Accepted for stock WebSocket SDK interruption. Playback is client-owned, while an explicit `response.cancel` or automatic server-VAD cancellation already discards provisional generation, so this is an acknowledgement-free no-op. |
+| `conversation.item.retrieve` | Return the server's current copy of a user, assistant, or function item the client has seen. Speech transcribed by the STT stage comes back as `input_audio` with its transcript and no audio bytes. Unknown IDs get an `error` with type `conversation_item_not_found`. |
 | `response.create` | Trigger LLM generation. Supports per-response `instructions`, `tool_choice`, and `reasoning` overrides. |
 | `response.cancel` | Cancel the in-progress or queued response and re-enable listening. |
 
@@ -95,6 +96,7 @@ flowchart LR
 | `input_audio_buffer.speech_started` | VAD detected user speech. |
 | `input_audio_buffer.speech_stopped` | End of user speech segment. |
 | `conversation.item.created` | Acknowledges injected `input_text` from `conversation.item.create`. |
+| `conversation.item.retrieved` | Answers `conversation.item.retrieve` with the full item. |
 | `conversation.item.input_audio_transcription.delta` | Incremental transcript text for the active input-audio content part (when live transcription is enabled). |
 | `conversation.item.input_audio_transcription.completed` | Final transcript for the user turn (with duration usage). |
 | `speech_to_speech.input_audio_transcription.snapshot` | Cumulative, replaceable speculative transcript hypothesis for the active input item (opt-in via `session.extensions`). |
@@ -206,7 +208,7 @@ uv run pytest tests/test_provider_response_status.py -q
 
 ### Official Agents SDK compatibility
 
-CI pins `@openai/agents` 0.14.3 and runs independent integration jobs against
+CI pins `@openai/agents` 0.21.0 and runs independent integration jobs against
 the SDK's stock `OpenAIRealtimeWebSocket` and `OpenAIRealtimeWebRTC`
 transports. Both use a normal `RealtimeSession` with only its endpoint URL
 changed.
@@ -226,7 +228,7 @@ Unlisted events, hosted features, and every future SDK behavior are not implied
 to be supported. The browser demo uses the same stock transports through a
 narrow adapter; its lower-level transport hooks only feed visualization,
 WebSocket PCM playback/replay, and existing UI events. One pinned-SDK gap is
-handled there as well: `@openai/agents` 0.14.3 omits `tools` when the updated
+handled there as well: `@openai/agents` 0.21.0 still omits `tools` when the updated
 list is empty, so the adapter uses the stock transport's `sendEvent` hook for
 an explicit `session.update` with `tools: []`. HF queueing, authentication,
 metering, camera capture, and device selection remain outside the Realtime

@@ -5,6 +5,7 @@ import logging
 from typing import TYPE_CHECKING, Literal
 
 from openai.types.realtime import (
+    ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionFailedEvent,
     InputAudioBufferAppendEvent,
     InputAudioBufferCommittedEvent,
@@ -263,6 +264,13 @@ class AudioHandler(RealtimeBaseHandler):
                 )
             )
         if pending.transcription is not None:
+            if (
+                isinstance(pending.transcription, ConversationItemInputAudioTranscriptionCompletedEvent)
+                and not pending.transcription.transcript
+            ):
+                st.empty_input_item_ids[item_id] = None
+                while len(st.empty_input_item_ids) > 128:
+                    st.empty_input_item_ids.pop(next(iter(st.empty_input_item_ids)))
             events.append(pending.transcription)
             pending.transcription = None
         if pending.input_closed:
