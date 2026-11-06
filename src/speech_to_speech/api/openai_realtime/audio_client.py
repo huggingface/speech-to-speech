@@ -30,6 +30,7 @@ from urllib.parse import urlsplit, urlunsplit
 from jsonschema import SchemaError, ValidationError
 from jsonschema.validators import validator_for
 from openai import AsyncOpenAI
+from rich.cells import cell_len
 from rich.console import Console
 from websockets.exceptions import ConnectionClosed
 
@@ -367,6 +368,33 @@ class PlaybackBuffer:
             return len(self._audio)
 
 
+# Retrieve requests the client sends to learn what an interrupted reply left in history.
+_HEARD_TEXT_EVENT_PREFIX = "heard_text_"
+# Assistant lines remembered for comparison with their heard text.
+_ASSISTANT_LINE_HISTORY = 32
+
+
+class _AssistantLineGuard(logging.Handler):
+    """Note that log output followed the last assistant line."""
+
+    def __init__(self, renderer: _FriendlyEventRenderer) -> None:
+        super().__init__()
+        self._renderer = renderer
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self._renderer.last_assistant_line = None
+
+
+def _heard_text_event_id(item_id: str) -> str:
+    return f"{_HEARD_TEXT_EVENT_PREFIX}{item_id}"
+
+
+def _assistant_item_text(item: Any) -> str:
+    """Join an assistant item's transcript or text parts the way they streamed."""
+    parts = (getattr(part, "transcript", None) or getattr(part, "text", None) for part in item.content or [])
+    return " ".join(part.strip() for part in parts if part and part.strip())
+
+
 class _FriendlyEventRenderer:
     def __init__(self, *, conversation_only: bool = False, console: Console | None = None) -> None:
         self.conversation_only = conversation_only
@@ -381,11 +409,16 @@ class _FriendlyEventRenderer:
         self.streamed_assistant_transcripts: set[_AssistantTranscriptStream] = set()
         self.status = ""
         self.status_visible = False
+        self.live_assistant_text = ""
+        self.assistant_text_by_item: dict[str, str] = {}
+        # (item id, terminal rows) of an assistant line when it is the last output.
+        self.last_assistant_line: tuple[str, int] | None = None
 
     def print_conversation(self, text: str, *, style: str, end: str = "\n") -> None:
+        self.last_assistant_line = None
         self._clear_status()
         if self.conversation_only:
-            self.console.print(text, style=style, end=end, markup=False, highlight=False, soft_wrap=True)
+            self.console.print(text, style=style, end=end, markup=False, emoji=False, highlight=False, soft_wrap=True)
         else:
             print(text, end=end, flush=True)
         if end == "\n":
@@ -465,8 +498,10 @@ class _FriendlyEventRenderer:
                 return
             self.print_conversation("ASSISTANT: ", style="green", end="")
             self.live_assistant_stream = stream_key
+            self.live_assistant_text = ""
         self.streamed_assistant_transcripts.add(stream_key)
         self.print_conversation(delta, style="green", end="")
+        self.live_assistant_text += delta
 
     def render_assistant_text_done(self, event: Any) -> None:
         stream_key = self._assistant_stream_key(event)
@@ -477,12 +512,48 @@ class _FriendlyEventRenderer:
             return
         self.clear_live_user_text()
         self.finish_live_assistant_text()
-        self.print_conversation(f"ASSISTANT: {event.transcript or ''}", style="green")
+        transcript = event.transcript or ""
+        self.print_conversation(f"ASSISTANT: {transcript}", style="green")
+        self._remember_assistant_line(getattr(event, "item_id", None), transcript)
 
     def finish_live_assistant_text(self) -> None:
         if self.live_assistant_stream is not None:
+            item_id = self.live_assistant_stream[1]
             self.live_assistant_stream = None
             self.print_conversation("", style="green")
+            self._remember_assistant_line(item_id, self.live_assistant_text)
+            self.live_assistant_text = ""
+
+    def _remember_assistant_line(self, item_id: str | None, text: str) -> None:
+        if item_id is None:
+            return
+        self.assistant_text_by_item.pop(item_id, None)
+        self.assistant_text_by_item[item_id] = text
+        while len(self.assistant_text_by_item) > _ASSISTANT_LINE_HISTORY:
+            self.assistant_text_by_item.pop(next(iter(self.assistant_text_by_item)))
+        width = max(1, self.console.width)
+        rows = sum(max(1, -(-cell_len(row.expandtabs(8)) // width)) for row in f"ASSISTANT: {text}".split("\n"))
+        self.last_assistant_line = (item_id, rows)
+
+    def render_heard_assistant_text(self, item_id: str, heard: str) -> None:
+        """Show the part of an interrupted reply that the model history kept.
+
+        The reply's line is redrawn in place while it is still the last line on
+        a terminal; otherwise the heard text is printed as a new line.
+        """
+        shown = self.assistant_text_by_item.get(item_id)
+        if shown is not None and " ".join(shown.split()) == " ".join(heard.split()):
+            return
+        self.clear_live_user_text()
+        self.finish_live_assistant_text()
+        last = self.last_assistant_line
+        if self.conversation_only and self.console.is_terminal and last is not None and last[0] == item_id:
+            self._clear_status()
+            self.console.file.write(f"\x1b[{last[1]}F\x1b[J")
+            self.console.file.flush()
+        self.assistant_text_by_item.pop(item_id, None)
+        line = f"ASSISTANT: {heard} [interrupted]" if heard else "ASSISTANT: [interrupted, nothing heard]"
+        self.print_conversation(line, style="green")
 
     def reset_assistant_text(self) -> None:
         self.finish_live_assistant_text()
@@ -507,6 +578,7 @@ def handle_server_event(
 
     if print_json:
         renderer.finish_live_assistant_text()
+        renderer.last_assistant_line = None
         try:
             print(f"EVENT: {event.model_dump_json()}", flush=True)
         except Exception:
@@ -617,6 +689,17 @@ def handle_server_event(
             renderer.print_conversation(f"ERROR: response {event.response.status}", style="red")
     elif event.type == "output_audio_buffer.cleared":
         playback.clear()
+    elif event.type == "conversation.item.retrieved":
+        item = event.item
+        if getattr(item, "role", None) == "assistant" and item.id is not None:
+            renderer.render_heard_assistant_text(item.id, _assistant_item_text(item))
+    elif (
+        event.type == "error"
+        and event.error.type == "conversation_item_not_found"
+        and (getattr(event.error, "event_id", None) or "").startswith(_HEARD_TEXT_EVENT_PREFIX)
+    ):
+        # The interrupted reply was removed from history: none of it was heard.
+        renderer.render_heard_assistant_text(event.error.event_id.removeprefix(_HEARD_TEXT_EVENT_PREFIX), "")
     elif event.type == "error":
         renderer.clear_live_user_text()
         renderer.finish_live_assistant_text()
@@ -660,8 +743,14 @@ class _ToolCoordinatorError(RuntimeError):
 class _ToolCallCoordinator:
     """Execute declared tools without blocking event reception or racing responses."""
 
-    def __init__(self, conn: Any, config: RealtimeAudioClientConfig) -> None:
+    def __init__(
+        self,
+        conn: Any,
+        config: RealtimeAudioClientConfig,
+        report: Callable[[str], None] | None = None,
+    ) -> None:
         self._conn = conn
+        self._report = report or (lambda line: print(line, flush=True))
         self._executor = config.tool_executor
         self._tool_validators = _validate_tool_config(config.tools, self._executor)
         self._default_create_response = config.tool_response_create
@@ -777,7 +866,7 @@ class _ToolCallCoordinator:
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"
             log_exception(logger, f"Local tool {display_name} failed", exc, level=logging.DEBUG)
-            print(f"TOOL ERROR: {display_name} call_id={call_id}: {message}", flush=True)
+            self._report(f"TOOL ERROR: {display_name} call_id={call_id}: {message}")
             output = json.dumps({"error": message})
             create_response = True
         return _ToolExecutionResult(call_id=call_id, output=output, create_response=create_response)
@@ -850,7 +939,7 @@ class _ToolCallCoordinator:
     def _schedule_call(self, response_id: str, call: Any) -> None:
         call_id = getattr(call, "call_id", None)
         if not isinstance(call_id, str) or not call_id:
-            print("TOOL ERROR: received a call without call_id; cannot return an output", flush=True)
+            self._report("TOOL ERROR: received a call without call_id; cannot return an output")
             return
         batch = self._batch(response_id)
         if call_id in batch.call_ids:
@@ -1362,7 +1451,11 @@ async def _run_audio_session(
         playback = worker.playback
         audio_context = worker
     renderer = _FriendlyEventRenderer(conversation_only=config.conversation_only)
-    tool_calls = _ToolCallCoordinator(conn, config)
+    tool_calls = _ToolCallCoordinator(conn, config, lambda line: renderer.print_conversation(line, style="red"))
+    # Log records reach the same terminal, so an assistant line they follow is
+    # no longer the last output and must not be redrawn in place.
+    output_guard = _AssistantLineGuard(renderer)
+    logging.getLogger().addHandler(output_guard)
 
     voices = VoiceSelection(conn, config, renderer.show_status) if len(config.voice_choices) > 1 else None
 
@@ -1415,6 +1508,14 @@ async def _run_audio_session(
                         "item_id": item_id,
                         "content_index": content_index,
                         "audio_end_ms": audio_end_ms,
+                    }
+                )
+                # The answer carries the heard text the model history kept.
+                await conn.send(
+                    {
+                        "type": "conversation.item.retrieve",
+                        "event_id": _heard_text_event_id(item_id),
+                        "item_id": item_id,
                     }
                 )
 
@@ -1480,6 +1581,7 @@ async def _run_audio_session(
         try:
             await tool_calls.close()
         finally:
+            logging.getLogger().removeHandler(output_guard)
             streams.close()
             renderer.clear_live_user_text()
             renderer.reset_assistant_text()

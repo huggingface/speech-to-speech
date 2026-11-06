@@ -2297,7 +2297,7 @@ async def test_barge_in_tells_the_server_how_much_assistant_audio_played(monkeyp
 
         async def send(self, event):
             sent.append(event)
-            if event["type"] == "conversation.item.truncate":
+            if event["type"] == "conversation.item.retrieve":
                 stop.set()
 
         async def recv(self):
@@ -2316,8 +2316,16 @@ async def test_barge_in_tells_the_server_how_much_assistant_audio_played(monkeyp
         2,
     )
 
-    # The speaker callback never ran, so none of the reply was heard.
-    assert sent == [{"type": "conversation.item.truncate", "item_id": "item_1", "content_index": 0, "audio_end_ms": 0}]
+    # The speaker callback never ran, so none of the reply was heard. The
+    # client then asks for the item to show what the model history kept.
+    assert sent == [
+        {"type": "conversation.item.truncate", "item_id": "item_1", "content_index": 0, "audio_end_ms": 0},
+        {
+            "type": "conversation.item.retrieve",
+            "event_id": audio_client_module._heard_text_event_id("item_1"),
+            "item_id": "item_1",
+        },
+    ]
 
 
 def test_playback_buffer_counts_audio_played_before_an_underrun():
@@ -2331,3 +2339,220 @@ def test_playback_buffer_counts_audio_played_before_an_underrun():
     playback.clear()
 
     assert interrupted == [[("item_slow", 0, 400)]]
+
+
+def _terminal_renderer(width=40):
+    from io import StringIO
+
+    from rich.console import Console
+
+    output = StringIO()
+    terminal = Console(file=output, force_terminal=True, no_color=True, width=width)
+    return _FriendlyEventRenderer(conversation_only=True, console=terminal), output
+
+
+def _stream_assistant(renderer, text, item_id="item_1"):
+    renderer.render_assistant_text_delta(
+        SimpleNamespace(delta=text, response_id="r", item_id=item_id, output_index=0, content_index=0)
+    )
+    renderer.finish_live_assistant_text()
+
+
+def _retrieved(item_id, transcript, status="incomplete"):
+    return SimpleNamespace(
+        type="conversation.item.retrieved",
+        item=SimpleNamespace(
+            id=item_id,
+            role="assistant",
+            status=status,
+            content=[SimpleNamespace(type="output_audio", transcript=transcript, text=None)],
+        ),
+    )
+
+
+def test_interrupted_assistant_line_is_rewritten_to_the_heard_text():
+    renderer, output = _terminal_renderer()
+    _stream_assistant(renderer, "Sure, here are five ways to improve it.")
+
+    handle_server_event(
+        _retrieved("item_1", "Sure, here are"),
+        playback=SimpleNamespace(clear=lambda: None),
+        renderer=renderer,
+        print_json=False,
+    )
+
+    # The 50-character line took two 40-column rows; both are redrawn.
+    assert output.getvalue() == (
+        "ASSISTANT: Sure, here are five ways to improve it.\n\x1b[2F\x1b[JASSISTANT: Sure, here are [interrupted]\n"
+    )
+
+
+def test_unheard_assistant_line_is_rewritten_as_nothing_heard():
+    renderer, output = _terminal_renderer()
+    _stream_assistant(renderer, "Sure.")
+
+    handle_server_event(
+        SimpleNamespace(
+            type="error",
+            error=SimpleNamespace(
+                type="conversation_item_not_found",
+                message="No conversation item with id 'item_1' found.",
+                event_id=audio_client_module._heard_text_event_id("item_1"),
+            ),
+        ),
+        playback=SimpleNamespace(clear=lambda: None),
+        renderer=renderer,
+        print_json=False,
+    )
+
+    assert output.getvalue() == "ASSISTANT: Sure.\n\x1b[1F\x1b[JASSISTANT: [interrupted, nothing heard]\n"
+
+
+def test_heard_text_is_printed_on_a_new_line_once_other_output_followed():
+    renderer, output = _terminal_renderer(width=80)
+    _stream_assistant(renderer, "Sure, here are five ways to improve it.")
+    renderer.render_live_user_text("Wait", final=True)
+
+    renderer.render_heard_assistant_text("item_1", "Sure, here are")
+
+    assert output.getvalue() == (
+        "ASSISTANT: Sure, here are five ways to improve it.\nUSER: Wait\nASSISTANT: Sure, here are [interrupted]\n"
+    )
+
+
+def test_assistant_line_that_was_fully_heard_is_left_alone():
+    renderer, output = _terminal_renderer(width=80)
+    _stream_assistant(renderer, "Sure, here are five ways to improve it.")
+
+    renderer.render_heard_assistant_text("item_1", "Sure, here are five ways to improve it.")
+
+    assert output.getvalue() == "ASSISTANT: Sure, here are five ways to improve it.\n"
+
+
+def test_heard_text_is_printed_without_a_terminal(capsys):
+    renderer = _FriendlyEventRenderer(conversation_only=False)
+    _stream_assistant(renderer, "Sure, here are five ways to improve it.")
+
+    renderer.render_heard_assistant_text("item_1", "Sure, here are")
+
+    assert capsys.readouterr().out == (
+        "ASSISTANT: Sure, here are five ways to improve it.\nASSISTANT: Sure, here are [interrupted]\n"
+    )
+
+
+def test_unrelated_errors_and_retrieved_items_keep_their_handling():
+    renderer, output = _terminal_renderer(width=80)
+    playback = SimpleNamespace(clear=lambda: None)
+
+    handle_server_event(
+        SimpleNamespace(
+            type="error",
+            error=SimpleNamespace(type="conversation_item_not_found", message="No item 'x'.", event_id="evt_other"),
+        ),
+        playback=playback,
+        renderer=renderer,
+        print_json=False,
+    )
+    user_item = SimpleNamespace(id="item_u", role="user", status="completed", content=[])
+    handle_server_event(
+        SimpleNamespace(type="conversation.item.retrieved", item=user_item),
+        playback=playback,
+        renderer=renderer,
+        print_json=False,
+    )
+
+    assert output.getvalue() == "ERROR: conversation_item_not_found: No item 'x'.\n"
+
+
+@pytest.mark.parametrize(
+    ("audio_end_ms", "expected"),
+    [(800, "ASSISTANT: Sure, here are [interrupted]\n"), (0, "ASSISTANT: [interrupted, nothing heard]\n")],
+)
+def test_terminal_shows_the_history_the_server_kept_after_barge_in(audio_end_ms, expected):
+    from openai.types.realtime import RealtimeServerEvent
+    from pydantic import TypeAdapter
+    from starlette.testclient import TestClient
+
+    import speech_to_speech.api.openai_realtime.websocket_router as router_module
+    from speech_to_speech.LLM.chat import make_assistant_message, make_user_message
+    from speech_to_speech.pipeline.events import AssistantOutputEvent, AssistantResponseDoneEvent
+    from speech_to_speech.pipeline.history import ResponseHistory
+    from tests.openai_realtime.conftest import make_pipeline_unit
+
+    text = "Sure, here are five ways to improve it."
+    unit = make_pipeline_unit()
+    stop_event = Event()
+    app = router_module.create_app(pool=[unit], stop_event=stop_event)
+    renderer, output = _terminal_renderer(width=80)
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/realtime") as ws:
+            ws.receive_json()  # session.created
+            service, conn_id = unit.service, unit.session.session_id
+            chat = service._state(conn_id).runtime_config.chat
+            chat.add_item(make_user_message("How can I improve my essay?"))
+            history = ResponseHistory.capture(
+                chat, [make_assistant_message(text)], after_item_id=chat.history_anchor_id(), complete=True
+            )
+            [*_, item_event] = service.dispatch_pipeline_event(
+                conn_id, AssistantOutputEvent(text=text, response_key="r1", history=history)
+            )
+            item_id = item_event.item_id
+            service.encode_audio_chunk(conn_id, bytes(16_000 * 2 * 2), "r1")
+            service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key="r1"))
+            service.finish_response(conn_id, response_key="r1")
+            _stream_assistant(renderer, text, item_id=item_id)
+
+            ws.send_json(
+                {
+                    "type": "conversation.item.truncate",
+                    "item_id": item_id,
+                    "content_index": 0,
+                    "audio_end_ms": audio_end_ms,
+                }
+            )
+            ws.send_json(
+                {
+                    "type": "conversation.item.retrieve",
+                    "event_id": audio_client_module._heard_text_event_id(item_id),
+                    "item_id": item_id,
+                }
+            )
+            event = TypeAdapter(RealtimeServerEvent).validate_python(ws.receive_json())
+            handle_server_event(
+                event, playback=SimpleNamespace(clear=lambda: None), renderer=renderer, print_json=False
+            )
+    stop_event.set()
+
+    assert output.getvalue() == f"ASSISTANT: {text}\n\x1b[1F\x1b[J{expected}"
+
+
+def test_heard_text_is_printed_on_a_new_line_after_a_log_record():
+    renderer, output = _terminal_renderer(width=80)
+    _stream_assistant(renderer, "Let me check.")
+    guard = audio_client_module._AssistantLineGuard(renderer)
+    guard.handle(logging.LogRecord("x", logging.WARNING, __file__, 1, "Speaker status", None, None))
+
+    renderer.render_heard_assistant_text("item_1", "Let me")
+
+    assert "\x1b[" not in output.getvalue()
+    assert output.getvalue().endswith("ASSISTANT: Let me [interrupted]\n")
+
+
+async def test_tool_errors_print_through_the_reporter():
+    reported = []
+    coordinator = _ToolCallCoordinator(SimpleNamespace(), RealtimeAudioClientConfig(), reported.append)
+
+    coordinator._schedule_call("response_1", SimpleNamespace(call_id=None))
+
+    assert reported == ["TOOL ERROR: received a call without call_id; cannot return an output"]
+
+
+def test_rewrite_counts_rows_of_a_multi_line_reply():
+    renderer, output = _terminal_renderer(width=80)
+    _stream_assistant(renderer, "First line.\nSecond :smile: line.")
+
+    renderer.render_heard_assistant_text("item_1", "First line.")
+
+    assert output.getvalue() == (
+        "ASSISTANT: First line.\nSecond :smile: line.\n\x1b[2F\x1b[JASSISTANT: First line. [interrupted]\n"
+    )

@@ -260,7 +260,10 @@ response does not assume an interrupted explanation was delivered.
   words the estimate removed, or the whole item in its original place. An item
   the client deleted with `conversation.item.delete` stays deleted. The
   browser demo, the packaged `local`/`talk` client, and the stock Agents SDK
-  WebSocket transport from 0.20.0 (0.21.0 is pinned here) send it. Earlier SDK
+  WebSocket transport from 0.20.0 (0.21.0 is pinned here) send it. The
+  packaged client then sends `conversation.item.retrieve` and shows the heard
+  text in the terminal, redrawing the interrupted line when it is still the
+  last one. Earlier SDK
   versions reset their playback position at `response.output_audio.done`,
   which this server sends before `input_audio_buffer.speech_started` on
   server-VAD barge-in. They then send no truncate and emit no
