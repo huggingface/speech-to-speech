@@ -264,19 +264,30 @@ class AudioHandler(RealtimeBaseHandler):
                 )
             )
         if pending.transcription is not None:
-            if (
-                isinstance(pending.transcription, ConversationItemInputAudioTranscriptionCompletedEvent)
-                and not pending.transcription.transcript
-            ):
-                st.empty_input_item_ids[item_id] = None
-                while len(st.empty_input_item_ids) > 128:
-                    st.empty_input_item_ids.pop(next(iter(st.empty_input_item_ids)))
+            if isinstance(pending.transcription, ConversationItemInputAudioTranscriptionCompletedEvent):
+                self._record_published_transcript(conn_id, item_id, pending.transcription.transcript)
             events.append(pending.transcription)
             pending.transcription = None
         if pending.input_closed:
             st.pending_input_terminals.pop(item_id, None)
             self._release_input_item_state_by_id(conn_id, item_id)
         return events
+
+    def _record_published_transcript(self, conn_id: str, item_id: str, transcript: str) -> None:
+        """Remember the transcript a client received, bounded by retained history."""
+        st = self._state(conn_id)
+        retained_ids = st.runtime_config.chat.item_ids()
+        transcripts = {
+            known_id: text
+            for known_id, text in st.published_input_transcripts.items()
+            if known_id != item_id and (known_id in retained_ids or not text)
+        }
+        transcripts[item_id] = transcript
+        # Empty transcripts never enter the chat; keep only the most recent ones.
+        empty_ids = [known_id for known_id, text in transcripts.items() if not text]
+        for known_id in empty_ids[:-128]:
+            del transcripts[known_id]
+        st.published_input_transcripts = transcripts
 
     def handle_audio_append(self, conn_id: str, event: InputAudioBufferAppendEvent) -> list[bytes]:
         """Decode base64 audio, resample to pipeline rate, and split into 512-sample PCM16 chunks for the VAD."""

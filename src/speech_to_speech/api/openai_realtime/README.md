@@ -82,7 +82,7 @@ flowchart LR
 | `session.update` | Deep-merge session config (instructions, tools, voice, turn detection, audio format, reasoning effort). |
 | `conversation.item.create` | Inject `input_text` or `function_call_output` into the LLM context without triggering generation. |
 | `conversation.item.truncate` | Accepted for stock WebSocket SDK interruption. Playback is client-owned, while an explicit `response.cancel` or automatic server-VAD cancellation already discards provisional generation, so this is an acknowledgement-free no-op. |
-| `conversation.item.retrieve` | Return the server's current copy of a user, assistant, or function item the client has seen. Speech transcribed by the STT stage comes back as `input_audio` with its transcript and no audio bytes. Unknown IDs get an `error` with type `conversation_item_not_found`. |
+| `conversation.item.retrieve` | Return the server's current copy of a user, assistant, or function item the client has seen. Speech transcribed by the STT stage comes back as `input_audio` with the transcript the client was sent and no audio bytes. An assistant item keeps its streamed shape (`output_audio` with a transcript for audio responses) while its response is live, and the stored `output_text` afterwards. Unknown IDs get an `error` with type `conversation_item_not_found`. |
 | `response.create` | Trigger LLM generation. Supports per-response `instructions`, `tool_choice`, and `reasoning` overrides. |
 | `response.cancel` | Cancel the in-progress or queued response and re-enable listening. |
 

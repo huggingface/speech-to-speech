@@ -184,8 +184,7 @@ class ConversationHandler(RealtimeBaseHandler):
         # Committed speech is already on the wire while STT still owns its
         # input state; its Chat entry is only written when transcription ends.
         committed_input = event.item_id in st.input_items and event.item_id in st.acknowledged_item_ids
-        empty_input = event.item_id in st.empty_input_item_ids
-        st.empty_input_item_ids.pop(event.item_id, None)
+        empty_input = st.published_input_transcripts.pop(event.item_id, None) == ""
         if removed is None and not committed_input and not empty_input:
             error = self.make_error(
                 f"No conversation item with id '{event.item_id}' found.", "conversation_item_not_found"
@@ -250,7 +249,8 @@ class ConversationHandler(RealtimeBaseHandler):
     def _retrievable_item(self, conn_id: str, item_id: str) -> ConversationItem | None:
         """Return the wire form of an item the client has seen and the server still holds."""
         st = self._state(conn_id)
-        if item_id not in st.acknowledged_item_ids and item_id not in st.empty_input_item_ids:
+        published = st.published_input_transcripts
+        if item_id not in st.acknowledged_item_ids and item_id not in published:
             return None
 
         # An active response's output items live in its pending state until
@@ -266,13 +266,23 @@ class ConversationHandler(RealtimeBaseHandler):
                 if call.id == item_id:
                     return call.model_copy(update={"object": "realtime.item", "status": call.status or "in_progress"})
 
+        speech = item_id in published or item_id in st.input_items
         held = st.runtime_config.chat.get_item(item_id)
         if held is not None:
-            return self._wire_item(conn_id, held)
+            if (
+                speech
+                and isinstance(held, RealtimeConversationItemUserMessage)
+                and all(part.type == "input_text" for part in held.content or [])
+            ):
+                # Transcribed speech is held as LLM text, possibly annotated
+                # with its speaker. Return the input_audio item the client saw,
+                # with the transcript it was sent (null until it is published).
+                return self._user_audio_item(item_id, published.get(item_id))
+            return self._wire_item(held)
         if item_id in st.input_items:
             # Committed speech whose transcription has not finished yet.
             return self._user_audio_item(item_id, None)
-        if item_id in st.empty_input_item_ids:
+        if published.get(item_id) == "":
             # An empty transcript never enters the chat, but the client was
             # told about the item and its empty completed transcription.
             return self._user_audio_item(item_id, "")
@@ -289,7 +299,8 @@ class ConversationHandler(RealtimeBaseHandler):
             content=[UserContent(type="input_audio", transcript=transcript)],
         )
 
-    def _wire_item(self, conn_id: str, item: SupportedItem) -> ConversationItem | None:
+    @staticmethod
+    def _wire_item(item: SupportedItem) -> ConversationItem | None:
         """Convert one held chat item to the Realtime item shape the client saw."""
         if isinstance(item, ResponseReasoningItem):
             return None
@@ -300,15 +311,6 @@ class ConversationHandler(RealtimeBaseHandler):
             wire = RealtimeConversationItemFunctionCall.model_validate(item.model_dump(exclude={"response_item"}))
         else:
             wire = item
-        if (
-            isinstance(wire, RealtimeConversationItemUserMessage)
-            and wire.id in self._state(conn_id).input_turn_by_item_id
-            and wire.content
-            and all(part.type == "input_text" for part in wire.content)
-        ):
-            # Transcribed speech is held as text for the LLM. Return it as the
-            # input_audio item the client saw, carrying the transcript.
-            return self._user_audio_item(wire.id, "".join(part.text or "" for part in wire.content))
         return wire.model_copy(update={"object": "realtime.item", "status": wire.status or "completed"})
 
     def _apply_item(

@@ -273,9 +273,10 @@ class ConnState(BaseModel):
     last_item_id: Optional[str] = None
     acknowledged_item_ids: list[str] = Field(default_factory=list)
     deleted_input_turn_ids: dict[str, None] = Field(default_factory=dict)
-    # Published input items whose transcript was empty. They never enter the
-    # chat, but the client saw them and can still retrieve them.
-    empty_input_item_ids: dict[str, None] = Field(default_factory=dict)
+    # Final transcript sent to the client for each published speech item. The
+    # chat may hold different text (speaker annotations) or nothing (empty
+    # transcripts), so conversation.item.retrieve answers from here.
+    published_input_transcripts: dict[str, str] = Field(default_factory=dict)
     current_response_params: RealtimeResponseCreateParams | None = None
     pending_assistant_item_id: Optional[str] = None
     pending_assistant_output_index: Optional[int] = None

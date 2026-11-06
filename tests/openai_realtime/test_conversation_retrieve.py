@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 from openai.types.realtime import (
     ConversationItemCreateEvent,
+    ConversationItemDeleteEvent,
     ConversationItemRetrieveEvent,
     RealtimeConversationItemFunctionCall,
     RealtimeConversationItemFunctionCallOutput,
@@ -20,6 +21,7 @@ from speech_to_speech.pipeline.events import (
     TranscriptionCompletedEvent,
 )
 from speech_to_speech.pipeline.messages import AssistantTextPart
+from speech_to_speech.pipeline.speaker_metadata import SpeakerAttribution, SpeakerInterval
 from tests.llm_history import drive_llm
 from tests.test_response_overrides import _RecordingLocalHandler
 
@@ -96,6 +98,26 @@ def test_retrieve_transcribed_speech_returns_audio_item_with_transcript(service,
     assert service._state(conn_id).runtime_config.chat.get_item(item_id).content[0].type == "input_text"
 
 
+def test_retrieve_speech_returns_published_transcript_not_speaker_annotation(service, conn_id):
+    item_id = _speak(service, conn_id, "diarized")
+    completed = service.dispatch_pipeline_event(
+        conn_id,
+        TranscriptionCompletedEvent(
+            transcript="hello there",
+            turn_id="diarized",
+            turn_revision=0,
+            speaker_attribution=SpeakerAttribution(intervals=[SpeakerInterval(speaker=0, start=0.0, end=1.0)]),
+        ),
+    )
+    sent = next(e for e in completed if e.type == "conversation.item.input_audio_transcription.completed")
+    assert sent.transcript == "hello there"
+    held = service._state(conn_id).runtime_config.chat.get_item(item_id)
+    assert held.content[0].text == "[speaker_0] hello there"
+
+    retrieved = _retrieve(service, conn_id, item_id)[0].item
+    assert [(part.type, part.transcript) for part in retrieved.content] == [("input_audio", "hello there")]
+
+
 def test_retrieve_empty_transcript_item(service, conn_id):
     item_id = _speak(service, conn_id, "noise")
     completed = service.dispatch_pipeline_event(
@@ -108,6 +130,12 @@ def test_retrieve_empty_transcript_item(service, conn_id):
 
     retrieved = _retrieve(service, conn_id, item_id)[0].item
     assert [(part.type, part.transcript) for part in retrieved.content] == [("input_audio", "")]
+
+    deleted = service.handle_conversation_item_delete(
+        conn_id, ConversationItemDeleteEvent(type="conversation.item.delete", item_id=item_id)
+    )
+    assert [e.type for e in deleted] == ["conversation.item.deleted"]
+    assert _retrieve(service, conn_id, item_id)[0].type == "error"
 
 
 def test_retrieve_generated_assistant_by_wire_id(service, conn_id):
