@@ -488,19 +488,51 @@ def test_retrieve_returns_the_heard_transcript_of_a_truncated_reply(service, con
     assert [(part.type, part.transcript) for part in event.item.content] == [("output_audio", "Sure, here are")]
 
 
-def test_retrieve_of_a_reply_nobody_heard_reports_it_missing(service, conn_id):
-    _start_conversation(service, conn_id)
-    item_id = _speak(service, conn_id, [(FIRST, 2.0)])
-    service.finish_response(conn_id, status="cancelled", reason="turn_detected")
-    service.handle_conversation_item_truncate(conn_id, _truncate(item_id, 0))
-
+def _retrieve(service, conn_id, item_id):
     [event] = service.handle_conversation_item_retrieve(
         conn_id,
         ConversationItemRetrieveEvent(type="conversation.item.retrieve", item_id=item_id),
     )
+    return event
 
-    assert event.type == "error"
-    assert event.error.type == "conversation_item_not_found"
+
+def _reply_nobody_heard(service, conn_id):
+    _start_conversation(service, conn_id)
+    item_id = _speak(service, conn_id, [(FIRST, 2.0)])
+    service.finish_response(conn_id, status="cancelled", reason="turn_detected")
+    service.handle_conversation_item_truncate(conn_id, _truncate(item_id, 0))
+    return item_id
+
+
+def test_retrieve_of_a_reply_nobody_heard_returns_it_empty(service, conn_id):
+    item_id = _reply_nobody_heard(service, conn_id)
+    # Later items must not make the removed reply unknown.
+    service.conversation.record_acknowledged_item(conn_id, "item_later")
+
+    event = _retrieve(service, conn_id, item_id)
+
+    # Like a truncate to 0 ms on OpenAI: the item stays, with nothing heard.
+    assert event.type == "conversation.item.retrieved"
+    assert event.item.id == item_id
+    assert event.item.status == "incomplete"
+    assert [(part.type, part.transcript) for part in event.item.content] == [("output_audio", "")]
+    # The model still never sees it, and an expected lookup is not an error.
+    assert _history(service, conn_id) == EARLIER_TURNS
+    assert service.get_usage()["total_errors"] == 0
+
+
+def test_deleting_a_reply_nobody_heard_succeeds_and_is_final(service, conn_id):
+    item_id = _reply_nobody_heard(service, conn_id)
+
+    [deleted] = service.handle_conversation_item_delete(
+        conn_id,
+        ConversationItemDeleteEvent(type="conversation.item.delete", item_id=item_id),
+    )
+    service.handle_conversation_item_truncate(conn_id, _truncate(item_id, 800))
+
+    assert deleted.type == "conversation.item.deleted"
+    assert _retrieve(service, conn_id, item_id).error.type == "conversation_item_not_found"
+    assert _history(service, conn_id) == EARLIER_TURNS
 
 
 async def _estimate_removes_a_completed_reply():

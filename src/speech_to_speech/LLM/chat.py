@@ -525,6 +525,11 @@ class Chat:
         with self._lock:
             return self._item_ids_locked()
 
+    def unheard_assistant_item_ids(self) -> set[str]:
+        """Realtime IDs of replies removed as unheard that can still be restored."""
+        with self._lock:
+            return set(self._unheard_assistant_items)
+
     def _item_ids_locked(self) -> set[str]:
         items: list[SupportedItem] = [*self.buffer, *self._pending_tool_calls.values()]
         if self.init_chat_message is not None:

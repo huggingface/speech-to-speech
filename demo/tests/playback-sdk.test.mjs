@@ -280,3 +280,14 @@ test("a removed reply is reported as nothing heard, not as a server error", asyn
   assert.deepEqual(f.heard, [{ responseId: "a", text: "" }]);
   assert.deepEqual(f.errors, []);
 });
+
+test("a reply nobody heard comes back empty and is reported as nothing heard", async (t) => {
+  const f = await interruptedReply(t);
+
+  f.receive({ type: "conversation.item.retrieved", item: {
+    id: "item-a", object: "realtime.item", type: "message", role: "assistant", status: "incomplete",
+    content: [{ type: "output_audio", transcript: "" }],
+  } });
+  assert.deepEqual(f.heard, [{ responseId: "a", text: "" }]);
+  assert.deepEqual(f.errors, []);
+});
