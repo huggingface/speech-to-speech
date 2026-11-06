@@ -166,7 +166,7 @@ def test_farsi_sentence_conversion_and_audio_output():
     assert converted == ["سلام", "حال شما"]
     assert [call[1] for call in calls] == ["salAm hAle SomA", "salAm hAle SomA"]
     assert all(call[2]["copy_state"] for call in calls)
-    assert all(block.dtype == np.int16 and block.shape == (512,) for block in output)
+    assert all(block.dtype == np.int16 and block.ndim == 1 and 0 < block.size <= 512 for block in output)
     assert any(np.any(block) for block in output)
     assert sum(len(block) for block in output) >= 4000  # Sentence pause is included.
 
@@ -526,9 +526,7 @@ def test_pocket_resampling_matches_whole_signal_across_chunk_boundaries(output_r
             torch.from_numpy(part) for part in np.split(samples, cuts)
         )
         actual = np.concatenate(list(handler.process(TTSInput(text="Test"))))
-        assert np.array_equal(actual[: len(expected)], expected)
-        assert np.all(actual[len(expected) :] == 0)
-        assert len(actual) == ((len(expected) + handler.blocksize - 1) // handler.blocksize) * handler.blocksize
+        np.testing.assert_array_equal(actual, expected)
 
 
 @pytest.mark.parametrize(

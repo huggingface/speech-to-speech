@@ -45,11 +45,10 @@ def test_drama3_sglang_request_and_resampled_audio(monkeypatch, tmp_path, clone)
     assert len(requests) == 1  # Startup validates the real request shape too.
     chunks = list(handler.process(TTSInput(text="[laughs] Hello!", selected_language="fr", tts_language_code="fr")))
     assert handler.queue_out.empty()
-    assert all(chunk.shape == (512,) and chunk.dtype == np.int16 for chunk in chunks)
+    assert all(chunk.ndim == 1 and 0 < chunk.size <= 512 and chunk.dtype == np.int16 for chunk in chunks)
     audio = np.concatenate(chunks)
-    assert len(audio) == 2048
-    assert np.any(audio[:1600])
-    assert np.all(audio[1600:] == 0)
+    assert len(audio) == 1600
+    assert np.any(audio)
     request = requests[-1]
     assert str(request.url) == "https://speech.example/v1/audio/speech"
     assert "Authorization" not in request.headers
