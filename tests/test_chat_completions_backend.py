@@ -1,6 +1,6 @@
 """Unit tests for the chat-completions LLM backend.
 
-These run without a GPU or a live server: the OpenAI client is faked at the
+These run without a GPU or a hosted server: the OpenAI client is faked at the
 module level, so the streaming/non-streaming parse logic and the format
 converters are exercised purely in-process.
 
@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import queue
 import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
 import httpx
@@ -49,7 +50,8 @@ from speech_to_speech.pipeline.messages import (
     TTSInput,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-from tests.llm_history import drive_llm
+from tests.llm_history import close_llm_runners as close_llm_runners
+from tests.llm_history import drive_llm, mock_async_client
 from tests.turns import reopen
 
 # ── Fakes ────────────────────────────────────────────────────────────────────
@@ -123,6 +125,7 @@ def _make_handler(stream=True, *, base_url="http://fake/v1", reasoning_effort=No
         )
     finally:
         base_mod.OpenAI = orig_openai
+    h._make_async_client = lambda: mock_async_client(h)
     return h
 
 
@@ -383,6 +386,82 @@ def test_chat_completions_backend_uses_configured_audio_url_payload():
     audio_part = handler.client.chat.completions.last_kwargs["messages"][-1]["content"][0]
     assert audio_part["type"] == "audio_url"
     assert audio_part["audio_url"]["url"].startswith("data:audio/wav;base64,UklGR")
+
+
+def test_cancel_keepalive_stream_releases_next_request(monkeypatch):
+    reading, release = threading.Event(), threading.Event()
+    requests = []
+
+    class Provider(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            requests.append(self.client_address)
+            chunk = {
+                "id": "test",
+                "choices": [{"index": 0, "delta": {"content": "Ready."}, "finish_reason": "stop"}],
+            }
+            payload = b"data: " + json.dumps(chunk).encode() + b"\n\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            if len(requests) == 1:
+                self.send_header("Connection", "close")
+            else:
+                self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            try:
+                if len(requests) == 1:
+                    reading.set()
+                    while not release.wait(0.05):
+                        self.wfile.write(b": keep-alive\n\n")
+                        self.wfile.flush()
+                self.wfile.write(payload)
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+    serving = threading.Thread(target=server.serve_forever)
+    serving.start()
+    monkeypatch.setattr(ChatCompletionsApiModelHandler, "warmup", lambda self: None)
+    handler = ChatCompletionsApiModelHandler(
+        threading.Event(),
+        queue.Queue(),
+        queue.Queue(),
+        setup_kwargs={
+            "base_url": f"http://127.0.0.1:{server.server_port}/v1",
+            "api_key": "none",
+            "cancel_scope": CancelScope(),
+        },
+    )
+    handler.request_timeout = 0.6
+    response = RealtimeResponseCreateParams(output_modalities=["text"])
+    outputs = []
+    worker = threading.Thread(target=lambda: outputs.append(_drive(handler, response=response)))
+    try:
+        worker.start()
+        assert reading.wait(2)
+        handler.cancel_scope.cancel()
+        worker.join(1)
+        assert not worker.is_alive(), "cancelled turn is still reading SSE keep-alives"
+        assert outputs[0][-1].error is None
+        for _ in range(2):
+            text, _, _, _, end = _drive(handler, response=response)
+            assert text == "Ready."
+            assert end.error is None
+        assert len(requests) == 3
+        assert requests[1] == requests[2], "ordinary turns did not reuse the HTTP connection"
+    finally:
+        release.set()
+        worker.join(2)
+        handler.cleanup()
+        server.shutdown()
+        server.server_close()
+        serving.join()
 
 
 def test_streaming_text_and_usage():
