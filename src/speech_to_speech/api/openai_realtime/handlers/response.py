@@ -1045,7 +1045,8 @@ class ResponseHandler(RealtimeBaseHandler):
         chars = samples = 0
         for segments in self._state(conn_id).assistant_audio_segments.values():
             for segment in segments:
-                if segment is not unfinished and segment[0] and segment[1]:
+                # A duration estimated at cancel is not measured speech.
+                if segment is not unfinished and segment[0] and segment[1] and segment[1] == segment[2]:
                     chars += len(segment[0])
                     samples += segment[2]
         if samples < PIPELINE_SAMPLE_RATE:

@@ -35,7 +35,7 @@ SECOND = "First, tighten the thesis so every paragraph supports it."
 RESPONSE_KEY = "response_essay"
 
 
-def _speak(service, conn_id, parts_with_seconds, *, complete=True):
+def _speak(service, conn_id, parts_with_seconds, *, complete=True, response_key=RESPONSE_KEY):
     """Stream assistant transcript parts, each followed by its delivered audio."""
     chat = service._state(conn_id).runtime_config.chat
     full_text = " ".join(text for text, _ in parts_with_seconds)
@@ -49,11 +49,11 @@ def _speak(service, conn_id, parts_with_seconds, *, complete=True):
     for text, seconds in parts_with_seconds:
         events = service.dispatch_pipeline_event(
             conn_id,
-            AssistantOutputEvent(text=text, response_key=RESPONSE_KEY, history=history),
+            AssistantOutputEvent(text=text, response_key=response_key, history=history),
         )
         item_id = item_id or next(event.item_id for event in events if hasattr(event, "item_id"))
         for _ in range(int(seconds * 10)):
-            service.encode_audio_chunk(conn_id, b"\x00\x00" * (RATE // 10), RESPONSE_KEY)
+            service.encode_audio_chunk(conn_id, b"\x00\x00" * (RATE // 10), response_key)
     return item_id
 
 
@@ -197,6 +197,21 @@ def test_cancel_during_synthesis_uses_the_measured_speaking_rate(service, conn_i
 
     # The first segment took 2 s for 39 characters, so the 58-character second
     # segment takes about 2.97 s; its 1 s delivered covers 19.5 characters.
+    assert _history(service, conn_id)[-1] == ("assistant", "incomplete", f"{FIRST} First, tighten the")
+
+
+def test_an_estimated_duration_does_not_feed_later_speaking_rates(service, conn_id):
+    """A cancel-time estimate is not measured speech."""
+    _start_conversation(service, conn_id)
+    _speak(service, conn_id, [(FIRST, 0.9)], response_key="response_first")
+    service.finish_response(conn_id, status="cancelled", reason="turn_detected")
+    service._state(conn_id).runtime_config.chat.add_item(make_user_message("Go on."))
+
+    _speak(service, conn_id, [(FIRST, 2.0), (SECOND, 1.0)], response_key="response_second")
+    service.finish_response(conn_id, status="cancelled", reason="turn_detected")
+
+    # Only the fully synthesized 2 s first segment sets the rate, as when it
+    # is the only speech (see the measured speaking rate test above).
     assert _history(service, conn_id)[-1] == ("assistant", "incomplete", f"{FIRST} First, tighten the")
 
 

@@ -1004,7 +1004,11 @@ def create_app(
                             # finish_response() runs on the sentinel, not when
                             # playback completes. WebSocket only estimates it.
                             # Cut history before speech_started goes out, so a
-                            # client that retrieves the reply sees the cut.
+                            # client that retrieves the reply sees the cut. An
+                            # interrupted reply has already ended: dispatching
+                            # SpeechStartedEvent ran on_speech_started, which
+                            # finished it as cancelled, so the cut is not
+                            # skipped as in-progress output.
                             unit.service.truncate_unplayed_audio(session_id, transport.discard_pending_audio())
 
                     if events and transport is not None:
