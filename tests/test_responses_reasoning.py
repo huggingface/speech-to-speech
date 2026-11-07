@@ -366,6 +366,7 @@ def test_out_of_band_snapshot_omits_reasoning_for_unresolved_call(stream, comple
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
     if completed_prefix:
         list(drive_llm(handler, request))
+        request.runtime_config.chat.finalize_provisional_generation(request.response_key)
         _finish(request.runtime_config.chat, "call_1")
     list(drive_llm(handler, request))
     canonical = request.runtime_config.chat.copy(deep=True)
@@ -375,7 +376,7 @@ def test_out_of_band_snapshot_omits_reasoning_for_unresolved_call(stream, comple
     assert not any(item.get("id") in {"rs_2", "fc_2", "msg_provider"} for item in captured[-1])
     if completed_prefix:
         completed = [item for item in captured[-1][2:] if item["type"] != "function_call_output"]
-        assert completed == [item.model_dump(exclude_unset=True) for item in responses[0]]
+        assert completed[: len(responses[0])] == [item.model_dump(exclude_unset=True) for item in responses[0]]
     assert request.runtime_config.chat.buffer == canonical.buffer
 
 
@@ -520,6 +521,10 @@ def test_pinned_sdk_pending_snapshot_preserves_previous_completed_response(strea
 
     def respond(request):
         body = json.loads(request.content)
+        for item in body["input"]:
+            if item.get("role") == "assistant":
+                assert isinstance(item.get("content"), list)
+                assert all(part["type"] in {"output_text", "refusal"} for part in item["content"])
         requests.append(body)
         output = first if len(requests) == 1 else pending if len(requests) == 2 else []
         response = {
@@ -579,7 +584,9 @@ def test_pinned_sdk_pending_snapshot_preserves_previous_completed_response(strea
         request.response = RealtimeResponseCreateParams(conversation="none")
         outputs = list(drive_llm(handler, request))
         assert next(item for item in outputs if isinstance(item, EndOfResponse)).error is None
-        assert requests[2]["input"][2:] == first
+        assert requests[2]["input"][2 : 2 + len(first)] == first
+        assert not any(item.get("id") in {"rs_B", "fc_B"} for item in requests[2]["input"])
+        assert "awaiting_output" in json.dumps(requests[2]["input"])
         assert chat.buffer == canonical.buffer
         _finish(chat, "call_B")
         request.response_key = "continuation"
@@ -655,3 +662,139 @@ def test_pinned_sdk_parses_and_serializes_reasoning_tool_continuation(stream, re
         second = list(drive_llm(handler, request))
         assert next(item for item in second if isinstance(item, EndOfResponse)).error is None
     assert len(requests) == 2
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("first", ["A", "B"])
+@pytest.mark.parametrize("unrelated_user", [False, True])
+@pytest.mark.parametrize("async_calls", [(False, False), (True, True), (True, False)])
+def test_pending_parallel_results_preserve_conversation_and_shared_context(stream, first, unrelated_user, async_calls):
+    native_async = all(async_calls)
+    handler = _make_handler(stream=stream)
+    request = _make_request(chat_size=10)
+    chat = request.runtime_config.chat
+    reasoning, call_a = _items("A")
+    reasoning = ResponseReasoningItem.model_validate(
+        {
+            **reasoning.model_dump(),
+            "summary": [{"type": "summary_text", "text": "Report each result as it arrives."}],
+            "content": [{"type": "reasoning_text", "text": "The two lookups are independent."}],
+        }
+    )
+    message = _message()
+    call_b = _items("B")[1]
+    if any(async_calls):
+        request.runtime_config.session.tools = [{"type": "function", "name": "lookup", "async": True}]
+    call_a = call_a.model_copy(update={"async": async_calls[0]})
+    call_b = call_b.model_copy(update={"async": async_calls[1]})
+    replies = iter(
+        [
+            [reasoning, message, call_a, call_b],
+            [
+                ResponseOutputMessage(
+                    id="msg_unrelated",
+                    type="message",
+                    role="assistant",
+                    status="completed",
+                    content=[{"type": "output_text", "text": "Unrelated answer.", "annotations": []}],
+                )
+            ],
+            [
+                ResponseOutputMessage(
+                    id="msg_partial",
+                    type="message",
+                    role="assistant",
+                    status="completed",
+                    content=[{"type": "output_text", "text": "The first result is 42.", "annotations": []}],
+                )
+            ],
+            [],
+        ]
+    )
+    captured = []
+    includes = []
+
+    def create(**kwargs):
+        includes.append(kwargs.get("include"))
+        captured.append(kwargs["input"])
+        items = next(replies)
+        return _stream(items) if stream else _make_response(items)
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    list(drive_llm(handler, request))
+    chat.finalize_provisional_generation(request.response_key)
+    calls = {item.response_item.call_id: item for item in chat.buffer if isinstance(item, ResponsesFunctionCall)}
+    if unrelated_user:
+        chat.add_item(make_user_message("Tell me something unrelated."))
+    for index in range(3):
+        if index:
+            suffix = first if index == 1 else ("B" if first == "A" else "A")
+            chat.add_item(
+                RealtimeConversationItemFunctionCallOutput(
+                    type="function_call_output",
+                    call_id=calls[f"call_{suffix}"].call_id,
+                    output="42" if index == 1 else "84",
+                )
+            )
+        # A new response identity, as on the wire, even without a new user message.
+        request = request.model_copy(update={"response_key": f"followup_{index}"})
+        outputs = list(drive_llm(handler, request))
+        assert next(item for item in outputs if isinstance(item, EndOfResponse)).error is None
+        chat.finalize_provisional_generation(request.response_key)
+    if native_async:
+        originals = [item.model_dump(exclude_unset=True) for item in (reasoning, message, call_a, call_b)]
+        for snapshot in captured[1:]:
+            assert snapshot[2:6] == originals
+            assert "Context records" not in json.dumps(snapshot)
+        final = captured[-1]
+        index = next(i for i, item in enumerate(final) if item.get("id") == "msg_unrelated")
+        tail = final[index:]
+        assert [item["type"] for item in tail] == ["message", "function_call_output", "message", "function_call_output"]
+        assert tail[1]["output"] == "42" and tail[3]["output"] == "84"
+        assert tail[1]["call_id"] == f"call_{first}"
+        assert tail[3]["call_id"] == ("call_B" if first == "A" else "call_A")
+        assert reasoning in chat.buffer
+        assert not chat.has_pending_tool_calls()
+        assert len([item for item in chat.buffer if item.type == "function_call_output"]) == 2
+        assert all(include == ["reasoning.encrypted_content"] for include in includes)
+        return
+    if any(async_calls):
+        assert all(include == ["reasoning.encrypted_content"] for include in includes)
+    for snapshot in captured[1:]:
+        assert not any(item.get("type") in {"reasoning", "function_call", "function_call_output"} for item in snapshot)
+    for snapshot in [*captured[1:], chat.to_transformers_chat()]:
+        serialized = json.dumps(snapshot)
+        assert "https://example.com/source" in serialized
+        assert "commentary" in serialized
+        assert "Cannot provide that detail." in serialized
+        assert "Report each result as it arrives." in serialized
+        assert "The two lookups are independent." in serialized
+        assert "opaque-A" not in serialized
+        assert "encrypted_content" not in serialized
+        text = "\n".join(
+            item["content"]
+            if isinstance(item.get("content"), str)
+            else "\n".join(part.get("text", "") for part in item.get("content", []))
+            for item in snapshot
+        )
+        context, _ = json.JSONDecoder().raw_decode(
+            text.split("Assistant message context (data, not a user request): ")[1]
+        )
+        assert context["phase"] == message.phase
+        assert context["annotated_content"] == [message.content[0].model_dump(include={"type", "text", "annotations"})]
+    final_text = "\n".join(
+        item["content"]
+        if isinstance(item.get("content"), str)
+        else "\n".join(part.get("text", "") for part in item.get("content", []))
+        for item in captured[-1]
+    )
+    assert (
+        final_text.index("Unrelated answer.")
+        < final_text.index('"output": "42"')
+        < final_text.index("The first result is 42.")
+        < final_text.index('"output": "84"')
+    )
+    assert reasoning in chat.buffer
+    assert message in [getattr(item, "response_item", None) for item in chat.buffer]
+    assert not chat.has_pending_tool_calls()
+    assert len([item for item in chat.buffer if item.type == "function_call_output"]) == 2

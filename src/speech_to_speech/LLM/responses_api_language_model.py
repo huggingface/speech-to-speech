@@ -63,6 +63,8 @@ def _response_end(response: Any, *, status: str | None = None) -> ProviderRespon
 class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
     """LLM handler that talks to an OpenAI ``/v1/responses`` server."""
 
+    _native_async_tool_history = True
+
     @classmethod
     def _build_extra_body(
         cls,
@@ -187,6 +189,11 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
             optional_kwargs["extra_body"] = None
         if req_tools is not None:
             optional_kwargs["tools"] = req_tools
+            if any(
+                (tool if isinstance(tool, dict) else tool.model_dump(by_alias=True)).get("async") is True
+                for tool in req_tools
+            ):
+                optional_kwargs["include"] = ["reasoning.encrypted_content"]
         if req_tool_choice is not None:
             optional_kwargs["tool_choice"] = req_tool_choice
         return optional_kwargs

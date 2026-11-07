@@ -1048,7 +1048,7 @@ def test_provider_error_after_text_tool_rolls_back_ordered_call():
     assert not request.runtime_config.chat.has_pending_tool_calls()
 
 
-def test_generation_is_rejected_until_ordered_tool_output_arrives():
+def test_generation_continues_while_ordered_tool_output_is_pending():
     handler = _make_handler()
     called = False
 
@@ -1074,10 +1074,9 @@ def test_generation_is_rejected_until_ordered_tool_output_arrives():
 
     outputs = list(handler.process(request))
 
-    assert called is False
-    assert len(outputs) == 1
-    assert isinstance(outputs[0], EndOfResponse)
-    assert outputs[0].error is not None and "function call outputs are pending" in outputs[0].error
+    assert called is True
+    assert next(item for item in outputs if isinstance(item, EndOfResponse)).error is None
+    assert chat.has_pending_tool_calls()
     assert [item.type for item in chat.buffer] == ["message", "function_call", "message"]
 
     chat.append_tool_output(

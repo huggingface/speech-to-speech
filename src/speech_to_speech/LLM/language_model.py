@@ -634,15 +634,6 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         # speech appends a newer user message while the model is still running.
         active_chat = original_chat.copy(deep=True)
         history_anchor_id = active_chat.history_anchor_id()
-        if not out_of_band and active_chat.has_pending_tool_calls():
-            yield EndOfResponse(
-                turn_id=ctx.turn_id,
-                turn_revision=ctx.turn_revision,
-                cancel_generation=gen,
-                response_key=request.response_key,
-                error="Cannot generate a response while function call outputs are pending.",
-            )
-            return
         if out_of_band:
             try:
                 active_chat = build_active_chat(active_chat, response)
@@ -679,6 +670,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         # Images the model sees this turn; only these are stripped on write-back,
         # so an image a fast client injects mid-generation for the next turn
         # survives (it is not in this serialized snapshot).
+        tool_projection_ids = active_chat.prepare_tool_history()
         consumed_image_ids = active_chat.image_message_ids()
         generation_completed = False
         history = None if out_of_band else ResponseHistory.capture(original_chat, [], after_item_id=history_anchor_id)
@@ -745,6 +737,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     complete=True,
                     consumed_image_ids=consumed_image_ids,
                     compactor=self.compactor,
+                    tool_projection_ids=tool_projection_ids,
                 )
             generation_completed = turn_output_allowed
             logger.debug("Clean text: %s", transcript_for_log(ctx.generated_text))

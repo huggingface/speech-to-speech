@@ -112,8 +112,7 @@ class ConversationHandler(RealtimeBaseHandler):
 
     def _tool_followup_inputs_are_ordered(
         self,
-        conn_id: str,
-        items: list[ConversationItem | ConversationItemDeleteEvent],
+        items: list[ConversationItemCreateEvent | ConversationItemDeleteEvent],
     ) -> bool:
         """Return whether deferred items form a prefetch-safe tool batch.
 
@@ -122,18 +121,20 @@ class ConversationHandler(RealtimeBaseHandler):
         imply ownership, so every image remains an ordinary conversation item
         and must survive if the tool response is later rolled back.
         """
-        st = self._state(conn_id)
-        for index, item in enumerate(items):
-            if isinstance(item, ConversationItemDeleteEvent):
+        for index, event in enumerate(items):
+            if not isinstance(event, ConversationItemCreateEvent):
                 return False
+            item = event.item
             if isinstance(item, RealtimeConversationItemFunctionCallOutput):
                 continue
             if not self._is_image_message(item) or item.id is None or index + 1 >= len(items):
                 return False
             following = items[index + 1]
-            if not isinstance(following, RealtimeConversationItemFunctionCallOutput):
+            if not isinstance(following, ConversationItemCreateEvent) or not isinstance(
+                following.item, RealtimeConversationItemFunctionCallOutput
+            ):
                 return False
-            if st.deferred_function_output_previous_item_ids.get(following.call_id) != item.id:
+            if following.previous_item_id != item.id:
                 return False
         return True
 
@@ -156,13 +157,9 @@ class ConversationHandler(RealtimeBaseHandler):
         """
         st = self._state(conn_id)
         if st.in_response or st.response_pending:
-            if isinstance(event.item, RealtimeConversationItemFunctionCallOutput):
-                st.deferred_function_output_previous_item_ids[event.item.call_id] = event.previous_item_id
-            st.deferred_items.append(event.item)
-            if (
-                st.current_response_key in st.generation_done_tool_calls
-                and any(isinstance(item, RealtimeConversationItemFunctionCallOutput) for item in st.deferred_items)
-                and self._tool_followup_inputs_are_ordered(conn_id, st.deferred_items)
+            st.deferred_items.append(event)
+            if st.current_response_key in st.generation_done_tool_calls and self._tool_followup_inputs_are_ordered(
+                st.deferred_items
             ):
                 return self.flush_deferred_items(
                     conn_id,
@@ -171,7 +168,7 @@ class ConversationHandler(RealtimeBaseHandler):
                 )
             logger.debug("Deferred conversation item until the active response completes")
             return []
-        return self._apply_item(conn_id, event.item)
+        return self._apply_item(conn_id, event)
 
     def handle_conversation_item_delete(self, conn_id: str, event: ConversationItemDeleteEvent) -> list[ServerEvent]:
         st = self._state(conn_id)
@@ -325,15 +322,18 @@ class ConversationHandler(RealtimeBaseHandler):
     def _apply_item(
         self,
         conn_id: str,
-        item: ConversationItem,
+        event: ConversationItemCreateEvent,
         *,
         defer_acknowledgement: bool = False,
     ) -> list[ServerEvent]:
         """Add one item to the chat and build its ``conversation.item.created``."""
+        item = event.item
         try:
             self._append_item(conn_id, item)
         except ChatItemError as exc:
-            return [self.make_error(str(exc), "invalid_conversation_item")]
+            error = self.make_error(str(exc), "invalid_conversation_item")
+            error.error.event_id = event.event_id
+            return [error]
 
         if not item:
             return []
@@ -342,7 +342,7 @@ class ConversationHandler(RealtimeBaseHandler):
             # The prefetching LM strips consumed images from Chat in place.
             # Keep the protocol echo immutable until it can be acknowledged in
             # order behind the origin response.
-            st.pending_item_acks.append(item.model_copy(deep=True))
+            st.pending_item_acks.append(event.model_copy(deep=True))
             return []
         return [self._ack_item(conn_id, item)]
 
@@ -389,16 +389,15 @@ class ConversationHandler(RealtimeBaseHandler):
         if st.response_pending and not tool_followup_inputs_only:
             return []
         has_function_output = any(
-            isinstance(item, RealtimeConversationItemFunctionCallOutput) for item in st.deferred_items
+            isinstance(event, ConversationItemCreateEvent)
+            and isinstance(event.item, RealtimeConversationItemFunctionCallOutput)
+            for event in st.deferred_items
         )
-        inputs_are_ordered = self._tool_followup_inputs_are_ordered(conn_id, st.deferred_items)
+        inputs_are_ordered = self._tool_followup_inputs_are_ordered(st.deferred_items)
         if tool_followup_inputs_only and (not has_function_output or not inputs_are_ordered):
             return []
         items = st.deferred_items
         st.deferred_items = []
-        for item in items:
-            if isinstance(item, RealtimeConversationItemFunctionCallOutput):
-                st.deferred_function_output_previous_item_ids.pop(item.call_id, None)
         events: list[ServerEvent] = []
         for item in items:
             if isinstance(item, ConversationItemDeleteEvent):
@@ -424,9 +423,16 @@ class ConversationHandler(RealtimeBaseHandler):
         items = st.pending_item_acks
         st.pending_item_acks = []
         events: list[ServerEvent] = []
-        for item in items:
-            if revalidate_tool_outputs and isinstance(item, RealtimeConversationItemFunctionCallOutput):
-                events.extend(self._apply_item(conn_id, item))
+        for event in items:
+            item = event.item
+            # An older call's accepted output survives unrelated rollback.
+            # Re-applying it would reject our own insertion as a duplicate.
+            if (
+                revalidate_tool_outputs
+                and isinstance(item, RealtimeConversationItemFunctionCallOutput)
+                and item.call_id not in st.runtime_config.chat.tool_output_call_ids()
+            ):
+                events.extend(self._apply_item(conn_id, event))
             else:
                 events.append(self._ack_item(conn_id, item))
         return events

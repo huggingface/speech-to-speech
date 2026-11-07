@@ -239,7 +239,7 @@ def test_tool_continuation_turn_after_newer_speech(runtime_config, prefetch, ass
         service.finish_response(conn_id, response_key=origin.response_key)
     if newer_turn != "listening":
         # "closed": the newer turn transcribes empty, so nothing answers it and it closes.
-        # "question": the model refuses it while the tool call has no output.
+        # "question": a provider failure stands in for a newer turn that cannot be answered.
         newer = {"turn_id": unfinished_id, "turn_revision": 0}
         service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(interrupt_response=False, **newer))
         tracker.segment_finalized(300)
@@ -248,7 +248,7 @@ def test_tool_continuation_turn_after_newer_speech(runtime_config, prefetch, ass
         service.dispatch_pipeline_event(conn_id, TranscriptionCompletedEvent(transcript=transcript, **newer))
         if newer_turn == "question":
             refused = prompts.get_nowait()
-            message = "Cannot generate a response while function call outputs are pending."
+            message = "Provider failed."
             service.dispatch_pipeline_event(
                 conn_id, ResponseFailedEvent(message=message, response_key=refused.response_key, **newer)
             )
@@ -441,7 +441,10 @@ async def test_completed_answer_suppresses_duplicate_tool_followup(
         coordinator.handle_event(SimpleNamespace(type="input_audio_buffer.speech_started", item_id="user_2"))
         coordinator.handle_event(response_done(output=[function_call("call_1")]))
         await wait_until(lambda: len(connection.sent) == 1)
-        service.handle_conversation_item_create(conn_id, ConversationItemCreateEvent.model_validate(connection.sent[0]))
+        for acknowledgment in service.handle_conversation_item_create(
+            conn_id, ConversationItemCreateEvent.model_validate(connection.sent[0])
+        ):
+            coordinator.handle_event(acknowledgment)
         runtime_config.chat.add_item(make_user_message("And hotels?"))
         created = service.handle_response_create(
             conn_id, ResponseCreateEvent(type="response.create", response={"output_modalities": ["text"]})

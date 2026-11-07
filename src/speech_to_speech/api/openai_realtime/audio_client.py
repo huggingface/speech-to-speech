@@ -42,6 +42,7 @@ from speech_to_speech.api.openai_realtime.tool_followup import (
 )
 from speech_to_speech.api.openai_realtime.voice_controls import VoiceSelection, arrow_steps, has_terminal_arrows
 from speech_to_speech.pipeline.transcript_logging import log_exception
+from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
 
@@ -594,7 +595,7 @@ class _ToolResponseBatch:
     completed: bool = False
     successful: bool = False
     cancelled: bool = False
-    create_response: bool = False
+    followup_call_ids: set[str] = field(default_factory=set)
 
 
 class _ToolCoordinatorError(RuntimeError):
@@ -610,7 +611,7 @@ class _ToolCallCoordinator:
         self._tool_validators = _validate_tool_config(config.tools, self._executor)
         self._default_create_response = config.tool_response_create
         self._active_response_id: str | None = None
-        self._pending_tool_flushes = 0
+        self._pending_outputs: dict[str, tuple[str, _ToolExecutionResult]] = {}
         self._pending_create_id: str | None = None
         self._pending_create_saw_response = False
         self._waiting_for_response_after_collision = False
@@ -664,6 +665,8 @@ class _ToolCallCoordinator:
             response_id = getattr(event, "response_id", None) or self._active_response_id
             if isinstance(response_id, str) and response_id:
                 self._schedule_call(response_id, event)
+        elif event.type == "conversation.item.created":
+            self._acknowledge_output(event.item)
         elif event.type == "response.done":
             self._handle_response_done(event.response)
         elif event.type == "error":
@@ -804,7 +807,6 @@ class _ToolCallCoordinator:
         if isinstance(output_index, int):
             batch.output_indices.setdefault(call_id, output_index)
         batch.pending_deliveries += 1
-        self._pending_tool_flushes += 1
 
         async def execute() -> None:
             result = await self._execute_tool(
@@ -827,58 +829,73 @@ class _ToolCallCoordinator:
 
     async def _deliver_ready_results(self) -> None:
         async with self._delivery_lock:
-            while self._tool_batch_order:
-                response_id = self._tool_batch_order[0]
+            for response_id in list(self._tool_batch_order):
                 batch = self._tool_batches.get(response_id)
                 if batch is None or batch.cancelled:
-                    self._tool_batch_order.pop(0)
                     continue
-                if batch.ordered_call_ids:
-                    call_id = batch.ordered_call_ids[0]
-                    result = batch.results.get(call_id)
+                # Output order establishes which calls the server has published,
+                # but an unfinished sibling must not hold back a ready result.
+                for call_id in list(batch.ordered_call_ids):
+                    result = batch.results.pop(call_id, None)
                     if result is None:
-                        return
-                    await self._conn.send(
-                        {
-                            "type": "conversation.item.create",
-                            "item": {
-                                "type": "function_call_output",
-                                "call_id": result.call_id,
-                                "output": result.output,
-                            },
-                        }
-                    )
-                    # response.done can cancel the batch while send() is
-                    # suspended on transport backpressure. _cancel_batch()
-                    # already releases its counters, so do not account for the
-                    # same delivery a second time when the send resumes.
+                        continue
+                    item_id = _generate_id("fco")
+                    self._pending_outputs[item_id] = (response_id, result)
+                    try:
+                        await self._conn.send(
+                            {
+                                "event_id": item_id,
+                                "type": "conversation.item.create",
+                                "item": {
+                                    "id": item_id,
+                                    "type": "function_call_output",
+                                    "call_id": result.call_id,
+                                    "output": result.output,
+                                },
+                            }
+                        )
+                    except BaseException:
+                        self._pending_outputs.pop(item_id, None)
+                        raise
                     if batch.cancelled:
-                        return
-                    batch.ordered_call_ids.pop(0)
-                    batch.authoritative_call_ids.discard(call_id)
-                    batch.delivered_call_ids.add(call_id)
-                    batch.results.pop(call_id, None)
-                    batch.pending_deliveries -= 1
-                    self._pending_tool_flushes -= 1
-                    batch.create_response = batch.create_response or result.create_response
-                    continue
-                if batch.completed and batch.pending_deliveries == 0:
-                    self._finalize_batch_if_ready(response_id, batch)
-                    continue
-                return
+                        break
+                self._finalize_batch_if_ready(response_id, batch)
+
+    def _acknowledge_output(self, item: Any) -> None:
+        item_id = getattr(item, "id", None)
+        if not isinstance(item_id, str):
+            return
+        pending = self._pending_outputs.get(item_id)
+        if pending is None:
+            return
+        response_id, result = pending
+        if getattr(item, "type", None) != "function_call_output" or getattr(item, "call_id", None) != result.call_id:
+            return
+        del self._pending_outputs[item_id]
+        batch = self._tool_batches.get(response_id)
+        if batch is None or batch.cancelled:
+            return
+        batch.delivered_call_ids.add(result.call_id)
+        batch.authoritative_call_ids.discard(result.call_id)
+        batch.ordered_call_ids.remove(result.call_id)
+        batch.pending_deliveries -= 1
+        if result.create_response:
+            batch.followup_call_ids.add(result.call_id)
+        self._finalize_batch_if_ready(response_id, batch)
 
     def _finalize_batch_if_ready(self, response_id: str, batch: _ToolResponseBatch) -> None:
-        if not batch.completed or batch.pending_deliveries > 0:
+        if not batch.completed or batch.cancelled or self._tool_batches.get(response_id) is not batch:
             return
-        if self._tool_batches.get(response_id) is batch:
-            self._tool_batches.pop(response_id, None)
-        if response_id in self._tool_batch_order:
-            self._tool_batch_order.remove(response_id)
-        if batch.successful and not batch.cancelled and batch.create_response:
-            remaining = batch.delivered_call_ids - self._answered_tool_call_ids
-            self._answered_tool_call_ids.difference_update(batch.delivered_call_ids)
+        if batch.successful:
+            remaining = batch.followup_call_ids - self._answered_tool_call_ids
             if remaining:
-                self._queued_tool_results[response_id] = remaining
+                self._queued_tool_results.setdefault(response_id, set()).update(remaining)
+            batch.followup_call_ids.clear()
+        if batch.pending_deliveries == 0:
+            self._tool_batches.pop(response_id, None)
+            if response_id in self._tool_batch_order:
+                self._tool_batch_order.remove(response_id)
+            self._answered_tool_call_ids.difference_update(batch.delivered_call_ids)
         self._kick_follow_up()
 
     def _consume_tool_results(self, call_ids: set[str]) -> None:
@@ -889,7 +906,9 @@ class _ToolCallCoordinator:
 
     def _cancel_batch(self, response_id: str, batch: _ToolResponseBatch) -> None:
         batch.cancelled = True
-        self._pending_tool_flushes -= batch.pending_deliveries
+        self._pending_outputs = {
+            item_id: pending for item_id, pending in self._pending_outputs.items() if pending[0] != response_id
+        }
         batch.pending_deliveries = 0
         self._tool_batches.pop(response_id, None)
         if response_id in self._tool_batch_order:
@@ -899,6 +918,17 @@ class _ToolCallCoordinator:
         self._kick_delivery()
 
     def _handle_error(self, error: Any) -> None:
+        event_id = getattr(error, "event_id", None)
+        rejected_output = self._pending_outputs.pop(event_id, None) if isinstance(event_id, str) else None
+        if rejected_output is not None:
+            self._closing = True
+            if not self._failure.done():
+                self._failure.set_exception(
+                    _ToolCoordinatorError(
+                        f"Tool result {rejected_output[1].call_id!r} was rejected: {getattr(error, 'message', None)}"
+                    )
+                )
+            return
         if getattr(error, "event_id", None) != self._pending_create_id:
             return
         is_collision = "conversation_already_has_active_response" in {
@@ -952,7 +982,6 @@ class _ToolCallCoordinator:
         async with self._follow_up_lock:
             if (
                 self._closing
-                or self._pending_tool_flushes > 0
                 or not self._queued_tool_results
                 or self._active_response_id is not None
                 or self._pending_create_id is not None

@@ -5,7 +5,6 @@ from threading import Event as ThreadingEvent
 from typing import Any, Callable, Literal, Optional, TypeVar, Union, cast
 
 from openai.types.realtime import (
-    ConversationItem,
     ConversationItemCreatedEvent,
     ConversationItemCreateEvent,
     ConversationItemDeletedEvent,
@@ -322,15 +321,11 @@ class ConnState(BaseModel):
     # generating. Applying them mid-generation races the LLM handler's chat
     # write-back (cross-thread), so they are buffered here and flushed in order
     # once the response completes. See ConversationHandler.flush_deferred_items.
-    deferred_items: list[ConversationItem | ConversationItemDeleteEvent] = Field(default_factory=list)
-    # Preserve the standard insertion anchor supplied with deferred function
-    # outputs so an image/output sequence can be applied in the intended order.
-    # The anchor does not imply that the output owns the preceding image.
-    deferred_function_output_previous_item_ids: dict[str, str | None] = Field(default_factory=dict)
+    deferred_items: list[ConversationItemCreateEvent | ConversationItemDeleteEvent] = Field(default_factory=list)
     # Tool outputs may be added to the internal chat at logical LM completion
     # so follow-up generation can overlap TTS. Their protocol acknowledgements
     # remain ordered behind the origin response's still-buffered output.
-    pending_item_acks: list[ConversationItem] = Field(default_factory=list)
+    pending_item_acks: list[ConversationItemCreateEvent] = Field(default_factory=list)
     generation_done_tool_calls: dict[str, set[str]] = Field(default_factory=dict)
     completed_tool_response_keys: dict[str, None] = Field(default_factory=dict)
     tool_followup_prefetch_request: GenerateResponseRequest | None = None
