@@ -890,6 +890,17 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     prefetch_transaction=turn.prefetch_transaction,
                 )
 
+            # On any generation failure, strip images that were included in the
+            # failed request from the persistent conversation history. Without this,
+            # the image stays in original_chat and every subsequent turn resends it
+            # to the backend, which causes all later requests to fail too (state
+            # poisoning). consumed_image_ids was captured from the serialized snapshot
+            # before the request fired, so only images the backend actually saw (and
+            # rejected) are removed, any image a fast client injected mid-generation
+            # for the *next* turn is left intact.
+            if error_message is not None and consumed_image_ids:
+                original_chat.strip_images(consumed_image_ids)
+
             proposal_allowed = (
                 error_message is None
                 and state.ending.status == "completed"
