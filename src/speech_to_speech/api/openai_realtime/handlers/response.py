@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from openai.types.realtime import (
     ConversationItem,
     RealtimeConversationItemFunctionCall,
+    RealtimeConversationItemFunctionCallOutput,
     RealtimeResponse,
     ResponseAudioDeltaEvent,
     ResponseAudioDoneEvent,
@@ -31,6 +32,7 @@ from openai.types.realtime.realtime_response_status import Error as RealtimeResp
 from openai.types.realtime.realtime_response_status import RealtimeResponseStatus
 from openai.types.realtime.realtime_response_usage import RealtimeResponseUsage
 from openai.types.realtime.realtime_response_usage_input_token_details import (
+    CachedTokensDetails,
     RealtimeResponseUsageInputTokenDetails,
 )
 from openai.types.realtime.realtime_response_usage_output_token_details import (
@@ -40,6 +42,7 @@ from openai.types.realtime.response_content_part_added_event import Part as Adde
 from openai.types.realtime.response_content_part_done_event import Part as DoneContentPart
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
+from speech_to_speech.api.openai_realtime.runtime_config import validate_reasoning
 from speech_to_speech.api.openai_realtime.tool_followup import (
     TOOL_FOLLOWUP_ACK_LIMIT,
     TOOL_FOLLOWUP_COVERED,
@@ -100,7 +103,13 @@ class ResponseHandler(RealtimeBaseHandler):
 
     def _log_turn_latency(self, st: ConnState, status: _ResponseStatus, response_key: str | None) -> None:
         assert status != "in_progress", "Latency is only finalized for terminal responses"
-        tracker = self._service.turn_latency_store.pop(response_key, session_id=st.session_id)
+        tracker = self._service.turn_latency_store.pop(
+            response_key,
+            session_id=st.session_id,
+            tool_call_ids=[call.call_id for call in st.pending_function_calls.values() if call.call_id is not None]
+            if status == "completed" and not is_out_of_band(st.current_response_params)
+            else (),
+        )
         if tracker is None:
             return
         if tracker.speech_anchor is not None and (status != "completed" or not st.pending_function_calls):
@@ -242,6 +251,7 @@ class ResponseHandler(RealtimeBaseHandler):
             request.response_key,
             turn_id=request.turn_id,
             turn_revision=request.turn_revision,
+            parent_response_key=origin_response_key if source == "tool" else None,
             source=source,
             speech_anchor=anchor,
         )
@@ -547,6 +557,8 @@ class ResponseHandler(RealtimeBaseHandler):
                 input_token_details=RealtimeResponseUsageInputTokenDetails(
                     audio_tokens=0,
                     cached_tokens=0,
+                    # The Agents SDK (>= 0.21) rejects a null entry here.
+                    cached_tokens_details=CachedTokensDetails(audio_tokens=0, image_tokens=0, text_tokens=0),
                     image_tokens=0,
                     text_tokens=st.response_usage.input_tokens,
                 ),
@@ -559,6 +571,20 @@ class ResponseHandler(RealtimeBaseHandler):
                 total_tokens=st.response_usage.input_tokens + st.response_usage.output_tokens,
             ),
         )
+
+    def _record_audio_output_items(self, conn_id: str, output: list[ConversationItem]) -> None:
+        """Remember which delivered assistant messages were audio, bounded by retained history."""
+        st = self._state(conn_id)
+        retained_ids = st.runtime_config.chat.item_ids()
+        audio_ids = {item_id: None for item_id in st.audio_output_item_ids if item_id in retained_ids}
+        for item in output:
+            if (
+                isinstance(item, RealtimeConversationItemAssistantMessage)
+                and item.id is not None
+                and any(part.type == "output_audio" for part in item.content)
+            ):
+                audio_ids[item.id] = None
+        st.audio_output_item_ids = audio_ids
 
     @staticmethod
     def _response_voice_id(voice: object | None) -> str | None:
@@ -791,6 +817,9 @@ class ResponseHandler(RealtimeBaseHandler):
                     message="Only string tool_choice values are supported for now (auto, required, none).",
                     _type="tool_choice_not_supported",
                 )
+            reasoning_error = validate_reasoning(event.response)
+            if reasoning_error is not None:
+                return self.make_error(message=reasoning_error, _type="invalid_request_error")
         metadata = event.response.metadata if event.response else None
         followup_ids = tool_call_ids(metadata.get(TOOL_FOLLOWUP_METADATA_KEY)) if metadata else set()
         if not is_out_of_band(event.response) and followup_ids and followup_ids <= st.answered_tool_call_ids.keys():
@@ -872,11 +901,20 @@ class ResponseHandler(RealtimeBaseHandler):
             speech_stopped_at_s=None if out_of_band else speech_stopped_at_s,
         )
         if not out_of_band:
+            parent_call_id = next(
+                (
+                    item.call_id
+                    for item in reversed(candidate_chat.buffer)
+                    if isinstance(item, RealtimeConversationItemFunctionCallOutput)
+                ),
+                None,
+            )
             self._service.bind_response_latency_tracker(
                 conn_id,
                 request.response_key,
                 turn_id=request.turn_id,
                 turn_revision=request.turn_revision,
+                parent_call_id=parent_call_id if source == "tool" else None,
                 source=source,
                 speech_anchor=anchor,
             )
@@ -1030,6 +1068,8 @@ class ResponseHandler(RealtimeBaseHandler):
                     response=terminal_response,
                 )
             )
+            if not is_out_of_band(st.current_response_params):
+                self._record_audio_output_items(conn_id, terminal_response.output or [])
             tool_inputs = st.response_tool_inputs.pop(st.current_response_key or "", set())
             if status == "completed" and terminal_response.output and not is_out_of_band(st.current_response_params):
                 for call_id in sorted(tool_inputs):

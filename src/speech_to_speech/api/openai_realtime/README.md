@@ -79,10 +79,11 @@ flowchart LR
 | Event | Description |
 |---|---|
 | `input_audio_buffer.append` | Stream base64 PCM audio. Decoded, resampled to 16 kHz, and chunked for the VAD. |
-| `session.update` | Deep-merge session config (instructions, tools, voice, turn detection, audio format). |
+| `session.update` | Deep-merge session config (instructions, tools, voice, turn detection, audio format, reasoning effort). |
 | `conversation.item.create` | Inject `input_text` or `function_call_output` into the LLM context without triggering generation. |
 | `conversation.item.truncate` | Accepted for stock WebSocket SDK interruption. Playback is client-owned, while an explicit `response.cancel` or automatic server-VAD cancellation already discards provisional generation, so this is an acknowledgement-free no-op. |
-| `response.create` | Trigger LLM generation. Supports per-response `instructions` and `tool_choice` overrides. |
+| `conversation.item.retrieve` | Return the server's current copy of a user, assistant, or function item the client has seen. Speech transcribed by the STT stage comes back as `input_audio` with the transcript the client was sent and no audio bytes. An assistant item keeps the shape it was delivered in, during and after its response: `output_audio` with a transcript for audio replies, `output_text` for text replies. Unknown IDs get an `error` with type `conversation_item_not_found`. |
+| `response.create` | Trigger LLM generation. Supports per-response `instructions`, `tool_choice`, and `reasoning` overrides. |
 | `response.cancel` | Cancel the in-progress or queued response and re-enable listening. |
 
 ### Server -> Client
@@ -95,6 +96,7 @@ flowchart LR
 | `input_audio_buffer.speech_started` | VAD detected user speech. |
 | `input_audio_buffer.speech_stopped` | End of user speech segment. |
 | `conversation.item.created` | Acknowledges injected `input_text` from `conversation.item.create`. |
+| `conversation.item.retrieved` | Answers `conversation.item.retrieve` with the full item. |
 | `conversation.item.input_audio_transcription.delta` | Incremental transcript text for the active input-audio content part (when live transcription is enabled). |
 | `conversation.item.input_audio_transcription.completed` | Final transcript for the user turn (with duration usage). |
 | `speech_to_speech.input_audio_transcription.snapshot` | Cumulative, replaceable speculative transcript hypothesis for the active input item (opt-in via `session.extensions`). |
@@ -115,6 +117,74 @@ matching audio. WebSocket preserves this message order; WebRTC does not guarante
 that viseme events arrive before the corresponding audio plays.
 Standard Realtime audio events and the current endpoints stay unchanged. See the
 [viseme guide](../../STV/README.md) for the event schema, timing, and model limits.
+
+### Discovering speech languages
+
+`GET /v1/realtime/capabilities` reports the active handlers' language capabilities
+before a client opens a session. It does not claim a pipeline slot, run inference,
+or contact a remote provider. It remains available while all slots are busy.
+The response lists each pipeline by its `/v1/pool` index:
+
+```json
+{
+  "pipelines": [{
+    "index": 0,
+    "stt": {
+      "languages": [{"code": "en", "name": "english"}],
+      "supports_language_selection": true,
+      "supports_auto": null
+    },
+    "tts": {
+      "languages": [{"code": "en", "name": "english"}],
+      "supports_language_selection": true,
+      "supports_auto": null
+    },
+    "conversation": {
+      "languages": [{"code": "en", "name": "english"}],
+      "selectable_languages": [{"code": "en", "name": "english"}],
+      "session_auto_supported": true
+    }
+  }]
+}
+```
+
+`languages: null` means coverage is unknown; an empty array means the declared
+set is empty. Unknown names appear as `name: null`. Codes and known names use the
+same trimming, lowercase normalization, and name-to-code mapping as session
+language validation.
+
+`conversation.languages` is the intersection when both coverage sets are known.
+Build a session language selector from `conversation.selectable_languages`: choices
+the adapters can honor and session validation accepts. A `null` value means complete
+coverage is unknown. Some adapters accept hints they ignore; that does not establish
+selection support. Parakeet TDT v3 has multilingual coverage but no selectable
+session languages because its decoder accepts no hint.
+
+Each handler's `supports_auto` describes automatic language selection; `null`
+means unknown. `conversation.session_auto_supported` says whether validation
+accepts `"auto"`. That value can be true for a fixed-language model: `"auto"` uses
+the adapter's configured behavior and does not turn a fixed model into a detector.
+
+After pipeline construction, handlers expose native metadata as an immutable
+`SpeechLanguageCapabilities` value through `language_capabilities`; custom handlers
+can supply it as a read-only property. Deployment declarations affect the service's
+response without changing that metadata. Remote model aliases, `/v1/models`, and
+Whisper decoder language tokens do not establish coverage. Multilingual Whisper
+architectures can hold English-only checkpoints, so they report unknown coverage.
+For these models or providers such as vLLM/vLLM-Omni without discovery, declare
+coverage explicitly:
+
+```bash
+speech-to-speech serve --stt openai --tts openai \
+  --stt_supported_languages en es --tts_supported_languages en fr \
+  --stt_auto_language_supported true --tts_auto_language_supported false
+```
+
+These declarations fill missing metadata and constrain named session choices;
+they cannot add a language control that the adapter lacks. A declaration that
+conflicts with known backend metadata raises a startup error. Omit a flag to
+retain discovered metadata or report unknown. Check the deployed model's
+configuration rather than inferring support from its served name.
 
 ### Terminal status details
 
@@ -138,7 +208,7 @@ uv run pytest tests/test_provider_response_status.py -q
 
 ### Official Agents SDK compatibility
 
-CI pins `@openai/agents` 0.14.3 and runs independent integration jobs against
+CI pins `@openai/agents` 0.21.0 and runs independent integration jobs against
 the SDK's stock `OpenAIRealtimeWebSocket` and `OpenAIRealtimeWebRTC`
 transports. Both use a normal `RealtimeSession` with only its endpoint URL
 changed.
@@ -158,7 +228,7 @@ Unlisted events, hosted features, and every future SDK behavior are not implied
 to be supported. The browser demo uses the same stock transports through a
 narrow adapter; its lower-level transport hooks only feed visualization,
 WebSocket PCM playback/replay, and existing UI events. One pinned-SDK gap is
-handled there as well: `@openai/agents` 0.14.3 omits `tools` when the updated
+handled there as well: `@openai/agents` 0.21.0 still omits `tools` when the updated
 list is empty, so the adapter uses the stock transport's `sendEvent` hook for
 an explicit `session.update` with `tools: []`. HF queueing, authentication,
 metering, camera capture, and device selection remain outside the Realtime
@@ -427,6 +497,22 @@ A client sets the VAD threshold and turns off interruption for its session with 
 With `interrupt_response: false` the server still sends `input_audio_buffer.speech_started` and transcribes the user, but it keeps the active response. A client that clears its playback queue on `speech_started` will still cut the reply off, so clients should only do that when interruption is on. A cancelled `response.done` or an `output_audio_buffer.cleared` event should still clear playback. The packaged Python client follows these rules, and `talk --vad-threshold` / `--no-interrupt-response` (or `vad_threshold` / `interrupt_response` under YAML `runtime.client`) set the fields.
 
 This is not the same as `--block-mic-during-playback`. That option stops sending microphone audio while the assistant speaks, so nothing is heard or transcribed until playback ends.
+
+### Changing reasoning effort from a client
+
+Clients pick the LLM's reasoning effort with the OpenAI Realtime `reasoning` object. In `session.update` it applies to the rest of the session and is echoed in `session.updated`; in `response.create` it applies to that response only:
+
+```json
+{"type": "session.update", "session": {"type": "realtime", "reasoning": {"effort": "high"}}}
+{"type": "response.create", "response": {"reasoning": {"effort": "minimal"}}}
+```
+
+OpenAI documents `minimal`, `low`, `medium`, `high`, and `xhigh`. This server adds two extensions:
+
+- `none` is also accepted, to turn reasoning off on providers that support it. It matches the `--responses_api_reasoning_effort none` CLI default.
+- `"reasoning": null` in `session.update` clears the client's choice and restores the server's startup setting. A partial object such as `"reasoning": {}` keeps the current effort.
+
+Other values return an `invalid_request_error`. When the client sets no effort, the startup flags (`--responses_api_reasoning_effort`, `--responses_api_disable_thinking`) apply unchanged. A client effort is sent as `reasoning.effort` on Responses requests and as `reasoning_effort` on Chat Completions requests, and it replaces the startup `chat_template_kwargs.enable_thinking=false` for that request. The local transformers/mlx-lm backend ignores it.
 
 ---
 

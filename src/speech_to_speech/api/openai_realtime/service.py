@@ -13,6 +13,7 @@ from openai.types.realtime import (
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
     ConversationItemInputAudioTranscriptionFailedEvent,
+    ConversationItemRetrieveEvent,
     ConversationItemTruncateEvent,
     InputAudioBufferAppendEvent,
     InputAudioBufferCommitEvent,
@@ -49,6 +50,7 @@ from openai.types.realtime.conversation_item_input_audio_transcription_completed
     UsageTranscriptTextUsageDuration,
 )
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+from openai.types.realtime.realtime_server_event import ConversationItemRetrieved
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from speech_to_speech.api.openai_realtime.handlers import (
@@ -67,6 +69,7 @@ from speech_to_speech.api.openai_realtime.input_state import (
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.api.openai_realtime.visemes import SpeechToSpeechVisemesEvent
 from speech_to_speech.LLM.chat import Chat, make_user_audio_message, make_user_message
+from speech_to_speech.LLM.utils import WHISPER_LANGUAGE_TO_LLM_LANGUAGE
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
@@ -87,6 +90,8 @@ from speech_to_speech.pipeline.queue_types import TextPromptItem
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnGateAction, TurnPhase
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
 from speech_to_speech.pipeline.turn_latency import SpeechLatencyAnchor, TurnLatencyStore
+from speech_to_speech.speech_languages import SpeechLanguageCapabilities
+from speech_to_speech.utils.request_tracing import log_response_binding
 from speech_to_speech.utils.utils import _generate_id, audio_to_wav_base64
 
 logger = logging.getLogger(__name__)
@@ -123,6 +128,7 @@ _EVENT_TYPE_TO_MODEL: dict[str, type[BaseModel]] = {
     "conversation.item.create": ConversationItemCreateEvent,
     "conversation.item.delete": ConversationItemDeleteEvent,
     "conversation.item.truncate": ConversationItemTruncateEvent,
+    "conversation.item.retrieve": ConversationItemRetrieveEvent,
     "response.create": ResponseCreateEvent,
     "response.cancel": ResponseCancelEvent,
 }
@@ -135,6 +141,7 @@ ClientEvent = Union[
     ConversationItemCreateEvent,
     ConversationItemDeleteEvent,
     ConversationItemTruncateEvent,
+    ConversationItemRetrieveEvent,
     ResponseCreateEvent,
     ResponseCancelEvent,
 ]
@@ -149,6 +156,7 @@ ServerEvent = Union[
     InputAudioBufferCommittedEvent,
     ConversationItemCreatedEvent,
     ConversationItemDeletedEvent,
+    ConversationItemRetrieved,
     ConversationItemInputAudioTranscriptionDeltaEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionFailedEvent,
@@ -265,6 +273,13 @@ class ConnState(BaseModel):
     last_item_id: Optional[str] = None
     acknowledged_item_ids: list[str] = Field(default_factory=list)
     deleted_input_turn_ids: dict[str, None] = Field(default_factory=dict)
+    # Final transcript sent to the client for each published speech item. The
+    # chat may hold different text (speaker annotations) or nothing (empty
+    # transcripts), so conversation.item.retrieve answers from here.
+    published_input_transcripts: dict[str, str] = Field(default_factory=dict)
+    # Delivered assistant messages that were audio. The chat holds their text,
+    # so retrieval restores the output_audio shape the client saw.
+    audio_output_item_ids: dict[str, None] = Field(default_factory=dict)
     current_response_params: RealtimeResponseCreateParams | None = None
     pending_assistant_item_id: Optional[str] = None
     pending_assistant_output_index: Optional[int] = None
@@ -380,6 +395,8 @@ class RealtimeService:
         # None means the active backend does not declare a complete language set.
         self.stt_supported_languages: set[str] | None = None
         self.tts_supported_languages: set[str] | None = None
+        self.stt_language_capabilities = SpeechLanguageCapabilities()
+        self.tts_language_capabilities = SpeechLanguageCapabilities()
         self.stt_auto_reset_supported: bool = True
         self._conns: dict[str, ConnState] = {}
         self.total_usage = GlobalUsageMetrics()
@@ -402,6 +419,47 @@ class RealtimeService:
             ResponseFailedEvent: self._on_response_failed,
         }
 
+    def get_language_capabilities(self) -> dict[str, Any]:
+        """Describe coverage separately from valid named session selections."""
+
+        def languages(codes: frozenset[str] | set[str] | None) -> list[dict[str, str | None]] | None:
+            if codes is None:
+                return None
+            return [{"code": code, "name": WHISPER_LANGUAGE_TO_LLM_LANGUAGE.get(code)} for code in sorted(codes)]
+
+        def describe(capabilities: SpeechLanguageCapabilities) -> dict[str, Any]:
+            return {
+                "languages": languages(capabilities.languages),
+                "supports_language_selection": capabilities.supports_language_selection,
+                "supports_auto": capabilities.supports_auto,
+            }
+
+        stt, tts = self.stt_language_capabilities, self.tts_language_capabilities
+        shared = None if stt.languages is None or tts.languages is None else stt.languages & tts.languages
+        selectable: set[str] | None = None
+        for capabilities, allowed in (
+            (stt, self.stt_supported_languages),
+            (tts, self.tts_supported_languages),
+        ):
+            if not capabilities.supports_language_selection:
+                selectable = set()
+                break
+            for known in (capabilities.languages, allowed):
+                if known is not None:
+                    selectable = set(known) if selectable is None else selectable.intersection(known)
+        # A partial known set cannot establish complete coverage for a selector.
+        if selectable and shared is None:
+            selectable = None
+        return {
+            "stt": describe(stt),
+            "tts": describe(tts),
+            "conversation": {
+                "languages": languages(shared),
+                "selectable_languages": languages(selectable),
+                "session_auto_supported": self.stt_auto_reset_supported,
+            },
+        }
+
     # ── Connection lifecycle ─────────────────────
 
     def register(self) -> str:
@@ -417,6 +475,7 @@ class RealtimeService:
                 ),
             )
         )
+        state.runtime_config.bind_trace_session(state.session_id)
         self._conns[state.session_id] = state
         self.total_usage.connections += 1
         return state.session_id
@@ -452,16 +511,29 @@ class RealtimeService:
         *,
         turn_id: str | None = None,
         turn_revision: int | None = None,
+        parent_response_key: str | None = None,
+        parent_call_id: str | None = None,
         source: Literal["speech", "client", "tool"] = "speech",
         speech_anchor: SpeechLatencyAnchor | None = None,
     ) -> None:
+        existing = self.turn_latency_store.get_response(response_key)
         tracker = self.turn_latency_store.get_or_create_response(
             response_key,
             turn_id=turn_id,
             turn_revision=turn_revision,
             session_id=conn_id,
+            parent_response_key=parent_response_key,
+            parent_call_id=parent_call_id,
         )
         tracker.source = source
+        if existing is None:
+            log_response_binding(
+                session_id=self._state(conn_id).session_id,
+                response_key=response_key,
+                turn_id=turn_id,
+                turn_revision=turn_revision,
+                source=source,
+            )
         if source == "speech" and speech_anchor is None and turn_id is not None:
             speech_anchor = self._state(conn_id).speech_latency_anchors.get((turn_id, turn_revision))
         tracker.speech_anchor = speech_anchor
@@ -606,6 +678,11 @@ class RealtimeService:
         # Hidden follow-up work captured the old history; it cannot be reused.
         self.response.discard_tool_followup_prefetch(conn_id)
         return self.conversation.handle_conversation_item_delete(conn_id, event)
+
+    def handle_conversation_item_retrieve(
+        self, conn_id: str, event: ConversationItemRetrieveEvent
+    ) -> list[ServerEvent]:
+        return self.conversation.handle_conversation_item_retrieve(conn_id, event)
 
     def dispatch_pipeline_event(self, conn_id: str, event: PipelineEvent) -> list[ServerEvent]:
         """Route an internal pipeline event to the appropriate handler."""

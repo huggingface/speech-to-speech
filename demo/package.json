@@ -10,7 +10,7 @@
     "test:ui": "node --test tests/turn-latency-ui.test.mjs tests/local-vad-browser.test.mjs"
   },
   "dependencies": {
-    "@openai/agents": "0.14.3",
+    "@openai/agents": "0.21.0",
     "@ricky0123/vad-web": "0.0.31",
     "hono": "4.13.0",
     "onnxruntime-web": "1.22.0",

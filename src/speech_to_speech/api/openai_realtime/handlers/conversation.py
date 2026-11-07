@@ -13,6 +13,7 @@ from openai.types.realtime import (
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
     ConversationItemInputAudioTranscriptionFailedEvent,
+    ConversationItemRetrieveEvent,
 )
 from openai.types.realtime.conversation_item_input_audio_transcription_completed_event import (
     UsageTranscriptTextUsageDuration,
@@ -20,25 +21,46 @@ from openai.types.realtime.conversation_item_input_audio_transcription_completed
 from openai.types.realtime.conversation_item_input_audio_transcription_failed_event import (
     Error as InputAudioTranscriptionError,
 )
+from openai.types.realtime.realtime_conversation_item_assistant_message import (
+    Content as AssistantContent,
+)
+from openai.types.realtime.realtime_conversation_item_assistant_message import (
+    RealtimeConversationItemAssistantMessage,
+)
+from openai.types.realtime.realtime_conversation_item_function_call import (
+    RealtimeConversationItemFunctionCall,
+)
 from openai.types.realtime.realtime_conversation_item_function_call_output import (
     RealtimeConversationItemFunctionCallOutput,
 )
 from openai.types.realtime.realtime_conversation_item_user_message import (
+    Content as UserContent,
+)
+from openai.types.realtime.realtime_conversation_item_user_message import (
     RealtimeConversationItemUserMessage,
 )
+from openai.types.realtime.realtime_server_event import ConversationItemRetrieved
+from openai.types.responses import ResponseReasoningItem
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
 from speech_to_speech.api.openai_realtime.input_state import (
     InputItemState,
     SpeechToSpeechInputAudioTranscriptionSnapshotEvent,
 )
-from speech_to_speech.LLM.chat import ChatItemError, add_supported_item
+from speech_to_speech.LLM.chat import (
+    ChatItemError,
+    ResponsesAssistantMessage,
+    ResponsesFunctionCall,
+    SupportedItem,
+    add_supported_item,
+)
 from speech_to_speech.pipeline.events import (
     PartialTranscriptionEvent,
     TranscriptionCompletedEvent,
     TranscriptionFailedEvent,
 )
 from speech_to_speech.pipeline.transcript_logging import transcript_for_log
+from speech_to_speech.utils.utils import is_out_of_band, response_wants_audio
 
 if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import ServerEvent
@@ -165,7 +187,8 @@ class ConversationHandler(RealtimeBaseHandler):
         # Committed speech is already on the wire while STT still owns its
         # input state; its Chat entry is only written when transcription ends.
         committed_input = event.item_id in st.input_items and event.item_id in st.acknowledged_item_ids
-        if removed is None and not committed_input:
+        empty_input = st.published_input_transcripts.pop(event.item_id, None) == ""
+        if removed is None and not committed_input and not empty_input:
             error = self.make_error(
                 f"No conversation item with id '{event.item_id}' found.", "conversation_item_not_found"
             )
@@ -199,6 +222,105 @@ class ConversationHandler(RealtimeBaseHandler):
                 type="conversation.item.deleted", event_id=self._next_event_id(), item_id=event.item_id
             )
         ]
+
+    def handle_conversation_item_retrieve(
+        self,
+        conn_id: str,
+        event: ConversationItemRetrieveEvent,
+    ) -> list[ServerEvent]:
+        """Answer ``conversation.item.retrieve`` with the server's copy of one item.
+
+        Per the OpenAI Realtime client events reference, the server answers
+        with ``conversation.item.retrieved`` "unless the item does not exist in
+        the conversation history, in which case the server will respond with an
+        error". Retrieval is read-only, so it is answered immediately, including
+        while a response is active.
+        """
+        item = self._retrievable_item(conn_id, event.item_id)
+        if item is None:
+            return [
+                self.make_error(f"No conversation item with id '{event.item_id}' found.", "conversation_item_not_found")
+            ]
+        return [
+            ConversationItemRetrieved(
+                type="conversation.item.retrieved",
+                event_id=self._next_event_id(),
+                item=item,
+            )
+        ]
+
+    def _retrievable_item(self, conn_id: str, item_id: str) -> ConversationItem | None:
+        """Return the wire form of an item the client has seen and the server still holds."""
+        st = self._state(conn_id)
+        published = st.published_input_transcripts
+        if item_id not in st.acknowledged_item_ids and item_id not in published:
+            return None
+
+        # An active response's output items live in its pending state until
+        # response.done binds them into history.
+        if st.in_response and not is_out_of_band(st.current_response_params):
+            wants_audio = response_wants_audio(st.current_response_params)
+            for pending in st.pending_text_outputs:
+                if pending["item_id"] == item_id:
+                    item = self._service.response._build_message_item(pending, wants_audio, "completed")
+                    item.status = pending.get("status", "in_progress")
+                    return item
+            for call in st.pending_function_calls.values():
+                if call.id == item_id:
+                    return call.model_copy(update={"object": "realtime.item", "status": call.status or "in_progress"})
+
+        speech = item_id in published or item_id in st.input_items
+        held = st.runtime_config.chat.get_item(item_id)
+        if held is not None:
+            if (
+                speech
+                and isinstance(held, RealtimeConversationItemUserMessage)
+                and all(part.type == "input_text" for part in held.content or [])
+            ):
+                # Transcribed speech is held as LLM text, possibly annotated
+                # with its speaker. Return the input_audio item the client saw,
+                # with the transcript it was sent (null until it is published).
+                return self._user_audio_item(item_id, published.get(item_id))
+            wire = self._wire_item(held)
+            if isinstance(wire, RealtimeConversationItemAssistantMessage) and item_id in st.audio_output_item_ids:
+                # The chat holds an audio reply as LLM text. Restore the
+                # output_audio part, joined the way the transcript streamed.
+                transcript = " ".join(part.text.strip() for part in wire.content if part.text and part.text.strip())
+                wire.content = [AssistantContent(type="output_audio", transcript=transcript)]
+            return wire
+        if item_id in st.input_items:
+            # Committed speech whose transcription has not finished yet.
+            return self._user_audio_item(item_id, None)
+        if published.get(item_id) == "":
+            # An empty transcript never enters the chat, but the client was
+            # told about the item and its empty completed transcription.
+            return self._user_audio_item(item_id, "")
+        return None
+
+    @staticmethod
+    def _user_audio_item(item_id: str, transcript: str | None) -> RealtimeConversationItemUserMessage:
+        return RealtimeConversationItemUserMessage(
+            id=item_id,
+            object="realtime.item",
+            type="message",
+            role="user",
+            status="completed",
+            content=[UserContent(type="input_audio", transcript=transcript)],
+        )
+
+    @staticmethod
+    def _wire_item(item: SupportedItem) -> ConversationItem | None:
+        """Convert one held chat item to the Realtime item shape the client saw."""
+        if isinstance(item, ResponseReasoningItem):
+            return None
+        wire: ConversationItem
+        if isinstance(item, ResponsesAssistantMessage):
+            wire = RealtimeConversationItemAssistantMessage.model_validate(item.model_dump(exclude={"response_item"}))
+        elif isinstance(item, ResponsesFunctionCall):
+            wire = RealtimeConversationItemFunctionCall.model_validate(item.model_dump(exclude={"response_item"}))
+        else:
+            wire = item
+        return wire.model_copy(update={"object": "realtime.item", "status": wire.status or "completed"})
 
     def _apply_item(
         self,

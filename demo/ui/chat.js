@@ -649,13 +649,19 @@ export class ChatView {
     status.textContent = ({ completed: "Completed", cancelled: "Interrupted", failed: "Failed", incomplete: "Incomplete" })[timing.status];
     details.appendChild(status);
     const list = document.createElement("dl");
+    const llmSummary = [];
+    if (timing.llm_total_s != null) llmSummary.push(`${format(timing.llm_total_s)} total`);
+    if (timing.llm_rounds !== undefined) {
+      llmSummary.push(`${timing.llm_rounds} ${timing.llm_rounds === 1 ? "round" : "rounds"}`);
+    }
     /** @type {[string, number|null|undefined|string][]} */
     const stages = [
       [timing.version === 2 ? "E2E time" : "VAD handoff to first audio", timing.e2e_s],
       ["VAD end decision", timing.vad_decision_s],
       ["Smart Turn decision", timing.smart_status],
       ["Transcription", timing.stt_s],
-      ["Response generation", timing.llm_s],
+      ["LLM", llmSummary.length ? llmSummary.join(" · ") : timing.llm_s],
+      ...(llmSummary.length ? [["LLM for this response", timing.llm_s]] : []),
       ["Voice synthesis to first audio", timing.tts_ttfa_s],
       ["Hold time before response", timing.version === 2 ? timing.hold_s : timing.smart_wait_s],
     ];
