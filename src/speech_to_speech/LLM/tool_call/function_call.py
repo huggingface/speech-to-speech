@@ -15,10 +15,12 @@ import tokenize
 from collections import OrderedDict
 from typing import Any, Dict, List, Tuple
 
-from jsonschema import ValidationError
+from jsonschema import SchemaError, ValidationError
 from jsonschema.validators import validator_for
 from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel
+from referencing import Registry
+from referencing.exceptions import Unresolvable
 
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.LLM.tool_call.signature_from_schema import signature_from_schema
@@ -332,7 +334,10 @@ def parse_tool_call_block(block: str, function_tools: list[FunctionTool]) -> Lis
         properties = schema.get("properties", {})
         if not isinstance(properties, dict):
             raise ValueError("invalid parameter schema")
-        validator = validator_for(schema)(schema)
+        validator_type = validator_for(schema)
+        validator_type.check_schema(schema)
+        # Client schemas may resolve local definitions but must never fetch URLs.
+        validator = validator_type(schema, registry=Registry())
         arguments: dict[str, Any] = {}
         while body.strip():
             parameter = re.match(r"\s*<parameter=([^<>\s]+)>(.*?)</parameter>", body, re.DOTALL)
@@ -357,7 +362,7 @@ def parse_tool_call_block(block: str, function_tools: list[FunctionTool]) -> Lis
             body = body[parameter.end() :]
         validator.validate(arguments)
         return [FunctionToolCall(function_name=name, parameters=arguments, original_string=block)]
-    except (ValueError, TypeError, ValidationError) as exc:
+    except (ValueError, TypeError, ValidationError, SchemaError, Unresolvable) as exc:
         logger.warning("Ignoring invalid Qwen tool call: %s", exc)
         return []
 

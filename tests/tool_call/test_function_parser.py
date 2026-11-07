@@ -529,3 +529,22 @@ def test_qwen_native_calls_validate_referenced_and_required_arguments():
     for body in ('<parameter=value>{"count": "wrong"}</parameter>', "<parameter=value>{}</parameter>", ""):
         block = f"<tool_call><function=configure>{body}</function></tool_call>"
         assert function_call_module.parse_tool_call_block(block, [tool]) == []
+
+
+@pytest.mark.parametrize(
+    "schema", [{"$ref": "https://example.invalid/schema"}, {"$ref": "#/$defs/Missing"}, {"type": "invalid"}]
+)
+def test_qwen_native_calls_reject_invalid_schemas_without_fetching(monkeypatch, schema):
+    import urllib.request
+
+    requests = []
+
+    def unexpected_fetch(*args, **kwargs):
+        requests.append(args)
+        raise AssertionError("Tool schemas must not trigger network requests")
+
+    monkeypatch.setattr(urllib.request, "urlopen", unexpected_fetch)
+    tool = _make_tool("configure", {"value": schema})
+    block = "<tool_call><function=configure><parameter=value>7</parameter></function></tool_call>"
+    assert function_call_module.parse_tool_call_block(block, [tool]) == []
+    assert requests == []

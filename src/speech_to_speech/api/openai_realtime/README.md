@@ -313,7 +313,7 @@ function_name(arg_name_1=value1, arg_name_2='string_value')
 </code>
 ```
 
-The streaming parser recognizes Python `<code>` calls and native JSON or Qwen function/parameter `<tool_call>` blocks. Valid calls become `ResponseFunctionToolCall` objects with generated `call_id`s. Qwen parameter decoding uses the declared JSON Schema, including local references, and accepts JSON literals and the template's scalar `True`, `False`, and `None`. Raw strings retain quotes and whitespace; when a schema accepts both string and non-string values, valid raw text takes precedence because the native format does not distinguish them.
+The streaming parser recognizes Python `<code>` calls and native JSON or Qwen function/parameter `<tool_call>` blocks. Valid calls become `ResponseFunctionToolCall` objects with generated `call_id`s. Qwen parameter decoding uses the declared JSON Schema, including local references, and accepts JSON literals and the template's scalar `True`, `False`, and `None`. Invalid schemas or unresolved references reject the call; schema validation never fetches remote references. Raw strings retain quotes and whitespace; when a schema accepts both string and non-string values, valid raw text takes precedence because the native format does not distinguish them.
 
 Transformers generation stops at both the model's configured EOS and the tokenizer's EOS. Explicit generation overrides take precedence.
 
