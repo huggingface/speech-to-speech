@@ -878,15 +878,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 log_exception(logger, "LLM generation failed; ending the current response", exc)
                 if error_message is None:
                     error_message = f"Language model generation failed: {exc}"
-                if consumed_image_ids and _is_image_input_rejection(exc):
-                    # A failed response never cleans up history, so the image would be
-                    # re-sent and rejected on every later turn. Drop only the images
-                    # this request carried; the rest of the conversation is untouched.
-                    image_input_rejected = True
-                    original_chat.strip_images(consumed_image_ids)
-                    logger.warning(
-                        "Language model rejected image input; removed %d image(s) from history", len(consumed_image_ids)
-                    )
+                image_input_rejected = bool(consumed_image_ids) and _is_image_input_rejection(exc)
             finally:
                 # Store elapsed provider work before an error terminal can finish
                 # the response on the service thread.
@@ -902,6 +894,15 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
             ):
                 state.output_emitted = True
+                if image_input_rejected and not is_out_of_band(turn.response):
+                    # A failed response never cleans up history, so the image would be
+                    # re-sent and rejected on every later turn. Drop only the images
+                    # this request carried, and only for the response the user hears:
+                    # a discarded prefetch must leave them for the real request.
+                    original_chat.strip_images(consumed_image_ids)
+                    logger.warning(
+                        "Language model rejected image input; removed %d image(s) from history", len(consumed_image_ids)
+                    )
                 yield LLMResponseChunk(
                     text=IMAGE_INPUT_UNSUPPORTED_FALLBACK if image_input_rejected else PROVIDER_FAILURE_FALLBACK,
                     selected_language=turn.selected_language,

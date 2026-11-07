@@ -384,6 +384,36 @@ def test_camera_image_rejected_by_text_only_backend_keeps_later_turns_working():
     assert "call_cam" in later and "Snapshot captured from the webcam." in later
 
 
+def test_image_rejected_by_unclaimed_prefetch_stays_for_the_real_request():
+    handler = _make_handler(stream=True, cancel_scope=CancelScope())
+
+    def create(**kwargs):
+        request = httpx.Request("POST", "http://fake/v1/responses")
+        raise InternalServerError(
+            "image input is not supported - hint: if this is unexpected, you may need to provide the mmproj",
+            response=httpx.Response(500, request=request),
+            body=None,
+        )
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    cfg = _make_runtime_config(chat_size=10)
+    cfg.chat.add_item(
+        RealtimeConversationItemUserMessage(
+            type="message",
+            role="user",
+            content=[UserContent(type="input_image", image_url="data:image/jpeg;base64,abc")],
+        )
+    )
+    request = GenerateResponseRequest(runtime_config=cfg)
+    request.prefetch_transaction = ResponsePrefetchTransaction()
+
+    outputs = list(drive_llm(handler, request))
+
+    assert not any(isinstance(o, LLMResponseChunk) for o in outputs)
+    assert "image input is not supported" in outputs[-1].error
+    assert cfg.chat.image_message_ids()
+
+
 def test_discarded_prefetch_does_not_block_on_provider_connect():
     request_started = Event()
     release_request = Event()

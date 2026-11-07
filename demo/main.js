@@ -667,6 +667,7 @@ toolWebSwitch.addEventListener("change", () => {
 });
 
 toolCamSwitch.addEventListener("change", async () => {
+  await configReady;
   if (toolCamSwitch.checked && !serverVision) {
     toolCamSwitch.checked = false; // guard: the backend can't take images
     return;
@@ -748,6 +749,7 @@ function disableCamera() {
  *  user declines the permission, switch the tool off and reflect it in the UI
  *  rather than nagging. */
 async function autoStartCamera() {
+  await configReady;
   if (!toolsEnabled.camera_snapshot || !serverVision || cameraStream) return;
   try {
     await enableCamera();
@@ -1434,7 +1436,9 @@ async function doStart(audioContext = null) {
   }
 
   // The webcam is started on arrival (autoStartCamera), so nothing to do here;
-  // a still-pending grant just means the snapshot tool isn't ready yet.
+  // a still-pending grant just means the snapshot tool isn't ready yet. The
+  // tool set depends on the config (e.g. `vision`), so wait for it.
+  await configReady;
 
   const common = {
     localVad: settings.localVad,
@@ -1716,10 +1720,12 @@ async function onFatalError(err) {
 setState("idle");
 chat.renderEmptyState();
 initGateArc();
-// Start the webcam as soon as the user lands (camera tool defaults on) and the
-// config confirms the backend takes images, and react to later permission
-// changes (re-grant after a denial re-enables it).
-void fetchConfig().then(autoStartCamera);
+// Camera starts and the call's tool set wait on this, so they never act on the
+// fail-open defaults before the deploy reports e.g. `vision`.
+const configReady = fetchConfig();
+// Start the webcam as soon as the user lands (camera tool defaults on), and
+// react to later permission changes (re-grant after a denial re-enables it).
+void autoStartCamera();
 void watchCameraPermission();
 
 // Reconcile a live session if the tab is closed/hidden mid-call (no teardown).
