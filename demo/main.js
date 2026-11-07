@@ -243,6 +243,8 @@ const toolCamSwitch = $("#tool-cam");
 /** @type {HTMLElement} */
 const toolWebRow = $("#tool-web-row");
 /** @type {HTMLElement} */
+const toolCamRow = $("#tool-cam-row");
+/** @type {HTMLElement} */
 const toolWebHint = $("#tool-web-hint");
 /** @type {HTMLElement} */
 const toolCamHint = $("#tool-cam-hint");
@@ -342,6 +344,9 @@ let activeTransport = "ws";
 let toolsEnabled = loadTools();
 // Whether the server holds a Serper key (learned from /api/config on load).
 let serverSearchKey = false;
+// Whether the s2s backend accepts images (/api/config `vision`, deploy env
+// VISION). Fails open so a missing config keeps the camera tool.
+let serverVision = true;
 // A user-supplied key (fallback when the deploy has none). localStorage only.
 let userSearchKey = localStorage.getItem(STORAGE_KEYS.searchKey) || "";
 /** @type {MediaStream | null} */
@@ -356,7 +361,7 @@ function searchAvailable() {
 function activeToolDefs() {
   const defs = [];
   if (toolsEnabled.web_search && searchAvailable()) defs.push(TOOL_DEFS.web_search);
-  if (toolsEnabled.camera_snapshot) defs.push(TOOL_DEFS.camera_snapshot);
+  if (toolsEnabled.camera_snapshot && serverVision) defs.push(TOOL_DEFS.camera_snapshot);
   return defs;
 }
 
@@ -624,7 +629,10 @@ function syncToolsUi() {
   toolWebSwitch.checked = toolsEnabled.web_search && avail;
   toolWebSwitch.disabled = !avail;
   toolWebRow.classList.toggle("disabled", !avail);
-  toolCamSwitch.checked = toolsEnabled.camera_snapshot;
+  toolCamSwitch.checked = toolsEnabled.camera_snapshot && serverVision;
+  toolCamSwitch.disabled = !serverVision;
+  toolCamRow.classList.toggle("disabled", !serverVision);
+  if (!serverVision) toolCamHint.textContent = "The connected model can't take images, so the camera is unavailable.";
 
   if (serverSearchKey) {
     // Key lives server-side: show it as configured, never expose it.
@@ -659,6 +667,11 @@ toolWebSwitch.addEventListener("change", () => {
 });
 
 toolCamSwitch.addEventListener("change", async () => {
+  await configReady;
+  if (toolCamSwitch.checked && !serverVision) {
+    toolCamSwitch.checked = false; // guard: the backend can't take images
+    return;
+  }
   if (toolCamSwitch.checked) {
     try {
       // Flipping the switch always re-requests the camera, so a permission that
@@ -736,7 +749,8 @@ function disableCamera() {
  *  user declines the permission, switch the tool off and reflect it in the UI
  *  rather than nagging. */
 async function autoStartCamera() {
-  if (!toolsEnabled.camera_snapshot || cameraStream) return;
+  await configReady;
+  if (!toolsEnabled.camera_snapshot || !serverVision || cameraStream) return;
   try {
     await enableCamera();
   } catch (err) {
@@ -907,6 +921,7 @@ async function fetchConfig() {
     if (res.ok) {
       const json = await res.json();
       serverSearchKey = !!json.search;
+      serverVision = json.vision ?? true;
       lbMode = !!json.lb;
       // Lock to LB mode only when the deploy reports a load balancer.
       allowDirect = json.allowDirect ?? !lbMode;
@@ -1421,7 +1436,9 @@ async function doStart(audioContext = null) {
   }
 
   // The webcam is started on arrival (autoStartCamera), so nothing to do here;
-  // a still-pending grant just means the snapshot tool isn't ready yet.
+  // a still-pending grant just means the snapshot tool isn't ready yet. The
+  // tool set depends on the config (e.g. `vision`), so wait for it.
+  await configReady;
 
   const common = {
     localVad: settings.localVad,
@@ -1703,7 +1720,9 @@ async function onFatalError(err) {
 setState("idle");
 chat.renderEmptyState();
 initGateArc();
-void fetchConfig();
+// Camera starts and the call's tool set wait on this, so they never act on the
+// fail-open defaults before the deploy reports e.g. `vision`.
+const configReady = fetchConfig();
 // Start the webcam as soon as the user lands (camera tool defaults on), and
 // react to later permission changes (re-grant after a denial re-enables it).
 void autoStartCamera();

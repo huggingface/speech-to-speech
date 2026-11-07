@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator, Iterator
 from queue import Empty, Full, Queue
@@ -14,7 +15,7 @@ from urllib.parse import urlparse
 
 import httpx
 from nltk import sent_tokenize
-from openai import OpenAI
+from openai import APIStatusError, OpenAI
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemAssistantMessage,
     RealtimeConversationItemFunctionCall,
@@ -70,6 +71,20 @@ PREFETCH_PROVIDER_WORKER_LIMIT = 1
 PREFETCH_STREAM_QUEUE_MAXSIZE = 16
 PREFETCH_WORKER_ACQUIRE_TIMEOUT_S = 0.05
 PROVIDER_FAILURE_FALLBACK = "I'm having trouble responding right now. Please try again."
+IMAGE_INPUT_UNSUPPORTED_FALLBACK = "Sorry, I can't see images with the current model."
+# Provider wording for a deployment that cannot take image input, e.g. llama.cpp
+# without an mmproj ("image input is not supported"), vLLM ("is not a multimodal
+# model") or OpenAI ("image_url is only supported by certain models").
+_IMAGE_INPUT_UNSUPPORTED_RE = re.compile(
+    r"image[^.]*\b(?:not supported|unsupported|only supported)\b"
+    r"|does not support (?:image|vision)|not a multimodal model",
+    re.IGNORECASE,
+)
+
+
+def _is_image_input_rejection(exc: Exception) -> bool:
+    """Whether the provider refused the request because it cannot process images."""
+    return isinstance(exc, APIStatusError) and bool(_IMAGE_INPUT_UNSUPPORTED_RE.search(str(exc)))
 
 
 # ── Normalised provider events ────────────────────────────────────────────────
@@ -785,6 +800,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         )
         provider_request_started = False
         consumed_image_ids: set[str] = set()
+        image_input_rejected = False
         store = getattr(self, "turn_latency_store", None)
         tracker = store.get_response(turn.response_key) if store else None
         trace_context = HttpRequestContext(
@@ -862,6 +878,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 log_exception(logger, "LLM generation failed; ending the current response", exc)
                 if error_message is None:
                     error_message = f"Language model generation failed: {exc}"
+                image_input_rejected = bool(consumed_image_ids) and _is_image_input_rejection(exc)
             finally:
                 # Store elapsed provider work before an error terminal can finish
                 # the response on the service thread.
@@ -877,8 +894,17 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
             ):
                 state.output_emitted = True
+                if image_input_rejected and not is_out_of_band(turn.response):
+                    # A failed response never cleans up history, so the image would be
+                    # re-sent and rejected on every later turn. Drop only the images
+                    # this request carried, and only for the response the user hears:
+                    # a discarded prefetch must leave them for the real request.
+                    original_chat.strip_images(consumed_image_ids)
+                    logger.warning(
+                        "Language model rejected image input; removed %d image(s) from history", len(consumed_image_ids)
+                    )
                 yield LLMResponseChunk(
-                    text=PROVIDER_FAILURE_FALLBACK,
+                    text=IMAGE_INPUT_UNSUPPORTED_FALLBACK if image_input_rejected else PROVIDER_FAILURE_FALLBACK,
                     selected_language=turn.selected_language,
                     runtime_config=turn.runtime_config,
                     response=turn.response,
