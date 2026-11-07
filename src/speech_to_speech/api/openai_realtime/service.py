@@ -12,6 +12,7 @@ from openai.types.realtime import (
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
     ConversationItemInputAudioTranscriptionFailedEvent,
+    ConversationItemRetrieveEvent,
     ConversationItemTruncateEvent,
     InputAudioBufferAppendEvent,
     InputAudioBufferCommitEvent,
@@ -48,6 +49,7 @@ from openai.types.realtime.conversation_item_input_audio_transcription_completed
     UsageTranscriptTextUsageDuration,
 )
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+from openai.types.realtime.realtime_server_event import ConversationItemRetrieved
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from speech_to_speech.api.openai_realtime.handlers import (
@@ -125,6 +127,7 @@ _EVENT_TYPE_TO_MODEL: dict[str, type[BaseModel]] = {
     "conversation.item.create": ConversationItemCreateEvent,
     "conversation.item.delete": ConversationItemDeleteEvent,
     "conversation.item.truncate": ConversationItemTruncateEvent,
+    "conversation.item.retrieve": ConversationItemRetrieveEvent,
     "response.create": ResponseCreateEvent,
     "response.cancel": ResponseCancelEvent,
 }
@@ -137,6 +140,7 @@ ClientEvent = Union[
     ConversationItemCreateEvent,
     ConversationItemDeleteEvent,
     ConversationItemTruncateEvent,
+    ConversationItemRetrieveEvent,
     ResponseCreateEvent,
     ResponseCancelEvent,
 ]
@@ -151,6 +155,7 @@ ServerEvent = Union[
     InputAudioBufferCommittedEvent,
     ConversationItemCreatedEvent,
     ConversationItemDeletedEvent,
+    ConversationItemRetrieved,
     ConversationItemInputAudioTranscriptionDeltaEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionFailedEvent,
@@ -267,6 +272,13 @@ class ConnState(BaseModel):
     last_item_id: Optional[str] = None
     acknowledged_item_ids: list[str] = Field(default_factory=list)
     deleted_input_turn_ids: dict[str, None] = Field(default_factory=dict)
+    # Final transcript sent to the client for each published speech item. The
+    # chat may hold different text (speaker annotations) or nothing (empty
+    # transcripts), so conversation.item.retrieve answers from here.
+    published_input_transcripts: dict[str, str] = Field(default_factory=dict)
+    # Delivered assistant messages that were audio. The chat holds their text,
+    # so retrieval restores the output_audio shape the client saw.
+    audio_output_item_ids: dict[str, None] = Field(default_factory=dict)
     current_response_params: RealtimeResponseCreateParams | None = None
     pending_assistant_item_id: Optional[str] = None
     pending_assistant_output_index: Optional[int] = None
@@ -661,6 +673,11 @@ class RealtimeService:
         # Hidden follow-up work captured the old history; it cannot be reused.
         self.response.discard_tool_followup_prefetch(conn_id)
         return self.conversation.handle_conversation_item_delete(conn_id, event)
+
+    def handle_conversation_item_retrieve(
+        self, conn_id: str, event: ConversationItemRetrieveEvent
+    ) -> list[ServerEvent]:
+        return self.conversation.handle_conversation_item_retrieve(conn_id, event)
 
     def dispatch_pipeline_event(self, conn_id: str, event: PipelineEvent) -> list[ServerEvent]:
         """Route an internal pipeline event to the appropriate handler."""

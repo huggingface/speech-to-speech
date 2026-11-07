@@ -685,6 +685,36 @@ class Chat:
             ids = {item.id for item in items if item.id is not None}
             return ids | {wire_id for wire_id, message_ids in self._assistant_item_aliases.items() if message_ids & ids}
 
+    def get_item(self, item_id: str) -> SupportedItem | None:
+        """Return a copy of one retained item, resolving a delivered wire ID.
+
+        A wire assistant ID that aliases several provider messages returns one
+        message holding their content parts in history order.
+        """
+        with self._lock:
+            alias_ids = self._assistant_item_aliases.get(item_id)
+            if alias_ids:
+                messages = [
+                    item
+                    for item in self.buffer
+                    if isinstance(item, RealtimeConversationItemAssistantMessage) and item.id in alias_ids
+                ]
+                if messages:
+                    return RealtimeConversationItemAssistantMessage(
+                        id=item_id,
+                        type="message",
+                        role="assistant",
+                        status=messages[-1].status,
+                        content=[part.model_copy(deep=True) for message in messages for part in message.content],
+                    )
+            candidates: list[SupportedItem] = [*self.buffer, *self._pending_tool_calls.values()]
+            if self.init_chat_message is not None:
+                candidates.insert(0, self.init_chat_message)
+            for item in candidates:
+                if item.id == item_id:
+                    return item.model_copy(deep=True)
+            return None
+
     def delete_item(self, item_id: str) -> SupportedItem | None:
         """Delete exactly one retained item and repair its history bookkeeping."""
         with self._lock:
