@@ -293,6 +293,12 @@ class ConnState(BaseModel):
     # flags. Kept as plain internal data to avoid coupling connection state to
     # protocol event models.
     pending_text_outputs: list[dict[str, Any]] = Field(default_factory=list)
+    # Recent assistant audio items, oldest first: transcript segments with the
+    # pipeline-rate samples delivered after each. Truncation maps a playback
+    # position back to the transcript the user heard.
+    assistant_audio_segments: dict[str, list[list[Any]]] = Field(default_factory=dict)
+    # Played position (pipeline samples) each truncated assistant item was cut to.
+    assistant_audio_cuts: dict[str, int] = Field(default_factory=dict)
     # Keyed by output index so response.done can preserve interleaving with
     # assistant message items.
     pending_function_calls: dict[int, RealtimeConversationItemFunctionCall] = Field(default_factory=dict)
@@ -598,8 +604,9 @@ class RealtimeService:
         self,
         conn_id: str,
         response_key: str | None = None,
+        samples: int = 0,
     ) -> tuple[str, str, int, list[ServerEvent]]:
-        return self.audio.begin_audio_output(conn_id, response_key)
+        return self.audio.begin_audio_output(conn_id, response_key, samples)
 
     def encode_audio_chunk(
         self,
@@ -618,6 +625,12 @@ class RealtimeService:
 
     def handle_response_create(self, conn_id: str, event: ResponseCreateEvent) -> ServerEvent | None:
         return self.response.handle_response_create(conn_id, event)
+
+    def handle_conversation_item_truncate(self, conn_id: str, event: ConversationItemTruncateEvent) -> None:
+        self.response.handle_conversation_item_truncate(conn_id, event)
+
+    def truncate_unplayed_audio(self, conn_id: str, unplayed_ms: float) -> None:
+        self.response.truncate_unplayed_audio(conn_id, unplayed_ms)
 
     def handle_response_cancel(self, conn_id: str) -> list[ServerEvent]:
         return self.response.handle_response_cancel(conn_id)
