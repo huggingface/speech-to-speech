@@ -1219,8 +1219,12 @@ class TestSDKMultiTurn:
 async def test_partial_weather_reaches_audio_callback_before_page_finishes(server_env, monkeypatch, weather_first):
     """Real SDK/server/client and audio callback; controlled model and TTS output."""
     from speech_to_speech.LLM.chat import make_user_message
+    from speech_to_speech.pipeline.language_detection import warm_language_detector
     from tests.llm_history import drive_llm
     from tests.test_response_overrides import _RecordingLocalHandler
+
+    # Keep language-detector loading outside the response deadline.
+    warm_language_detector()
 
     streams = []
 
