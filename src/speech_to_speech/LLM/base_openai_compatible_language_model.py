@@ -123,6 +123,8 @@ class ProviderResponseEnd(BaseModel):
     status: Literal["completed", "incomplete", "failed"] = "completed"
     reason: ResponseIncompleteReason | None = None
     error: str | None = None
+    # What the provider said ended a normal completion, kept for diagnostics.
+    finish_reason: str | None = None
     # Responses output_index order, independent of item completion timing.
     history_item_order: list[str] | None = None
 
@@ -759,6 +761,33 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
     # ── orchestration ─────────────────────────────────────────────────────────
 
+    def _log_empty_completion(
+        self,
+        active_chat: Chat,
+        turn: _Turn,
+        state: _GenState,
+        optional_kwargs: dict[str, Any],
+    ) -> None:
+        """Record what the provider was asked when it finished with nothing to say.
+
+        Clients only see ``response.done`` with no output, which looks the same
+        as a lost response. Log the shape of the request and the provider's
+        terminal so the two can be told apart, without any conversation text.
+        """
+        last_item = active_chat.buffer[-1] if active_chat.buffer else None
+        logger.warning(
+            "LLM completed without output: response_key=%s finish_reason=%s output_tokens=%d "
+            "items=%d last_item=%s tool_choice=%s tools=%d cancel_generation=%s",
+            turn.response_key,
+            state.ending.finish_reason,
+            state.output_tokens,
+            len(active_chat.buffer),
+            getattr(last_item, "role", None) or getattr(last_item, "type", None),
+            optional_kwargs.get("tool_choice"),
+            len(optional_kwargs.get("tools") or []),
+            turn.gen,
+        )
+
     def _generate(
         self,
         active_chat: Chat,
@@ -889,6 +918,14 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     response_key=turn.response_key,
                     prefetch_transaction=turn.prefetch_transaction,
                 )
+
+            if (
+                generation_completed
+                and error_message is None
+                and state.ending.status == "completed"
+                and not state.output_emitted
+            ):
+                self._log_empty_completion(active_chat, turn, state, optional_kwargs)
 
             proposal_allowed = (
                 error_message is None

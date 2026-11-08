@@ -221,7 +221,7 @@ def _chat_response_end(finish_reason: str) -> ProviderResponseEnd:
         return ProviderResponseEnd(status="incomplete", reason="max_output_tokens")
     if finish_reason == "content_filter":
         return ProviderResponseEnd(status="incomplete", reason="content_filter")
-    return ProviderResponseEnd()
+    return ProviderResponseEnd(finish_reason=finish_reason)
 
 
 def _iter_chat_stream_events(api_response: Stream[ChatCompletionChunk]) -> Iterator[ProviderEvent]:
