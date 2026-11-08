@@ -88,26 +88,37 @@ test("history shows per-response server timings on desktop and phone", async (t)
     assert.equal(await page.locator(".hist-note").textContent(), "Interrupted");
     assert.equal(await page.locator(".hist-msg.assistant").last().locator(".hist-timings").count(), 0);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-    for (const fields of [{}, { llm_rounds: 0 }, { llm_total_s: 0.8 }, { llm_total_s: 0.8, llm_rounds: 1 }]) {
-      await page.evaluate(({ timing, fields }) => {
+    const compatibilityCases = [
+      { fields: {}, summary: "0.80 s" },
+      { fields: { llm_total_s: null }, summary: "0.80 s" },
+      { fields: { llm_rounds: 0 }, summary: "0 rounds", separateResponse: true },
+      { fields: { llm_total_s: null, llm_rounds: 0 }, summary: "0 rounds", separateResponse: true },
+      { fields: { llm_total_s: 0.8 }, summary: "0.80 s total", separateResponse: true },
+      { fields: { llm_total_s: 0.8, llm_rounds: 1 }, summary: "0.80 s total · 1 round", separateResponse: true },
+      { fields: { llm_total_s: 2.4, llm_rounds: 3 }, summary: "2.40 s total · 3 rounds", separateResponse: true },
+      { fields: { llm_total_s: 0, llm_rounds: 0 }, summary: "0.00 s total · 0 rounds", separateResponse: true },
+      // The deployed backend's reported turn must show its measured LLM time once.
+      { fields: { e2e_s: 2.29, vad_decision_s: 0.10, smart_status: "incomplete", stt_s: 0.23,
+        llm_s: 1.17, tts_ttfa_s: 0.15, hold_s: 1.21 }, summary: "1.17 s" },
+    ];
+    for (const [index, { fields, summary, separateResponse }] of compatibilityCases.entries()) {
+      await page.evaluate(({ timing, fields, index }) => {
         const legacy = { ...timing };
         delete legacy.llm_total_s;
         delete legacy.llm_rounds;
-        const id = `compat-${fields.llm_rounds ?? (fields.llm_total_s === undefined ? "missing" : "unknown")}`;
+        const id = `compat-${index}`;
         chat.onTranscript({ role: "assistant", text: "Compatibility reply.", partial: false, responseId: id });
         finish(id, { ...legacy, ...fields });
-      }, { timing, fields });
+      }, { timing, fields, index });
       await page.locator(".hist-timings summary").last().click();
-      const text = await page.locator(".hist-timings dl").last().innerText();
-      if (fields.llm_total_s === undefined) {
-        assert.match(text, /Total unavailable/);
-        assert.doesNotMatch(text, /total · 1 round/);
-        assert.match(text, fields.llm_rounds === 0 ? /0 rounds/ : /round count unavailable/);
-      } else if (fields.llm_rounds === undefined) {
-        assert.match(text, /round count unavailable/);
-      } else {
-        assert.match(text, /0.80 s total · 1 round\b/);
-      }
+      const list = page.locator(".hist-timings dl").last();
+      const llmRows = await list.locator("dt").evaluateAll((terms) => terms
+        .filter((term) => term.textContent.startsWith("LLM"))
+        .map((term) => [term.textContent, term.nextElementSibling.textContent]));
+      assert.deepEqual(llmRows, separateResponse
+        ? [["LLM", summary], ["LLM for this response", "0.80 s"]]
+        : [["LLM", summary]]);
+      assert.doesNotMatch(await list.innerText(), /Total unavailable|round count unavailable/);
     }
     await page.evaluate(() => { chat.clear(); chat.reset(); });
     assert.equal(await page.locator(".hist-timings").count(), 0);

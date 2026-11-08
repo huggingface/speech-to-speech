@@ -414,15 +414,12 @@ class KokoroTTSHandler(BaseTTSHandler):
                 # Convert to int16 format
                 audio = (audio * 32768).astype(np.int16)
 
-                # Yield audio in fixed-size chunks
+                # Preserve short tails without inserting silence between provider segments.
                 for i in range(0, len(audio), self.blocksize):
                     if self._is_stale(gen):
                         logger.info("TTS generation cancelled (interruption)")
                         return
                     chunk = audio[i : i + self.blocksize]
-                    # Pad the last chunk if necessary
-                    if len(chunk) < self.blocksize:
-                        chunk = np.pad(chunk, (0, self.blocksize - len(chunk)))
                     timer.first_yield()
                     logger.debug(f"TTS yielding audio chunk: {len(chunk)} samples")
                     yield chunk
@@ -482,15 +479,12 @@ class KokoroTTSHandler(BaseTTSHandler):
             # Convert to int16 format
             audio = (audio * 32768).astype(np.int16)
 
-            # Yield audio in fixed-size chunks
+            # Preserve short tails without inserting silence between provider segments.
             for i in range(0, len(audio), self.blocksize):
                 if self._is_stale(gen):
                     logger.info("TTS generation cancelled (interruption)")
                     return
                 chunk = audio[i : i + self.blocksize]
-                # Pad the last chunk if necessary
-                if len(chunk) < self.blocksize:
-                    chunk = np.pad(chunk, (0, self.blocksize - len(chunk)))
                 timer.first_yield()
                 yield chunk
 

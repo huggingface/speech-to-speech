@@ -79,7 +79,9 @@ class TurnLatencyTracker:
     """Server timings, not an additive breakdown or client playback latency.
 
     ``llm_ttft_s`` ends at the first non-whitespace provider text delta and
-    ``llm_s`` covers full generation, including lock waits. ``tts_ttfa_s`` ends
+    ``llm_s`` covers full generation, including lock waits. ``llm_first_tts_s``
+    ends when the output processor first forwards nonempty text to TTS, using
+    that same generation-start origin. ``tts_ttfa_s`` ends
     at the first model audio chunk before trimming and block assembly;
     ``e2e_s`` runs from estimated speech end to first yielded TTS audio.
     TTFT remains an internal measurement, omitted from the simplified record.
@@ -122,6 +124,8 @@ class TurnLatencyTracker:
     mlx_lock_waits: dict[str, MLXLockStat] = field(default_factory=dict)
     mlx_lock_holds: dict[str, MLXLockStat] = field(default_factory=dict)
     status: TurnLatencyStatus = "completed"
+    llm_first_tts_s: float | None = None
+    _llm_started_at_s: float | None = field(default=None, init=False, repr=False)
 
     def record_stt(self, seconds: float) -> None:
         self.stt_s = max(0.0, seconds)
@@ -138,6 +142,16 @@ class TurnLatencyTracker:
 
     def record_llm(self, seconds: float) -> None:
         self.llm_s = max(0.0, seconds)
+
+    def record_llm_start(self, started_at_s: float) -> None:
+        """Retain this response's generation origin across the processor queue."""
+        if self._llm_started_at_s is None:
+            self._llm_started_at_s = started_at_s
+
+    def record_llm_first_tts(self) -> None:
+        """Record the first forwarded audio text batch, never a provider delta."""
+        if self.llm_first_tts_s is None and self._llm_started_at_s is not None:
+            self.llm_first_tts_s = max(0.0, perf_counter() - self._llm_started_at_s)
 
     def record_vad_settle(self, seconds: float) -> None:
         self.vad_settle_s = max(0.0, seconds)
@@ -205,6 +219,7 @@ class TurnLatencyTracker:
             "response_key": response_key,
             "stt_s": self.stt_s,
             "llm_s": self.llm_s,
+            "llm_first_tts_s": compact(self.llm_first_tts_s),
             "llm_total_s": compact(self.llm_total_s),
             "llm_rounds": self.llm_rounds,
             "tts_ttfa_s": self.tts_ttfa_s,
@@ -256,6 +271,7 @@ class TurnLatencyTracker:
             f"Turn {self.turn_id or 'n/a'} rev={revision} latency: "
             f"stt={self._fmt(self.stt_s)} "
             f"llm={self._fmt(self.llm_s)} "
+            f"llm_first_tts={self._fmt(self.llm_first_tts_s)} "
             f"llm_total={self._fmt(self.llm_total_s)} llm_rounds={self.llm_rounds} "
             f"tts_ttfa={self._fmt(self.tts_ttfa_s)} e2e={self._fmt(self.e2e_s)} "
             f"{settle}"

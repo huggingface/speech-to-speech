@@ -26,6 +26,7 @@ from openai.types.realtime.realtime_conversation_item_assistant_message import (
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage, ResponseReasoningItem
 from pydantic import BaseModel, ConfigDict, Field
 
+from speech_to_speech.api.openai_realtime.runtime_config import resolve_reasoning_effort
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.chat import (
     Chat,
@@ -58,6 +59,7 @@ from speech_to_speech.pipeline.messages import (
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
+from speech_to_speech.utils.request_tracing import HttpRequestContext, HttpRequestTrace
 from speech_to_speech.utils.utils import audio_to_wav_base64, is_out_of_band, response_wants_audio
 
 logger = logging.getLogger(__name__)
@@ -330,8 +332,17 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             yield from self._iter_response_events(api_response)
 
     @abstractmethod
-    def _build_optional_kwargs(self, req_tools: Any, req_tool_choice: Any) -> dict[str, Any]:
-        """Build the per-request tools/tool_choice kwargs in the backend's shape."""
+    def _build_optional_kwargs(
+        self,
+        req_tools: Any,
+        req_tool_choice: Any,
+        reasoning_effort: str | None = None,
+    ) -> dict[str, Any]:
+        """Build the per-request tools/tool_choice/reasoning kwargs in the backend's shape.
+
+        ``reasoning_effort`` is the client's Realtime ``reasoning.effort``; ``None``
+        keeps the startup default.
+        """
         ...
 
     # ── audio-input protocol hooks ───────────────────────────────────────────
@@ -345,9 +356,10 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         response: Any,
         req_tools: Any,
         req_tool_choice: Any,
+        reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
         """Build audio request parameters in the selected backend's shape."""
-        kwargs = self._build_optional_kwargs(req_tools, req_tool_choice)
+        kwargs = self._build_optional_kwargs(req_tools, req_tool_choice, reasoning_effort)
         max_tokens = getattr(response, "max_output_tokens", None) if response is not None else None
         kwargs.setdefault("max_tokens", max_tokens or self.audio_max_tokens)
         kwargs.setdefault("temperature", self.audio_temperature)
@@ -775,9 +787,18 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         consumed_image_ids: set[str] = set()
         store = getattr(self, "turn_latency_store", None)
         tracker = store.get_response(turn.response_key) if store else None
+        trace_context = HttpRequestContext(
+            "llm",
+            session_id=getattr(turn.runtime_config, "trace_session_id", None),
+            turn_id=turn.turn_id,
+            turn_revision=turn.turn_revision,
+            response_key=turn.response_key,
+        )
 
         try:
             generation_started_at_s = perf_counter()
+            if tracker is not None:
+                tracker.record_llm_start(generation_started_at_s)
             try:
                 api_input = (serialize_fn or self._serialize)(active_chat)
                 # Images the model actually sees this turn; only these are stripped on
@@ -796,7 +817,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         provider_request_started = True
                         if tracker is not None:
                             tracker.start_llm()
-                        return (request_fn or self._request)(api_input, optional_kwargs)
+                        trace = HttpRequestTrace(trace_context)
+                        trace.dispatch()
+                        return (request_fn or self._request)(api_input, trace.request_options(optional_kwargs))
 
                     if turn.prefetch_transaction is not None:
                         events = self._iter_prefetch_events_interruptibly(
@@ -985,7 +1008,12 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         wants_audio = response_wants_audio(response)
         self._apply_config(active_chat, instructions, wants_audio, language_name=lang_name)
 
-        optional_kwargs = self._build_audio_optional_kwargs(response, req_tools, req_tool_choice)
+        optional_kwargs = self._build_audio_optional_kwargs(
+            response,
+            req_tools,
+            req_tool_choice,
+            resolve_reasoning_effort(runtime_config, response),
+        )
         input_history = None
         if request.audio is not None:
             audio_b64 = self._audio_to_wav_base64(request.audio, request.audio_sample_rate)
@@ -1102,7 +1130,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         wants_audio = response_wants_audio(response)
         self._apply_config(active_chat, instructions, wants_audio, language_name=lang_name)
 
-        optional_kwargs = self._build_optional_kwargs(req_tools, req_tool_choice)
+        optional_kwargs = self._build_optional_kwargs(
+            req_tools,
+            req_tool_choice,
+            resolve_reasoning_effort(runtime_config, response),
+        )
 
         # CancelScope.is_stale(gen) is checked when the stream iterator advances; a
         # blocked read inside httpx cannot be aborted by cancel_scope.cancel() from
