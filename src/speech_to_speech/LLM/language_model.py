@@ -772,6 +772,14 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 # The terminal is queued before this generator resumes into its
                 # finally block, so publish failure before yielding it.
                 request.prefetch_transaction.discard()
+            # Strip any images that were part of this failed turn from the persistent
+            # conversation history. Without this, the image stays in original_chat and
+            # every subsequent turn re-serializes it (causing repeated failures or a
+            # pipeline freeze when the tokenizer tries to process large base64 image
+            # data as plain text). consumed_image_ids was snapshotted before the
+            # request, so only images the model actually saw are removed.
+            if consumed_image_ids:
+                original_chat.strip_images(consumed_image_ids)
             yield EndOfResponse(
                 history=history,
                 turn_id=ctx.turn_id,
