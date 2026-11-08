@@ -88,7 +88,13 @@ class SessionHandler(RealtimeBaseHandler):
         # The OpenAI GA protocol includes the session id in session.created.
         # The SDK model has no `id` field but allows extras, and model_dump()
         # carries them onto the wire.
-        session = cfg.session.model_copy(update={"id": conn_id})
+        # vision_capable is a non-standard extension field: the demo reads it
+        # from session.created to decide whether to advertise the camera tool.
+        # Strict OpenAI-protocol clients ignore unknown fields.
+        session = cfg.session.model_copy(update={
+            "id": conn_id,
+            "vision_capable": self._service.vision_capable,
+        })
         return SessionCreatedEvent(
             type="session.created",
             event_id=self._next_event_id(),

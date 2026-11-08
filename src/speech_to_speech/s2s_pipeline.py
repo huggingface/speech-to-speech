@@ -632,6 +632,11 @@ def _build_pipeline_unit(
 
     chat_size = llm_selection.config.get("chat_size", 10)
     default_instructions = llm_selection.config.get("init_chat_prompt")
+    # True only for local VLM backends (is_vlm flag set in backend_registry).
+    # API backends (Responses API, Chat Completions) don't declare this flag, so
+    # they default to False — the safe side. A follow-up can expose an explicit
+    # env var for API deployments that are known to accept images.
+    vision_capable = bool(llm_selection.config.get("is_vlm", False))
 
     service = RealtimeService(
         text_prompt_queue=text_prompt_queue,
@@ -640,6 +645,7 @@ def _build_pipeline_unit(
         speculative_turns=speculative_turns,
         turn_latency_store=turn_latency_store,
         default_instructions=default_instructions,
+        vision_capable=vision_capable,
     )
 
     if module_kwargs.enable_live_transcription and not stt_selection.spec.capabilities.streams_audio_chunks:

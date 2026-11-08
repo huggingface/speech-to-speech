@@ -1530,6 +1530,29 @@ async function doStart(audioContext = null) {
       startHeartbeat(info.heartbeatSec, !!info.limited);
     }
   });
+  c.addEventListener("session-capabilities", (e) => {
+    const { visionCapable } = /** @type {CustomEvent<{ visionCapable: boolean | null }>} */ (e).detail;
+    // null means the backend didn't send the field (stock OpenAI endpoint or
+    // older server build) — leave the camera toggle in its user-chosen state.
+    // false means the backend explicitly declared it cannot process images:
+    // disable and hide the camera tool so it is never advertised to the model.
+    if (visionCapable === false) {
+      toolsEnabled.camera_snapshot = false;
+      saveTools();
+      pushToolsToSession();
+      toolCamSwitch.checked = false;
+      toolCamSwitch.disabled = true;
+      const hint = document.getElementById("tool-cam-hint");
+      if (hint) hint.textContent = "Camera is not supported by the connected backend.";
+      console.log("[main] vision not supported by backend — camera tool disabled");
+    } else if (visionCapable === true) {
+      // Backend explicitly declared vision support — restore the toggle to its
+      // user-chosen state (re-enable in case a previous session had disabled it).
+      toolCamSwitch.disabled = false;
+      const hint = document.getElementById("tool-cam-hint");
+      if (hint) hint.textContent = "A live preview shows bottom-left while the camera is on.";
+    }
+  });
   c.addEventListener("input-level", (e) => {
     const { rms } = /** @type {CustomEvent<{ rms: number }>} */ (e).detail;
     paintInputLevel(rms);

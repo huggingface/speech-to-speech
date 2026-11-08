@@ -559,6 +559,16 @@ export class S2sRealtimeClient extends EventTarget {
     if (typeof type !== "string") return;
     if (this._debug) console.debug(`[${this.options.transport}]`, event);
     switch (type) {
+      case "session.created": {
+        // vision_capable is a non-standard extension field added by the
+        // speech-to-speech backend. It is undefined when connecting to a
+        // stock OpenAI endpoint (treat as unknown / capable in that case).
+        const visionCapable = event.session?.vision_capable;
+        this.dispatchEvent(new CustomEvent("session-capabilities", {
+          detail: { visionCapable: visionCapable === undefined ? null : Boolean(visionCapable) },
+        }));
+        break;
+      }
       case "speech_to_speech.output_audio.visemes": {
         this.dispatchEvent(new CustomEvent("visemes", { detail: event }));
         break;
