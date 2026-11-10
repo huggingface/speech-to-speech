@@ -86,7 +86,7 @@ from speech_to_speech.pipeline.events import (
     TranscriptionCompletedEvent,
     TranscriptionFailedEvent,
 )
-from speech_to_speech.pipeline.messages import GenerateResponseRequest
+from speech_to_speech.pipeline.messages import AssistantReasoningPart, GenerateResponseRequest
 from speech_to_speech.pipeline.queue_types import TextPromptItem
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnGateAction, TurnPhase
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
@@ -312,6 +312,11 @@ class ConnState(BaseModel):
     # events only finalize audio.
     next_assistant_output_sequence: int = 0
     pending_early_tool_calls: dict[int, Any] = Field(default_factory=dict)
+    # Thinking must not commit a paused user utterance. Keep its readable text
+    # private until answer/tool output (or the normal response terminal) commits.
+    pending_reasoning: dict[tuple[str | None, str | None, int | None], list[AssistantReasoningPart]] = Field(
+        default_factory=dict
+    )
     response_usage: UsageMetrics = Field(default_factory=UsageMetrics)
     pending_token_usage: dict[str, tuple[int, int]] = Field(default_factory=dict)
     # The tracker owns the current turn and revision. This map holds only the
@@ -364,6 +369,18 @@ class ConnState(BaseModel):
 
     def close_response_key(self, response_key: str | None) -> None:
         """Tombstone a finished key so output arriving after cancellation stays stale."""
+        discarded_reasoning = False
+        for owner in tuple(self.pending_reasoning):
+            if owner[0] == response_key:
+                del self.pending_reasoning[owner]
+                discarded_reasoning = True
+        if discarded_reasoning and not self.in_response:
+            self.next_assistant_output_sequence = 0
+            self.pending_early_tool_calls = {
+                sequence: event
+                for sequence, event in self.pending_early_tool_calls.items()
+                if event.response_key != response_key
+            }
         if response_key is None:
             self.response_pending = bool(self.pending_response_keys)
             return
@@ -649,6 +666,7 @@ class RealtimeService:
     def close_pending_responses(self, conn_id: str) -> None:
         """Cancel queued responses without losing usage already reported by their LMs."""
         st = self._state(conn_id)
+        st.pending_reasoning.clear()
         # Close eligibility before discarding private prefetch work removes
         # its tracker/key. Ordinary prefetch replacement keeps its anchor.
         for response_key in tuple(st.pending_response_keys):
@@ -701,6 +719,19 @@ class RealtimeService:
 
     def dispatch_pipeline_event(self, conn_id: str, event: PipelineEvent) -> list[ServerEvent]:
         """Route an internal pipeline event to the appropriate handler."""
+        if self.speculative_turns is not None:
+            st = self._state(conn_id)
+            pending = st.pending_reasoning
+            for owner in tuple(pending):
+                if not self.speculative_turns.is_latest(owner[1], owner[2]):
+                    del pending[owner]
+                    if not st.in_response:
+                        st.next_assistant_output_sequence = 0
+                        st.pending_early_tool_calls = {
+                            sequence: ready
+                            for sequence, ready in st.pending_early_tool_calls.items()
+                            if self.speculative_turns.is_latest(ready.turn_id, ready.turn_revision)
+                        }
         # Provider-reported usage is billable accounting, not client-visible
         # assistant output. Cancellation must not make it stale.
         if isinstance(event, TokenUsageEvent):

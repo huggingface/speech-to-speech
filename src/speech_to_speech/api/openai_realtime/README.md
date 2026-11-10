@@ -591,6 +591,14 @@ without repeating text already streamed. Nothing is emitted for encrypted-only
 reasoning or providers that do not expose text. Existing cancellation,
 speculative-turn and response-order gates also apply to these parts.
 
+On speculative-turn setups, reasoning alone does not commit the user's turn or
+close its reopen window. The server buffers reasoning until the first answer
+text or tool call commits the turn (or its normal response terminal arrives),
+then sends the buffered reasoning first. Resumed speech, cancellation, and
+response replacement discard reasoning from the superseded generation. This
+means the thinking phase itself is not streamed live while a turn can reopen.
+Untracked turns and already-committed turns stream reasoning immediately.
+
 
 ---
 

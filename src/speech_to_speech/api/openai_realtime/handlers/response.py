@@ -1308,9 +1308,43 @@ class ResponseHandler(RealtimeBaseHandler):
         _early_tool_call: bool = False,
     ) -> list[ServerEvent]:
         """Translate ordered assistant output into OpenAI Realtime events."""
+        st = self._state(conn_id)
+        wants_audio = response_wants_audio(st.current_response_params)
+        turn_tracker = self._service.speculative_turns
+        reasoning_only = any(isinstance(part, AssistantReasoningPart) for part in event.parts) and not any(
+            isinstance(part, AssistantToolCallPart)
+            or (isinstance(part, AssistantTextPart) and (bool(part.text.strip()) if wants_audio else bool(part.text)))
+            for part in event.parts
+        )
+        if (
+            reasoning_only
+            and turn_tracker is not None
+            and event.turn_id is not None
+            and event.turn_revision is not None
+            and not turn_tracker.is_committed(event.turn_id, event.turn_revision)
+        ):
+            decision = turn_tracker.gate(event.turn_id, event.turn_revision)
+            if decision.action is TurnGateAction.HOLD:
+                raise TurnOutputHeld
+            if decision.action is TurnGateAction.DROP:
+                return []
+            sequence = event.output_sequence
+            if sequence is not None and sequence < st.next_assistant_output_sequence:
+                return []
+            if st.runtime_config.reasoning_text_enabled:
+                owner = (event.response_key, event.turn_id, event.turn_revision)
+                st.pending_reasoning.setdefault(owner, []).extend(
+                    part for part in event.parts if isinstance(part, AssistantReasoningPart) and part.text
+                )
+            # Consume this ordered position without accepting history, publishing
+            # input terminals, or opening a response. An early tool can now
+            # commit normally and flush the buffered reasoning ahead of itself.
+            if sequence is not None:
+                st.next_assistant_output_sequence = sequence + 1
+                return self._flush_early_tool_calls(conn_id)
+            return []
         if not self._accept_turn_output(conn_id, event):
             return []
-        st = self._state(conn_id)
         # Accepting this output commits the turn it answers. The user item that
         # prompted it is permanent from here, so it is published first.
         events: list[ServerEvent] = self._service.audio.resolve_input_terminals(conn_id)
@@ -1332,10 +1366,10 @@ class ResponseHandler(RealtimeBaseHandler):
                     st.next_assistant_output_sequence,
                     output_sequence,
                 )
-        wants_audio = response_wants_audio(st.current_response_params)
+        buffered = st.pending_reasoning.pop((event.response_key, event.turn_id, event.turn_revision), [])
         meaningful_parts = [
             part
-            for part in event.parts
+            for part in [*buffered, *event.parts]
             if isinstance(part, AssistantToolCallPart)
             or (isinstance(part, AssistantTextPart) and (bool(part.text.strip()) if wants_audio else bool(part.text)))
             or (
@@ -1539,7 +1573,7 @@ class ResponseHandler(RealtimeBaseHandler):
             return []
         st = self._state(conn_id)
         response_was_missing = st.current_response_id is None
-        self._ensure_response(conn_id, event.response_key)
+        response_id, _ = self._ensure_response(conn_id, event.response_key)
         if (
             event.status == "completed"
             and event.response_key is not None
@@ -1565,4 +1599,14 @@ class ResponseHandler(RealtimeBaseHandler):
             else []
         )
         self._service._apply_pending_token_usage(conn_id, event.response_key)
+        if st.runtime_config.reasoning_text_enabled:
+            for part in st.pending_reasoning.pop((event.response_key, event.turn_id, event.turn_revision), []):
+                events.append(
+                    SpeechToSpeechReasoningDeltaEvent(
+                        event_id=self._next_event_id(),
+                        response_id=response_id,
+                        delta=part.text,
+                        kind=part.kind,
+                    )
+                )
         return events

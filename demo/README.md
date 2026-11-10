@@ -295,6 +295,11 @@ appears only when the model/provider supplies readable reasoning or a summary;
 encrypted reasoning is not displayed. This needs the updated speech-to-speech
 backend as well as the demo frontend.
 
+With speculative turn reopening enabled, reasoning waits for the first answer
+text or tool call (or the normal response terminal) before it appears. Thinking
+alone does not end the user's chance to resume a paused utterance; reasoning
+from a superseded turn is discarded.
+
 ## Files
 
 | File | Role |
