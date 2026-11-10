@@ -7,6 +7,22 @@ import { S2sRealtimeClient } from "../s2s-realtime-client.js";
 import { waitFor } from "./helpers.mjs";
 import { REASONING_LEVELS } from "../ui/reasoning.js";
 
+for (const transport of ["websocket", "webrtc"]) {
+  test(`${transport} reports server reasoning acknowledgements without fabricating them from selections`, () => {
+    globalThis.localStorage = { getItem() { return null; } };
+    const client = new S2sRealtimeClient({ transport });
+    const updates = [];
+    client.addEventListener("reasoning-updated", (event) => updates.push(event.detail));
+    client.setReasoningEffort("high");
+    client._onTransportEvent({ type: "session.created", session: { reasoning: { effort: "high" } } });
+    assert.deepEqual(updates, []);
+    for (const reasoning of [{ effort: "high" }, { effort: "low" }, null, undefined]) {
+      client._onTransportEvent({ type: "session.updated", session: { reasoning } });
+      assert.deepEqual(updates.at(-1), { reasoning });
+    }
+  });
+}
+
 test("WebSocket preserves live reasoning choices through voice and tool updates", async () => {
   globalThis.localStorage = { getItem() { return null; } };
   globalThis.OpenAIAgentsRealtime = realtime;

@@ -98,6 +98,8 @@ test("RealtimeSession covers the core GA flow over the stock WebRTC transport", 
     try {
       await session.connect({ apiKey: "test-key", url: `${http}/v1/realtime/calls` });
       await waitFor(() => rawEvents.some((event) => event.type === "session.updated"));
+      transport.sendEvent({ type: "session.update", session: { type: "realtime", reasoning: { effort: "high" } } });
+      await waitFor(() => rawEvents.some((event) => event.type === "session.updated" && event.session?.reasoning?.effort === "high"));
       const configured = await state();
       await waitFor(async () => (await state()).inputChunks > 0);
       await waitFor(() => receiver()?.track?.readyState === "live" && audioElement.srcObject);

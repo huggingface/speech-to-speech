@@ -41,9 +41,16 @@ test("browser RealtimeSession negotiates the stock WebSocket subprotocol", async
     try {
       await session.connect({ apiKey: "test-key", url: ws });
       await waitForEvent("session.updated");
+      transport.sendEvent({ type: "session.update", session: { type: "realtime", reasoning: { effort: "high" } } });
+      const deadline = Date.now() + 10_000;
+      while (!rawEvents.some((event) => event.type === "session.updated" && event.session?.reasoning?.effort === "high")) {
+        if (Date.now() > deadline) throw new Error("Server did not echo reasoning effort");
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
       return {
         errors,
         protocol: transport.connectionState.websocket?.protocol,
+        reasoning: rawEvents.find((event) => event.type === "session.updated" && event.session?.reasoning?.effort === "high").session.reasoning,
       };
     } finally {
       session.close();
@@ -52,6 +59,7 @@ test("browser RealtimeSession negotiates the stock WebSocket subprotocol", async
 
   assert.equal(result.protocol, "realtime");
   assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.reasoning, { effort: "high" });
 });
 
 test("RealtimeSession covers the core GA flow over the stock WebSocket transport", async (t) => {

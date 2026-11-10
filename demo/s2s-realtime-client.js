@@ -55,7 +55,7 @@ import { LocalVad } from "./ws/local-vad.js";
 import { normalizeReasoningEffort } from "./ui/reasoning.js";
 
 export const AUDIO_SAMPLE_RATE = 24_000;
-export const AUDIO_WORKLET_VERSION = "reasoning-20261110";
+export const AUDIO_WORKLET_VERSION = "reasoning-confirmed-20261110";
 export const DEFAULT_PLAYBACK_BUFFER_MS = 0;
 const MIC_CHUNK_MS = 40;
 // Retrieves the client sends to learn what an interrupted reply left in history.
@@ -624,6 +624,9 @@ export class S2sRealtimeClient extends EventTarget {
     if (typeof type !== "string") return;
     if (this._debug) console.debug(`[${this.options.transport}]`, event);
     switch (type) {
+      case "session.updated":
+        this.dispatchEvent(new CustomEvent("reasoning-updated", { detail: { reasoning: event.session?.reasoning } }));
+        break;
       case "speech_to_speech.output_audio.visemes": {
         this.dispatchEvent(new CustomEvent("visemes", { detail: event }));
         break;

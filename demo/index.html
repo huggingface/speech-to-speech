@@ -133,11 +133,14 @@
         <p id="circle-caption" class="circle-caption" role="status">Tap to start</p>
         <p id="circle-subcaption" class="circle-subcaption" hidden></p>
 
-        <button id="reasoning-btn" class="reasoning-btn" type="button" popovertarget="reasoning-picker" aria-expanded="false" aria-controls="reasoning-picker">
-          <span>Reasoning</span>
-          <span id="reasoning-value">Server default</span>
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-        </button>
+        <div class="reasoning-control">
+          <button id="reasoning-btn" class="reasoning-btn" type="button" popovertarget="reasoning-picker" aria-expanded="false" aria-controls="reasoning-picker" aria-describedby="reasoning-status">
+            <span>Reasoning</span>
+            <span id="reasoning-value">Server default</span>
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <p id="reasoning-status" class="reasoning-status" role="status" title="Confirms the server's session setting. Model support determines how it is used.">Applies when you start a conversation</p>
+        </div>
         <div id="reasoning-picker" class="reasoning-picker" popover>
           <fieldset>
             <legend>Reasoning level</legend>
@@ -435,6 +438,6 @@
     </dialog>
 
     <script src="vendor/openai-realtime-agents.umd.js"></script>
-    <script type="module" src="main.js?v=reasoning-20261110"></script>
+    <script type="module" src="main.js?v=reasoning-confirmed-20261110"></script>
   </body>
 </html>

@@ -27,7 +27,7 @@ test("reasoning picker supports touch, keyboard, persistence, and server default
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless: true, args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"] });
   t.after(() => browser.close());
   for (const width of [1280, 360]) {
     const page = await browser.newPage({ viewport: { width, height: 850 }, reducedMotion: "reduce" });
@@ -103,6 +103,56 @@ test("reasoning picker supports touch, keyboard, persistence, and server default
     await page.waitForFunction(() => !document.body.classList.contains("booting"));
     assert.match(await button.innerText(), /Server default/);
     if (process.env.S2S_UI_SCREENSHOTS) await page.screenshot({ path: `${process.env.S2S_UI_SCREENSHOTS}/reasoning-${width}.png` });
+
+    // Exercise the real main.js lifecycle and adapter event path. Hold the
+    // backend's acknowledgement until after checking that selection alone
+    // cannot show a successful confirmation.
+    await page.evaluate(async () => {
+      const { S2sRealtimeClient } = await import("/s2s-realtime-client.js?v=reasoning-confirmed-20261110");
+      S2sRealtimeClient.prototype.connect = async function () {
+        window.demoClient = this;
+        this._setStatus("connected");
+      };
+      localStorage.setItem("s2s.ws.directUrl", "ws://unused/v1/realtime");
+    });
+    // Use the settings form to update the in-memory connection target too.
+    await page.locator("#settings-btn").click();
+    await page.locator("#lb-url").fill("ws://unused/v1/realtime");
+    await page.locator("#settings-save").click();
+    await page.locator("#main-circle").click();
+    await page.waitForFunction(() => Boolean(window.demoClient));
+    const status = page.locator("#reasoning-status");
+    assert.equal(await status.getAttribute("data-state"), "pending");
+    const echo = (reasoning) => page.evaluate((reasoning) => {
+      demoClient._onTransportEvent({ type: "session.updated", session: { reasoning } });
+    }, reasoning);
+    await echo(null);
+    assert.equal(await status.innerText(), "✓ Server confirmed: Server default");
+    await button.click();
+    await picker.getByRole("radio", { name: "High", exact: true }).check();
+    assert.equal(await status.getAttribute("data-state"), "pending");
+    await echo({ effort: "low" });
+    assert.equal(await status.getAttribute("data-state"), "unconfirmed");
+    assert.match(await status.innerText(), /Server reports Low/);
+    await echo({ effort: "high" });
+    assert.equal(await status.innerText(), "✓ Server confirmed: High");
+    if (process.env.S2S_UI_SCREENSHOTS) await page.screenshot({ path: `${process.env.S2S_UI_SCREENSHOTS}/reasoning-confirmed-${width}.png` });
+    await button.click();
+    await picker.getByRole("radio", { name: "Off", exact: true }).check();
+    assert.equal(await status.getAttribute("data-state"), "pending");
+    await echo(null);
+    assert.equal(await status.getAttribute("data-state"), "unconfirmed");
+    await echo({ effort: "none" });
+    assert.equal(await status.innerText(), "✓ Server confirmed: Off");
+    await page.evaluate(() => demoClient._onTransportEvent({
+      type: "error", error: { message: "Unsupported reasoning effort" },
+    }));
+    assert.equal(await status.innerText(), "Server reported a reasoning error");
+    await page.locator("#stop-btn").click();
+    assert.equal(await status.getAttribute("data-state"), "idle");
+    // Late acknowledgements from a closed conversation cannot reconfirm it.
+    await echo({ effort: "none" });
+    assert.equal(await status.getAttribute("data-state"), "idle");
     assert.deepEqual(errors, []);
     await page.close();
   }

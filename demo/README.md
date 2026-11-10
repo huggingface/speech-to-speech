@@ -281,7 +281,7 @@ case-insensitively against the user's organisations from HF OAuth.
 | Microphone | Input device for capture. Applies on the next conversation / Restart. |
 | Speakers | Output device for assistant audio. Chrome/Edge can switch live via `AudioContext.setSinkId`; other browsers keep the system default. |
 | Voice | Qwen3-TTS speaker name (Aiden, Ryan, Dylan, Eric, Ono_Anna, Serena, Sohee, Uncle_Fu, Vivian) |
-| Reasoning (button below the orb) | Server default, Off, Minimal, Low, Medium, High, or Extra high. Saved in this browser and applied to the next response without reconnecting, over either transport. Higher levels may increase response time; support depends on the model. Server default clears the override and restores the backend's startup setting. |
+| Reasoning (button below the orb) | Server default, Off, Minimal, Low, Medium, High, or Extra high. Saved in this browser and applied to the next response without reconnecting, over either transport. The line below the button waits for `session.updated` and shows a green “Server confirmed” only when the server echoes the selected level. Missing or different levels stay unconfirmed. This verifies the server's session setting; model support determines how it is used. Higher levels may increase response time. Server default clears the override and restores the backend's startup setting. |
 | Instructions | System prompt sent in `session.update` once the connection opens |
 
 LocalStorage keys are namespaced `s2s.ws.*` (plus `s2s.transport` for the
@@ -333,7 +333,7 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
   resamples to 24 kHz (boxcar lowpass + decimation on the 48 -> 24 fast
   path, linear interpolation fallback for odd rates) and packs Int16 LE.
 - **Browser cache safety**: the entry module, realtime client, and both audio
-  worklet URLs share the `reasoning-20261110` cache key. The client also waits for
+  worklet URLs share the `reasoning-confirmed-20261110` cache key. The client also waits for
   the capture worklet to report the same version and a 24 kHz output rate
   before opening a session. When the browser-audio contract or sample rate
   changes, bump the key in `index.html`, `main.js`, and

@@ -869,6 +869,18 @@ a:hover {
 .circle-subcaption[hidden] { display: none; }
 
 /* Reasoning stays within reach before and during a conversation. */
+.reasoning-control { display: grid; justify-items: center; gap: 6px; }
+.reasoning-status {
+  margin: 0;
+  max-width: 36ch;
+  min-height: 1.5em;
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+  color: var(--text-faint);
+}
+.reasoning-status[data-state="confirmed"] { color: var(--success); }
+.reasoning-status[data-state="unconfirmed"] { color: var(--processing); }
 .reasoning-btn {
   display: inline-flex;
   align-items: center;

@@ -17,7 +17,7 @@
  * @typedef {S2sRealtimeClient} RealtimeClient
  */
 
-import { S2sRealtimeClient, normalizePlaybackBufferMs } from "./s2s-realtime-client.js?v=reasoning-20261110";
+import { S2sRealtimeClient, normalizePlaybackBufferMs } from "./s2s-realtime-client.js?v=reasoning-confirmed-20261110";
 import { ReasoningControl } from "./ui/reasoning.js";
 import { $, truncateError, errorMessage, DEBUG } from "./ui/dom.js";
 import { ChatView } from "./ui/chat.js?v=timings-20261105";
@@ -1457,6 +1457,7 @@ async function doStart(audioContext = null) {
         ...common,
       });
   client = c;
+  reasoning.setActive(true);
   c.setMuted(micMuted || userAudioReplaying);
 
   c.addEventListener("queue", (e) => {
@@ -1485,6 +1486,11 @@ async function doStart(audioContext = null) {
     const detail = /** @type {CustomEvent<{ status: string }>} */ (e).detail;
     onClientStatus(detail.status);
     if (detail.status === "ai-speaking") chat.onAssistantActivity();
+  });
+  c.addEventListener("reasoning-updated", (e) => {
+    if (client !== c) return;
+    const detail = /** @type {CustomEvent<{reasoning: unknown}>} */ (e).detail;
+    reasoning.confirm(detail.reasoning);
   });
   c.addEventListener("transcript", (e) => {
     const d = /** @type {CustomEvent<{ role: "user" | "assistant"; text: string; partial: boolean; itemId?: string; responseId?: string }>} */ (e).detail;
@@ -1520,6 +1526,7 @@ async function doStart(audioContext = null) {
     // socket and the conversation alive (the model can recover on its own).
     const detail = /** @type {CustomEvent<{ error: unknown }>} */ (e).detail;
     const msg = errorMessage(detail.error);
+    if (client === c) reasoning.onServerError(msg);
     console.warn("[main] server error (non-fatal):", msg);
   });
   c.addEventListener("session", (e) => {
@@ -1660,12 +1667,14 @@ function onClientStatus(status) {
       // teardown() will move us to idle
       break;
     case "error":
+      reasoning.setActive(false);
       setState("error");
       break;
   }
 }
 
 async function teardown() {
+  reasoning.setActive(false);
   stopHeartbeat();
   stopJoinCountdown();
   endTrackedSession();
