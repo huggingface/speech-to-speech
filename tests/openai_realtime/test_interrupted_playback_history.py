@@ -812,3 +812,23 @@ def test_unheard_native_reply_is_not_restored_once_its_own_user_turn_is_gone():
 
     assert not chat.truncate_assistant_message("msg_target", "Heard")
     assert [item.content[0].text for item in chat.buffer] == ["Older question", "Older answer."]
+
+
+def test_truncate_at_the_end_of_audio_with_a_fractional_millisecond_keeps_the_reply(service, conn_id):
+    """audio_end_ms is whole milliseconds, so the end of 2000.4375 ms is reported as 2000."""
+    _start_conversation(service, conn_id)
+    chat = service._state(conn_id).runtime_config.chat
+    history = ResponseHistory.capture(
+        chat, [make_assistant_message(FIRST)], after_item_id=chat.history_anchor_id(), complete=True
+    )
+    events = service.dispatch_pipeline_event(
+        conn_id, AssistantOutputEvent(text=FIRST, response_key=RESPONSE_KEY, history=history)
+    )
+    item_id = next(event.item_id for event in events if hasattr(event, "item_id"))
+    service.encode_audio_chunk(conn_id, b"\x00\x00" * 32_007, RESPONSE_KEY)
+    service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=RESPONSE_KEY))
+    service.finish_response(conn_id, response_key=RESPONSE_KEY)
+
+    service.handle_conversation_item_truncate(conn_id, _truncate(item_id, 2000))
+
+    assert _history(service, conn_id) == [*EARLIER_TURNS, ("assistant", None, FIRST)]

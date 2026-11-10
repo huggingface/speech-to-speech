@@ -1093,6 +1093,10 @@ class ResponseHandler(RealtimeBaseHandler):
             return
         delivered = sum(segment[1] for segment in segments)
         played_samples = min(max(0, played_samples), delivered)
+        if delivered - played_samples < PIPELINE_SAMPLE_RATE // 1000:
+            # Positions arrive in whole milliseconds, so the end of audio that
+            # is not a whole millisecond long is reported slightly short.
+            played_samples = delivered
         if played_samples == st.assistant_audio_cuts.get(item_id, delivered):
             return
         # Cuts are measured from the original segments, so a client position
