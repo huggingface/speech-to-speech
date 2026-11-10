@@ -5,7 +5,7 @@ includes its turn, revision, response key, terminal status, and available stage
 durations:
 
 ```text
-Turn turn_3 rev=0 latency: stt=0.18s llm=1.24s llm_total=1.24s llm_rounds=1 tts_ttfa=0.12s e2e=2.01s vad_settle=0.61s vad_decision=0.36s hold=0.24s smart_turn_status=complete status=completed mlx_lock_wait=0.02s[ParakeetSTT-Progressive:0.02s] mlx_lock_hold=0.88s[Qwen3TTS:0.88s]
+Turn turn_3 rev=0 latency: stt=0.18s llm=1.24s llm_first_tts=0.42s llm_total=1.24s llm_rounds=1 tts_ttfa=0.12s e2e=2.01s vad_settle=0.61s vad_decision=0.36s hold=0.24s smart_turn_status=complete status=completed mlx_lock_wait=0.02s[ParakeetSTT-Progressive:0.02s] mlx_lock_hold=0.88s[Qwen3TTS:0.88s]
 ```
 
 The same record is available with `speech-to-speech local` and
@@ -20,7 +20,7 @@ reserved `response.metadata["speech_to_speech.turn_latency"]` key. Realtime
 metadata values are strings, so the value is compact JSON with this schema:
 
 ```json
-{"e2e_s":2.013482,"hold_s":0.24,"llm_rounds":1,"llm_s":1.241907,"llm_total_s":1.241907,"response_key":"...","smart_status":"complete","source":"speech","status":"completed","stt_s":0.181284,"tts_ttfa_s":0.121775,"turn_id":"turn_3","turn_revision":0,"vad_decision_s":0.36,"version":2}
+{"e2e_s":2.013482,"hold_s":0.24,"llm_first_tts_s":0.42,"llm_rounds":1,"llm_s":1.241907,"llm_total_s":1.241907,"response_key":"...","smart_status":"complete","source":"speech","status":"completed","stt_s":0.181284,"tts_ttfa_s":0.121775,"turn_id":"turn_3","turn_revision":0,"vad_decision_s":0.36,"version":2}
 ```
 
 Version 2 changes `e2e_s` from VAD handoff to **estimated speech end** to
@@ -46,7 +46,7 @@ are added only to terminal responses.
 | Stage | Backends with a measured field | Backends with `n/a` pending coverage |
 | --- | --- | --- |
 | `stt` | `parakeet-tdt`, `openai`, `openai-realtime`, `vllm-realtime`, `whisper`, `whisper-mlx`, `mlx-audio-whisper`, `faster-whisper`, `qwen3-asr`, `parakeet-unified`, `nemotron-streaming`, `orukeet`, `paraformer`, `sense-voice` | None of the built-in STT backends (`--stt none` excluded) |
-| `llm` | `transformers`, `mlx-lm`, `responses-api`, `chat-completions` | None of the built-in LLM backends |
+| `llm`, `llm_first_tts` | `transformers`, `mlx-lm`, `responses-api`, `chat-completions` | None of the built-in LLM backends |
 | `tts_ttfa`, `e2e` | `qwen3`, `openai`, `pocket`, `kokoro`, `facebookMMS`, `chatTTS`, `omnivoice`, `kitten`, `supertonic` | None |
 
 `--stt none` deliberately has no STT measurement. Any field is also `n/a`
@@ -66,6 +66,21 @@ that lock is not contended, and hold is omitted entirely when nothing held it.
 - `llm` / `llm_s` covers generation for this response key, from serialization
   through consumption of provider output, including model lock and provider
   waits. It is recorded even if the request fails.
+- `llm_first_tts` / `llm_first_tts_s` uses that same generation-start timestamp
+  and ends immediately before the output processor yields its first nonempty,
+  audio-enabled text input to TTS. It includes sentence batching or final flush,
+  the LLM-to-processor queue, speculative output gates, and language processing.
+  It excludes the downstream TTS queue, synthesis, and playback, so it is neither
+  provider first-token time nor first-audio time. Nonstreaming replies measure
+  the handoff after the complete reply. Failure fallback text also counts when
+  it is forwarded; inspect terminal `status` rather than treating that as a
+  successful model reply. Later text batches cannot overwrite the measurement.
+  Text-only or tool-only responses, missing generation origins, stale output,
+  discarded trackers and already discarded prefetches leave it unavailable.
+  Tool follow-ups start their own measurement; they do not inherit the parent's
+  first-batch time. A forwarded input does not guarantee that TTS later produces
+  audio. This optional, additive version 2 field uses nine decimal places and is
+  absent from older records.
 - `llm_total_s` sums measured LLM generation durations across the initial request
   and its tool-result follow-ups. It excludes tool execution and waits between
   requests. Three generations of 0.7s, 0.9s and 0.8s produce 2.4s total, while
@@ -178,3 +193,59 @@ and clears them on session teardown.
 Remote timings are measured by this server. They include network transfer and
 provider waits within the operation, so they are not provider-only inference
 times. Stages can overlap; these fields are not an additive breakdown.
+
+## Correlating remote requests with workers
+
+Remote HTTP STT (including the Nemotron profile), conversational Chat
+Completions/Responses requests, and OpenAI-compatible TTS batches send a generated
+opaque `X-Speech-Request-Id`. INFO logs from
+`speech_to_speech.utils.request_tracing` are bounded JSON records containing only
+technical identifiers:
+
+```json
+{"event":"speech_response_binding","session_id":"session-example","response_key":"response-example","turn_id":"turn_1","turn_revision":1,"source":"speech"}
+{"event":"speech_http_stt_result","request_id":"0123456789abcdef0123456789abcdef","stage":"stt","session_id":"session-example","turn_id":"turn_1","turn_revision":1,"response_key":null,"mode":"final"}
+{"event":"speech_http_dispatch","request_id":"abcdef0123456789abcdef0123456789","stage":"tts","session_id":"session-example","turn_id":"turn_1","turn_revision":1,"response_key":"response-example","mode":null}
+```
+
+Start with the slow record's `response_key`. Its binding identifies the server
+session and turn/revision; match accepted STT results on those fields, and LLM/TTS
+dispatches on the response key. Turn names such as `turn_1` reset between sessions,
+so never join different sessions by turn name alone. A proxy that implements this
+header contract can log each ID alongside its selected worker and forward it to
+worker timing logs. These upstream logs alone cannot establish which worker was
+selected. Custom-header preservation through a deployment's ingress must be
+validated separately.
+
+Each HTTP STT operation, logical LLM provider request and nonempty TTS batch has
+its own ID. Multiple synthesis batches can use different workers. The SDK and a
+proxy may reuse a logical operation ID across retries: find all matching attempt
+records, rather than treating an ID as one physical network attempt. Dispatch
+means an attempt, not proof of worker receipt, success or stream completion.
+Cancellation before dispatch emits no dispatch record; failed and cancelled
+dispatched STT operations retain their owning session/turn identity even when
+there is no accepted transcription or response.
+
+Accepted final STT records include the IDs actually used by that result,
+including cached prefix windows from earlier revisions. Associations are emitted
+only after the current result passes the existing publication gate. Partial
+captions do not create final-result associations. Private results retain one
+fixed-width ID per already-retained window, with the existing pruning and session
+teardown; there is no global request history. Memory follows the existing window
+cache, whose window count has no absolute cap for an arbitrarily long utterance.
+Each association is a separate bounded log record, not an unbounded metadata
+array.
+
+The server session binding is private, distinct from client session parameters,
+and snapshotted before worker/thread handoff. Reusing settings/history for a new
+session adopts a new wrapper; queued or in-flight calls keep their original
+owner. Unbound standalone configurations have an unavailable session ID. Warmup
+and background history-compaction calls do not borrow the active response's
+identity and are outside this conversational-request contract.
+
+No request ID is added to transcript events or terminal timing metadata, so this
+does not consume Realtime metadata space. The logs contain no request/response
+content, URLs or credentials; unsafe correlation values are omitted instead of
+rewritten. IDs are diagnostic, never authentication or deduplication tokens.
+Tracing needs retained technical logs for the relevant time range; the timing
+metadata is not a persistent archive of every worker attempt.

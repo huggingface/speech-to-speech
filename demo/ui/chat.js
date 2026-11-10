@@ -22,6 +22,22 @@ const WRENCH_PATH = `<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l
 const CHAT_BUBBLE_SVG = `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`;
 const EMPTY_STATE_HTML = `<div id="chat-empty" class="chat-empty">${CHAT_BUBBLE_SVG}<span class="chat-empty-title">No messages yet</span><span class="chat-empty-hint">Tap the orb and start talking</span></div>`;
 
+/**
+ * Length of the start of *shown* that matches *heard*, ignoring whitespace,
+ * or -1 when *heard* is not a prefix of it.
+ * @param {string} shown @param {string} heard
+ */
+function heardPrefixLength(shown, heard) {
+  let index = 0;
+  // Iterate by code point: an emoji is two UTF-16 units.
+  for (const char of heard.replace(/\s+/g, "")) {
+    while (index < shown.length && /\s/.test(shown[index])) index += 1;
+    if (!shown.startsWith(char, index)) return -1;
+    index += char.length;
+  }
+  return index;
+}
+
 export class ChatView {
   /**
    * @param {{ onUserAudioPlaybackChange?: (playing: boolean) => void }} [options]
@@ -69,6 +85,12 @@ export class ChatView {
     // ── Assistant transcript state (keyed by response_id) ──────────────────
     /** @type {Map<string, { bubble: HTMLElement, hist: HTMLElement }>} */
     this._asstByResp = new Map();
+    // History rows and bubbles outlive their response so its heard text can
+    // rewrite them.
+    /** @type {Map<string, HTMLElement>} */
+    this._histByResp = new Map();
+    /** @type {Map<string, HTMLElement>} */
+    this._bubbleByResp = new Map();
 
     // ── Ephemeral bubble auto-dismiss ──────────────────────────────────────
     // Per-element expiry (epoch ms). A bubble fades once its expiry passes —
@@ -387,14 +409,81 @@ export class ChatView {
   }
 
   /** Tag an assistant history row as interrupted (user barged in mid-reply).
-   *  @param {HTMLElement | null} hist */
-  _markHistInterrupted(hist) {
-    if (!hist || hist.querySelector(".hist-note")) return;
+   *  @param {HTMLElement | null} hist @param {string} [text] */
+  _markHistInterrupted(hist, text = "Interrupted") {
+    if (!hist) return;
     hist.classList.add("interrupted");
-    const note = document.createElement("div");
-    note.className = "hist-note";
-    note.textContent = "Interrupted";
-    hist.appendChild(note);
+    let note = hist.querySelector(".hist-note");
+    if (!note) {
+      note = document.createElement("div");
+      note.className = "hist-note";
+      hist.appendChild(note);
+    }
+    note.textContent = text;
+  }
+
+  /** @param {string} responseId @param {HTMLElement} hist */
+  _rememberHist(responseId, hist) {
+    this._histByResp.set(responseId, hist);
+    while (this._histByResp.size > 32) this._histByResp.delete(this._histByResp.keys().next().value);
+  }
+
+  /** @param {string} responseId @param {HTMLElement} bubble */
+  _rememberBubble(responseId, bubble) {
+    this._bubbleByResp.set(responseId, bubble);
+    while (this._bubbleByResp.size > 32) this._bubbleByResp.delete(this._bubbleByResp.keys().next().value);
+  }
+
+  /**
+   * The server cut an interrupted reply to the speech the user heard: show
+   * the history row as the text the model will see.
+   * @param {{ responseId: string; text: string }} detail
+   */
+  onAssistantHeard(detail) {
+    // Both keep the full reply and strike through the words never said; only
+    // the bubble animates it. A faded bubble stays gone.
+    const hist = this._asstByResp.get(detail.responseId)?.hist ?? this._histByResp.get(detail.responseId);
+    if (hist?.isConnected) {
+      if (!this._strikeUnheard(hist.querySelector(".hist-body"), detail.text)) {
+        this._updateHistMsg(hist, detail.text, false);
+      }
+      this._markHistInterrupted(hist);
+    }
+    const bubble = this._asstByResp.get(detail.responseId)?.bubble ?? this._bubbleByResp.get(detail.responseId);
+    if (bubble?.isConnected && !bubble.classList.contains("out")) {
+      if (!this._strikeUnheard(bubble.querySelector(".bubble-body"), detail.text)) {
+        this._updateBubbleText(bubble, detail.text);
+      }
+      this._bumpDismiss(bubble);
+    }
+  }
+
+  /**
+   * Keep a message's full reply, striking through what follows the heard
+   * text. Returns false, changing nothing, when the heard text does not match
+   * the start of the message.
+   * @param {Element | null} body @param {string} heard
+   */
+  _strikeUnheard(body, heard) {
+    if (!(body instanceof HTMLElement)) return false;
+    // The text content still includes words struck by an earlier correction.
+    const shown = body.textContent || "";
+    const cut = heardPrefixLength(shown, heard);
+    if (cut < 0) return false;
+    const kept = shown.slice(0, cut).trimEnd();
+    const unheard = shown.slice(cut).trim();
+    body.replaceChildren();
+    if (kept) body.append(kept);
+    if (unheard) {
+      const struck = document.createElement("s");
+      struck.className = "unheard";
+      struck.textContent = unheard;
+      // Longer tails take longer to cross out, within limits.
+      struck.style.setProperty("--strike-ms", `${Math.min(1400, Math.max(450, unheard.length * 22))}ms`);
+      body.append(kept ? " " : "", struck);
+    }
+    body.hidden = !shown;
+    return true;
   }
 
   /** Render a captured webcam frame in the transcript (the camera tool result).
@@ -426,6 +515,8 @@ export class ChatView {
     this._activeUserItemId = "";
     this._assistantDismissedUserItemId = "";
     this._asstByResp.clear();
+    this._histByResp.clear();
+    this._bubbleByResp.clear();
   }
 
   // ── Client event handlers ─────────────────────────────────────────────────
@@ -517,7 +608,10 @@ export class ChatView {
       const entry = this._asstByResp.get(rid);
       if (!entry) {
         const bubble = this._spawnBubble("assistant", d.text);
-        this._asstByResp.set(rid, { bubble, hist: this._appendHistMsg("assistant", d.text, false) });
+        const hist = this._appendHistMsg("assistant", d.text, false);
+        this._asstByResp.set(rid, { bubble, hist });
+        this._rememberHist(rid, hist);
+        this._rememberBubble(rid, bubble);
         this._bumpDismiss(bubble);
       } else {
         this._updateBubbleText(entry.bubble, d.text);
@@ -607,7 +701,10 @@ export class ChatView {
     const entry = this._asstByResp.get(responseId);
     let hist = entry?.hist ?? null;
     if (detail.latency) {
-      hist ??= this._appendHistMsg("assistant", transcript || "", false);
+      if (!hist) {
+        hist = this._appendHistMsg("assistant", transcript || "", false);
+        this._rememberHist(responseId, hist);
+      }
       this._appendTimings(hist, detail.latency);
       this._markUnread();
     }
@@ -618,6 +715,7 @@ export class ChatView {
       // from the text carried in response.done.
       if (!hist && transcript) {
         hist = this._appendHistMsg("assistant", transcript, false);
+        this._rememberHist(responseId, hist);
       } else if (hist && transcript) {
         this._updateHistMsg(hist, transcript, false);
       }
@@ -649,18 +747,19 @@ export class ChatView {
     status.textContent = ({ completed: "Completed", cancelled: "Interrupted", failed: "Failed", incomplete: "Incomplete" })[timing.status];
     details.appendChild(status);
     const list = document.createElement("dl");
-    const llmTotal = timing.llm_total_s == null ? "Total unavailable" : `${format(timing.llm_total_s)} total`;
-    const llmRounds = timing.llm_rounds === undefined
-      ? "round count unavailable"
-      : `${timing.llm_rounds} ${timing.llm_rounds === 1 ? "round" : "rounds"}`;
+    const llmSummary = [];
+    if (timing.llm_total_s != null) llmSummary.push(`${format(timing.llm_total_s)} total`);
+    if (timing.llm_rounds !== undefined) {
+      llmSummary.push(`${timing.llm_rounds} ${timing.llm_rounds === 1 ? "round" : "rounds"}`);
+    }
     /** @type {[string, number|null|undefined|string][]} */
     const stages = [
       [timing.version === 2 ? "E2E time" : "VAD handoff to first audio", timing.e2e_s],
       ["VAD end decision", timing.vad_decision_s],
       ["Smart Turn decision", timing.smart_status],
       ["Transcription", timing.stt_s],
-      ["LLM", `${llmTotal} · ${llmRounds}`],
-      ["LLM for this response", timing.llm_s],
+      ["LLM", llmSummary.length ? llmSummary.join(" · ") : timing.llm_s],
+      ...(llmSummary.length ? [["LLM for this response", timing.llm_s]] : []),
       ["Voice synthesis to first audio", timing.tts_ttfa_s],
       ["Hold time before response", timing.version === 2 ? timing.hold_s : timing.smart_wait_s],
     ];

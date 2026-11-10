@@ -14,6 +14,7 @@ from openai.types.realtime.realtime_transcription_session_create_request import 
 )
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
+from speech_to_speech.api.openai_realtime.runtime_config import validate_reasoning
 from speech_to_speech.speech_languages import normalize_language
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,10 @@ class SessionHandler(RealtimeBaseHandler):
                 message="Only 'realtime' session type is supported; transcription sessions are not.",
                 _type="invalid_session_type",
             )
+
+        reasoning_error = validate_reasoning(s)
+        if reasoning_error is not None:
+            return self.make_error(message=reasoning_error, _type="invalid_request_error")
 
         transcription = s.audio.input.transcription if s.audio is not None and s.audio.input is not None else None
         if transcription is not None and isinstance(transcription.language, str):

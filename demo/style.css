@@ -2423,6 +2423,52 @@ body.cam-on .footer {
 .hist-msg.interrupted .hist-body {
   opacity: 0.7;
 }
+/* Words of an interrupted reply the user never heard. */
+.unheard {
+  color: var(--text-faint);
+  text-decoration-thickness: 1.5px;
+}
+
+/* In a bubble the strike is drawn across the words like a pen: a glowing tip
+ * leads an accent line, the words dim as it passes, and the line settles to
+ * the faint text colour. Wrapped lines are crossed out in reading order. */
+@property --strike-color {
+  syntax: "<color>";
+  inherits: false;
+  initial-value: transparent;
+}
+.bubble .unheard {
+  --strike-color: var(--text-faint);
+  text-decoration: none;
+  background-image:
+    radial-gradient(circle, var(--voice-assistant) 0 30%, transparent 70%),
+    linear-gradient(var(--strike-color), var(--strike-color));
+  background-repeat: no-repeat;
+  background-position: 100% 58%, 0 58%;
+  background-size: 0 0, 100% 1.5px;
+  -webkit-box-decoration-break: slice;
+  box-decoration-break: slice;
+  animation: unheard-strike var(--strike-ms, 700ms) cubic-bezier(0.55, 0, 0.25, 1) 120ms both;
+}
+@keyframes unheard-strike {
+  0% {
+    color: var(--text);
+    --strike-color: var(--voice-assistant);
+    background-position: 0% 58%, 0 58%;
+    background-size: 9px 9px, 0% 1.5px;
+  }
+  82% {
+    --strike-color: var(--voice-assistant);
+    background-position: 100% 58%, 0 58%;
+    background-size: 9px 9px, 100% 1.5px;
+  }
+  100% {
+    color: var(--text-faint);
+    --strike-color: var(--text-faint);
+    background-position: 100% 58%, 0 58%;
+    background-size: 0 0, 100% 1.5px;
+  }
+}
 
 /* Captured webcam frame shown in the transcript (camera tool result). */
 .hist-image {
@@ -2622,6 +2668,9 @@ body.cam-on .footer {
 }
 @media (prefers-reduced-motion: reduce) {
   .voice-turn-wave i {
+    animation: none;
+  }
+  .bubble .unheard {
     animation: none;
   }
   .cam-pip {

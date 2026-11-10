@@ -17,9 +17,9 @@
  * @typedef {S2sRealtimeClient} RealtimeClient
  */
 
-import { S2sRealtimeClient, normalizePlaybackBufferMs } from "./s2s-realtime-client.js?v=demo-sync-20261103-2";
+import { S2sRealtimeClient, normalizePlaybackBufferMs } from "./s2s-realtime-client.js?v=demo-sync-20261110";
 import { $, truncateError, errorMessage, DEBUG } from "./ui/dom.js";
-import { ChatView } from "./ui/chat.js";
+import { ChatView } from "./ui/chat.js?v=timings-20261105";
 import { Account } from "./ui/account.js";
 
 const DEFAULT_VOICE = "Aiden";
@@ -1527,6 +1527,10 @@ async function doStart(audioContext = null) {
     chat.onUserAudio(detail);
   });
 
+  c.addEventListener("assistant-heard", (e) => {
+    const detail = /** @type {CustomEvent<{ responseId: string; text: string }>} */ (e).detail;
+    chat.onAssistantHeard(detail);
+  });
   c.addEventListener("response-finished", (e) => {
     const detail = /** @type {CustomEvent<{ responseId: string; status: string; audible?: boolean; transcript?: string; latency?: import("./turn-latency.js").TurnLatency | null }>} */ (e).detail;
     chat.onResponseFinished(detail);

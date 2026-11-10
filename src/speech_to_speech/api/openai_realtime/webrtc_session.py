@@ -409,17 +409,20 @@ class WebRTCSession(SessionTransport):
         _resp_id, _item_id, _output_index, events = service.begin_audio_output(
             session_id,
             response_key,
+            len(pcm) // 2,
         )
         if events:
             await self.send_events(events)
         self._track.write(self._out_resampler.resample_pcm(pcm, PIPELINE_SAMPLE_RATE))
 
-    def discard_pending_audio(self) -> None:
+    def discard_pending_audio(self) -> float:
+        unplayed_ms = self._track.buffered_bytes / 2 / WEBRTC_SAMPLE_RATE * 1000
         self._track.clear()
         if self._sender is not None:
             # Drop codec lookahead too, so interrupted speech cannot reappear
             # when a later response wakes the track.
             setattr(self._sender, "_RTCRtpSender__encoder", None)
+        return unplayed_ms
 
     # ── Internals ─────────────────────────────────
 
