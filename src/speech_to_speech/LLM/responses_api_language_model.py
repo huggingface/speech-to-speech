@@ -85,13 +85,13 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
         """Keep Responses reasoning out of the Chat-Completions-shaped extra body."""
         return super()._build_extra_body(
             base_url,
-            disable_thinking=disable_thinking and reasoning_effort is None,
+            disable_thinking=disable_thinking and not reasoning_effort,
             reasoning_effort=None,
         )
 
     def _reasoning_kwargs(self, reasoning_effort: str | None = None) -> dict[str, Any]:
         effort = reasoning_effort or self.reasoning_effort
-        if effort is None:
+        if not effort:
             return {}
         return {"reasoning": {"effort": effort}}
 
