@@ -5,6 +5,53 @@ import * as realtime from "@openai/agents/realtime";
 
 import { S2sRealtimeClient } from "../s2s-realtime-client.js";
 import { waitFor } from "./helpers.mjs";
+import { REASONING_LEVELS } from "../ui/reasoning.js";
+
+test("WebSocket preserves live reasoning choices through voice and tool updates", async () => {
+  globalThis.localStorage = { getItem() { return null; } };
+  globalThis.OpenAIAgentsRealtime = realtime;
+  const client = new S2sRealtimeClient({ transport: "websocket", voice: "Aiden", instructions: "Be concise." });
+  const sent = [];
+  const transport = new realtime.OpenAIRealtimeWebSocket({ useInsecureApiKey: true });
+  transport.sendEvent = (event) => sent.push(event);
+  Object.defineProperty(transport, "status", { value: "connected" });
+  client._transport = transport;
+  client._agent = client._buildAgent();
+  client._session = new realtime.RealtimeSession(client._agent, {
+    transport, model: "s2s-local", config: client._sessionConfig(), tracingDisabled: true,
+  });
+  transport.updateSessionConfig(await client._session.getInitialSessionConfig());
+  assert.equal("reasoning" in sent.at(-1).session, false, "first visit must keep the server default");
+
+  for (const [effort] of REASONING_LEVELS.slice(1).concat([REASONING_LEVELS[0]])) {
+    const expected = effort === "default" ? null : { effort };
+    client.setReasoningEffort(effort === "default" ? null : effort);
+    assert.deepEqual(sent.at(-1), {
+      type: "session.update", session: { type: "realtime", reasoning: expected },
+    });
+    const before = sent.length;
+    client.updateSession({ voice: "Coral" });
+    await waitFor(() => sent.length > before);
+    assert.deepEqual(sent.at(-1).session.reasoning, expected);
+    const beforeTools = sent.length;
+    client.setTools([]);
+    await waitFor(() => sent.length >= beforeTools + 2);
+    assert.deepEqual(sent.at(-2).session.reasoning, expected);
+  }
+});
+
+test("saved reasoning levels are included in the initial SDK session payload", async () => {
+  globalThis.localStorage = { getItem() { return null; } };
+  globalThis.OpenAIAgentsRealtime = realtime;
+  for (const [effort] of REASONING_LEVELS.slice(1)) {
+    const client = new S2sRealtimeClient({ transport: "websocket", reasoningEffort: effort });
+    const transport = new realtime.OpenAIRealtimeWebSocket({ useInsecureApiKey: true });
+    const session = new realtime.RealtimeSession(client._buildAgent(), {
+      transport, config: client._sessionConfig(), tracingDisabled: true,
+    });
+    assert.deepEqual(transport.buildSessionPayload(await session.getInitialSessionConfig()).reasoning, { effort });
+  }
+});
 
 test("the pinned SDK changes the live voice and explicitly clears all tools", async () => {
   globalThis.localStorage = { getItem() { return null; } };

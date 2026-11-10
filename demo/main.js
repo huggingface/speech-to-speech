@@ -17,7 +17,8 @@
  * @typedef {S2sRealtimeClient} RealtimeClient
  */
 
-import { S2sRealtimeClient, normalizePlaybackBufferMs } from "./s2s-realtime-client.js?v=timings-20261105";
+import { S2sRealtimeClient, normalizePlaybackBufferMs } from "./s2s-realtime-client.js?v=reasoning-20261110";
+import { ReasoningControl } from "./ui/reasoning.js";
 import { $, truncateError, errorMessage, DEBUG } from "./ui/dom.js";
 import { ChatView } from "./ui/chat.js?v=timings-20261105";
 import { Account } from "./ui/account.js";
@@ -392,6 +393,7 @@ let queuedTicketId = "";
 
 /** @type {RealtimeClient | null} */
 let client = null;
+const reasoning = new ReasoningControl((effort) => client?.setReasoningEffort(effort));
 /** @type {MediaStream | null} */
 let micStream = null;
 let micMuted = false;
@@ -1424,6 +1426,7 @@ async function doStart(audioContext = null) {
   // a still-pending grant just means the snapshot tool isn't ready yet.
 
   const common = {
+    reasoningEffort: reasoning.effort,
     localVad: settings.localVad,
     voice: settings.voice,
     instructions: settings.instructions,

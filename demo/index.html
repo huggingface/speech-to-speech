@@ -133,6 +133,19 @@
         <p id="circle-caption" class="circle-caption" role="status">Tap to start</p>
         <p id="circle-subcaption" class="circle-subcaption" hidden></p>
 
+        <button id="reasoning-btn" class="reasoning-btn" type="button" popovertarget="reasoning-picker" aria-expanded="false" aria-controls="reasoning-picker">
+          <span>Reasoning</span>
+          <span id="reasoning-value">Server default</span>
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <div id="reasoning-picker" class="reasoning-picker" popover>
+          <fieldset>
+            <legend>Reasoning level</legend>
+            <p>Higher levels can take longer to reply. Available levels depend on the model.</p>
+            <div class="reasoning-choices"></div>
+          </fieldset>
+        </div>
+
         <div id="queue-actions" class="queue-actions" hidden>
           <button id="join-queue-btn" class="join-queue-btn" type="button" hidden>
             Join now
@@ -422,6 +435,6 @@
     </dialog>
 
     <script src="vendor/openai-realtime-agents.umd.js"></script>
-    <script type="module" src="main.js?v=timings-20261105"></script>
+    <script type="module" src="main.js?v=reasoning-20261110"></script>
   </body>
 </html>
