@@ -178,6 +178,7 @@ class _GenState(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     output_emitted: bool = False
+    reasoning: dict[Literal["reasoning", "summary"], list[str]] = Field(default_factory=dict)
     ending: ProviderResponseEnd = Field(default_factory=ProviderResponseEnd)
 
 
@@ -552,19 +553,27 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
     # ── output helpers ──────────────────────────────────────────────────────--
 
+    @staticmethod
+    def _take_reasoning(state: _GenState) -> list[AssistantReasoningPart]:
+        parts = [AssistantReasoningPart(text="".join(text), kind=kind) for kind, text in state.reasoning.items()]
+        state.reasoning.clear()
+        return parts
+
     def _chunk(
         self,
         turn: _Turn,
+        state: _GenState,
         *,
         text: str = "",
-        reasoning: ReasoningDelta | None = None,
         tools: list[ResponseFunctionToolCall] | None = None,
         language_code: Optional[str] = None,
         history: ResponseHistory | None = None,
     ) -> LLMResponseChunk:
-        parts: list[AssistantOutputPart] = []
-        if reasoning is not None:
-            parts.append(AssistantReasoningPart(text=reasoning.text, kind=reasoning.kind))
+        has_output = bool(text.strip() if turn.wants_audio else text) or bool(tools)
+        parts: list[AssistantOutputPart] = (
+            list(self._take_reasoning(state)) if has_output and not state.output_emitted else []
+        )
+        state.output_emitted = state.output_emitted or has_output
         if text:
             parts.append(AssistantTextPart(text=text))
         parts.extend(AssistantToolCallPart(tool=tool) for tool in tools or [])
@@ -616,8 +625,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 after_item_id=turn.history_anchor_id,
             )
         )
-        state.output_emitted = True
-        yield self._chunk(turn, tools=[item], history=history)
+        yield self._chunk(turn, state, tools=[item], history=history)
 
     # ── consumption ─────────────────────────────────────────────────────────--
 
@@ -637,8 +645,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
                 logger.info("LLM generation cancelled (stale speculative turn)")
                 return
-            state.output_emitted = True
-            yield self._chunk(turn, text=" ".join(batch))
+            yield self._chunk(turn, state, text=" ".join(batch))
 
         for event in events:
             # Provider usage is billable even when cancellation rolls back the
@@ -662,10 +669,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 state.history_items.append(event.model_copy(deep=True))
             elif isinstance(event, ReasoningDelta):
                 if event.text and turn.runtime_config.reasoning_text_enabled:
-                    if not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
-                        cancelled = True
-                        break
-                    yield self._chunk(turn, reasoning=event)
+                    state.reasoning.setdefault(event.kind, []).append(event.text)
             elif isinstance(event, ToolCall):
                 if state.ending.status != "completed":
                     continue
@@ -692,8 +696,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                             logger.info("LLM generation cancelled (stale speculative turn)")
                             cancelled = True
                             break
-                        state.output_emitted = True
-                        yield self._chunk(turn, text=event.text)
+                        yield self._chunk(turn, state, text=event.text)
                     continue
                 new_text = remove_unspeechable(event.text)
                 state.clean_text += new_text
@@ -757,10 +760,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 state.history_items.append(event.model_copy(deep=True))
             elif isinstance(event, ReasoningDelta):
                 if event.text and turn.runtime_config.reasoning_text_enabled:
-                    if not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
-                        cancelled = True
-                        break
-                    yield self._chunk(turn, reasoning=event)
+                    state.reasoning.setdefault(event.kind, []).append(event.text)
             elif isinstance(event, ToolCall):
                 if state.ending.status != "completed":
                     continue
@@ -777,8 +777,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     and not self._turn_is_cancelled(turn)
                     and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
                 ):
-                    state.output_emitted = True
-                    yield self._chunk(turn, text=out)
+                    yield self._chunk(turn, state, text=out)
         logger.debug("Clean text: %s", transcript_for_log(state.clean_text))
         logger.info("Tools: %s", transcript_for_log(state.tools))
         return (
@@ -909,7 +908,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             ):
                 state.output_emitted = True
                 yield LLMResponseChunk(
-                    text=PROVIDER_FAILURE_FALLBACK,
+                    parts=[*self._take_reasoning(state), AssistantTextPart(text=PROVIDER_FAILURE_FALLBACK)],
                     selected_language=turn.selected_language,
                     runtime_config=turn.runtime_config,
                     response=turn.response,
@@ -955,6 +954,14 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 )
             yield EndOfResponse(
                 history=history,
+                reasoning=(
+                    self._take_reasoning(state)
+                    if error_message is None
+                    and generation_completed
+                    and not self._turn_is_cancelled(turn)
+                    and self._turn_is_latest(turn.turn_id, turn.turn_revision)
+                    else []
+                ),
                 turn_id=turn.turn_id,
                 turn_revision=turn.turn_revision,
                 cancel_generation=turn.gen,

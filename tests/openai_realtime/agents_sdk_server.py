@@ -45,11 +45,13 @@ def _audio(samples: int = 3_200) -> bytes:
     return wave.tobytes()
 
 
-def _queue_completed_response(env: _ServerEnv, response_key: str, text: str) -> None:
+def _queue_completed_response(
+    env: _ServerEnv, response_key: str, text: str, *, reasoning: list[AssistantReasoningPart] | None = None
+) -> None:
     env.output_queue.put(
         AssistantOutputEvent(
             response_key=response_key,
-            parts=[AssistantTextPart(text=text)],
+            parts=[*(reasoning or []), AssistantTextPart(text=text)],
         )
     )
     env.output_queue.put(AudioOutput(audio=_audio(), response_key=response_key))
@@ -121,13 +123,12 @@ def main() -> None:
     @env.app.post("/test/reasoning")
     async def reasoning():
         response_key = _response_key(env, "reasoning")
-        env.output_queue.put(
-            AssistantOutputEvent(
-                response_key=response_key,
-                parts=[AssistantReasoningPart(text="Compare the choices first.")],
-            )
+        _queue_completed_response(
+            env,
+            response_key,
+            "Option A is the better fit.",
+            reasoning=[AssistantReasoningPart(text="Compare the choices first.")],
         )
-        _queue_completed_response(env, response_key, "Option A is the better fit.")
         return {"ok": True}
 
     @env.app.post("/test/start-audio")

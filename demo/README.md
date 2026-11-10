@@ -289,16 +289,17 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
 
 Open **Conversation** (the chat icon) to read the provider's reasoning under
 each reply. **Reasoning** and **Reasoning summary** sections are collapsed by
-default; expand one to read it, including while the text streams. Reasoning
-stays separate from the answer and is never sent to speech synthesis. A section
-appears only when the model/provider supplies readable reasoning or a summary;
-encrypted reasoning is not displayed. This needs the updated speech-to-speech
-backend as well as the demo frontend.
+default; expand one to read it. On every setup, reasoning is collected in the
+LLM handler and delivered with the first answer text or tool call, rather than
+streamed live. A response with neither delivers its reasoning at completion.
+Reasoning stays separate from the answer and is never sent to speech synthesis.
+A section appears only when the model/provider supplies readable reasoning or
+a summary; encrypted reasoning is not displayed. This needs the updated
+speech-to-speech backend as well as the demo frontend.
 
-With speculative turn reopening enabled, reasoning waits for the first answer
-text or tool call (or the normal response terminal) before it appears. Thinking
-alone does not end the user's chance to resume a paused utterance; reasoning
-from a superseded turn is discarded.
+Reasoning alone does not commit a turn or close the user's chance to resume a
+paused utterance. Reasoning from a cancelled or superseded generation is not
+sent.
 
 ## Files
 

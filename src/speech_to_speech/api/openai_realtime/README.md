@@ -582,23 +582,25 @@ server emits this extension over either transport:
 ```
 
 `kind` is `reasoning` for provider-exposed reasoning text and `summary` for a
-provider reasoning summary. Deltas belong to `response_id`; `response.done`
-ends the stream, including interrupted or failed responses. They are separate
-from answer transcripts, output items, and synthesized speech. Chat Completions
-reads the provider's `reasoning_content` or string `reasoning` field. Responses
-reads reasoning text/summary deltas and readable completed reasoning parts,
-without repeating text already streamed. Nothing is emitted for encrypted-only
-reasoning or providers that do not expose text. Existing cancellation,
-speculative-turn and response-order gates also apply to these parts.
+provider reasoning summary. Deltas belong to `response_id`. On every setup,
+the LLM handler collects readable reasoning and attaches it to the first
+answer-text or tool-call chunk. The extension events arrive after
+`response.created` and before the answer/tool output they accompany. Responses
+with neither deliver reasoning with their normal completion, before
+`response.done`. Any readable text supplied late by the provider is also
+included at completion. Reasoning tokens are not streamed live.
 
-On speculative-turn setups, reasoning alone does not commit the user's turn or
-close its reopen window. The server buffers reasoning until the first answer
-text or tool call commits the turn (or its normal response terminal arrives),
-then sends the buffered reasoning first. Resumed speech, cancellation, and
-response replacement discard reasoning from the superseded generation. This
-means the thinking phase itself is not streamed live while a turn can reopen.
-Untracked turns and already-committed turns stream reasoning immediately.
+Reasoning is separate from answer transcripts, output items, synthesized
+speech, and client-visible history. Chat Completions reads the provider's
+`reasoning_content` or string `reasoning` field. Responses reads reasoning
+text/summary deltas and readable completed reasoning parts without repeating
+text already collected. Nothing is emitted for encrypted-only reasoning or
+providers that do not expose text.
 
+Reasoning alone never commits a turn or closes its reopen window: the server
+only receives reasoning alongside output that already commits the turn, or at
+the normal response terminal. Reasoning from cancelled or superseded
+generations is discarded by the existing generation and speculative-turn gates.
 
 ---
 

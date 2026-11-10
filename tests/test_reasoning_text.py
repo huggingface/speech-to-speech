@@ -9,8 +9,8 @@ from speech_to_speech.LLM.base_openai_compatible_language_model import Reasoning
 from speech_to_speech.LLM.chat_completions_language_model import _iter_chat_response_events, _iter_chat_stream_events
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.events import AssistantOutputEvent
-from speech_to_speech.pipeline.messages import AssistantReasoningPart, LLMResponseChunk, TTSInput
+from speech_to_speech.pipeline.events import AssistantOutputEvent, AssistantResponseDoneEvent
+from speech_to_speech.pipeline.messages import AssistantReasoningPart, EndOfResponse, LLMResponseChunk, TTSInput
 from tests.test_chat_completions_backend import _FakeStream
 from tests.test_chat_completions_backend import _make_handler as chat_handler
 from tests.test_responses_api_language_model import _make_handler as responses_handler
@@ -107,8 +107,8 @@ def test_reasoning_reaches_ordered_pipeline_only_for_opted_in_clients(stream, en
     parts = [
         part
         for event in outputs
-        if isinstance(event, AssistantOutputEvent)
-        for part in event.parts
+        if isinstance(event, (AssistantOutputEvent, AssistantResponseDoneEvent))
+        for part in (event.parts if isinstance(event, AssistantOutputEvent) else event.reasoning)
         if isinstance(part, AssistantReasoningPart)
     ]
     assert [part.text for part in parts] == (
@@ -164,10 +164,10 @@ def test_reasoning_parts_never_become_legacy_text_or_tts():
     processor = LMOutputProcessor.__new__(LMOutputProcessor)
     processor.setup()
     outputs = list(processor.process(chunk))
-    assert len(outputs) == 1 and isinstance(outputs[0], AssistantOutputEvent)
+    assert outputs == []
 
 
-def test_cancellation_stops_reasoning_deltas():
+def test_cancellation_during_thinking_discards_collected_reasoning():
     from openai.types.responses import ResponseReasoningTextDeltaEvent
 
     scope = CancelScope()
@@ -189,7 +189,6 @@ def test_cancellation_stops_reasoning_deltas():
             )
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: _make_stream(stream())))
-    chunks = [item for item in handler.process(request) if isinstance(item, LLMResponseChunk)]
-    assert [part.text for chunk in chunks for part in chunk.parts if isinstance(part, AssistantReasoningPart)] == [
-        "Before cancellation."
-    ]
+    outputs = list(handler.process(request))
+    assert not any(isinstance(item, LLMResponseChunk) for item in outputs)
+    assert all(not item.reasoning for item in outputs if isinstance(item, EndOfResponse))

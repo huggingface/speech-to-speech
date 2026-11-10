@@ -211,6 +211,7 @@ class EndOfResponse(PipelineMessage):
     """
 
     history: ResponseHistory | None = Field(default=None, exclude=True, repr=False)
+    reasoning: list[AssistantReasoningPart] = Field(default_factory=list)
 
     tag: Literal["end_of_response"] = "end_of_response"
     turn_id: str | None = None
