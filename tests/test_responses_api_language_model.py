@@ -36,6 +36,7 @@ from speech_to_speech.LLM.chat import (
     make_system_message,
     make_user_message,
 )
+from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.messages import (
@@ -46,7 +47,8 @@ from speech_to_speech.pipeline.messages import (
     TokenUsage,
 )
 from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
-from tests.llm_history import drive_llm
+from tests.llm_history import close_llm_runners as close_llm_runners
+from tests.llm_history import drive_llm, mock_async_client
 
 
 def _make_text_delta_event(text):
@@ -232,6 +234,10 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None, rea
     )
     handler._prefetch_workers_lock = Lock()
     handler._prefetch_workers = set()
+    handler.stop_event = Event()
+    handler._async_runner = None
+    handler._async_client = None
+    handler._make_async_client = lambda: mock_async_client(handler)
     return handler
 
 
@@ -639,6 +645,53 @@ def test_process_records_hosted_llm_latency():
     assert tracker.llm_s is not None and tracker.llm_s >= tail_delay_s
     assert tracker.llm_ttft_s is not None
     assert tracker.llm_ttft_s < tail_delay_s
+
+
+@pytest.mark.parametrize("mode,first_tts_s", [("stream", 0.4), ("trailing", 0.9), ("nonstream", 0.4), ("failed", 0.4)])
+def test_first_tts_batch_latency_uses_hosted_generation_start(monkeypatch, mode, first_tts_s):
+    clock = [10.0]
+    monkeypatch.setattr(base_openai_compatible_language_model, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
+    handler = _make_handler(stream=mode != "nonstream")
+
+    def events():
+        clock[0] = 10.1
+        yield _make_text_delta_event("Hello")
+        clock[0] = 10.4
+        if mode == "stream":
+            yield _make_text_delta_event(". How are you?")
+        clock[0] = 10.9
+        yield _make_output_item_done_event(content="Hello. How are you?" if mode == "stream" else "Hello")
+
+    def create(**kwargs):
+        if mode == "failed":
+            clock[0] = 10.4
+            raise httpx.ReadTimeout("synthetic provider timeout")
+        if mode != "nonstream":
+            return _make_stream(events())
+        clock[0] = 10.4
+        message = ResponseOutputMessage(
+            type="message",
+            id="msg_test",
+            role="assistant",
+            status="completed",
+            content=[ResponseOutputText(type="output_text", text="Hello.", annotations=[])],
+        )
+        return _make_response([message])
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    request = _make_request()
+    store = handler.turn_latency_store = TurnLatencyStore()
+    tracker = store.get_or_create_response(request.response_key, turn_id="turn_1", turn_revision=0)
+    processor = object.__new__(LMOutputProcessor)
+    processor.setup()
+    processor.turn_latency_store = store
+    for output in drive_llm(handler, request):
+        list(processor.process(output))
+
+    assert tracker.llm_first_tts_s == pytest.approx(first_tts_s)
+    assert tracker.llm_s == pytest.approx(0.4 if mode in ("nonstream", "failed") else 0.9)
+    assert tracker.llm_ttft_s == (None if mode in ("nonstream", "failed") else pytest.approx(0.1))
 
 
 def test_text_only_streams_raw_deltas_without_sentence_trimming():

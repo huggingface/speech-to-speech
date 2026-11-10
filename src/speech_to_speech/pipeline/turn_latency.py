@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import sys
 from collections import defaultdict
+from collections.abc import Collection
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Literal
+from time import perf_counter
+from typing import Callable, Literal
 
 TurnLatencyStatus = Literal["completed", "cancelled", "failed", "incomplete"]
 TURN_LATENCY_METADATA_KEY = "speech_to_speech.turn_latency"
@@ -77,7 +79,9 @@ class TurnLatencyTracker:
     """Server timings, not an additive breakdown or client playback latency.
 
     ``llm_ttft_s`` ends at the first non-whitespace provider text delta and
-    ``llm_s`` covers full generation, including lock waits. ``tts_ttfa_s`` ends
+    ``llm_s`` covers full generation, including lock waits. ``llm_first_tts_s``
+    ends when the output processor first forwards nonempty text to TTS, using
+    that same generation-start origin. ``tts_ttfa_s`` ends
     at the first model audio chunk before trimming and block assembly;
     ``e2e_s`` runs from estimated speech end to first yielded TTS audio.
     TTFT remains an internal measurement, omitted from the simplified record.
@@ -92,7 +96,7 @@ class TurnLatencyTracker:
     says the cancellation arrived after audio started, not that a sentence was
     truncated: a cancellation landing just after the last chunk is marked too.
 
-    Tool follow-ups use separate trackers.
+    Tool follow-ups use separate trackers with explicit cumulative LLM ancestry.
     """
 
     turn_id: str | None = None
@@ -102,6 +106,9 @@ class TurnLatencyTracker:
     stt_s: float | None = None
     llm_ttft_s: float | None = None
     llm_s: float | None = None
+    llm_rounds: int = 0
+    _prior_llm_s: float | None = None
+    _prior_llm_rounds: int = 0
     tts_ttfa_s: float | None = None
     e2e_s: float | None = None
     vad_settle_s: float | None = None
@@ -117,12 +124,34 @@ class TurnLatencyTracker:
     mlx_lock_waits: dict[str, MLXLockStat] = field(default_factory=dict)
     mlx_lock_holds: dict[str, MLXLockStat] = field(default_factory=dict)
     status: TurnLatencyStatus = "completed"
+    llm_first_tts_s: float | None = None
+    _llm_started_at_s: float | None = field(default=None, init=False, repr=False)
 
     def record_stt(self, seconds: float) -> None:
         self.stt_s = max(0.0, seconds)
 
+    def start_llm(self) -> None:
+        """Count a generation attempt, never a queued response or a tool call."""
+        self.llm_rounds = self._prior_llm_rounds + 1
+
+    @property
+    def llm_total_s(self) -> float | None:
+        if self.llm_s is None or self.llm_rounds == self._prior_llm_rounds:
+            return self._prior_llm_s
+        return (self._prior_llm_s or 0.0) + self.llm_s
+
     def record_llm(self, seconds: float) -> None:
         self.llm_s = max(0.0, seconds)
+
+    def record_llm_start(self, started_at_s: float) -> None:
+        """Retain this response's generation origin across the processor queue."""
+        if self._llm_started_at_s is None:
+            self._llm_started_at_s = started_at_s
+
+    def record_llm_first_tts(self) -> None:
+        """Record the first forwarded audio text batch, never a provider delta."""
+        if self.llm_first_tts_s is None and self._llm_started_at_s is not None:
+            self.llm_first_tts_s = max(0.0, perf_counter() - self._llm_started_at_s)
 
     def record_vad_settle(self, seconds: float) -> None:
         self.vad_settle_s = max(0.0, seconds)
@@ -190,6 +219,9 @@ class TurnLatencyTracker:
             "response_key": response_key,
             "stt_s": self.stt_s,
             "llm_s": self.llm_s,
+            "llm_first_tts_s": compact(self.llm_first_tts_s),
+            "llm_total_s": compact(self.llm_total_s),
+            "llm_rounds": self.llm_rounds,
             "tts_ttfa_s": self.tts_ttfa_s,
             "e2e_s": self.e2e_s,
             "vad_decision_s": compact(self.vad_decision_s),
@@ -239,6 +271,8 @@ class TurnLatencyTracker:
             f"Turn {self.turn_id or 'n/a'} rev={revision} latency: "
             f"stt={self._fmt(self.stt_s)} "
             f"llm={self._fmt(self.llm_s)} "
+            f"llm_first_tts={self._fmt(self.llm_first_tts_s)} "
+            f"llm_total={self._fmt(self.llm_total_s)} llm_rounds={self.llm_rounds} "
             f"tts_ttfa={self._fmt(self.tts_ttfa_s)} e2e={self._fmt(self.e2e_s)} "
             f"{settle}"
             f"vad_decision={self._fmt(self.vad_decision_s)} "
@@ -258,6 +292,15 @@ class TurnLatencyTracker:
         return f"{total:.2f}s[{named}]"
 
 
+@dataclass(frozen=True)
+class _LLMChain:
+    turn_id: str | None
+    turn_revision: int | None
+    llm_total_s: float | None
+    llm_rounds: int
+    call_ids: frozenset[str]
+
+
 class TurnLatencyStore:
     """Thread-safe latency trackers keyed by response_key.
 
@@ -266,6 +309,12 @@ class TurnLatencyStore:
 
     STT runs before a response_key exists, so interim measurements are held on
     a per-turn pending slot and merged when the response tracker is created.
+
+    Completed tool responses retain at most 128 immutable LLM snapshots per
+    session. Only an explicit parent response or tool call with matching
+    turn/revision inherits them. Completed snapshots retain call IDs so response.create
+    can recover ancestry after prefetch cleanup. STT and VAD/Smart Turn timings
+    never carry to the follow-up.
 
     Session cleanup: response trackers are indexed by ``session_id`` so
     ``unregister`` can drop only that session's in-flight measurements.
@@ -281,6 +330,7 @@ class TurnLatencyStore:
         self._pending_turn: dict[tuple[str, int], TurnLatencyTracker] = {}
         self._turn_responses: dict[tuple[str, int], str] = {}
         self._session_keys: dict[str, set[str]] = defaultdict(set)
+        self._completed_tools: dict[str, dict[str, _LLMChain]] = defaultdict(dict)
 
     @staticmethod
     def _turn_key(turn_id: str, turn_revision: int | None) -> tuple[str, int]:
@@ -330,12 +380,31 @@ class TurnLatencyStore:
         turn_id: str | None = None,
         turn_revision: int | None = None,
         session_id: str | None = None,
+        parent_response_key: str | None = None,
+        parent_call_id: str | None = None,
     ) -> TurnLatencyTracker:
         with self._lock:
             tracker = self._trackers.get(response_key)
             if tracker is None:
                 revision = None if turn_revision is None else turn_revision
                 tracker = TurnLatencyTracker(turn_id=turn_id, turn_revision=revision)
+                if session_id is not None:
+                    completed = self._completed_tools.get(session_id, {})
+                    parent = None
+                    if parent_response_key is not None:
+                        parent = (
+                            self._trackers.get(parent_response_key)
+                            if parent_response_key in self._session_keys.get(session_id, set())
+                            else completed.get(parent_response_key)
+                        )
+                    elif parent_call_id is not None:
+                        parent = next(
+                            (chain for chain in reversed(completed.values()) if parent_call_id in chain.call_ids), None
+                        )
+                    if parent is not None and (parent.turn_id, parent.turn_revision) == (turn_id, turn_revision):
+                        tracker._prior_llm_s = parent.llm_total_s
+                        tracker._prior_llm_rounds = parent.llm_rounds
+                        tracker.llm_rounds = parent.llm_rounds
                 self._trackers[response_key] = tracker
                 if session_id is not None:
                     self._session_keys[session_id].add(response_key)
@@ -371,7 +440,9 @@ class TurnLatencyStore:
         with self._lock:
             return self._trackers.get(response_key)
 
-    def pop(self, response_key: str | None, *, session_id: str | None = None) -> TurnLatencyTracker | None:
+    def pop(
+        self, response_key: str | None, *, session_id: str | None = None, tool_call_ids: Collection[str] = ()
+    ) -> TurnLatencyTracker | None:
         if response_key is None:
             return None
         with self._lock:
@@ -381,6 +452,17 @@ class TurnLatencyStore:
                 if self._turn_responses.get(key) == response_key:
                     self._turn_responses.pop(key, None)
             if session_id is not None:
+                if tool_call_ids and tracker is not None:
+                    completed = self._completed_tools[session_id]
+                    completed[response_key] = _LLMChain(
+                        tracker.turn_id,
+                        tracker.turn_revision,
+                        tracker.llm_total_s,
+                        tracker.llm_rounds,
+                        frozenset(tool_call_ids),
+                    )
+                    while len(completed) > 128:
+                        completed.pop(next(iter(completed)))
                 self._detach_response_from_session(session_id, response_key)
             return tracker
 
@@ -389,6 +471,7 @@ class TurnLatencyStore:
 
     def clear_session(self, session_id: str) -> None:
         with self._lock:
+            self._completed_tools.pop(session_id, None)
             for response_key in self._session_keys.pop(session_id, set()):
                 tracker = self._trackers.pop(response_key, None)
                 if tracker is not None and tracker.turn_id is not None:
@@ -418,3 +501,74 @@ def record_response_e2e(
     """Publish eligible speech E2E; return whether a first sample was recorded."""
     tracker = store.get_response(response_key) if store is not None else None
     return tracker.record_e2e(seconds) if tracker is not None else False
+
+
+class TTSResponseTimer:
+    """Per-synthesis bookkeeping for the two TTS latency fields.
+
+    The handler decides *where* the boundaries are (first provider audio, first
+    yielded block); the timer owns the rest: first-write-wins, suppression once
+    the output is cancelled or stale, and the ``speech_stopped_at_s`` clamp.
+    ``started_at_s`` is taken at construction, so create it right before
+    provider work starts, or call ``mark_start`` once the real start is known
+    (for example after acquiring a lock the handler does not want to measure).
+    """
+
+    def __init__(
+        self,
+        store: TurnLatencyStore | None,
+        response_key: str | None,
+        speech_stopped_at_s: float | None,
+        is_cancelled: Callable[[], bool] | None = None,
+    ) -> None:
+        self._store = store
+        self._response_key = response_key
+        self._speech_stopped_at_s = speech_stopped_at_s
+        self._is_cancelled = is_cancelled
+        self._provider_done = False
+        self._yield_done = False
+        self.started_at_s = perf_counter()
+
+    def _cancelled(self) -> bool:
+        return self._is_cancelled is not None and self._is_cancelled()
+
+    @property
+    def has_tracker(self) -> bool:
+        """Whether the response still has a live tracker to publish into."""
+        return self._store is not None and self._store.get_response(self._response_key) is not None
+
+    def mark_start(self, at_s: float | None = None) -> None:
+        """Re-anchor the synthesis start used for ``tts_ttfa``."""
+        self.started_at_s = perf_counter() if at_s is None else at_s
+
+    def speech_stop_elapsed_s(self) -> float | None:
+        """Unclamped seconds since speech stopped, or None when unknown."""
+        if self._speech_stopped_at_s is None:
+            return None
+        return perf_counter() - self._speech_stopped_at_s
+
+    def first_provider_audio(self, at_s: float | None = None) -> bool:
+        """Record synthesis start to first model/provider audio; once per timer."""
+        if self._provider_done or self._cancelled():
+            return False
+        self._provider_done = True
+        now = perf_counter() if at_s is None else at_s
+        record_response_tts_ttfa(self._store, self._response_key, now - self.started_at_s)
+        return True
+
+    def first_yield(self, *, ignore_cancel: bool = False) -> float | None:
+        """Record speech stop to first yielded block.
+
+        Returns the recorded seconds, or None when nothing was recorded (already
+        done, cancelled, unknown speech stop, or the response is not tracked).
+        ``ignore_cancel`` is for callers that yield the block regardless of a
+        cancel flag that flipped after their own last check.
+        """
+        if self._yield_done or (not ignore_cancel and self._cancelled()):
+            return None
+        self._yield_done = True
+        elapsed_s = self.speech_stop_elapsed_s()
+        if elapsed_s is None:
+            return None
+        latency_s = max(0.0, elapsed_s)
+        return latency_s if record_response_e2e(self._store, self._response_key, latency_s) else None

@@ -1,6 +1,18 @@
 """Run a language model backend with the service writing its history."""
 
+import pytest
+
 from speech_to_speech.api.openai_realtime.service import RealtimeService
+
+_async_runners = []
+
+
+@pytest.fixture(autouse=True)
+def close_llm_runners():
+    yield
+    for runner in _async_runners:
+        runner.close()
+    _async_runners.clear()
 
 
 def drive_llm(handler, request, *, service=None, conn_id=None):
@@ -33,3 +45,31 @@ def drive_llm(handler, request, *, service=None, conn_id=None):
     finally:
         if request.prefetch_transaction is None and proposal is not None and not proposal.complete:
             service.history.close(conn_id, key)
+
+
+def mock_async_client(handler):
+    """Forward async SDK calls to the backend tests' existing synchronous fakes."""
+    from functools import reduce
+    from unittest.mock import AsyncMock, MagicMock
+
+    _async_runners.append(handler._async_runner)
+    client = MagicMock()
+    client.close = AsyncMock()
+    for path in (("responses",), ("chat", "completions")):
+
+        async def create(*args, _path=path, **kwargs):
+            resource = reduce(getattr, _path, handler.client)
+            response = resource.create(*args, **kwargs)
+            stream = MagicMock()
+            stream.__aenter__.return_value = stream
+            stream.__aiter__.return_value = response
+
+            def close(*exc):
+                response.close()
+                return False
+
+            stream.__aexit__.side_effect = close
+            return stream
+
+        reduce(getattr, path, client).create = AsyncMock(side_effect=create)
+    return client

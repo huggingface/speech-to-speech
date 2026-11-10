@@ -7,12 +7,12 @@ import wave
 from queue import Queue
 from threading import Event
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 
 import speech_to_speech.LLM.base_openai_compatible_language_model as llm_module
-import speech_to_speech.TTS.openai_compatible_handler as tts_module
 import speech_to_speech.TTS.pocket_tts_handler as pocket_module
 from speech_to_speech.pipeline.events import AssistantResponseDoneEvent, SpeechStartedEvent, TranscriptionCompletedEvent
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, AudioOutput, EndOfResponse, TTSInput, VADAudio
@@ -24,6 +24,7 @@ from speech_to_speech.STT.openai_compatible_handler import (
 )
 from speech_to_speech.STT.streaming_handler import VLLMRealtimeSTTHandler
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
+from tests.llm_history import close_llm_runners as close_llm_runners
 from tests.test_chat_completions_backend import _make_handler as make_chat_handler
 from tests.test_openai_tts_handler import _openai_tts_handler
 from tests.test_pocket_tts_handler import _farsi_handler, _run_farsi_inputs, _run_farsi_worker
@@ -100,7 +101,7 @@ def test_vllm_realtime_final_commit_reaches_response_log(service, conn_id, caplo
 
 
 @pytest.mark.parametrize("make_handler", [make_responses_handler, make_chat_handler])
-@pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("failure", [False, True, "empty_input"])
 def test_remote_llm_records_generation_through_terminal_response(
     service, conn_id, caplog, monkeypatch, make_handler, failure
 ):
@@ -111,20 +112,29 @@ def test_remote_llm_records_generation_through_terminal_response(
     request = service.text_prompt_queue.get_nowait()
     handler = make_handler()
     handler.turn_latency_store = service.turn_latency_store
-    handler._serialize = lambda chat: [{"role": "user", "content": "hello"}]
+    handler._serialize = lambda chat: [] if failure == "empty_input" else [{"role": "user", "content": "hello"}]
     clock = [10.0]
     monkeypatch.setattr(llm_module, "perf_counter", lambda: clock[0])
 
-    def provider_request(api_input, optional_kwargs):
+    calls = []
+
+    async def provider_request(api_input, optional_kwargs, *, client):
+        calls.append(api_input)
         if failure:
             clock[0] = 10.25
             raise RuntimeError("provider failed")
         clock[0] = 10.10
-        return object()
+        stream = MagicMock()
+        stream.__aenter__.return_value = stream
+        stream.__aexit__.return_value = False
+        stream.__aiter__.return_value = []
+        return stream
 
     handler._request = provider_request
 
     def provider_events(response):
+        # The streaming request is issued when its first chunk is read.
+        assert list(response) == []
         clock[0] = 10.15
         yield llm_module.TextDelta(text="")
         clock[0] = 10.18
@@ -133,10 +143,17 @@ def test_remote_llm_records_generation_through_terminal_response(
 
     handler._iter_events = provider_events
     outputs = list(handler.process(request))
-    assert any(isinstance(output, EndOfResponse) and bool(output.error) == failure for output in outputs)
+    assert any(isinstance(output, EndOfResponse) and bool(output.error) == bool(failure) for output in outputs)
     line, metadata = _finish(
         service, conn_id, request.response_key, caplog, status="failed" if failure else "completed"
     )
+    assert metadata["llm_rounds"] == (0 if failure == "empty_input" else 1)
+    assert len(calls) == metadata["llm_rounds"]
+    if failure == "empty_input":
+        assert metadata["llm_total_s"] is None
+        assert metadata["llm_s"] is None
+        return
+    assert metadata["llm_total_s"] == pytest.approx(0.25)
     assert "llm_ttft=" not in line
     assert "llm=0.25s" in line
     assert f"status={'failed' if failure else 'completed'}" in line
@@ -156,7 +173,7 @@ def test_remote_tts_tracks_provider_audio_before_block_assembly_and_preserves_fi
     handler = _openai_tts_handler(monkeypatch)
     handler.turn_latency_store = service.turn_latency_store
     clock = [10.0]
-    monkeypatch.setattr(tts_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     original_blocks = handler._resample_to_blocks
 
     def delayed_blocks(*args):
@@ -201,6 +218,7 @@ def test_pocket_worker_timings_reach_terminal_response_before_tracker_cleanup(se
     handler.phonemizer = None
     handler.turn_latency_store = service.turn_latency_store
     clock = [10.0]
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     monkeypatch.setattr(pocket_module, "perf_counter", lambda: clock[0])
 
     def stream(voice, text, **kwargs):
@@ -249,7 +267,7 @@ def test_wav_tts_records_first_provider_audio_before_later_chunks(service, conn_
     handler.turn_latency_store = service.turn_latency_store
     handler.response_format = "wav"
     clock = [10.0]
-    monkeypatch.setattr(tts_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
 
     wav_bytes = io.BytesIO()
     with wave.open(wav_bytes, "wb") as writer:

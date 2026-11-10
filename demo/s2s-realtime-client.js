@@ -30,10 +30,13 @@
  * @property {string} [sessionUrl]
  * @property {string} [loadBalancerUrl]
  * @property {string} [directUrl]
+ * @property {string} [capabilitiesUrl] Backend realtime URL for language discovery.
  * @property {string} [callsUrl]
  * @property {RTCIceServer[]} [iceServers]
  * @property {string} voice
+ * @property {string} [language] ISO language code, or "auto".
  * @property {string} instructions
+ * @property {string | null} [reasoningEffort] Null keeps the server's startup default.
  * @property {string} [startupGreeting]
  * @property {MediaStream} [micStream]
  * @property {() => Promise<MediaStream>} [acquireMic]
@@ -51,14 +54,24 @@ import { extractResponseTranscript, trimTrailingSlash } from "./ws/codec.js";
 import { OrbVisualiser, VIS_FFT_SIZE } from "./ws/orb-visualizer.js";
 import { SentAudioRecorder } from "./ws/user-audio-recorder.js";
 import { LocalVad } from "./ws/local-vad.js";
+import { normalizeReasoningEffort } from "./ui/reasoning.js";
 
 export const AUDIO_SAMPLE_RATE = 24_000;
-export const AUDIO_WORKLET_VERSION = "audio-24k-v2";
+export const AUDIO_WORKLET_VERSION = "reasoning-language-20261110";
 export const DEFAULT_PLAYBACK_BUFFER_MS = 0;
 const MIC_CHUNK_MS = 40;
+// Retrieves the client sends to learn what an interrupted reply left in history.
+const HEARD_TEXT_EVENT_PREFIX = "heard_text_";
+const ASSISTANT_ITEM_HISTORY = 64;
+const ASSISTANT_REPLIES_CHECKED = 2;
 const CAPTURE_CONFIG_TIMEOUT_MS = 2_000;
 const SPEAKING_OPEN_DB = -50;
 const SPEAKING_HANG_MS = 250;
+/** @type {Record<string, string>} */
+const LANGUAGE_NAMES = {
+  zh: "Chinese", en: "English", ja: "Japanese", ko: "Korean", de: "German",
+  fr: "French", ru: "Russian", pt: "Portuguese", es: "Spanish", it: "Italian",
+};
 
 /** @param {unknown} value */
 export function normalizePlaybackBufferMs(value) {
@@ -80,6 +93,23 @@ function codedError(message, code, extra) {
   error.code = code;
   if (extra) Object.assign(error, extra);
   return error;
+}
+
+/** Turn browser WebSocket events and SDK error envelopes into useful errors.
+ *  @param {unknown} value @returns {Error} */
+function connectionError(value) {
+  if (value instanceof Error) return value;
+  const nested = /** @type {any} */ (value)?.error;
+  if (nested instanceof Error) return nested;
+  if (typeof nested?.message === "string" && nested.message) return new Error(nested.message);
+  if (typeof /** @type {any} */ (value)?.message === "string" && /** @type {any} */ (value).message) {
+    return new Error(/** @type {any} */ (value).message);
+  }
+  if (typeof Event !== "undefined" && value instanceof Event) {
+    return new Error("Realtime WebSocket handshake failed");
+  }
+  const text = String(value);
+  return new Error(text === "[object Object]" ? "Realtime connection failed" : text);
 }
 
 function sdk() {
@@ -141,6 +171,10 @@ export class S2sRealtimeClient extends EventTarget {
     this._audibleResponses = new Set();
     this._asstTranscriptByResp = new Map();
     this._asstFullByResp = new Map();
+    // Assistant transcript items, kept after their response ends so an
+    // interrupted reply can be shown as the text the server kept.
+    /** @type {Map<string, { responseId: string, text: string }>} */
+    this._asstItems = new Map();
     // Input transcription deltas are append-only and may overlap across turns.
     // Keep each unresolved prefix until its authoritative completion arrives.
     this._userTranscriptByItem = new Map();
@@ -191,6 +225,8 @@ export class S2sRealtimeClient extends EventTarget {
     if (this._closed) throw codedError("connect aborted", "aborted");
     if (!this.options.micStream?.getAudioTracks()[0]) throw new Error("No microphone track available");
 
+    await this._loadLanguageCapabilities(url);
+    if (this._closed) throw codedError("connect aborted", "aborted");
     await this._setupAudio();
     const { OpenAIRealtimeWebRTC, OpenAIRealtimeWebSocket, RealtimeSession } = sdk();
     if (this.options.transport === "websocket") {
@@ -201,7 +237,16 @@ export class S2sRealtimeClient extends EventTarget {
           if (cancelOngoingResponse) this._cancelResponse();
           this.emit("audio_interrupted");
         }
-      }({ useInsecureApiKey: true });
+      }({
+        useInsecureApiKey: true,
+        // The stock browser transport advertises OpenAI's WebSocket
+        // subprotocols. The HF realtime endpoint accepts the same GA events but
+        // does not negotiate a Sec-WebSocket-Protocol response, which browsers
+        // reject. Use the SDK's supported socket factory hook to open the same
+        // connection without an OpenAI-specific subprotocol (the signed session
+        // token is already carried by the connect URL).
+        createWebSocket: async ({ url: socketUrl }) => new globalThis.WebSocket(socketUrl),
+      });
     } else {
       // Keep startup noise from racing the initial config and greeting. The
       // prior demo client held this same gate until its data channel was ready.
@@ -244,7 +289,16 @@ export class S2sRealtimeClient extends EventTarget {
       else this._clearPlayback();
     });
 
-    await this._session.connect({ apiKey: "s2s-local", url });
+    const initialEffort = this.options.reasoningEffort;
+    try {
+      await this._session.connect({ apiKey: "s2s-local", url });
+    } catch (error) {
+      throw connectionError(error);
+    }
+    if (this.options.reasoningEffort !== initialEffort) this.setReasoningEffort(this.options.reasoningEffort);
+    // Send the choice explicitly as well as in the SDK's initial config. This
+    // guarantees it reaches the split pipeline before the first mic frames.
+    this._sendLanguageUpdate(this.options.language || "auto");
     if (this.options.transport === "webrtc") this._attachRtcOutput();
     const greeting = this.options.startupGreeting?.trim();
     if (greeting) {
@@ -265,16 +319,49 @@ export class S2sRealtimeClient extends EventTarget {
     }
   }
 
+  async _loadLanguageCapabilities(connectUrl) {
+    this._autoLanguageSupported = false;
+    try {
+      const url = new URL(this.options.capabilitiesUrl || connectUrl, globalThis.location?.href);
+      url.protocol = url.protocol === "wss:" ? "https:" : url.protocol === "ws:" ? "http:" : url.protocol;
+      url.pathname = url.pathname.replace(/\/v1\/realtime(?:\/calls)?\/?$/, "/v1/realtime/capabilities");
+      // A same-origin WebRTC proxy cannot provide the backend capability URL.
+      if (!url.pathname.endsWith("/v1/realtime/capabilities")) return;
+      const response = await fetch(url, { signal: AbortSignal.timeout(2000) });
+      if (!response.ok) return;
+      const data = await response.json();
+      this._autoLanguageSupported = Array.isArray(data.pipelines) && data.pipelines.length > 0
+        && data.pipelines.every(pipeline => pipeline.conversation?.session_auto_supported === true);
+    } catch {
+      // Older servers and inaccessible discovery endpoints keep backend defaults.
+    } finally {
+      this.dispatchEvent(new CustomEvent("language-capabilities", {
+        detail: { autoSupported: this._autoLanguageSupported },
+      }));
+    }
+  }
+
+  _languageConfig(language) {
+    return language !== "auto" || this._autoLanguageSupported
+      ? { language } : {};
+  }
+
   _sessionConfig() {
     return {
       outputModalities: ["audio"],
       providerData: {
-        extensions: ["speech_to_speech.input_audio_transcription.snapshot"],
+        extensions: ["speech_to_speech.input_audio_transcription.snapshot", "speech_to_speech.reasoning.delta"],
+        ...(normalizeReasoningEffort(this.options.reasoningEffort) === null ? {} : {
+          reasoning: { effort: this.options.reasoningEffort },
+        }),
       },
       audio: {
         input: {
           format: { type: "audio/pcm", rate: AUDIO_SAMPLE_RATE },
-          transcription: { model: "whisper-1" },
+          transcription: {
+            model: "whisper-1",
+            ...this._languageConfig(this.options.language || "auto"),
+          },
           turnDetection: { type: "server_vad", interruptResponse: true },
           noiseReduction: null,
         },
@@ -308,7 +395,9 @@ export class S2sRealtimeClient extends EventTarget {
     }));
     return new RealtimeAgent({
       name: "speech-to-speech-demo",
-      instructions: this.options.instructions,
+      instructions: this.options.language && LANGUAGE_NAMES[this.options.language]
+        ? `${this.options.instructions}\nRespond in ${LANGUAGE_NAMES[this.options.language]}.`
+        : this.options.instructions,
       voice: this.options.voice,
       tools,
     });
@@ -534,7 +623,57 @@ export class S2sRealtimeClient extends EventTarget {
         content_index: item.contentIndex,
         audio_end_ms: Math.max(0, Math.floor(samples / AUDIO_SAMPLE_RATE * 1000)),
       });
+      this._requestHeardText(item.itemId);
     }
+  }
+
+  /** Ask the server for an assistant item; its answer carries the heard text.
+   * @param {string} itemId */
+  _requestHeardText(itemId) {
+    if (!itemId) return;
+    this._transport?.sendEvent({
+      type: "conversation.item.retrieve",
+      event_id: `${HEARD_TEXT_EVENT_PREFIX}${itemId}`,
+      item_id: itemId,
+    });
+  }
+
+  /** WebRTC playback is cut by the server, which never says which items it
+   * cut, so check the items of the last two replies after each barge-in: a
+   * reply spoken before a tool call can still be playing during its follow-up. */
+  _requestLatestHeardText() {
+    const items = [...this._asstItems];
+    const responses = [...new Set(items.map(([, item]) => item.responseId))].slice(-ASSISTANT_REPLIES_CHECKED);
+    for (const [itemId, item] of items) {
+      if (responses.includes(item.responseId)) this._requestHeardText(itemId);
+    }
+  }
+
+  /** @param {unknown} itemId @param {string} responseId @param {string} [text] */
+  _rememberAssistantItem(itemId, responseId, text) {
+    if (typeof itemId !== "string" || !itemId) return;
+    const item = this._asstItems.get(itemId);
+    if (item) {
+      if (text !== undefined) item.text = text;
+      return;
+    }
+    this._asstItems.set(itemId, { responseId, text: text ?? "" });
+    while (this._asstItems.size > ASSISTANT_ITEM_HISTORY) {
+      this._asstItems.delete(this._asstItems.keys().next().value);
+    }
+  }
+
+  /** Report a reply as the text the server kept for one of its items.
+   * @param {string} itemId @param {string} text */
+  _onHeardText(itemId, text) {
+    const item = this._asstItems.get(itemId);
+    if (!item || item.text.split(/\s+/).join(" ") === text.split(/\s+/).join(" ")) return;
+    item.text = text;
+    const reply = [...this._asstItems.values()]
+      .filter((entry) => entry.responseId === item.responseId && entry.text)
+      .map((entry) => entry.text)
+      .join(" ");
+    this.dispatchEvent(new CustomEvent("assistant-heard", { detail: { responseId: item.responseId, text: reply } }));
   }
 
   _clearPlayback() {
@@ -559,6 +698,17 @@ export class S2sRealtimeClient extends EventTarget {
     if (typeof type !== "string") return;
     if (this._debug) console.debug(`[${this.options.transport}]`, event);
     switch (type) {
+      case "speech_to_speech.reasoning.delta":
+        if (typeof event.response_id === "string" && typeof event.delta === "string"
+            && (event.kind === "reasoning" || event.kind === "summary")) {
+          this.dispatchEvent(new CustomEvent("reasoning-text", { detail: {
+            responseId: event.response_id, delta: event.delta, kind: event.kind,
+          } }));
+        }
+        break;
+      case "session.updated":
+        this.dispatchEvent(new CustomEvent("reasoning-updated", { detail: { reasoning: event.session?.reasoning } }));
+        break;
       case "speech_to_speech.output_audio.visemes": {
         this.dispatchEvent(new CustomEvent("visemes", { detail: event }));
         break;
@@ -576,7 +726,10 @@ export class S2sRealtimeClient extends EventTarget {
       }
       case "input_audio_buffer.speech_started": {
         // WebSocket calls interrupt() after dispatching this raw event.
-        if (this.options.transport !== "websocket") this._clearPlayback();
+        if (this.options.transport !== "websocket") {
+          this._clearPlayback();
+          this._requestLatestHeardText();
+        }
         const itemId = typeof event.item_id === "string" ? event.item_id : "";
         this._currentUserItemId = itemId;
         if (this.options.transport === "websocket") {
@@ -686,6 +839,7 @@ export class S2sRealtimeClient extends EventTarget {
       case "response.output_audio_transcript.delta": {
         const responseId = typeof event.response_id === "string" ? event.response_id : "";
         const delta = typeof event.delta === "string" ? event.delta : "";
+        this._rememberAssistantItem(event.item_id, responseId);
         if (delta) {
           this._asstTranscriptByResp.set(responseId, (this._asstTranscriptByResp.get(responseId) || "") + delta);
           this.dispatchEvent(new CustomEvent("transcript", { detail: {
@@ -699,6 +853,7 @@ export class S2sRealtimeClient extends EventTarget {
         const responseId = typeof event.response_id === "string" ? event.response_id : "";
         const segment = event.transcript || this._asstTranscriptByResp.get(responseId) || "";
         this._asstTranscriptByResp.delete(responseId);
+        this._rememberAssistantItem(event.item_id, responseId, segment);
         if (segment) {
           const previous = this._asstFullByResp.get(responseId) || "";
           this._asstFullByResp.set(responseId, previous ? `${previous} ${segment}` : segment);
@@ -730,7 +885,25 @@ export class S2sRealtimeClient extends EventTarget {
         this._asstFullByResp.delete(responseId);
         break;
       }
+      case "conversation.item.retrieved": {
+        const item = event.item;
+        // Only a cut item carries heard text. A reply still generating, or one
+        // that played to the end, keeps the transcript already shown.
+        if (item?.role !== "assistant" || typeof item.id !== "string" || item.status !== "incomplete") break;
+        const text = (item.content ?? [])
+          .map((part) => (part?.transcript ?? part?.text ?? "").trim())
+          .filter(Boolean)
+          .join(" ");
+        this._onHeardText(item.id, text);
+        break;
+      }
       case "error": {
+        const eventId = typeof event.error?.event_id === "string" ? event.error.event_id : "";
+        if (event.error?.type === "conversation_item_not_found" && eventId.startsWith(HEARD_TEXT_EVENT_PREFIX)) {
+          // The interrupted reply was removed from history: none of it was heard.
+          this._onHeardText(eventId.slice(HEARD_TEXT_EVENT_PREFIX.length), "");
+          break;
+        }
         const message = event.error?.message ?? "Server error";
         this.dispatchEvent(new CustomEvent("server-error", { detail: { error: new Error(message) } }));
         break;
@@ -750,13 +923,56 @@ export class S2sRealtimeClient extends EventTarget {
     this._setStatus("ai-speaking");
   }
 
-  /** @param {{voice?: string, instructions?: string}} patch */
+  /** @param {string | null | undefined} effort */
+  setReasoningEffort(effort) {
+    this.options.reasoningEffort = normalizeReasoningEffort(effort);
+    if (!this._session) return;
+    const reasoning = this.options.reasoningEffort === null ? null : { effort: this.options.reasoningEffort };
+    // updateAgent resends options.config: keep it in sync so changing voice or
+    // tools cannot restore the reasoning effort from the start of the call.
+    this._session.options.config.providerData = {
+      ...this._session.options.config.providerData, reasoning,
+    };
+    if (this._transport?.status === "connected") {
+      this._transport.sendEvent({ type: "session.update", session: { type: "realtime", reasoning } });
+    }
+  }
+
+  /** @param {string} language */
+  _sendLanguageUpdate(language) {
+    if (language === "auto" && !this._autoLanguageSupported) return;
+    this._transport?.sendEvent({
+      type: "session.update",
+      session: {
+        type: "realtime",
+        audio: { input: { transcription: { language } } },
+      },
+    });
+  }
+
+  /** @param {{voice?: string, language?: string, instructions?: string}} patch */
   updateSession(patch) {
+    if (this._session && patch.language === "auto" && !this._autoLanguageSupported
+        && this.options.language !== "auto") {
+      throw new Error("This backend cannot restore Auto during a conversation. Start a new session using backend defaults.");
+    }
     if (patch.voice) this.options.voice = patch.voice;
     if (patch.instructions) this.options.instructions = patch.instructions;
+    if (patch.language !== undefined) this.options.language = patch.language;
     if (!this._session) return;
+    // Agent and tool updates rebuild the SDK payload from options.config.
+    // Keep that config current so later updates cannot restore the initial language.
+    const config = this._session.options.config;
+    delete config.audio.input.transcription.language;
+    Object.assign(config.audio.input.transcription, this._languageConfig(this.options.language || "auto"));
     this._agent = this._buildAgent();
-    void this._session.updateAgent(this._agent);
+    void this._session.updateAgent(this._agent).then(() => {
+      // The SDK may send its cached session config while updating the agent.
+      // Apply the language last so a live change cannot be overwritten.
+      if (patch.language !== undefined && this.options.language === patch.language) {
+        this._sendLanguageUpdate(patch.language);
+      }
+    });
   }
 
   /** @param {ToolDef[]} tools */
@@ -766,7 +982,7 @@ export class S2sRealtimeClient extends EventTarget {
     this._agent = this._buildAgent();
     const clearTools = tools.length === 0;
     void this._session.updateAgent(this._agent).then(() => {
-      // @openai/agents 0.14.3 omits the `tools` field when its list is empty.
+      // @openai/agents (0.21.0 included) omits the `tools` field when its list is empty.
       // Send the explicit GA clear through the stock transport hook so the
       // server does not retain tools from its deep-merged session config.
       if (clearTools && this._tools.length === 0) {

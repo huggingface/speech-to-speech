@@ -8,12 +8,12 @@ from typing import Iterator
 import numpy as np
 import scipy.signal
 
-from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ SUPERTONIC_LANGUAGE_CODES = frozenset(
 )
 
 
-class SupertonicTTSHandler(BaseHandler[TTSIn, TTSOut]):
+class SupertonicTTSHandler(BaseTTSHandler):
     def setup(
         self,
         should_listen: Event,
@@ -131,9 +131,6 @@ class SupertonicTTSHandler(BaseHandler[TTSIn, TTSOut]):
         )
         return self.lang
 
-    def _is_cancelled(self, generation: int | None) -> bool:
-        return generation is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(generation)
-
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         speculative_turns = getattr(self, "speculative_turns", None)
 
@@ -175,6 +172,8 @@ class SupertonicTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         console.print(f"[green]ASSISTANT: {text}")
 
+        # Synthesis start: after speculative gate / language resolve, before provider work.
+        timer = self._latency_timer(tts_input, cancel_gen)
         # Supertonic returns (1, num_samples) shaped array at 44.1kHz float32
         wav, _duration = self.tts.synthesize(
             text=text,
@@ -184,11 +183,17 @@ class SupertonicTTSHandler(BaseHandler[TTSIn, TTSOut]):
         )
 
         # If the user interrupted during the blocking synthesize(), drop the buffer.
-        if self._is_cancelled(cancel_gen):
+        if self._is_stale(cancel_gen):
             logger.info("Supertonic TTS output cancelled (interruption)")
             return
 
         audio = np.asarray(wav, dtype=np.float32).squeeze()
+        if audio.size == 0:
+            return
+
+        # Full waveform is available before resample / block assembly.
+        timer.first_provider_audio()
+
         source_sample_rate = int(getattr(self.tts, "sample_rate", 44100))
         divisor = gcd(source_sample_rate, PIPELINE_SAMPLE_RATE)
         audio_16k_float = scipy.signal.resample_poly(
@@ -200,18 +205,22 @@ class SupertonicTTSHandler(BaseHandler[TTSIn, TTSOut]):
         # Convert to int16 format expected by the audio pipeline
         audio_int16 = np.clip(audio_16k_float * 32768, -32768, 32767).astype(np.int16)
 
+        def emit(block: np.ndarray) -> Iterator[TTSOut]:
+            timer.first_yield()
+            yield block
+
         # Yield in block-aligned chunks so the streamer can handle it smoothly
         n = (len(audio_int16) // self.blocksize) * self.blocksize
         for i in range(0, n, self.blocksize):
-            if self._is_cancelled(cancel_gen):
+            if self._is_stale(cancel_gen):
                 logger.info("Supertonic TTS output cancelled (interruption)")
                 return
-            yield audio_int16[i : i + self.blocksize]
+            yield from emit(audio_int16[i : i + self.blocksize])
 
         # Pad the tail so the audio streamer's fixed-blocksize callback doesn't crash
         if n < len(audio_int16):
-            if self._is_cancelled(cancel_gen):
+            if self._is_stale(cancel_gen):
                 logger.info("Supertonic TTS output cancelled (interruption)")
                 return
             tail = audio_int16[n:]
-            yield np.pad(tail, (0, self.blocksize - len(tail)))
+            yield from emit(np.pad(tail, (0, self.blocksize - len(tail))))

@@ -62,7 +62,7 @@ and `pipelines` mappings.
 | Pipeline `options` | Pipeline-wide options such as `device`, `mac_optimal_settings`, diarization, and `enable_visemes` / `stv_model_name` / `stv_device` |
 | `runtime` | Process settings: `log_level`, `log_transcripts`, and `torch_num_threads` |
 | `runtime.server` | Listener `host` and `port` |
-| `runtime.client` | Packaged client settings such as `url`, `voice`, `input_device`, `output_device`, `playback_buffer_ms`, and `tool_module` |
+| `runtime.client` | Packaged client settings such as `url`, `voice`, `input_device`, `output_device`, `playback_buffer_ms`, `vad_threshold`, `interrupt_response`, and `tool_module` |
 
 Settings use the existing [argument definitions](../src/speech_to_speech/arguments_classes/)
 and defaults. Unknown fields fail. Backend selectors belong in `backend`, not `settings`.
@@ -89,7 +89,9 @@ client URL follows the server port; an explicit non-loopback host or conflicting
 client URL fails.
 
 `local` and `talk` show conversation-only terminal output by default, with warnings
-and errors still visible. To include routine logs, backend transcripts, tool details,
+and errors still visible. When you interrupt a reply, the terminal shows the part the
+model history kept, marked `[interrupted]`, redrawing the reply's line when
+nothing has been printed after it. To include routine logs, backend transcripts, tool details,
 and protocol events, set:
 
 ```yaml
