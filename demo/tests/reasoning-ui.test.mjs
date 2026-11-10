@@ -109,7 +109,7 @@ test("reasoning picker supports touch, keyboard, persistence, and server default
     // backend's acknowledgement until after checking that selection alone
     // cannot show a successful confirmation.
     await page.evaluate(async () => {
-      const { S2sRealtimeClient } = await import("/s2s-realtime-client.js?v=reasoning-visibility-20261110");
+      const { S2sRealtimeClient } = await import("/s2s-realtime-client.js?v=reasoning-language-20261110");
       S2sRealtimeClient.prototype.connect = async function () {
         window.demoClient = this;
         this._setStatus("connected");

@@ -352,7 +352,7 @@ sent.
   resamples to 24 kHz (boxcar lowpass + decimation on the 48 -> 24 fast
   path, linear interpolation fallback for odd rates) and packs Int16 LE.
 - **Browser cache safety**: the entry module, realtime client, and both audio
-  worklet URLs share the `reasoning-visibility-20261110` cache key. The client also waits for
+  worklet URLs share the `reasoning-language-20261110` cache key. The client also waits for
   the capture worklet to report the same version and a 24 kHz output rate
   before opening a session. When the browser-audio contract or sample rate
   changes, bump the key in `index.html`, `main.js`, and
@@ -386,3 +386,7 @@ sent.
 
 - Backend: [huggingface/speech-to-speech](https://github.com/huggingface/speech-to-speech)
 - UI verbatim from `amir-tfrere/minimal-conversation-app-s2s-backend` (Pollen Robotics × Hugging Face)
+
+Choose **Language** on the conversation screen or in Settings to set transcription and response language. The choice persists across reloads and can change during a conversation; **Auto** restores automatic language selection. Language support depends on the configured speech backends.
+
+The demo checks backend language capabilities before connecting. When Auto is unsupported or discovery is unavailable, it preserves the backend default and disables switching back to Auto during that conversation. End the conversation to select backend defaults for the next one. Language changes while queued apply when the conversation starts.

@@ -48,23 +48,29 @@
             </div>
           </div>
         </div>
-        <div class="topbar-right">
-          <!-- HF login chip / sign-in pill. Populated by ui/account.js; only
-               shown when the deploy runs behind a load balancer with OAuth. -->
-          <div id="account" class="account" hidden></div>
-          <button id="about-btn-m" class="icon-btn about-btn-mobile" title="About this space" aria-label="About this space">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-          </button>
-          <button id="tools-btn" class="icon-btn" title="Tools" aria-label="Tools">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
-          </button>
-          <button id="chat-btn" class="icon-btn" title="Conversation history" aria-label="Conversation history">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-            <span id="chat-badge" class="chat-badge" aria-hidden="true"></span>
-          </button>
-          <button id="settings-btn" class="icon-btn" title="Settings" aria-label="Settings">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c0 .66.39 1.25 1 1.51H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-          </button>
+        <div class="topbar-actions">
+          <div class="topbar-right">
+            <!-- HF login chip / sign-in pill. Populated by ui/account.js; only
+                 shown when the deploy runs behind a load balancer with OAuth. -->
+            <div id="account" class="account" hidden></div>
+            <button id="about-btn-m" class="icon-btn about-btn-mobile" title="About this space" aria-label="About this space">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+            </button>
+            <button id="tools-btn" class="icon-btn" title="Tools" aria-label="Tools">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+            </button>
+            <button id="chat-btn" class="icon-btn" title="Conversation history" aria-label="Conversation history">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+              <span id="chat-badge" class="chat-badge" aria-hidden="true"></span>
+            </button>
+            <button id="settings-btn" class="icon-btn" title="Settings" aria-label="Settings">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c0 .66.39 1.25 1 1.51H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            </button>
+          </div>
+          <label class="language-picker">
+            <span>Language</span>
+            <select id="main-language" aria-label="Conversation language" title="Choose a language or detect it automatically"></select>
+          </label>
         </div>
       </header>
 
@@ -285,6 +291,23 @@
                   <option value="Vivian">Vivian</option>
                 </select>
               </label>
+              <label class="field">
+                <span>Conversation language</span>
+                <select id="conversation-language">
+                  <option value="auto" selected>🌐 Auto detect</option>
+                  <option value="zh">🇨🇳 Chinese</option>
+                  <option value="en">🇬🇧 English</option>
+                  <option value="ja">🇯🇵 Japanese</option>
+                  <option value="ko">🇰🇷 Korean</option>
+                  <option value="de">🇩🇪 German</option>
+                  <option value="fr">🇫🇷 French</option>
+                  <option value="ru">🇷🇺 Russian</option>
+                  <option value="pt">🇵🇹 Portuguese</option>
+                  <option value="es">🇪🇸 Spanish</option>
+                  <option value="it">🇮🇹 Italian</option>
+                </select>
+                <small>Sets transcription and speech for this conversation.</small>
+              </label>
             </div>
 
             <div class="tool-row">
@@ -447,6 +470,6 @@
     </dialog>
 
     <script src="vendor/openai-realtime-agents.umd.js"></script>
-    <script type="module" src="main.js?v=reasoning-visibility-20261110"></script>
+    <script type="module" src="main.js?v=reasoning-language-20261110"></script>
   </body>
 </html>

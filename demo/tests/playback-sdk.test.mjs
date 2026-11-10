@@ -13,11 +13,17 @@ async function fixture(bufferMs = 1200, sampleRate = 48_000) {
     close() { this.dispatchEvent(new Event("close")); }
     receive(data) { this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(data) })); }
   }();
+  globalThis.WebSocket = class {
+    constructor(...args) {
+      assert.equal(args.length, 1, "Space socket must omit WebSocket subprotocols");
+      return socket;
+    }
+  };
   globalThis.OpenAIAgentsRealtime = {
     ...realtime,
     OpenAIRealtimeWebSocket: class extends realtime.OpenAIRealtimeWebSocket {
       constructor(options) {
-        super({ ...options, createWebSocket: () => socket, skipOpenEventListeners: true });
+        super({ ...options, skipOpenEventListeners: true });
       }
     },
   };

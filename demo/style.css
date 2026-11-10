@@ -2884,3 +2884,47 @@ body.cam-on .footer {
 .chat-history.hide-reasoning .hist-msg.assistant:has(.hist-reasoning):not(:has(.hist-body:not([hidden]), .hist-timings)) {
   display: none;
 }
+
+/* Align the language picker beneath the top-right conversation controls. */
+.topbar-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 14px;
+  flex-shrink: 0;
+}
+.language-picker {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  width: 164px;
+}
+.language-picker > span {
+  padding-inline: 2px;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.language-picker select {
+  width: 100%;
+  min-height: 40px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg-elev);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+.language-picker select:hover { border-color: var(--text-faint); background: var(--bg-elev-2); }
+.language-picker select:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.language-picker select:disabled { opacity: 0.5; cursor: wait; }
+@media (max-width: 600px) {
+  .topbar-actions { gap: 12px; }
+  .language-picker { width: 148px; }
+}
