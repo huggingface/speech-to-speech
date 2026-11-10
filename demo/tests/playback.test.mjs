@@ -285,6 +285,7 @@ test("settings persist the reserve, normalize invalid values, and hide it for We
     inputLanguage: { value: "auto" },
     inputVoice: field(), inputInstructions: field(), inputNoiseGate: { value: "-50" },
     inputLocalVad: field(),
+    inputShowReasoning: { checked: false },
     inputAudioInput: field(), inputAudioOutput: field(),
   });
   vm.runInContext(`${prefix}\n${functions}\nglobalThis.api = {loadSettings, saveSettings, readSettingsFromForm, syncTransportUi};`, context);

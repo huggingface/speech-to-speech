@@ -36,6 +36,7 @@
  * @property {string} voice
  * @property {string} [language] ISO language code, or "auto".
  * @property {string} instructions
+ * @property {string | null} [reasoningEffort] Null keeps the server's startup default.
  * @property {string} [startupGreeting]
  * @property {MediaStream} [micStream]
  * @property {() => Promise<MediaStream>} [acquireMic]
@@ -53,9 +54,10 @@ import { extractResponseTranscript, trimTrailingSlash } from "./ws/codec.js";
 import { OrbVisualiser, VIS_FFT_SIZE } from "./ws/orb-visualizer.js";
 import { SentAudioRecorder } from "./ws/user-audio-recorder.js";
 import { LocalVad } from "./ws/local-vad.js";
+import { normalizeReasoningEffort } from "./ui/reasoning.js";
 
 export const AUDIO_SAMPLE_RATE = 24_000;
-export const AUDIO_WORKLET_VERSION = "demo-sync-20261110";
+export const AUDIO_WORKLET_VERSION = "reasoning-language-20261110";
 export const DEFAULT_PLAYBACK_BUFFER_MS = 0;
 const MIC_CHUNK_MS = 40;
 // Retrieves the client sends to learn what an interrupted reply left in history.
@@ -287,11 +289,13 @@ export class S2sRealtimeClient extends EventTarget {
       else this._clearPlayback();
     });
 
+    const initialEffort = this.options.reasoningEffort;
     try {
       await this._session.connect({ apiKey: "s2s-local", url });
     } catch (error) {
       throw connectionError(error);
     }
+    if (this.options.reasoningEffort !== initialEffort) this.setReasoningEffort(this.options.reasoningEffort);
     // Send the choice explicitly as well as in the SDK's initial config. This
     // guarantees it reaches the split pipeline before the first mic frames.
     this._sendLanguageUpdate(this.options.language || "auto");
@@ -346,7 +350,10 @@ export class S2sRealtimeClient extends EventTarget {
     return {
       outputModalities: ["audio"],
       providerData: {
-        extensions: ["speech_to_speech.input_audio_transcription.snapshot"],
+        extensions: ["speech_to_speech.input_audio_transcription.snapshot", "speech_to_speech.reasoning.delta"],
+        ...(normalizeReasoningEffort(this.options.reasoningEffort) === null ? {} : {
+          reasoning: { effort: this.options.reasoningEffort },
+        }),
       },
       audio: {
         input: {
@@ -691,6 +698,17 @@ export class S2sRealtimeClient extends EventTarget {
     if (typeof type !== "string") return;
     if (this._debug) console.debug(`[${this.options.transport}]`, event);
     switch (type) {
+      case "speech_to_speech.reasoning.delta":
+        if (typeof event.response_id === "string" && typeof event.delta === "string"
+            && (event.kind === "reasoning" || event.kind === "summary")) {
+          this.dispatchEvent(new CustomEvent("reasoning-text", { detail: {
+            responseId: event.response_id, delta: event.delta, kind: event.kind,
+          } }));
+        }
+        break;
+      case "session.updated":
+        this.dispatchEvent(new CustomEvent("reasoning-updated", { detail: { reasoning: event.session?.reasoning } }));
+        break;
       case "speech_to_speech.output_audio.visemes": {
         this.dispatchEvent(new CustomEvent("visemes", { detail: event }));
         break;
@@ -903,6 +921,21 @@ export class S2sRealtimeClient extends EventTarget {
   _markAudible() {
     if (this._status === "closed" || this._status === "error") return;
     this._setStatus("ai-speaking");
+  }
+
+  /** @param {string | null | undefined} effort */
+  setReasoningEffort(effort) {
+    this.options.reasoningEffort = normalizeReasoningEffort(effort);
+    if (!this._session) return;
+    const reasoning = this.options.reasoningEffort === null ? null : { effort: this.options.reasoningEffort };
+    // updateAgent resends options.config: keep it in sync so changing voice or
+    // tools cannot restore the reasoning effort from the start of the call.
+    this._session.options.config.providerData = {
+      ...this._session.options.config.providerData, reasoning,
+    };
+    if (this._transport?.status === "connected") {
+      this._transport.sendEvent({ type: "session.update", session: { type: "realtime", reasoning } });
+    }
   }
 
   /** @param {string} language */

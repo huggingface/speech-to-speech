@@ -868,6 +868,70 @@ a:hover {
 }
 .circle-subcaption[hidden] { display: none; }
 
+/* Reasoning stays within reach before and during a conversation. */
+.reasoning-control { display: grid; justify-items: center; gap: 6px; }
+.reasoning-status {
+  margin: 0;
+  max-width: 36ch;
+  min-height: 1.5em;
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+  color: var(--text-faint);
+}
+.reasoning-status[data-state="confirmed"] { color: var(--success); }
+.reasoning-status[data-state="unconfirmed"] { color: var(--processing); }
+.reasoning-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 8px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+#reasoning-value { color: var(--text); font-weight: 500; }
+.reasoning-btn:hover { background: var(--bg-elev-2); }
+.reasoning-btn:focus-visible,
+.reasoning-choices label:has(:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.reasoning-picker {
+  width: min(290px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  padding: 20px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-elev);
+  color: var(--text);
+  box-shadow: 0 16px 64px #0009;
+}
+.reasoning-picker::backdrop { background: #0006; }
+.reasoning-picker fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.reasoning-picker legend { font-size: 15px; font-weight: 600; }
+.reasoning-picker p { color: var(--text-dim); font-size: 12px; line-height: 1.5; margin: 8px 0 12px; }
+.reasoning-choices { display: grid; gap: 4px; }
+.reasoning-choices label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  cursor: pointer;
+}
+.reasoning-choices label:hover,
+.reasoning-choices label:has(:checked) { background: var(--bg-elev-2); }
+.reasoning-choices input { accent-color: var(--accent); margin: 0; }
+
 /* Queue actions sit under the caption: "Join now" (primary, only when it's your
  * turn) stacked above the quiet "Leave queue" escape hatch. */
 .queue-actions {
@@ -2770,19 +2834,22 @@ body.cam-on .footer {
 }
 
 /* Response measurements stay in history, away from the live voice surface. */
-.hist-timings {
+.hist-timings,
+.hist-reasoning {
   margin-top: 6px;
   color: var(--text-dim);
   font-size: 12px;
 }
-.hist-timings summary {
+.hist-timings summary,
+.hist-reasoning summary {
   min-height: 44px;
   padding: 12px 0;
   box-sizing: border-box;
   cursor: pointer;
   touch-action: manipulation;
 }
-.hist-timings summary:focus-visible {
+.hist-timings summary:focus-visible,
+.hist-reasoning summary:focus-visible {
   outline: 2px solid var(--text-dim);
   outline-offset: 3px;
   border-radius: var(--radius-sm);
@@ -2801,6 +2868,22 @@ body.cam-on .footer {
 }
 .hist-timings p { margin: 8px 0; line-height: 1.5; }
 .hist-timings .timing-status { color: var(--text); }
+.reasoning-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 320px;
+  overflow-y: auto;
+  line-height: 1.6;
+  padding: 10px 12px;
+  border-left: 2px solid var(--border-strong);
+  background: var(--bg-elev);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  user-select: text;
+}
+.chat-history.hide-reasoning .hist-reasoning,
+.chat-history.hide-reasoning .hist-msg.assistant:has(.hist-reasoning):not(:has(.hist-body:not([hidden]), .hist-timings)) {
+  display: none;
+}
 
 /* Align the language picker beneath the top-right conversation controls. */
 .topbar-actions {

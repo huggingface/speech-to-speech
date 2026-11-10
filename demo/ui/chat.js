@@ -40,7 +40,7 @@ function heardPrefixLength(shown, heard) {
 
 export class ChatView {
   /**
-   * @param {{ onUserAudioPlaybackChange?: (playing: boolean) => void }} [options]
+   * @param {{ onUserAudioPlaybackChange?: (playing: boolean) => void; showReasoning?: boolean }} [options]
    */
   constructor(options = {}) {
     /** @type {HTMLButtonElement} */
@@ -57,6 +57,7 @@ export class ChatView {
     this._chatHistory = $("#chat-history");
     /** @type {HTMLDivElement} */
     this._bubbleStack = $("#bubble-stack");
+    this.setShowReasoning(options.showReasoning === true);
 
     this._panelOpen = false;
     this._scrollQueued = false;
@@ -608,7 +609,8 @@ export class ChatView {
       const entry = this._asstByResp.get(rid);
       if (!entry) {
         const bubble = this._spawnBubble("assistant", d.text);
-        const hist = this._appendHistMsg("assistant", d.text, false);
+        const hist = this._histByResp.get(rid) ?? this._appendHistMsg("assistant", d.text, false);
+        this._updateHistMsg(hist, d.text, false);
         this._asstByResp.set(rid, { bubble, hist });
         this._rememberHist(rid, hist);
         this._rememberBubble(rid, bubble);
@@ -618,6 +620,40 @@ export class ChatView {
         this._updateHistMsg(entry.hist, d.text, false);
         this._bumpDismiss(entry.bubble);
       }
+      this._markUnread();
+    }
+  }
+
+  /** @param {boolean} show */
+  setShowReasoning(show) {
+    this._showReasoning = show;
+    this._chatHistory.classList.toggle("hide-reasoning", !show);
+  }
+
+  /** Provider-exposed text belongs only in collapsed history, never a speech bubble.
+   * @param {{responseId: string; delta: string; kind: "reasoning" | "summary"}} detail */
+  onReasoning({ responseId, delta, kind }) {
+    if (!responseId || !delta || (kind !== "reasoning" && kind !== "summary")) return;
+    let hist = this._histByResp.get(responseId);
+    if (!hist) {
+      hist = this._appendHistMsg("assistant", "", false);
+      this._rememberHist(responseId, hist);
+    }
+    let section = hist.querySelector(`.hist-reasoning[data-kind="${kind}"]`);
+    if (!section) {
+      section = document.createElement("details");
+      section.className = "hist-reasoning";
+      /** @type {HTMLElement} */ (section).dataset.kind = kind;
+      const summary = document.createElement("summary");
+      summary.textContent = kind === "summary" ? "Reasoning summary" : "Reasoning";
+      const text = document.createElement("div");
+      text.className = "reasoning-text";
+      section.append(summary, text);
+      hist.appendChild(section);
+    }
+    section.querySelector(".reasoning-text")?.append(document.createTextNode(delta));
+    if (this._showReasoning) {
+      this._scrollToBottom();
       this._markUnread();
     }
   }
@@ -699,7 +735,7 @@ export class ChatView {
     // auto-dismiss on its own timer regardless.
     if (!responseId) return;
     const entry = this._asstByResp.get(responseId);
-    let hist = entry?.hist ?? null;
+    let hist = entry?.hist ?? this._histByResp.get(responseId) ?? null;
     if (detail.latency) {
       if (!hist) {
         hist = this._appendHistMsg("assistant", transcript || "", false);

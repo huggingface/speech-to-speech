@@ -17,9 +17,10 @@
  * @typedef {S2sRealtimeClient} RealtimeClient
  */
 
-import { S2sRealtimeClient, normalizePlaybackBufferMs } from "./s2s-realtime-client.js?v=demo-sync-20261110";
+import { S2sRealtimeClient, normalizePlaybackBufferMs } from "./s2s-realtime-client.js?v=reasoning-language-20261110";
+import { ReasoningControl } from "./ui/reasoning.js";
 import { $, truncateError, errorMessage, DEBUG } from "./ui/dom.js";
-import { ChatView } from "./ui/chat.js?v=timings-20261105";
+import { ChatView } from "./ui/chat.js?v=reasoning-language-20261110";
 import { Account } from "./ui/account.js";
 
 const DEFAULT_VOICE = "Aiden";
@@ -37,6 +38,7 @@ const STORAGE_KEYS = {
   noiseGate: "s2s.ws.noiseGate",
   playbackBufferMs: "s2s.ws.playbackBufferMs",
   localVad: "s2s.audio.localVad",
+  showReasoning: "s2s.ws.showReasoning",
   // "ws" | "webrtc". Not under the historical "s2s.ws." prefix — it selects
   // between the transports rather than configuring the WS one.
   transport: "s2s.transport",
@@ -118,6 +120,7 @@ function loadSettings() {
     noiseGate: loadGateThreshold(),
     playbackBufferMs: normalizePlaybackBufferMs(localStorage.getItem(STORAGE_KEYS.playbackBufferMs)),
     localVad: localStorage.getItem(STORAGE_KEYS.localVad) !== "off",
+    showReasoning: localStorage.getItem(STORAGE_KEYS.showReasoning) === "on",
     // Default WebSocket: the proven path stays the first-run experience.
     transport: localStorage.getItem(STORAGE_KEYS.transport) === "webrtc" ? "webrtc" : "ws",
     audioInputId: localStorage.getItem(STORAGE_KEYS.audioInputId) || "",
@@ -147,6 +150,7 @@ function saveSettings(s) {
   localStorage.setItem(STORAGE_KEYS.noiseGate, String(s.noiseGate));
   localStorage.setItem(STORAGE_KEYS.playbackBufferMs, String(s.playbackBufferMs));
   localStorage.setItem(STORAGE_KEYS.localVad, s.localVad ? "on" : "off");
+  localStorage.setItem(STORAGE_KEYS.showReasoning, s.showReasoning ? "on" : "off");
   localStorage.setItem(STORAGE_KEYS.transport, s.transport);
   localStorage.setItem(STORAGE_KEYS.audioInputId, s.audioInputId || "");
   localStorage.setItem(STORAGE_KEYS.audioOutputId, s.audioOutputId || "");
@@ -276,6 +280,8 @@ const playbackBufferField = $("#playback-buffer-field");
 const inputPlaybackBuffer = $("#playback-buffer-ms");
 /** @type {HTMLSelectElement} */
 const inputLocalVad = $("#local-vad");
+/** @type {HTMLInputElement} */
+const inputShowReasoning = $("#show-reasoning");
 /** @type {HTMLSelectElement} */
 const inputVoice = $("#voice");
 /** @type {HTMLSelectElement} */
@@ -382,6 +388,7 @@ function pushToolsToSession() {
 // streaming state. The client's events are forwarded to its on* methods.
 let userAudioReplaying = false;
 const chat = new ChatView({
+  showReasoning: settings.showReasoning,
   onUserAudioPlaybackChange(playing) {
     userAudioReplaying = playing;
     syncMicMuteState();
@@ -403,6 +410,7 @@ let queuedTicketId = "";
 
 /** @type {RealtimeClient | null} */
 let client = null;
+const reasoning = new ReasoningControl((effort) => client?.setReasoningEffort(effort));
 /** @type {MediaStream | null} */
 let micStream = null;
 let micMuted = false;
@@ -483,6 +491,7 @@ function openSettings() {
   inputLanguage.value = settings.language;
   inputPlaybackBuffer.value = String(settings.playbackBufferMs);
   inputLocalVad.value = settings.localVad ? "on" : "off";
+  inputShowReasoning.checked = settings.showReasoning;
   inputInstructions.value = settings.instructions;
   syncGateUi();
   updateRestartAvailability();
@@ -1020,6 +1029,7 @@ function readSettingsFromForm() {
     noiseGate: readGateThreshold(),
     playbackBufferMs: normalizePlaybackBufferMs(inputPlaybackBuffer.value),
     localVad: inputLocalVad.value !== "off",
+    showReasoning: inputShowReasoning.checked,
     transport: /** @type {"ws" | "webrtc"} */ (
       transportSelectable()
         ? (inputTransport.value === "webrtc" ? "webrtc" : "ws")
@@ -1122,6 +1132,7 @@ settingsForm.addEventListener("submit", (event) => {
 
   settings = readSettingsFromForm();
   saveSettings(settings);
+  chat.setShowReasoning(settings.showReasoning);
   mainLanguage.value = settings.language;
 
   // Voice, language, and instructions can apply to a live session without reconnecting; a
@@ -1134,6 +1145,12 @@ settingsForm.addEventListener("submit", (event) => {
       void client.setAudioOutputDevice(settings.audioOutputId);
     }
   }
+});
+
+inputShowReasoning.addEventListener("change", () => {
+  settings.showReasoning = inputShowReasoning.checked;
+  localStorage.setItem(STORAGE_KEYS.showReasoning, settings.showReasoning ? "on" : "off");
+  chat.setShowReasoning(settings.showReasoning);
 });
 
 // The noise gate applies live (worklet param), so tune it without a restart:
@@ -1449,6 +1466,7 @@ async function doStart(audioContext = null) {
   // a still-pending grant just means the snapshot tool isn't ready yet.
 
   const common = {
+    reasoningEffort: reasoning.effort,
     localVad: settings.localVad,
     voice: settings.voice,
     language: settings.language,
@@ -1481,6 +1499,7 @@ async function doStart(audioContext = null) {
         ...common,
       });
   client = c;
+  reasoning.setActive(true);
   c.setMuted(micMuted || userAudioReplaying);
 
   c.addEventListener("queue", (e) => {
@@ -1510,9 +1529,19 @@ async function doStart(audioContext = null) {
     onClientStatus(detail.status);
     if (detail.status === "ai-speaking") chat.onAssistantActivity();
   });
+  c.addEventListener("reasoning-updated", (e) => {
+    if (client !== c) return;
+    const detail = /** @type {CustomEvent<{reasoning: unknown}>} */ (e).detail;
+    reasoning.confirm(detail.reasoning);
+  });
   c.addEventListener("transcript", (e) => {
     const d = /** @type {CustomEvent<{ role: "user" | "assistant"; text: string; partial: boolean; itemId?: string; responseId?: string }>} */ (e).detail;
     chat.onTranscript(d);
+  });
+  c.addEventListener("reasoning-text", (e) => {
+    if (client !== c) return;
+    const detail = /** @type {CustomEvent<{responseId: string; delta: string; kind: "reasoning" | "summary"}>} */ (e).detail;
+    chat.onReasoning(detail);
   });
   c.addEventListener("user-turn-started", (e) => {
     const detail = /** @type {CustomEvent<{ itemId?: string }>} */ (e).detail;
@@ -1544,6 +1573,7 @@ async function doStart(audioContext = null) {
     // socket and the conversation alive (the model can recover on its own).
     const detail = /** @type {CustomEvent<{ error: unknown }>} */ (e).detail;
     const msg = errorMessage(detail.error);
+    if (client === c) reasoning.onServerError(msg);
     console.warn("[main] server error (non-fatal):", msg);
   });
   c.addEventListener("session", (e) => {
@@ -1692,12 +1722,14 @@ function onClientStatus(status) {
       // teardown() will move us to idle
       break;
     case "error":
+      reasoning.setActive(false);
       setState("error");
       break;
   }
 }
 
 async function teardown() {
+  reasoning.setActive(false);
   stopHeartbeat();
   stopJoinCountdown();
   endTrackedSession();

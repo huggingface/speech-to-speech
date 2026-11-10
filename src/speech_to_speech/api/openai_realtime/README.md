@@ -571,6 +571,37 @@ OpenAI documents `minimal`, `low`, `medium`, `high`, and `xhigh`. This server ad
 
 Other values return an `invalid_request_error`. When the client sets no effort, the startup flags (`--responses_api_reasoning_effort`, `--responses_api_disable_thinking`) apply unchanged. A client effort is sent as `reasoning.effort` on Responses requests and as `reasoning_effort` on Chat Completions requests, and it replaces the startup `chat_template_kwargs.enable_thinking=false` for that request. The local transformers/mlx-lm backend ignores it.
 
+### Reading provider reasoning
+
+Clients can also opt in to readable provider reasoning by including
+`"speech_to_speech.reasoning.delta"` in the session's `extensions` array. The
+server emits this extension over either transport:
+
+```json
+{"type":"speech_to_speech.reasoning.delta","event_id":"evt_1","response_id":"resp_1","kind":"reasoning","delta":"Compare the choices first."}
+```
+
+`kind` is `reasoning` for provider-exposed reasoning text and `summary` for a
+provider reasoning summary. Deltas belong to `response_id`. On every setup,
+the LLM handler collects readable reasoning and attaches it to the first
+answer-text or tool-call chunk. The extension events arrive after
+`response.created` and before the answer/tool output they accompany. Responses
+with neither deliver reasoning with their normal completion, before
+`response.done`. Any readable text supplied late by the provider is also
+included at completion. Reasoning tokens are not streamed live.
+
+Reasoning is separate from answer transcripts, output items, synthesized
+speech, and client-visible history. Chat Completions reads the provider's
+`reasoning_content` or string `reasoning` field. Responses reads reasoning
+text/summary deltas and readable completed reasoning parts without repeating
+text already collected. Nothing is emitted for encrypted-only reasoning or
+providers that do not expose text.
+
+Reasoning alone never commits a turn or closes its reopen window: the server
+only receives reasoning alongside output that already commits the turn, or at
+the normal response terminal. Reasoning from cancelled or superseded
+generations is discarded by the existing generation and speculative-turn gates.
+
 ---
 
 ## Testing

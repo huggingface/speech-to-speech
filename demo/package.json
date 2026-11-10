@@ -7,7 +7,7 @@
     "test:agents:ws": "node --test tests/agents-websocket.test.mjs",
     "test:agents:webrtc": "node --test tests/agents-webrtc.test.mjs",
     "test:agents": "npm run test:agents:adapter && npm run test:agents:ws && npm run test:agents:webrtc",
-    "test:ui": "node --test tests/turn-latency-ui.test.mjs tests/local-vad-browser.test.mjs tests/interrupted-reply-ui.test.mjs tests/conversation-language-ui.test.mjs"
+    "test:ui": "node --test tests/turn-latency-ui.test.mjs tests/local-vad-browser.test.mjs tests/interrupted-reply-ui.test.mjs tests/reasoning-ui.test.mjs tests/conversation-language-ui.test.mjs"
   },
   "dependencies": {
     "@openai/agents": "0.21.0",

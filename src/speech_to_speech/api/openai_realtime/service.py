@@ -66,6 +66,7 @@ from speech_to_speech.api.openai_realtime.input_state import (
     PendingInputTerminal,
     SpeechToSpeechInputAudioTranscriptionSnapshotEvent,
 )
+from speech_to_speech.api.openai_realtime.reasoning import SpeechToSpeechReasoningDeltaEvent
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.api.openai_realtime.visemes import SpeechToSpeechVisemesEvent
 from speech_to_speech.LLM.chat import Chat, make_user_audio_message, make_user_message
@@ -147,6 +148,7 @@ ClientEvent = Union[
 ]
 
 ServerEvent = Union[
+    SpeechToSpeechReasoningDeltaEvent,
     SpeechToSpeechVisemesEvent,
     SessionCreatedEvent,
     SessionUpdatedEvent,

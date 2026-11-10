@@ -48,7 +48,7 @@ test("Auto is sent explicitly at session initialization", () => {
 });
 
 for (const [initial, selected] of [["auto", "fr"], ["es", "de"], ["fr", "auto"]]) {
-  test(`live language ${initial} → ${selected} survives agent and tool updates`, async (t) => {
+  test(`live language ${initial} → ${selected} and reasoning survive agent and tool updates`, async (t) => {
     const realtime = await import("@openai/agents/realtime");
     globalThis.OpenAIAgentsRealtime = realtime;
     t.after(() => { delete globalThis.OpenAIAgentsRealtime; });
@@ -56,20 +56,27 @@ for (const [initial, selected] of [["auto", "fr"], ["es", "de"], ["fr", "auto"]]
     const transport = new realtime.OpenAIRealtimeWebSocket();
     transport.sendEvent = (event) => events.push(event);
     const client = new S2sRealtimeClient({
-      transport: "websocket", voice: "Aiden", instructions: "Be helpful.", language: initial,
+      transport: "websocket", voice: "Aiden", instructions: "Be helpful.", language: initial, reasoningEffort: "low",
     });
     client._autoLanguageSupported = true;
-  client._transport = transport;
+    client._transport = transport;
     client._session = new realtime.RealtimeSession(client._buildAgent(), {
       transport, config: client._sessionConfig(), tracingDisabled: true,
     });
     await client._session.getInitialSessionConfig();
+    client.setReasoningEffort("high");
+    let expectedReasoning = { effort: "high" };
     const flush = () => new Promise((resolve) => setImmediate(resolve));
     const assertLanguage = () => {
       const updates = events.filter((event) => event.session?.audio?.input?.transcription);
       assert.ok(updates.length > 0);
       for (const update of updates) {
         assert.equal(update.session.audio.input.transcription.language, selected);
+      }
+      const reasoningUpdates = events.filter(event => Object.hasOwn(event.session || {}, "reasoning"));
+      assert.ok(reasoningUpdates.length > 0);
+      for (const update of reasoningUpdates) {
+        assert.deepEqual(update.session.reasoning, expectedReasoning);
       }
       events.length = 0;
     };
@@ -85,6 +92,9 @@ for (const [initial, selected] of [["auto", "fr"], ["es", "de"], ["fr", "auto"]]
     client.setTools([]);
     await flush();
     assertLanguage();
+    client.setReasoningEffort(null);
+    expectedReasoning = null;
+    assert.equal(client._session.options.config.audio.input.transcription.language, selected);
     client.updateSession({ voice: "Vivian", instructions: "Be concise." });
     await flush();
     assertLanguage();

@@ -44,6 +44,7 @@ from openai.types.realtime.response_content_part_done_event import Part as DoneC
 
 from speech_to_speech.api.openai_realtime.handlers.audio import PIPELINE_SAMPLE_RATE
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
+from speech_to_speech.api.openai_realtime.reasoning import SpeechToSpeechReasoningDeltaEvent
 from speech_to_speech.api.openai_realtime.runtime_config import validate_reasoning
 from speech_to_speech.api.openai_realtime.tool_followup import (
     TOOL_FOLLOWUP_ACK_LIMIT,
@@ -61,6 +62,7 @@ from speech_to_speech.pipeline.events import (
     ResponseGenerationDoneEvent,
 )
 from speech_to_speech.pipeline.messages import (
+    AssistantReasoningPart,
     AssistantTextPart,
     AssistantToolCallPart,
     GenerateResponseRequest,
@@ -1336,6 +1338,11 @@ class ResponseHandler(RealtimeBaseHandler):
             for part in event.parts
             if isinstance(part, AssistantToolCallPart)
             or (isinstance(part, AssistantTextPart) and (bool(part.text.strip()) if wants_audio else bool(part.text)))
+            or (
+                isinstance(part, AssistantReasoningPart)
+                and bool(part.text)
+                and st.runtime_config.reasoning_text_enabled
+            )
         ]
         if meaningful_parts:
             response_was_missing = st.current_response_id is None
@@ -1350,7 +1357,16 @@ class ResponseHandler(RealtimeBaseHandler):
                 )
             self._service._apply_pending_token_usage(conn_id, event.response_key)
         for part in meaningful_parts:
-            if isinstance(part, AssistantTextPart):
+            if isinstance(part, AssistantReasoningPart):
+                events.append(
+                    SpeechToSpeechReasoningDeltaEvent(
+                        event_id=self._next_event_id(),
+                        response_id=resp_id,
+                        delta=part.text,
+                        kind=part.kind,
+                    )
+                )
+            elif isinstance(part, AssistantTextPart):
                 text = part.text.strip() if wants_audio else part.text
                 if not text:
                     continue
@@ -1501,7 +1517,7 @@ class ResponseHandler(RealtimeBaseHandler):
                 conn_id,
                 AssistantOutputEvent(
                     history=ready.history,
-                    parts=[ready.part],
+                    parts=[*ready.reasoning, ready.part],
                     turn_id=ready.turn_id,
                     turn_revision=ready.turn_revision,
                     cancel_generation=ready.cancel_generation,
@@ -1523,7 +1539,7 @@ class ResponseHandler(RealtimeBaseHandler):
             return []
         st = self._state(conn_id)
         response_was_missing = st.current_response_id is None
-        self._ensure_response(conn_id, event.response_key)
+        response_id, _ = self._ensure_response(conn_id, event.response_key)
         if (
             event.status == "completed"
             and event.response_key is not None
@@ -1549,4 +1565,15 @@ class ResponseHandler(RealtimeBaseHandler):
             else []
         )
         self._service._apply_pending_token_usage(conn_id, event.response_key)
+        if st.runtime_config.reasoning_text_enabled:
+            events.extend(
+                SpeechToSpeechReasoningDeltaEvent(
+                    event_id=self._next_event_id(),
+                    response_id=response_id,
+                    delta=part.text,
+                    kind=part.kind,
+                )
+                for part in event.reasoning
+                if part.text
+            )
         return events

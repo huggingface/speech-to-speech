@@ -82,6 +82,7 @@ jobs:
       - run: npx --prefix demo playwright install --with-deps chromium
       - run: npm --prefix demo run test:agents:adapter
       - run: npm --prefix demo run test:agents:ws
+      - run: npm --prefix demo run test:ui
 
   agents-sdk-webrtc:
     permissions:
