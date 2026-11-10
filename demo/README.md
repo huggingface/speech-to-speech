@@ -287,6 +287,14 @@ case-insensitively against the user's organisations from HF OAuth.
 LocalStorage keys are namespaced `s2s.ws.*` (plus `s2s.transport` for the
 transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
 
+Open **Conversation** (the chat icon) to read the provider's reasoning under
+each reply. **Reasoning** and **Reasoning summary** sections are collapsed by
+default; expand one to read it, including while the text streams. Reasoning
+stays separate from the answer and is never sent to speech synthesis. A section
+appears only when the model/provider supplies readable reasoning or a summary;
+encrypted reasoning is not displayed. This needs the updated speech-to-speech
+backend as well as the demo frontend.
+
 ## Files
 
 | File | Role |
@@ -333,7 +341,7 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
   resamples to 24 kHz (boxcar lowpass + decimation on the 48 -> 24 fast
   path, linear interpolation fallback for odd rates) and packs Int16 LE.
 - **Browser cache safety**: the entry module, realtime client, and both audio
-  worklet URLs share the `reasoning-confirmed-20261110` cache key. The client also waits for
+  worklet URLs share the `reasoning-text-20261110` cache key. The client also waits for
   the capture worklet to report the same version and a 24 kHz output rate
   before opening a session. When the browser-audio contract or sample rate
   changes, bump the key in `index.html`, `main.js`, and

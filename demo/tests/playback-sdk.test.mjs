@@ -221,6 +221,19 @@ test("SDK preserves terminal server timings through its WebSocket parser", async
   assert.deepEqual(finished[0].latency, timing);
 });
 
+test("the pinned SDK forwards readable reasoning without adding it to audio or transcripts", async (t) => {
+  const f = await fixture();
+  t.after(() => f.client.close());
+  const reasoning = [];
+  const transcripts = [];
+  f.client.addEventListener("reasoning-text", (event) => reasoning.push(event.detail));
+  f.client.addEventListener("transcript", (event) => transcripts.push(event.detail));
+  f.start();
+  f.receive({ type: "speech_to_speech.reasoning.delta", response_id: "a", delta: "Think first.", kind: "reasoning" });
+  assert.deepEqual(reasoning, [{ responseId: "a", delta: "Think first.", kind: "reasoning" }]);
+  assert.deepEqual(transcripts, []);
+});
+
 test("the pinned SDK forwards viseme extension events to avatar consumers", async (t) => {
   const f = await fixture(0);
   t.after(() => f.client.close());

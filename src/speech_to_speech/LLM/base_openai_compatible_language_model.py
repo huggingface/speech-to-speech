@@ -51,6 +51,10 @@ from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
 from speech_to_speech.pipeline.history import ResponseHistory
 from speech_to_speech.pipeline.messages import (
+    AssistantOutputPart,
+    AssistantReasoningPart,
+    AssistantTextPart,
+    AssistantToolCallPart,
     EndOfResponse,
     LLMResponseChunk,
     ResponseIncompleteReason,
@@ -83,6 +87,13 @@ class TextDelta(BaseModel):
     ``remove_unspeechable`` for the audio path."""
 
     text: str
+
+
+class ReasoningDelta(BaseModel):
+    """Readable provider output, kept separate from the assistant's answer."""
+
+    text: str
+    kind: Literal["reasoning", "summary"] = "reasoning"
 
 
 class AssistantMessage(BaseModel):
@@ -127,7 +138,9 @@ class ProviderResponseEnd(BaseModel):
     history_item_order: list[str] | None = None
 
 
-ProviderEvent = TextDelta | AssistantMessage | ToolCall | ResponseReasoningItem | Usage | ProviderResponseEnd
+ProviderEvent = (
+    TextDelta | ReasoningDelta | AssistantMessage | ToolCall | ResponseReasoningItem | Usage | ProviderResponseEnd
+)
 SerializeFn = Callable[[Chat], Any]
 RequestFn = Callable[[Any, dict[str, Any]], Any]
 EventIteratorFn = Callable[[Any], Iterator[ProviderEvent]]
@@ -544,16 +557,22 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         turn: _Turn,
         *,
         text: str = "",
+        reasoning: ReasoningDelta | None = None,
         tools: list[ResponseFunctionToolCall] | None = None,
         language_code: Optional[str] = None,
         history: ResponseHistory | None = None,
     ) -> LLMResponseChunk:
+        parts: list[AssistantOutputPart] = []
+        if reasoning is not None:
+            parts.append(AssistantReasoningPart(text=reasoning.text, kind=reasoning.kind))
+        if text:
+            parts.append(AssistantTextPart(text=text))
+        parts.extend(AssistantToolCallPart(tool=tool) for tool in tools or [])
         return LLMResponseChunk(
             history=history,
-            text=text,
+            parts=parts,
             language_code=language_code if language_code is not None else turn.language_code,
             selected_language=turn.selected_language,
-            tools=tools or [],
             runtime_config=turn.runtime_config,
             response=turn.response,
             turn_id=turn.turn_id,
@@ -641,6 +660,12 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 state.history_items.append(event.to_chat_item())
             elif isinstance(event, ResponseReasoningItem):
                 state.history_items.append(event.model_copy(deep=True))
+            elif isinstance(event, ReasoningDelta):
+                if event.text and turn.runtime_config.reasoning_text_enabled:
+                    if not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
+                        cancelled = True
+                        break
+                    yield self._chunk(turn, reasoning=event)
             elif isinstance(event, ToolCall):
                 if state.ending.status != "completed":
                     continue
@@ -730,6 +755,12 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 state.history_items.append(event.to_chat_item())
             elif isinstance(event, ResponseReasoningItem):
                 state.history_items.append(event.model_copy(deep=True))
+            elif isinstance(event, ReasoningDelta):
+                if event.text and turn.runtime_config.reasoning_text_enabled:
+                    if not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
+                        cancelled = True
+                        break
+                    yield self._chunk(turn, reasoning=event)
             elif isinstance(event, ToolCall):
                 if state.ending.status != "completed":
                     continue

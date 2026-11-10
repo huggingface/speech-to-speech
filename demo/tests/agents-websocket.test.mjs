@@ -19,14 +19,14 @@ test("browser RealtimeSession negotiates the stock WebSocket subprotocol", async
   const page = await browser.newPage();
   await page.goto(`${server.http}/test/sdk-page`);
 
-  const result = await page.evaluate(async ({ config, ws }) => {
+  const result = await page.evaluate(async ({ config, ws, http }) => {
     const { OpenAIRealtimeWebSocket, RealtimeAgent, RealtimeSession } = window.OpenAIAgentsRealtime;
     const rawEvents = [];
     const errors = [];
     const transport = new OpenAIRealtimeWebSocket({ useInsecureApiKey: true });
     const session = new RealtimeSession(
       new RealtimeAgent({ name: "browser-websocket-test", instructions: "Be concise." }),
-      { transport, model: "s2s-local", config, tracingDisabled: true },
+      { transport, model: "s2s-local", config: { ...config, providerData: { extensions: ["speech_to_speech.reasoning.delta"] } }, tracingDisabled: true },
     );
     transport.on("*", (event) => rawEvents.push(event));
     session.on("error", (event) => errors.push(String(event?.error?.message || event?.error || event)));
@@ -47,19 +47,24 @@ test("browser RealtimeSession negotiates the stock WebSocket subprotocol", async
         if (Date.now() > deadline) throw new Error("Server did not echo reasoning effort");
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
+      await fetch(`${http}/test/reasoning`, { method: "POST" });
+      await waitForEvent("speech_to_speech.reasoning.delta");
+      await waitForEvent("response.done");
       return {
         errors,
         protocol: transport.connectionState.websocket?.protocol,
         reasoning: rawEvents.find((event) => event.type === "session.updated" && event.session?.reasoning?.effort === "high").session.reasoning,
+        reasoningText: rawEvents.find((event) => event.type === "speech_to_speech.reasoning.delta").delta,
       };
     } finally {
       session.close();
     }
-  }, { config: SDK_CONFIG, ws: server.ws });
+  }, { config: SDK_CONFIG, ws: server.ws, http: server.http });
 
   assert.equal(result.protocol, "realtime");
   assert.deepEqual(result.errors, []);
   assert.deepEqual(result.reasoning, { effort: "high" });
+  assert.equal(result.reasoningText, "Compare the choices first.");
 });
 
 test("RealtimeSession covers the core GA flow over the stock WebSocket transport", async (t) => {

@@ -183,7 +183,7 @@ test("speculative transcript snapshots update display and prune on completion", 
   });
 
   const config = client._sessionConfig();
-  assert.deepEqual(config.providerData?.extensions, ["speech_to_speech.input_audio_transcription.snapshot"]);
+  assert.deepEqual(config.providerData?.extensions, ["speech_to_speech.input_audio_transcription.snapshot", "speech_to_speech.reasoning.delta"]);
 
   const transcripts = [];
   client.addEventListener("transcript", (event) => transcripts.push(event.detail));
@@ -252,6 +252,7 @@ test("the client negotiates speculative snapshot extensions on the wire", async 
   const initialSession = sent[0]?.session;
   assert.deepEqual(initialSession?.extensions, [
     "speech_to_speech.input_audio_transcription.snapshot",
+    "speech_to_speech.reasoning.delta",
   ]);
 
   client.updateSession({ voice: "Coral" });
@@ -259,6 +260,7 @@ test("the client negotiates speculative snapshot extensions on the wire", async 
   const updatedSession = sent.at(-1)?.session;
   assert.deepEqual(updatedSession?.extensions, [
     "speech_to_speech.input_audio_transcription.snapshot",
+    "speech_to_speech.reasoning.delta",
   ]);
 });
 

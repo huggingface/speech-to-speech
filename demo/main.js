@@ -17,10 +17,10 @@
  * @typedef {S2sRealtimeClient} RealtimeClient
  */
 
-import { S2sRealtimeClient, normalizePlaybackBufferMs } from "./s2s-realtime-client.js?v=reasoning-confirmed-20261110";
+import { S2sRealtimeClient, normalizePlaybackBufferMs } from "./s2s-realtime-client.js?v=reasoning-text-20261110";
 import { ReasoningControl } from "./ui/reasoning.js";
 import { $, truncateError, errorMessage, DEBUG } from "./ui/dom.js";
-import { ChatView } from "./ui/chat.js?v=timings-20261105";
+import { ChatView } from "./ui/chat.js?v=reasoning-text-20261110";
 import { Account } from "./ui/account.js";
 
 const DEFAULT_VOICE = "Aiden";
@@ -1495,6 +1495,11 @@ async function doStart(audioContext = null) {
   c.addEventListener("transcript", (e) => {
     const d = /** @type {CustomEvent<{ role: "user" | "assistant"; text: string; partial: boolean; itemId?: string; responseId?: string }>} */ (e).detail;
     chat.onTranscript(d);
+  });
+  c.addEventListener("reasoning-text", (e) => {
+    if (client !== c) return;
+    const detail = /** @type {CustomEvent<{responseId: string; delta: string; kind: "reasoning" | "summary"}>} */ (e).detail;
+    chat.onReasoning(detail);
   });
   c.addEventListener("user-turn-started", (e) => {
     const detail = /** @type {CustomEvent<{ itemId?: string }>} */ (e).detail;

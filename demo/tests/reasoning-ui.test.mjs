@@ -108,7 +108,7 @@ test("reasoning picker supports touch, keyboard, persistence, and server default
     // backend's acknowledgement until after checking that selection alone
     // cannot show a successful confirmation.
     await page.evaluate(async () => {
-      const { S2sRealtimeClient } = await import("/s2s-realtime-client.js?v=reasoning-confirmed-20261110");
+      const { S2sRealtimeClient } = await import("/s2s-realtime-client.js?v=reasoning-text-20261110");
       S2sRealtimeClient.prototype.connect = async function () {
         window.demoClient = this;
         this._setStatus("connected");
@@ -148,6 +148,41 @@ test("reasoning picker supports touch, keyboard, persistence, and server default
       type: "error", error: { message: "Unsupported reasoning effort" },
     }));
     assert.equal(await status.innerText(), "Server reported a reasoning error");
+
+    await page.evaluate(() => {
+      demoClient._onTransportEvent({ type: "response.created", response: { id: "reply-reasoning" } });
+      demoClient._onTransportEvent({ type: "speech_to_speech.reasoning.delta", response_id: "reply-reasoning", kind: "reasoning", delta: "First, compare the options.\n" });
+    });
+    await page.locator("#chat-btn").click();
+    await page.evaluate(() => document.querySelector(".chat-panel-inner").getAnimations().forEach((animation) => animation.finish()));
+    const row = page.locator(".hist-msg.assistant").last();
+    const reasoningDetails = row.locator(".hist-reasoning");
+    assert.equal(await reasoningDetails.getAttribute("open"), null);
+    assert.equal(await reasoningDetails.locator(".reasoning-text").isVisible(), false);
+    assert.equal(await page.locator(".bubble.assistant").count(), 0, "reasoning must never become an answer bubble");
+    await reasoningDetails.locator("summary").focus();
+    await page.keyboard.press("Enter");
+    await page.evaluate(() => {
+      demoClient._onTransportEvent({ type: "speech_to_speech.reasoning.delta", response_id: "reply-reasoning", kind: "reasoning", delta: "Treat <img src=x onerror=alert(1)> as plain text." });
+      demoClient._onTransportEvent({ type: "response.output_audio_transcript.done", response_id: "reply-reasoning", item_id: "answer", transcript: "Option A is the better fit." });
+      demoClient._onTransportEvent({ type: "response.done", response: { id: "reply-reasoning", status: "completed", output: [] } });
+    });
+    assert.equal(await page.locator(".hist-msg.assistant").count(), 1, "reasoning and answer share one row");
+    assert.equal(await reasoningDetails.getAttribute("open"), "", "streaming must preserve the expanded state");
+    assert.match(await reasoningDetails.innerText(), /compare the options/);
+    assert.equal(await reasoningDetails.locator("img").count(), 0);
+    assert.equal(await row.locator(".hist-body").innerText(), "Option A is the better fit.");
+    if (process.env.S2S_UI_SCREENSHOTS) await page.screenshot({ path: `${process.env.S2S_UI_SCREENSHOTS}/reasoning-text-${width}.png` });
+    await page.evaluate(() => {
+      demoClient._onTransportEvent({ type: "speech_to_speech.reasoning.delta", response_id: "reply-summary", kind: "summary", delta: "A brief provider summary." });
+      demoClient._onTransportEvent({ type: "response.done", response: { id: "reply-summary", status: "cancelled", output: [] } });
+    });
+    const summaryRow = page.locator(".hist-msg.assistant").last();
+    assert.equal(await summaryRow.locator(".hist-reasoning summary").innerText(), "Reasoning summary");
+    assert.equal(await summaryRow.locator(".hist-reasoning").getAttribute("open"), null);
+    assert.equal(await summaryRow.locator(".hist-note").textContent(), "Interrupted");
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.locator("#chat-panel-close").click();
     await page.locator("#stop-btn").click();
     assert.equal(await status.getAttribute("data-state"), "idle");
     // Late acknowledgements from a closed conversation cannot reconfirm it.

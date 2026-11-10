@@ -27,6 +27,7 @@ from speech_to_speech.pipeline.events import (
 from speech_to_speech.pipeline.history import ResponseHistory
 from speech_to_speech.pipeline.messages import (
     AUDIO_RESPONSE_DONE,
+    AssistantReasoningPart,
     AssistantTextPart,
     AssistantToolCallPart,
     AudioOutput,
@@ -115,6 +116,18 @@ def main() -> None:
         env.text_output_queue.put(SpeechStoppedEvent())
         env.text_output_queue.put(TranscriptionCompletedEvent(transcript="hello"))
         _queue_completed_response(env, _response_key(env, "voice"), "Hello from the compatibility test.")
+        return {"ok": True}
+
+    @env.app.post("/test/reasoning")
+    async def reasoning():
+        response_key = _response_key(env, "reasoning")
+        env.output_queue.put(
+            AssistantOutputEvent(
+                response_key=response_key,
+                parts=[AssistantReasoningPart(text="Compare the choices first.")],
+            )
+        )
+        _queue_completed_response(env, response_key, "Option A is the better fit.")
         return {"ok": True}
 
     @env.app.post("/test/start-audio")

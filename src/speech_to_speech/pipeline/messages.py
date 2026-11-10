@@ -114,8 +114,16 @@ class AssistantToolCallPart(BaseModel):
     tool: ResponseFunctionToolCall
 
 
+class AssistantReasoningPart(BaseModel):
+    """Provider-exposed reasoning or summary, never speech or answer text."""
+
+    type: Literal["reasoning"] = "reasoning"
+    text: str
+    kind: Literal["reasoning", "summary"] = "reasoning"
+
+
 AssistantOutputPart: TypeAlias = Annotated[
-    AssistantTextPart | AssistantToolCallPart,
+    AssistantTextPart | AssistantToolCallPart | AssistantReasoningPart,
     Field(discriminator="type"),
 ]
 

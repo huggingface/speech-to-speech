@@ -571,6 +571,27 @@ OpenAI documents `minimal`, `low`, `medium`, `high`, and `xhigh`. This server ad
 
 Other values return an `invalid_request_error`. When the client sets no effort, the startup flags (`--responses_api_reasoning_effort`, `--responses_api_disable_thinking`) apply unchanged. A client effort is sent as `reasoning.effort` on Responses requests and as `reasoning_effort` on Chat Completions requests, and it replaces the startup `chat_template_kwargs.enable_thinking=false` for that request. The local transformers/mlx-lm backend ignores it.
 
+### Reading provider reasoning
+
+Clients can also opt in to readable provider reasoning by including
+`"speech_to_speech.reasoning.delta"` in the session's `extensions` array. The
+server emits this extension over either transport:
+
+```json
+{"type":"speech_to_speech.reasoning.delta","event_id":"evt_1","response_id":"resp_1","kind":"reasoning","delta":"Compare the choices first."}
+```
+
+`kind` is `reasoning` for provider-exposed reasoning text and `summary` for a
+provider reasoning summary. Deltas belong to `response_id`; `response.done`
+ends the stream, including interrupted or failed responses. They are separate
+from answer transcripts, output items, and synthesized speech. Chat Completions
+reads the provider's `reasoning_content` or string `reasoning` field. Responses
+reads reasoning text/summary deltas and readable completed reasoning parts,
+without repeating text already streamed. Nothing is emitted for encrypted-only
+reasoning or providers that do not expose text. Existing cancellation,
+speculative-turn and response-order gates also apply to these parts.
+
+
 ---
 
 ## Testing

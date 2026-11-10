@@ -55,7 +55,7 @@ import { LocalVad } from "./ws/local-vad.js";
 import { normalizeReasoningEffort } from "./ui/reasoning.js";
 
 export const AUDIO_SAMPLE_RATE = 24_000;
-export const AUDIO_WORKLET_VERSION = "reasoning-confirmed-20261110";
+export const AUDIO_WORKLET_VERSION = "reasoning-text-20261110";
 export const DEFAULT_PLAYBACK_BUFFER_MS = 0;
 const MIC_CHUNK_MS = 40;
 // Retrieves the client sends to learn what an interrupted reply left in history.
@@ -281,7 +281,7 @@ export class S2sRealtimeClient extends EventTarget {
     return {
       outputModalities: ["audio"],
       providerData: {
-        extensions: ["speech_to_speech.input_audio_transcription.snapshot"],
+        extensions: ["speech_to_speech.input_audio_transcription.snapshot", "speech_to_speech.reasoning.delta"],
         ...(normalizeReasoningEffort(this.options.reasoningEffort) === null ? {} : {
           reasoning: { effort: this.options.reasoningEffort },
         }),
@@ -624,6 +624,14 @@ export class S2sRealtimeClient extends EventTarget {
     if (typeof type !== "string") return;
     if (this._debug) console.debug(`[${this.options.transport}]`, event);
     switch (type) {
+      case "speech_to_speech.reasoning.delta":
+        if (typeof event.response_id === "string" && typeof event.delta === "string"
+            && (event.kind === "reasoning" || event.kind === "summary")) {
+          this.dispatchEvent(new CustomEvent("reasoning-text", { detail: {
+            responseId: event.response_id, delta: event.delta, kind: event.kind,
+          } }));
+        }
+        break;
       case "session.updated":
         this.dispatchEvent(new CustomEvent("reasoning-updated", { detail: { reasoning: event.session?.reasoning } }));
         break;

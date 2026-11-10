@@ -56,6 +56,7 @@ test("RealtimeSession covers the core GA flow over the stock WebRTC transport", 
         transport,
         model: "s2s-local",
         config: {
+          providerData: { extensions: ["speech_to_speech.reasoning.delta"] },
           outputModalities: ["audio"],
           audio: {
             input: {
@@ -100,6 +101,9 @@ test("RealtimeSession covers the core GA flow over the stock WebRTC transport", 
       await waitFor(() => rawEvents.some((event) => event.type === "session.updated"));
       transport.sendEvent({ type: "session.update", session: { type: "realtime", reasoning: { effort: "high" } } });
       await waitFor(() => rawEvents.some((event) => event.type === "session.updated" && event.session?.reasoning?.effort === "high"));
+      await post("/test/reasoning");
+      const reasoning = await waitFor(() => rawEvents.find((event) => event.type === "speech_to_speech.reasoning.delta"));
+      await waitFor(() => rawEvents.some((event) => event.type === "response.done" && event.response?.id === reasoning.response_id));
       const configured = await state();
       await waitFor(async () => (await state()).inputChunks > 0);
       await waitFor(() => receiver()?.track?.readyState === "live" && audioElement.srcObject);
@@ -149,7 +153,7 @@ test("RealtimeSession covers the core GA flow over the stock WebRTC transport", 
         const current = await state();
         return current.toolOutputs.includes("result:sdk") && current.responseRequests > 0 ? current : false;
       });
-      return { configured, errors, toolOutputs: toolState.toolOutputs };
+      return { configured, errors, toolOutputs: toolState.toolOutputs, reasoningText: reasoning.delta };
     } finally {
       session.close();
       mic.getTracks().forEach((track) => track.stop());
@@ -164,4 +168,5 @@ test("RealtimeSession covers the core GA flow over the stock WebRTC transport", 
   assert.deepEqual(result.configured.tools, ["lookup"]);
   assert.deepEqual(result.toolOutputs, ["result:sdk"]);
   assert.deepEqual(result.errors, []);
+  assert.equal(result.reasoningText, "Compare the choices first.");
 });
