@@ -17,7 +17,12 @@ from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.LLM.language_model import LanguageModelHandler, StreamContext
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.LLM.tool_call.tool_prompt import END_CODE, ENTER_CODE, build_block_regex, build_tool_system_prompt
-from speech_to_speech.LLM.voice_prompt import VOICE_SYSTEM_PROMPT, build_voice_system_prompt
+from speech_to_speech.LLM.voice_prompt import (
+    VOICE_SYSTEM_PROMPT,
+    VOICE_SYSTEM_PROMPT_LEAD,
+    VOICE_SYSTEM_PROMPT_TAIL,
+    build_voice_system_prompt,
+)
 from speech_to_speech.pipeline.messages import (
     AssistantTextPart,
     AssistantToolCallPart,
@@ -25,6 +30,26 @@ from speech_to_speech.pipeline.messages import (
     LLMResponseChunk,
 )
 from tests.llm_history import drive_llm
+
+VOICE_SNAPSHOT = (
+    f"{VOICE_SYSTEM_PROMPT_LEAD.rstrip()}\n\n"
+    "Session Prompt:\nBe concise.\n\nTOOLS\n\nPlease reply to my message in french.\n\n"
+    f"{VOICE_SYSTEM_PROMPT_TAIL.rstrip()}\n"
+)
+
+
+def test_voice_prompt_without_current_date_matches_snapshot():
+    prompt = build_voice_system_prompt("Be concise.", tool_section="TOOLS", language_name="french")
+
+    assert prompt == VOICE_SNAPSHOT
+
+
+def test_voice_prompt_current_date_is_the_first_line():
+    date = "Today is Wednesday, November 4, 2026."
+    prompt = build_voice_system_prompt("Be concise.", tool_section="TOOLS", language_name="french", current_date=date)
+
+    assert prompt.splitlines()[0] == date
+    assert prompt == f"{date}\n\n{VOICE_SNAPSHOT}"
 
 
 def _tool(name="dance"):

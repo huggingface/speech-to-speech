@@ -12,6 +12,7 @@ from threading import Event as ThreadingEvent
 from time import perf_counter
 from typing import Any, Literal, Optional
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 import httpx
 from nltk import sent_tokenize
@@ -41,7 +42,9 @@ from speech_to_speech.LLM.chat import (
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
 from speech_to_speech.LLM.text_prompt import build_text_system_prompt
 from speech_to_speech.LLM.utils import (
+    current_date_for_prompt,
     language_name_for_prompt,
+    prompt_timezone,
     remove_markdown,
     remove_unspeechable,
     resolve_auto_language,
@@ -199,6 +202,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
     usage, out-of-band handling and error termination.
     """
 
+    current_date: bool = False
+    current_date_tz: ZoneInfo | None = None
+
     # ── setup ─────────────────────────────────────────────────────────────────
 
     def setup(
@@ -222,6 +228,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         audio_temperature: float = 0.0,
         audio_content_type: Literal["input_audio", "audio_url"] = "input_audio",
         audio_history_turns: int = 1,
+        llm_current_date: bool = False,
+        llm_timezone: Optional[str] = None,
         **_kwargs: Any,
     ) -> None:
         self.cancel_scope = cancel_scope
@@ -230,6 +238,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.stream = stream
         self.stream_batch_sentences = max(1, stream_batch_sentences)
         self.enable_lang_prompt = enable_lang_prompt
+        self.current_date = llm_current_date
+        self.current_date_tz = prompt_timezone(llm_timezone)
         self.gen_kwargs = dict(gen_kwargs)
         self.audio_max_tokens = audio_max_tokens
         self.audio_temperature = audio_temperature
@@ -617,11 +627,12 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         wants_audio: bool = True,
         *,
         language_name: str | None = None,
+        current_date: str | None = None,
     ) -> None:
-        if not instructions and not language_name:
+        if not instructions and not language_name and not current_date:
             return
         builder = build_voice_system_prompt if wants_audio else build_text_system_prompt
-        full_instructions = builder(instructions or "", language_name=language_name)
+        full_instructions = builder(instructions or "", language_name=language_name, current_date=current_date)
         chat.prepend_instructions(full_instructions)
 
     # ── output helpers ──────────────────────────────────────────────────────--
@@ -1128,7 +1139,13 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
         )
         wants_audio = response_wants_audio(response)
-        self._apply_config(active_chat, instructions, wants_audio, language_name=lang_name)
+        self._apply_config(
+            active_chat,
+            instructions,
+            wants_audio,
+            language_name=lang_name,
+            current_date=current_date_for_prompt(enable=self.current_date, timezone=self.current_date_tz),
+        )
 
         optional_kwargs = self._build_audio_optional_kwargs(
             response,
@@ -1247,7 +1264,13 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
         )
         wants_audio = response_wants_audio(response)
-        self._apply_config(active_chat, instructions, wants_audio, language_name=lang_name)
+        self._apply_config(
+            active_chat,
+            instructions,
+            wants_audio,
+            language_name=lang_name,
+            current_date=current_date_for_prompt(enable=self.current_date, timezone=self.current_date_tz),
+        )
 
         optional_kwargs = self._build_optional_kwargs(
             req_tools,
