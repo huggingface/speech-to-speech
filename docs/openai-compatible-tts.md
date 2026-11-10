@@ -71,6 +71,22 @@ The default request uses the standard `stream_format=audio` field and consumes
 the HTTP response body incrementally. It does not send the non-standard
 `stream` field.
 
+### Fixed voice for non-Qwen servers
+
+Realtime clients can request a voice per session or response, and clients built
+for the default Qwen3-TTS backend send Qwen speaker names such as `Aiden`. A
+server with its own voice names rejects those requests. Set
+`--openai_tts_voice_override` to always send one server voice and ignore
+client-requested voices:
+
+```bash
+speech-to-speech local \
+  --tts openai \
+  --openai_tts_base_url http://localhost:8000/v1 \
+  --openai_tts_model your-tts-model \
+  --openai_tts_voice_override narrator
+```
+
 ## Playback buffering
 
 Sometimes the first audio chunks arrive unevenly: an initial burst can be

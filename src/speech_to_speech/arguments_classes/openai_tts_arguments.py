@@ -22,6 +22,13 @@ class OpenAICompatibleTTSHandlerArguments:
         default="aiden",
         metadata={"help": "Voice name sent with speech requests."},
     )
+    openai_tts_voice_override: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "If set, always send this voice to the TTS server and ignore voices requested by realtime clients. "
+            "Use when the server's voice names differ from the client's (e.g. a non-Qwen TTS engine)."
+        },
+    )
     openai_tts_language: Optional[str] = field(
         default=None,
         metadata={"help": "Optional fixed language value forwarded unchanged with every speech request."},
