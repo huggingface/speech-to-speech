@@ -89,7 +89,9 @@ client URL follows the server port; an explicit non-loopback host or conflicting
 client URL fails.
 
 `local` and `talk` show conversation-only terminal output by default, with warnings
-and errors still visible. To include routine logs, backend transcripts, tool details,
+and errors still visible. When you interrupt a reply, the terminal shows the part the
+model history kept, marked `[interrupted]`, redrawing the reply's line when
+nothing has been printed after it. To include routine logs, backend transcripts, tool details,
 and protocol events, set:
 
 ```yaml

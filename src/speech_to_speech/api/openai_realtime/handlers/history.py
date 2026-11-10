@@ -33,7 +33,10 @@ class _ResponseHistoryState:
 
 
 class HistoryHandler(RealtimeBaseHandler):
-    """The only writer of model output to a session's chat.
+    """The only writer of model proposals to a session's chat.
+
+    Interrupted speech is written from the audio the client heard instead, by
+    :meth:`ResponseHandler.finish_response` and conversation item truncation.
 
     Models attach cumulative :class:`ResponseHistory` proposals to their
     output. ``hold`` keeps the newest proposal per response. ``accept`` runs
@@ -76,6 +79,11 @@ class HistoryHandler(RealtimeBaseHandler):
         st.runtime_config.chat.rollback_provisional_generation(key)
         if proposal is not None:
             proposal.resolve()
+
+    def anchor(self, conn_id: str, key: str | None) -> str | None:
+        """Return the history position a response's output follows, if known."""
+        state = self._responses.get((conn_id, key)) if key is not None else None
+        return state.proposal.after_item_id if state is not None and state.proposal is not None else None
 
     def finalize(self, conn_id: str, key: str | None) -> None:
         """Make a completed response's history permanent."""
