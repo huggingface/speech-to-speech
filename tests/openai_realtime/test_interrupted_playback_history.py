@@ -707,3 +707,108 @@ def test_cut_replies_are_logged_at_debug(service, conn_id, caplog):
         f"Interrupted reply {item_id} kept in history (client playback position): 'Sure,', dropped 34 of 39 chars",
     ]
     assert all(record.levelno == logging.DEBUG for record in caplog.records if "kept in history" in record.getMessage())
+
+
+class _GatedWebSocket(_FakeWebSocket):
+    """Holds audio sends open while blocked, like a slow socket."""
+
+    def __init__(self):
+        super().__init__()
+        self.block = False
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def send_json(self, data):
+        if self.block and data["type"] == "response.output_audio.delta":
+            self.entered.set()
+            await self.release.wait()
+        self.sent.append(data)
+
+
+async def test_cancel_during_an_audio_send_counts_that_audio_as_unplayed():
+    unit = make_pipeline_unit()
+    service = unit.service
+    conn_id = service.register()
+    _start_conversation(service, conn_id)
+    clock = _Clock()
+    socket = _GatedWebSocket()
+    transport = WebSocketTransport(socket, clock=clock)
+    await _speak_over(transport, service, conn_id, [(FIRST, 1.0)])
+    clock.now += 0.8
+    socket.block = True
+    sending = asyncio.create_task(transport.send_audio_chunk(service, conn_id, bytes(6400), RESPONSE_KEY))
+    await socket.entered.wait()
+
+    cancelling = asyncio.create_task(_cancel(unit, conn_id, transport))
+    await asyncio.sleep(0)
+    socket.release.set()
+    await asyncio.gather(sending, cancelling)
+
+    # 0.8 s of 1.2 s sent played, the same as when the send had completed.
+    assert _history(service, conn_id)[-1] == ("assistant", "incomplete", "Sure,")
+    # The send that finished after the cancel adds nothing back.
+    assert transport.discard_pending_audio() == 0.0
+
+
+async def test_late_playback_report_does_not_edit_a_new_item_reusing_a_deleted_id():
+    unit = make_pipeline_unit()
+    service = unit.service
+    conn_id = service.register()
+    _start_conversation(service, conn_id)
+    item_id = _speak(service, conn_id, [(FIRST, 2.0)])
+    service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key=RESPONSE_KEY))
+    service.finish_response(conn_id, response_key=RESPONSE_KEY)
+    transport = _WebSocketTransport()
+
+    async def send(event):
+        await router_module._dispatch_client_event(unit, conn_id, event, transport, transport_kind="websocket")
+
+    await send(_truncate(item_id, 800).model_dump())
+    await send({"type": "conversation.item.delete", "item_id": item_id})
+    replacement = "A completely different assistant message"
+    await send(
+        {
+            "type": "conversation.item.create",
+            "item": {
+                "id": item_id,
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": replacement}],
+            },
+        }
+    )
+    await send(_truncate(item_id, 400).model_dump())
+
+    assert _history(service, conn_id)[-1] == ("assistant", None, replacement)
+    assert all(event.type != "error" for event in transport.sent)
+
+
+def test_unheard_native_reply_is_not_restored_once_its_own_user_turn_is_gone():
+    """Its reasoning item leaves with it, so it cannot anchor the reply's turn."""
+    chat = Chat(size=10)
+    chat.add_item(make_user_message("Older question"))
+    chat.add_item(make_assistant_message("Older answer."))
+    chat.add_item(make_user_message("Target user turn"))
+    target_turn_id = chat.buffer[-1].id
+    chat.add_item(ResponseReasoningItem(id="rs_target", type="reasoning", summary=[]))
+    chat.add_item(
+        ResponsesAssistantMessage(
+            type="message",
+            role="assistant",
+            id="msg_target",
+            content=[{"type": "output_text", "text": "Heard target reply."}],
+            response_item=ResponseOutputMessage(
+                id="msg_target",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[ResponseOutputText(type="output_text", text="Heard target reply.", annotations=[])],
+            ),
+        )
+    )
+    assert chat.truncate_assistant_message("msg_target", "")
+
+    chat.delete_item(target_turn_id)
+
+    assert not chat.truncate_assistant_message("msg_target", "Heard")
+    assert [item.content[0].text for item in chat.buffer] == ["Older question", "Older answer."]

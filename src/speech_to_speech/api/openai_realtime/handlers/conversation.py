@@ -212,6 +212,10 @@ class ConversationHandler(RealtimeBaseHandler):
             while len(st.deleted_input_turn_ids) > 128:
                 st.deleted_input_turn_ids.pop(next(iter(st.deleted_input_turn_ids)))
         st.pending_input_terminals.pop(event.item_id, None)
+        # A deleted reply's audio records must not let a late playback report
+        # edit a new item that reuses its id.
+        st.assistant_audio_segments.pop(event.item_id, None)
+        st.assistant_audio_cuts.pop(event.item_id, None)
         self._service.audio._release_input_item_state_by_id(conn_id, event.item_id)
         retained_ids = chat.item_ids() | chat.unheard_assistant_item_ids() | st.input_items.keys()
         st.acknowledged_item_ids = [item_id for item_id in st.acknowledged_item_ids if item_id in retained_ids]

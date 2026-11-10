@@ -29,10 +29,11 @@ const EMPTY_STATE_HTML = `<div id="chat-empty" class="chat-empty">${CHAT_BUBBLE_
  */
 function heardPrefixLength(shown, heard) {
   let index = 0;
+  // Iterate by code point: an emoji is two UTF-16 units.
   for (const char of heard.replace(/\s+/g, "")) {
     while (index < shown.length && /\s/.test(shown[index])) index += 1;
-    if (shown[index] !== char) return -1;
-    index += 1;
+    if (!shown.startsWith(char, index)) return -1;
+    index += char.length;
   }
   return index;
 }

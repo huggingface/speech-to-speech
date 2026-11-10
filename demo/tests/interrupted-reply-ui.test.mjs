@@ -89,5 +89,11 @@ test("history rewrites an interrupted reply to what the user heard", async (t) =
   const latest = bubbles.last();
   assert.equal(await latest.locator(".bubble-body").textContent(), "Goodbye");
   assert.deepEqual(await struck(latest), []);
+  // An emoji in the heard text still matches.
+  await page.evaluate(() => {
+    chat.onTranscript({ role: "assistant", text: "Great 🐶 dogs are the best.", partial: false, responseId: "r4" });
+    chat.onAssistantHeard({ responseId: "r4", text: "Great 🐶" });
+  });
+  assert.deepEqual(await struck(bubbles.last()), ["dogs are the best."]);
   await page.close();
 });

@@ -5,7 +5,7 @@ import logging
 import threading
 from collections.abc import Callable, Container, Sequence
 from copy import deepcopy
-from typing import Any, Literal, Union, cast
+from typing import Any, Literal, NamedTuple, Union, cast
 
 from openai.types.realtime import ConversationItem
 from openai.types.realtime.conversation_item import (
@@ -59,6 +59,13 @@ AUDIO_INPUT_HISTORY_PLACEHOLDER = "[User audio input]"
 HISTORY_START_ANCHOR = ""
 # Replies removed as unheard that a later playback report can still restore.
 _UNHEARD_ASSISTANT_ITEM_LIMIT = 32
+
+
+class _UnheardReply(NamedTuple):
+    """Where a reply removed as unheard stood, so a playback report can restore it."""
+
+    preceding: list[str | None]  # Items before it that survived its removal.
+    turn_id: str | None  # The user message that opened its turn, if any.
 
 
 class ChatItemError(Exception):
@@ -162,9 +169,9 @@ class Chat:
         self._provisional_generations: dict[str, tuple[set[str], set[str]]] = {}
         self._provisional_output_items: dict[str, list[tuple[str, str, str | None]]] = {}
         self._assistant_item_aliases: dict[str, set[str]] = {}
-        # Realtime item id of each reply removed as unheard -> ids of the items
-        # that preceded it, so a later playback report can put it back.
-        self._unheard_assistant_items: dict[str, list[str | None]] = {}
+        # Realtime item id of each reply removed as unheard -> where it stood,
+        # so a later playback report can put it back.
+        self._unheard_assistant_items: dict[str, _UnheardReply] = {}
         self._deleted_tool_output_ids: set[str] = set()
         self._user_turn_count: int = 0
 
@@ -640,13 +647,14 @@ class Chat:
     def _forget_unheard_in_locked(self, removed_ids: Container[str | None], *, head_removed: bool) -> None:
         """Forget unheard replies whose turn left history; caller holds ``_lock``.
 
-        A removed reply belongs to the turn of the item just before it, or to
-        the head of history when nothing preceded it.
+        A removed reply belongs to the turn its user message opened and follows
+        the item just before it, or the head of history when nothing preceded it.
         """
         self._unheard_assistant_items = {
-            item_id: preceding
-            for item_id, preceding in self._unheard_assistant_items.items()
-            if not (preceding[-1] in removed_ids if preceding else head_removed)
+            item_id: reply
+            for item_id, reply in self._unheard_assistant_items.items()
+            if reply.turn_id not in removed_ids
+            and not (reply.preceding[-1] in removed_ids if reply.preceding else head_removed)
         }
 
     def _heard_message_locked(self, item_id: str, text: str) -> RealtimeConversationItemAssistantMessage:
@@ -685,16 +693,18 @@ class Chat:
         dropped as :meth:`delete_item` does.
         """
         with self._lock:
-            preceding = self._unheard_assistant_items.get(item_id)
-            if preceding is not None:
+            reply = self._unheard_assistant_items.get(item_id)
+            if reply is not None:
                 # The reply was removed as unheard. An item holding its id now
                 # is a different item, which its playback report must not edit.
                 if not text or item_id in self._item_ids_locked():
                     return False
                 positions = {item.id: position for position, item in enumerate(self.buffer)}
                 del self._unheard_assistant_items[item_id]
-                anchors = [positions[i] + 1 for i in preceding if i in positions]
-                if preceding and not anchors:
+                if reply.turn_id is not None and reply.turn_id not in positions:
+                    return False  # The question it answered is gone.
+                anchors = [positions[i] + 1 for i in reply.preceding if i in positions]
+                if reply.preceding and not anchors:
                     return False  # Its turn was evicted or compacted.
                 self.buffer.insert(max(anchors, default=0), self._heard_message_locked(item_id, text))
                 self._gen_counter += 1
@@ -712,10 +722,19 @@ class Chat:
             if index is None:
                 return False
             if not text:
-                self._unheard_assistant_items[item_id] = [item.id for item in self.buffer[:index]]
+                before = self.buffer[:index]
+                turn_id = next(
+                    (item.id for item in reversed(before) if isinstance(item, RealtimeConversationItemUserMessage)),
+                    None,
+                )
+                self._delete_item_locked(item_id)
+                # Companions deleted with it (native reasoning) cannot anchor it.
+                retained_ids = {item.id for item in self.buffer}
+                self._unheard_assistant_items[item_id] = _UnheardReply(
+                    [item.id for item in before if item.id in retained_ids], turn_id
+                )
                 while len(self._unheard_assistant_items) > _UNHEARD_ASSISTANT_ITEM_LIMIT:
                     self._unheard_assistant_items.pop(next(iter(self._unheard_assistant_items)))
-                self._delete_item_locked(item_id)
                 return True
             message = self.buffer[index]
             if len(target_ids) == 1 and type(message) is RealtimeConversationItemAssistantMessage:

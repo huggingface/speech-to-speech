@@ -98,6 +98,10 @@ class WebSocketTransport(SessionTransport):
         # When the client should finish playing the audio sent so far, assuming
         # it plays in real time from the moment each chunk is sent.
         self._playback_end = 0.0
+        # Audio of sends still in progress, and a counter that tells a send
+        # finishing after a discard not to add its discarded audio back.
+        self._sending_seconds = 0.0
+        self._discards = 0
 
     async def send_events(self, events: list[ServerEvent]) -> None:
         async with self._send_lock:
@@ -112,18 +116,29 @@ class WebSocketTransport(SessionTransport):
         response_key: str | None = None,
     ) -> None:
         events = service.encode_audio_chunk(session_id, pcm, response_key)
-        await self.send_events(events)
-        if events:
-            seconds = len(pcm) / 2 / PIPELINE_SAMPLE_RATE
+        # History counts this audio as delivered from here on, so a discard
+        # during the send must count it as unplayed.
+        seconds = len(pcm) / 2 / PIPELINE_SAMPLE_RATE if events else 0.0
+        discards = self._discards
+        self._sending_seconds += seconds
+        try:
+            await self.send_events(events)
+        finally:
+            if discards == self._discards:
+                self._sending_seconds -= seconds
+        if seconds and discards == self._discards:
             self._playback_end = max(self._playback_end, self._clock()) + seconds
 
     def discard_pending_audio(self) -> float:
         # The client flushes its own player on barge-in. Report the audio it
-        # had not played yet, so clients that never send
-        # conversation.item.truncate still get history cut to what they heard.
+        # had not played yet, including sends still in progress, so clients
+        # that never send conversation.item.truncate still get history cut to
+        # what they heard.
         now = self._clock()
-        unplayed = max(0.0, self._playback_end - now)
+        unplayed = max(0.0, self._playback_end - now) + self._sending_seconds
         self._playback_end = now
+        self._sending_seconds = 0.0
+        self._discards += 1
         return unplayed * 1000
 
     async def close(self) -> None:
