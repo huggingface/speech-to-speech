@@ -283,10 +283,30 @@ case-insensitively against the user's organisations from HF OAuth.
 | Microphone | Input device for capture. Applies on the next conversation / Restart. |
 | Speakers | Output device for assistant audio. Chrome/Edge can switch live via `AudioContext.setSinkId`; other browsers keep the system default. |
 | Voice | Qwen3-TTS speaker name (Aiden, Ryan, Dylan, Eric, Ono_Anna, Serena, Sohee, Uncle_Fu, Vivian) |
+| Show reasoning | Show or hide the reasoning and summary sections in Conversation. Off by default; when enabled, each section starts collapsed. Applies immediately to existing and future replies and is saved in this browser. This changes display only; the reasoning effort is selected separately. |
+| Reasoning (button below the orb) | Server default, Off, Minimal, Low, Medium, High, or Extra high. Saved in this browser and applied to the next response without reconnecting, over either transport. The line below the button waits for `session.updated` and shows a green “Server confirmed” only when the server echoes the selected level. Missing or different levels stay unconfirmed. This verifies the server's session setting; model support determines how it is used. Higher levels may increase response time. Server default clears the override and restores the backend's startup setting. |
 | Instructions | System prompt sent in `session.update` once the connection opens |
 
 LocalStorage keys are namespaced `s2s.ws.*` (plus `s2s.transport` for the
 transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
+
+Enable **Settings → Show reasoning**, then open **Conversation** (the chat icon)
+to read the provider's reasoning under
+each reply. **Reasoning** and **Reasoning summary** sections are collapsed by
+default; expand one to read it. On every setup, reasoning is collected in the
+LLM handler and delivered with the first answer text or tool call, rather than
+streamed live. A response with neither delivers its reasoning at completion.
+Reasoning stays separate from the answer and is never sent to speech synthesis.
+A section appears only when the model/provider supplies readable reasoning or
+a summary; encrypted reasoning is not displayed. This needs the updated
+speech-to-speech backend as well as the demo frontend.
+
+Turn **Settings → Show reasoning** off to hide these sections, or back on to
+restore them. The preference is saved and applies without restarting a call.
+
+Reasoning alone does not commit a turn or close the user's chance to resume a
+paused utterance. Reasoning from a cancelled or superseded generation is not
+sent.
 
 ## Files
 
@@ -334,7 +354,7 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
   resamples to 24 kHz (boxcar lowpass + decimation on the 48 -> 24 fast
   path, linear interpolation fallback for odd rates) and packs Int16 LE.
 - **Browser cache safety**: the entry module, realtime client, and both audio
-  worklet URLs share the `timings-20261105` cache key. The client also waits for
+  worklet URLs share the `reasoning-language-20261110` cache key. The client also waits for
   the capture worklet to report the same version and a 24 kHz output rate
   before opening a session. When the browser-audio contract or sample rate
   changes, bump the key in `index.html`, `main.js`, and
@@ -354,11 +374,21 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
   before playback starts), retaining identities even after audio/response done.
   This overrides the SDK's receipt-time interruption clock. Server VAD cancels
   the in-flight response; explicit interruptions use the SDK cancellation hook.
-  The local server currently accepts truncation events without changing its
-  conversation history; these client counts do not establish server-side truncation.
+  The server cuts the item's model history to the transcript heard in that
+  time; see [Interrupted replies](../src/speech_to_speech/api/openai_realtime/README.md#interrupted-replies).
+  After each truncate the client sends `conversation.item.retrieve`. The
+  reply's history row then strikes through the words never said, marked
+  Interrupted, and its bubble, while still on screen, draws the strike across
+  them (statically with reduced motion). Over WebRTC, where the server measures playback, the client
+  retrieves the items of the last two replies after each barge-in. Only an
+  item the server cut (status `incomplete`, or removed) changes its row.
   See the [Realtime interruption guidance](https://developers.openai.com/api/docs/guides/realtime-conversations#handling-interruptions).
 
 ## Credits
 
 - Backend: [huggingface/speech-to-speech](https://github.com/huggingface/speech-to-speech)
 - UI verbatim from `amir-tfrere/minimal-conversation-app-s2s-backend` (Pollen Robotics × Hugging Face)
+
+Choose **Language** on the conversation screen or in Settings to set transcription and response language. The choice persists across reloads and can change during a conversation; **Auto** restores automatic language selection. Language support depends on the configured speech backends.
+
+The demo checks backend language capabilities before connecting. When Auto is unsupported or discovery is unavailable, it preserves the backend default and disables switching back to Auto during that conversation. End the conversation to select backend defaults for the next one. Language changes while queued apply when the conversation starts.

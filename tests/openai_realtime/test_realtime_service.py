@@ -225,6 +225,44 @@ class TestConnectionLifecycle:
             assert updated.session.audio.input.transcription.language == expected
             assert runtime_config.selected_language == expected
 
+    def test_demo_default_language_preserves_fixed_backend_session_config(self, service, conn_id):
+        import json
+        import shutil
+        import subprocess
+        from pathlib import Path
+
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("Node.js is required for demo client tests")
+        service.stt_auto_reset_supported = False
+        supported = service.get_language_capabilities()["conversation"]["session_auto_supported"]
+        script = f"""
+const {{ S2sRealtimeClient }} = await import("./demo/s2s-realtime-client.js");
+const client = new S2sRealtimeClient({{ transport: "websocket", language: "auto" }});
+client._autoLanguageSupported = {json.dumps(supported)};
+console.log(JSON.stringify(client._sessionConfig().audio.input.transcription));
+"""
+        transcription = json.loads(
+            subprocess.check_output(
+                [node, "--input-type=module", "-e", script],
+                cwd=Path(__file__).resolve().parents[2],
+                text=True,
+            )
+        )
+        assert "language" not in transcription
+        update = SessionUpdateEvent.model_validate(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "realtime",
+                    "instructions": "Keep these instructions",
+                    "audio": {"input": {"transcription": transcription}},
+                },
+            }
+        )
+        assert service.handle_session_update(conn_id, update) is None
+        assert service.build_session_updated(conn_id).session.instructions == "Keep these instructions"
+
     def test_unsupported_session_language_is_rejected_without_changing_effective_config(
         self, service, conn_id, runtime_config
     ):

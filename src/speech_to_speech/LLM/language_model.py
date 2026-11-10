@@ -480,6 +480,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if isinstance(part, AssistantTextPart):
                 text_parts.append(part.text)
                 continue
+            if not isinstance(part, AssistantToolCallPart):
+                continue
             flush_text()
             tool = part.tool
             items.append(

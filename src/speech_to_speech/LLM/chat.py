@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Container, Sequence
 from copy import deepcopy
-from typing import Any, Literal, Union, cast
+from typing import Any, Literal, NamedTuple, Union, cast
 
 from openai.types.realtime import ConversationItem
 from openai.types.realtime.conversation_item import (
@@ -57,6 +57,15 @@ AUDIO_INPUT_HISTORY_PLACEHOLDER = "[User audio input]"
 # messages that arrive while it runs.
 # Client item IDs are nonempty, so this internal marker cannot collide with one.
 HISTORY_START_ANCHOR = ""
+# Replies removed as unheard that a later playback report can still restore.
+_UNHEARD_ASSISTANT_ITEM_LIMIT = 32
+
+
+class _UnheardReply(NamedTuple):
+    """Where a reply removed as unheard stood, so a playback report can restore it."""
+
+    preceding: list[str | None]  # Items before it that survived its removal.
+    turn_id: str | None  # The user message that opened its turn, if any.
 
 
 class ChatItemError(Exception):
@@ -160,6 +169,9 @@ class Chat:
         self._provisional_generations: dict[str, tuple[set[str], set[str]]] = {}
         self._provisional_output_items: dict[str, list[tuple[str, str, str | None]]] = {}
         self._assistant_item_aliases: dict[str, set[str]] = {}
+        # Realtime item id of each reply removed as unheard -> where it stood,
+        # so a later playback report can put it back.
+        self._unheard_assistant_items: dict[str, _UnheardReply] = {}
         self._deleted_tool_output_ids: set[str] = set()
         self._user_turn_count: int = 0
 
@@ -228,6 +240,7 @@ class Chat:
             return False
         removed = self.buffer[start:end]
         del self.buffer[start:end]
+        self._forget_unheard_in_locked({item.id for item in removed}, head_removed=start == 0)
         removed_call_ids: set[str] = set()
 
         def record_call(item: SupportedItem) -> None:
@@ -517,11 +530,19 @@ class Chat:
     def item_ids(self) -> set[str]:
         """IDs of retained items, including staged function calls."""
         with self._lock:
-            items: list[SupportedItem] = [*self.buffer, *self._pending_tool_calls.values()]
-            if self.init_chat_message is not None:
-                items.append(self.init_chat_message)
-            ids = {item.id for item in items if item.id is not None}
-            return ids | {wire_id for wire_id, message_ids in self._assistant_item_aliases.items() if message_ids & ids}
+            return self._item_ids_locked()
+
+    def unheard_assistant_item_ids(self) -> set[str]:
+        """Realtime IDs of replies removed as unheard that can still be restored."""
+        with self._lock:
+            return set(self._unheard_assistant_items)
+
+    def _item_ids_locked(self) -> set[str]:
+        items: list[SupportedItem] = [*self.buffer, *self._pending_tool_calls.values()]
+        if self.init_chat_message is not None:
+            items.append(self.init_chat_message)
+        ids = {item.id for item in items if item.id is not None}
+        return ids | {wire_id for wire_id, message_ids in self._assistant_item_aliases.items() if message_ids & ids}
 
     def get_item(self, item_id: str) -> SupportedItem | None:
         """Return a copy of one retained item, resolving a delivered wire ID.
@@ -556,75 +577,180 @@ class Chat:
     def delete_item(self, item_id: str) -> SupportedItem | None:
         """Delete exactly one retained item and repair its history bookkeeping."""
         with self._lock:
-            removed: SupportedItem | None = None
-            target_ids = self._assistant_item_aliases.pop(item_id, {item_id})
-            # Native reasoning requires its following provider message/call.
-            # Find that companion before deleting it, allowing interleaved user
-            # inputs and tool results without consuming another response's pair.
-            reasoning_prefix: set[str] = set()
-            orphaned_reasoning_ids: set[str] = set()
-            for item in self.buffer:
-                if isinstance(item, ResponseReasoningItem):
-                    reasoning_prefix.add(item.id)
-                elif isinstance(item, (RealtimeConversationItemAssistantMessage, RealtimeConversationItemFunctionCall)):
-                    if isinstance(item, (ResponsesAssistantMessage, ResponsesFunctionCall)) and item.id in target_ids:
-                        orphaned_reasoning_ids.update(reasoning_prefix)
-                    reasoning_prefix.clear()
-            if self.init_chat_message is not None and self.init_chat_message.id == item_id:
-                removed = self.init_chat_message
-                self.init_chat_message = None
-            else:
-                for index, item in enumerate(self.buffer):
-                    if item.id in target_ids:
-                        removed = self.buffer.pop(index)
-                        break
-                if removed is not None and len(target_ids) > 1:
-                    self.buffer = [item for item in self.buffer if item.id not in target_ids]
-                if removed is None:
-                    removed = next((call for call in self._pending_tool_calls.values() if call.id == item_id), None)
+            # An explicit delete is final: a later playback report must not restore it.
+            self._unheard_assistant_items.pop(item_id, None)
+            return self._delete_item_locked(item_id)
+
+    def _delete_item_locked(self, item_id: str) -> SupportedItem | None:
+        removed: SupportedItem | None = None
+        target_ids = self._assistant_item_aliases.pop(item_id, {item_id})
+        # Native reasoning requires its following provider message/call.
+        # Find that companion before deleting it, allowing interleaved user
+        # inputs and tool results without consuming another response's pair.
+        reasoning_prefix: set[str] = set()
+        orphaned_reasoning_ids: set[str] = set()
+        for item in self.buffer:
+            if isinstance(item, ResponseReasoningItem):
+                reasoning_prefix.add(item.id)
+            elif isinstance(item, (RealtimeConversationItemAssistantMessage, RealtimeConversationItemFunctionCall)):
+                if isinstance(item, (ResponsesAssistantMessage, ResponsesFunctionCall)) and item.id in target_ids:
+                    orphaned_reasoning_ids.update(reasoning_prefix)
+                reasoning_prefix.clear()
+        if self.init_chat_message is not None and self.init_chat_message.id == item_id:
+            removed = self.init_chat_message
+            self.init_chat_message = None
+        else:
+            for index, item in enumerate(self.buffer):
+                if item.id in target_ids:
+                    removed = self.buffer.pop(index)
+                    break
+            if removed is not None and len(target_ids) > 1:
+                self.buffer = [item for item in self.buffer if item.id not in target_ids]
             if removed is None:
-                return None
-            if orphaned_reasoning_ids:
-                self.buffer = [item for item in self.buffer if item.id not in orphaned_reasoning_ids]
-                target_ids = target_ids | orphaned_reasoning_ids
-            if isinstance(removed, RealtimeConversationItemUserMessage):
-                self._user_turn_count -= 1
-            elif isinstance(removed, RealtimeConversationItemFunctionCall):
-                if removed.call_id is not None:
-                    self._deleted_tool_output_ids.update(
-                        item.id
-                        for item in self.buffer
-                        if item.type == "function_call_output"
-                        and item.call_id == removed.call_id
-                        and item.id is not None
-                    )
-                    self._pending_tool_calls.pop(removed.call_id, None)
-                    self._ordered_pending_calls.pop(removed.call_id, None)
-            elif isinstance(removed, RealtimeConversationItemFunctionCallOutput):
-                if not any(
-                    item.type == "function_call_output" and item.call_id == removed.call_id for item in self.buffer
-                ):
-                    call = next(
-                        (
-                            item
-                            for item in self.buffer
-                            if item.type == "function_call" and item.call_id == removed.call_id
-                        ),
-                        None,
-                    )
-                    if call is not None:
-                        self._pending_tool_calls[removed.call_id] = call
-            self._deleted_tool_output_ids.intersection_update(item.id for item in self.buffer if item.id is not None)
-            for tracked_ids, tracked_call_ids in self._provisional_generations.values():
-                tracked_ids.difference_update(target_ids)
-                if isinstance(removed, RealtimeConversationItemFunctionCall) and removed.call_id is not None:
-                    tracked_call_ids.discard(removed.call_id)
-            for context in self._ordered_pending_calls.values():
-                context.difference_update(target_ids)
-            # A summary calculated before deletion must not restore deleted text.
-            self._gen_counter += 1
-            self._compact_in_flight = False
-            return removed
+                removed = next((call for call in self._pending_tool_calls.values() if call.id == item_id), None)
+        if removed is None:
+            return None
+        if orphaned_reasoning_ids:
+            self.buffer = [item for item in self.buffer if item.id not in orphaned_reasoning_ids]
+            target_ids = target_ids | orphaned_reasoning_ids
+        if isinstance(removed, RealtimeConversationItemUserMessage):
+            self._user_turn_count -= 1
+        elif isinstance(removed, RealtimeConversationItemFunctionCall):
+            if removed.call_id is not None:
+                self._deleted_tool_output_ids.update(
+                    item.id
+                    for item in self.buffer
+                    if item.type == "function_call_output" and item.call_id == removed.call_id and item.id is not None
+                )
+                self._pending_tool_calls.pop(removed.call_id, None)
+                self._ordered_pending_calls.pop(removed.call_id, None)
+        elif isinstance(removed, RealtimeConversationItemFunctionCallOutput):
+            if not any(item.type == "function_call_output" and item.call_id == removed.call_id for item in self.buffer):
+                call = next(
+                    (item for item in self.buffer if item.type == "function_call" and item.call_id == removed.call_id),
+                    None,
+                )
+                if call is not None:
+                    self._pending_tool_calls[removed.call_id] = call
+        self._deleted_tool_output_ids.intersection_update(item.id for item in self.buffer if item.id is not None)
+        for tracked_ids, tracked_call_ids in self._provisional_generations.values():
+            tracked_ids.difference_update(target_ids)
+            if isinstance(removed, RealtimeConversationItemFunctionCall) and removed.call_id is not None:
+                tracked_call_ids.discard(removed.call_id)
+        for context in self._ordered_pending_calls.values():
+            context.difference_update(target_ids)
+        # A summary calculated before deletion must not restore deleted text.
+        self._gen_counter += 1
+        self._compact_in_flight = False
+        return removed
+
+    def _forget_unheard_in_locked(self, removed_ids: Container[str | None], *, head_removed: bool) -> None:
+        """Forget unheard replies whose turn left history; caller holds ``_lock``.
+
+        A removed reply belongs to the turn its user message opened and follows
+        the item just before it, or the head of history when nothing preceded it.
+        """
+        self._unheard_assistant_items = {
+            item_id: reply
+            for item_id, reply in self._unheard_assistant_items.items()
+            if reply.turn_id not in removed_ids
+            and not (reply.preceding[-1] in removed_ids if reply.preceding else head_removed)
+        }
+
+    def _heard_message_locked(self, item_id: str, text: str) -> RealtimeConversationItemAssistantMessage:
+        """Build an interrupted reply addressed by Realtime *item_id*; caller holds ``_lock``.
+
+        The Responses API accepts only ``msg``-prefixed ids on replayed
+        assistant messages, so the item id becomes an alias of a new one.
+        """
+        message = RealtimeConversationItemAssistantMessage(
+            type="message",
+            role="assistant",
+            id=_generate_id("msg"),
+            status="incomplete",
+            content=[AssistantContent(type="output_text", text=text)],
+        )
+        assert message.id is not None
+        self._assistant_item_aliases[item_id] = {message.id}
+        return message
+
+    def add_heard_assistant_message(self, item_id: str, text: str, *, after_item_id: str | None = None) -> None:
+        """Add the heard part of an interrupted reply, addressed by its Realtime *item_id*."""
+        with self._lock:
+            self._unheard_assistant_items.pop(item_id, None)
+            self._add_item_locked(
+                self._heard_message_locked(item_id, text),
+                insert_at=self._turn_insertion_index_locked(after_item_id),
+            )
+
+    def truncate_assistant_message(self, item_id: str, text: str) -> bool:
+        """Keep only *text*, the heard prefix, of one delivered assistant message.
+
+        The message becomes ``incomplete``. Empty *text* removes it, so an
+        unheard reply is not replayed as delivered; non-empty *text* for a
+        message removed that way puts it back where it was. Provider-native
+        messages are replaced by plain text; their reasoning companions are
+        dropped as :meth:`delete_item` does.
+        """
+        with self._lock:
+            reply = self._unheard_assistant_items.get(item_id)
+            if reply is not None:
+                # The reply was removed as unheard. An item holding its id now
+                # is a different item, which its playback report must not edit.
+                if not text or item_id in self._item_ids_locked():
+                    return False
+                positions = {item.id: position for position, item in enumerate(self.buffer)}
+                del self._unheard_assistant_items[item_id]
+                if reply.turn_id is not None and reply.turn_id not in positions:
+                    return False  # The question it answered is gone.
+                anchors = [positions[i] + 1 for i in reply.preceding if i in positions]
+                if reply.preceding and not anchors:
+                    return False  # Its turn was evicted or compacted.
+                self.buffer.insert(max(anchors, default=0), self._heard_message_locked(item_id, text))
+                self._gen_counter += 1
+                self._compact_in_flight = False
+                return True
+            target_ids = self._assistant_item_aliases.get(item_id, {item_id})
+            index = next(
+                (
+                    index
+                    for index, item in enumerate(self.buffer)
+                    if item.id in target_ids and isinstance(item, RealtimeConversationItemAssistantMessage)
+                ),
+                None,
+            )
+            if index is None:
+                return False
+            if not text:
+                before = self.buffer[:index]
+                turn_id = next(
+                    (item.id for item in reversed(before) if isinstance(item, RealtimeConversationItemUserMessage)),
+                    None,
+                )
+                self._delete_item_locked(item_id)
+                # Companions deleted with it (native reasoning) cannot anchor it.
+                retained_ids = {item.id for item in self.buffer}
+                self._unheard_assistant_items[item_id] = _UnheardReply(
+                    [item.id for item in before if item.id in retained_ids], turn_id
+                )
+                while len(self._unheard_assistant_items) > _UNHEARD_ASSISTANT_ITEM_LIMIT:
+                    self._unheard_assistant_items.pop(next(iter(self._unheard_assistant_items)))
+                return True
+            message = self.buffer[index]
+            if len(target_ids) == 1 and type(message) is RealtimeConversationItemAssistantMessage:
+                message.content = [AssistantContent(type="output_text", text=text)]
+                message.status = "incomplete"
+                self._gen_counter += 1
+                self._compact_in_flight = False
+                return True
+            preceding_ids = [item.id for item in self.buffer[:index]]
+            self._delete_item_locked(item_id)
+            retained_ids = {item.id for item in self.buffer}
+            self.buffer.insert(
+                sum(preceding_id in retained_ids for preceding_id in preceding_ids),
+                self._heard_message_locked(item_id, text),
+            )
+            return True
 
     def bind_assistant_item_ids(self, response_key: str | None, output_items: Sequence[ConversationItem]) -> None:
         """Give delivered assistant history the IDs exposed by Realtime."""
@@ -1196,6 +1322,7 @@ class Chat:
             self._user_turn_count = 0
             self._deleted_tool_output_ids.clear()
             self._assistant_item_aliases.clear()
+            self._unheard_assistant_items.clear()
 
     def close(self) -> None:
         """Permanently shut down the chat. In-flight compaction splice is suppressed.
@@ -1426,6 +1553,7 @@ class Chat:
             asst_msg.id = _generate_id("msg")
 
             self.buffer = [user_msg, asst_msg, *remaining]
+            self._forget_unheard_in_locked(drop_ids, head_removed=True)
             self._user_turn_count = sum(1 for x in self.buffer if isinstance(x, RealtimeConversationItemUserMessage))
             logger.info(
                 "Chat compaction applied: buffer now %d item(s), %d user turn(s)",

@@ -156,6 +156,12 @@ class RuntimeConfig(BaseModel):
             and "speech_to_speech.input_audio_transcription.snapshot" in extensions
         )
 
+    @property
+    def reasoning_text_enabled(self) -> bool:
+        """Whether this client wants the provider's readable reasoning output."""
+        extensions = getattr(self.session, "extensions", None)
+        return isinstance(extensions, (list, tuple, set)) and "speech_to_speech.reasoning.delta" in extensions
+
     def apply_session_update(self, update: RealtimeSessionCreateRequest) -> None:
         """Merge non-None, explicitly-set fields from 'update' into the
         current 'session', preserving any fields not present in the update."""
