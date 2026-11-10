@@ -58,3 +58,15 @@ class OpenAICompatibleSTTHandlerArguments:
         default=384,
         metadata={"help": "Output token budget for the nemotron profile. Truncated transcripts fail the request."},
     )
+    openai_stt_speech_contexts: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Word boosting for the transcription profile, sent as the 'speech_contexts' form field: "
+            'a JSON array like \'[{"phrases": ["Acme"], "boost": 3.0}]\' (NVIDIA NeMo-Speech / Riva shape). '
+            "Ignored by servers that don't support it."
+        },
+    )
+    openai_stt_prompt: Optional[str] = field(
+        default=None,
+        metadata={"help": "OpenAI 'prompt' form field for the transcription profile (vocabulary hint)."},
+    )
