@@ -38,6 +38,7 @@ from speech_to_speech.LLM.chat import (
     make_user_audio_message,
 )
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
+from speech_to_speech.LLM.interruptible_stream import InterruptibleStream
 from speech_to_speech.LLM.text_prompt import build_text_system_prompt
 from speech_to_speech.LLM.utils import (
     language_name_for_prompt,
@@ -72,6 +73,7 @@ PREFETCH_WORKER_ACQUIRE_TIMEOUT_S = 0.05
 # How often an active streaming turn checks whether it was cancelled, so a
 # provider read that never produces another event can be released.
 CANCEL_WATCH_INTERVAL_S = 0.05
+STREAM_WORKER_JOIN_TIMEOUT_S = 0.5
 PROVIDER_FAILURE_FALLBACK = "I'm having trouble responding right now. Please try again."
 
 
@@ -241,6 +243,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self._prefetch_worker_slots = BoundedSemaphore(PREFETCH_PROVIDER_WORKER_LIMIT)
         self._prefetch_workers_lock = Lock()
         self._prefetch_workers: set[Thread] = set()
+        self._stream_worker: Thread | None = None
+        self._stream_abort: Callable[[], None] | None = None
         self.compactor = build_compactor(self._build_compaction_generate_fn()) if compact_history else None
         self.warmup()
 
@@ -377,6 +381,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
     _audio_to_wav_base64 = staticmethod(audio_to_wav_base64)
 
     def cleanup(self) -> None:
+        abort = getattr(self, "_stream_abort", None)
+        if abort is not None:
+            abort()
         client = getattr(self, "client", None)
         if client is not None:
             del self.client
@@ -451,6 +458,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         api_response: Any,
         event_iterator: Callable[[Any], Iterator[ProviderEvent]],
         turn: _Turn,
+        state: _GenState,
     ) -> Iterator[ProviderEvent]:
         """Read provider events so a cancellation is never queued behind a read.
 
@@ -459,16 +467,22 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         the socket busy without producing one, so neither the check nor the read
         timeout runs, and the cancelled turn keeps its pipeline worker busy. The
         blocking read therefore runs in one worker while this generator polls the
-        cancellation state; on cancellation it closes the response, which releases
-        the socket read.
+        cancellation state. HTTP/1 cancellation shuts down the socket before
+        closing it, so a pending read also wakes up on Unix.
         """
+        response = getattr(api_response, "response", None)
+        transport = InterruptibleStream(response) if isinstance(response, httpx.Response) else None
         results: Queue[tuple[bool, Any]] = Queue(maxsize=PREFETCH_STREAM_QUEUE_MAXSIZE)
         done = object()
         stop_reading = ThreadingEvent()
+        received_usage: Usage | None = None
 
         def read_events() -> None:
+            nonlocal received_usage
             try:
                 for event in event_iterator(api_response):
+                    if isinstance(event, Usage):
+                        received_usage = event
                     if not self._publish_event(results, stop_reading, (True, event)):
                         return
                 self._publish_event(results, stop_reading, (True, done))
@@ -478,8 +492,33 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 stop_reading.set()
 
         worker = Thread(target=read_events, name="llm-provider-stream", daemon=True)
-        worker.start()
+        stopped = False
+
+        def finish_reader() -> None:
+            nonlocal stopped
+            if not stopped:
+                stopped = True
+                stop_reading.set()
+                try:
+                    if transport is not None:
+                        transport.abort()
+                    else:
+                        self._close_response(api_response)
+                except Exception:
+                    pass  # Cleanup must not turn cancellation into a provider error.
+            if worker.ident is not None:
+                worker.join(timeout=STREAM_WORKER_JOIN_TIMEOUT_S)
+            self._close_response(api_response)
+            if not worker.is_alive():
+                self._stream_worker = None
+                self._stream_abort = None
+
+        # A transport without an interruptible socket may ignore close(). Keep
+        # its worker tracked and reject another reader until it actually exits.
+        self._stream_worker = worker
+        self._stream_abort = finish_reader
         try:
+            worker.start()
             while True:
                 if self._turn_is_cancelled(turn):
                     return
@@ -497,8 +536,12 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     return
                 yield value
         finally:
-            stop_reading.set()
-            self._close_response(api_response)
+            finish_reader()
+            # Preserve the newest billable usage even if cancellation or stale
+            # output made the consumer break before it drained the event queue.
+            if received_usage is not None:
+                state.input_tokens = received_usage.input_tokens
+                state.output_tokens = received_usage.output_tokens
 
     def _iter_prefetch_events_interruptibly(
         self,
@@ -893,28 +936,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         trace.dispatch()
                         return (request_fn or self._request)(api_input, trace.request_options(optional_kwargs))
 
-                    if turn.prefetch_transaction is not None:
-                        events = self._iter_prefetch_events_interruptibly(
-                            make_request,
-                            event_iterator_fn or self._iter_events,
-                            turn,
-                        )
-                    else:
-                        api_response = make_request()
-                        # Only a streaming response can stay open without producing
-                        # an event; a non-streaming one is already complete here.
-                        if self.stream:
-                            events = self._iter_events_interruptibly(
-                                api_response,
-                                event_iterator_fn or self._iter_events,
-                                turn,
-                            )
-                        else:
-                            events = (event_iterator_fn or self._iter_events)(api_response)
-                if events is not None:
-
-                    def measured_events() -> Iterator[ProviderEvent]:
-                        for event in events:
+                    def measured_events(response: Any) -> Iterator[ProviderEvent]:
+                        for event in (event_iterator_fn or self._iter_events)(response):
                             if (
                                 self.stream
                                 and tracker is not None
@@ -924,11 +947,33 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                                 tracker.record_llm_ttft(perf_counter() - generation_started_at_s)
                             yield event
 
-                    observed_events = measured_events()
-                    if self.stream:
-                        generation_completed = yield from self._consume_streaming(observed_events, state, turn)
+                    if turn.prefetch_transaction is not None:
+                        events = self._iter_prefetch_events_interruptibly(
+                            make_request,
+                            measured_events,
+                            turn,
+                        )
                     else:
-                        generation_completed = yield from self._consume_nonstreaming(observed_events, state, turn)
+                        previous_worker = getattr(self, "_stream_worker", None)
+                        if self.stream and previous_worker is not None and previous_worker.is_alive():
+                            raise RuntimeError("The previous language model stream reader has not stopped.")
+                        api_response = make_request()
+                        # Only a streaming response can stay open without producing
+                        # an event; a non-streaming one is already complete here.
+                        if self.stream:
+                            events = self._iter_events_interruptibly(
+                                api_response,
+                                measured_events,
+                                turn,
+                                state,
+                            )
+                        else:
+                            events = measured_events(api_response)
+                if events is not None:
+                    if self.stream:
+                        generation_completed = yield from self._consume_streaming(events, state, turn)
+                    else:
+                        generation_completed = yield from self._consume_nonstreaming(events, state, turn)
             except httpx.ReadTimeout:
                 logger.warning(
                     "OpenAI API read timed out after %.1fs; ending the current response",
@@ -944,6 +989,10 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 if error_message is None:
                     error_message = f"Language model generation failed: {exc}"
             finally:
+                # A stale turn or a provider error may stop the consumer before
+                # stream exhaustion. Reap its reader before emitting a terminal.
+                if events is not None and hasattr(events, "close"):
+                    events.close()
                 # Store elapsed provider work before an error terminal can finish
                 # the response on the service thread.
                 if tracker is not None and provider_request_started:
@@ -1111,9 +1160,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             item for item in active_chat.buffer if isinstance(item, RealtimeConversationItemUserMessage)
         ]
 
-        # CancelScope.is_stale(gen) is checked when the stream iterator advances; a
-        # blocked read inside httpx cannot be aborted by cancel_scope.cancel() from
-        # the websocket router. Mitigations: request_timeout_s / ReadTimeout.
         turn = _Turn(
             language_code=language_code,
             selected_language=request.selected_language,
@@ -1217,9 +1263,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             resolve_reasoning_effort(runtime_config, response),
         )
 
-        # CancelScope.is_stale(gen) is checked when the stream iterator advances; a
-        # blocked read inside httpx cannot be aborted by cancel_scope.cancel() from
-        # the websocket router. Mitigations: request_timeout_s / ReadTimeout.
         turn = _Turn(
             language_code=language_code,
             selected_language=request.selected_language,

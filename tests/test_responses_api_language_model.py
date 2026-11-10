@@ -645,6 +645,7 @@ def test_process_records_hosted_llm_latency():
 @pytest.mark.parametrize("mode,first_tts_s", [("stream", 0.4), ("trailing", 0.9), ("nonstream", 0.4), ("failed", 0.4)])
 def test_first_tts_batch_latency_uses_hosted_generation_start(monkeypatch, mode, first_tts_s):
     clock = [10.0]
+    first_batch_forwarded = Event()
     monkeypatch.setattr(base_openai_compatible_language_model, "perf_counter", lambda: clock[0])
     monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     handler = _make_handler(stream=mode != "nonstream")
@@ -655,6 +656,9 @@ def test_first_tts_batch_latency_uses_hosted_generation_start(monkeypatch, mode,
         clock[0] = 10.4
         if mode == "stream":
             yield _make_text_delta_event(". How are you?")
+            # The provider reader and output processor run independently. Do
+            # not advance their shared fake clock past the first TTS dispatch.
+            assert first_batch_forwarded.wait(5)
         clock[0] = 10.9
         yield _make_output_item_done_event(content="Hello. How are you?" if mode == "stream" else "Hello")
 
@@ -683,6 +687,8 @@ def test_first_tts_batch_latency_uses_hosted_generation_start(monkeypatch, mode,
     processor.turn_latency_store = store
     for output in drive_llm(handler, request):
         list(processor.process(output))
+        if tracker.llm_first_tts_s is not None:
+            first_batch_forwarded.set()
 
     assert tracker.llm_first_tts_s == pytest.approx(first_tts_s)
     assert tracker.llm_s == pytest.approx(0.4 if mode in ("nonstream", "failed") else 0.9)
