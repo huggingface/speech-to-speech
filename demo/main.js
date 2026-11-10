@@ -1500,6 +1500,10 @@ async function doStart(audioContext = null) {
     chat.onUserAudio(detail);
   });
 
+  c.addEventListener("assistant-heard", (e) => {
+    const detail = /** @type {CustomEvent<{ responseId: string; text: string }>} */ (e).detail;
+    chat.onAssistantHeard(detail);
+  });
   c.addEventListener("response-finished", (e) => {
     const detail = /** @type {CustomEvent<{ responseId: string; status: string; audible?: boolean; transcript?: string; latency?: import("./turn-latency.js").TurnLatency | null }>} */ (e).detail;
     chat.onResponseFinished(detail);

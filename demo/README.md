@@ -352,8 +352,14 @@ transport pick, and `s2s.audio.inputId` / `s2s.audio.outputId` for devices).
   before playback starts), retaining identities even after audio/response done.
   This overrides the SDK's receipt-time interruption clock. Server VAD cancels
   the in-flight response; explicit interruptions use the SDK cancellation hook.
-  The local server currently accepts truncation events without changing its
-  conversation history; these client counts do not establish server-side truncation.
+  The server cuts the item's model history to the transcript heard in that
+  time; see [Interrupted replies](../src/speech_to_speech/api/openai_realtime/README.md#interrupted-replies).
+  After each truncate the client sends `conversation.item.retrieve`. The
+  reply's history row then strikes through the words never said, marked
+  Interrupted, and its bubble, while still on screen, draws the strike across
+  them (statically with reduced motion). Over WebRTC, where the server measures playback, the client
+  retrieves the items of the last two replies after each barge-in. Only an
+  item the server cut (status `incomplete`, or removed) changes its row.
   See the [Realtime interruption guidance](https://developers.openai.com/api/docs/guides/realtime-conversations#handling-interruptions).
 
 ## Credits
