@@ -464,6 +464,32 @@ def test_cancel_keepalive_stream_releases_next_request(monkeypatch):
         serving.join()
 
 
+@pytest.mark.parametrize("interrupt", ["stop", "cancel"])
+def test_interrupted_stream_does_not_flush_a_partial_tool_call(caplog, interrupt):
+    h = _make_handler(stream=True)
+    h.cancel_scope = CancelScope()
+
+    def chunks():
+        yield _chunk(tool_calls=[_tc_delta(0, id="srv_1", name="search_docs", arguments='{"query": "bo')])
+        # The turn is interrupted while the provider is still sending arguments.
+        h.stop_event.set() if interrupt == "stop" else h.cancel_scope.cancel()
+        yield _chunk(tool_calls=[_tc_delta(0, arguments="ld")])
+
+    h.client.chat.completions.create = lambda **k: _FakeStream(chunks())
+    with caplog.at_level("WARNING"):
+        _text, tools, _usage, chat, end = _drive(
+            h,
+            tools=[{"type": "function", "name": "search_docs", "parameters": {"type": "object"}}],
+            tool_choice="required",
+        )
+
+    assert tools == [], "an abandoned stream must not surface truncated tool arguments"
+    assert end.error is None
+    assert end.history is None or not end.history.complete
+    assert [item.type for item in chat.buffer] == ["message"]
+    assert "without a finish_reason" not in caplog.text
+
+
 def test_streaming_text_and_usage():
     h = _make_handler(stream=True)
     h.client.chat.completions.create = lambda **k: _FakeStream(

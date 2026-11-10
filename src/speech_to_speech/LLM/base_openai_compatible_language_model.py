@@ -79,6 +79,10 @@ PROVIDER_FAILURE_FALLBACK = "I'm having trouble responding right now. Please try
 # lives in one place. Subclasses differ only in how they produce these events.
 
 
+class _StreamInterrupted(Exception):
+    """A cancelled or stopped turn abandoned its provider stream before it ended."""
+
+
 class TextDelta(BaseModel):
     """Incremental assistant text. Always RAW (unfiltered); the base applies
     ``remove_unspeechable`` for the audio path."""
@@ -489,8 +493,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 except StopAsyncIteration:
                     return
                 if chunk is stopped:
-                    return
+                    break
                 yield chunk
+            # Returning here would look like a finished stream, and the event
+            # parsers would flush partial text and tool calls as a complete reply.
+            raise _StreamInterrupted
         finally:
             loop.run_until_complete(chunks.aclose())
 
@@ -921,6 +928,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         generation_completed = yield from self._consume_streaming(observed_events, state, turn)
                     else:
                         generation_completed = yield from self._consume_nonstreaming(observed_events, state, turn)
+            except _StreamInterrupted:
+                logger.info("LLM generation cancelled (interruption)")
             except httpx.ReadTimeout:
                 logger.warning(
                     "OpenAI API read timed out after %.1fs; ending the current response",
