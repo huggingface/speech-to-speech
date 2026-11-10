@@ -77,10 +77,11 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
             reasoning_effort=None,
         )
 
-    def _reasoning_kwargs(self) -> dict[str, Any]:
-        if self.reasoning_effort is None:
+    def _reasoning_kwargs(self, reasoning_effort: str | None = None) -> dict[str, Any]:
+        effort = reasoning_effort or self.reasoning_effort
+        if effort is None:
             return {}
-        return {"reasoning": {"effort": self.reasoning_effort}}
+        return {"reasoning": {"effort": effort}}
 
     def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
@@ -135,8 +136,9 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
         response: Any,
         req_tools: Any,
         req_tool_choice: Any,
+        reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
-        kwargs = _build_chat_optional_kwargs(req_tools, req_tool_choice)
+        kwargs = _build_chat_optional_kwargs(req_tools, req_tool_choice, reasoning_effort)
         max_tokens = getattr(response, "max_output_tokens", None) if response is not None else None
         kwargs.setdefault("max_tokens", max_tokens or self.audio_max_tokens)
         kwargs.setdefault("temperature", self.audio_temperature)
@@ -171,8 +173,18 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
     def _serialize(self, active_chat: Chat) -> Any:
         return active_chat.to_responses_api_chat()
 
-    def _build_optional_kwargs(self, req_tools: Any, req_tool_choice: Any) -> dict[str, Any]:
-        optional_kwargs = self._reasoning_kwargs()
+    def _build_optional_kwargs(
+        self,
+        req_tools: Any,
+        req_tool_choice: Any,
+        reasoning_effort: str | None = None,
+    ) -> dict[str, Any]:
+        optional_kwargs = self._reasoning_kwargs(reasoning_effort)
+        if reasoning_effort:
+            # Mirror _build_extra_body: an explicit effort drops the startup
+            # chat_template_kwargs.enable_thinking=false, which vLLM would
+            # otherwise honour over reasoning.effort.
+            optional_kwargs["extra_body"] = None
         if req_tools is not None:
             optional_kwargs["tools"] = req_tools
         if req_tool_choice is not None:
@@ -180,13 +192,15 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
         return optional_kwargs
 
     def _request(self, api_input: Any, optional_kwargs: dict[str, Any]) -> Any:
+        create_kwargs = dict(optional_kwargs)
+        extra_body = create_kwargs.pop("extra_body", self._extra_body)
         return self.client.responses.create(
             model=self.model_name,
             input=api_input,
             stream=self.stream,
-            extra_body=self._extra_body,
+            extra_body=extra_body,
             timeout=self.request_timeout,
-            **optional_kwargs,
+            **create_kwargs,
         )
 
     @staticmethod

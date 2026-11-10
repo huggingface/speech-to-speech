@@ -28,6 +28,7 @@ def test_internal_chunks_keep_first_model_audio_in_terminal_record(
     handler.turn_latency_store = service.turn_latency_store
     clock = [100.0]
     monkeypatch.setattr(kitten_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     monkeypatch.setattr(kitten_module.console, "print", lambda *_a, **_k: None)
     handler._chunk_text = lambda text: ["empty", "first", "second"] if empty_first_chunk else ["first", "second"]
     calls = []

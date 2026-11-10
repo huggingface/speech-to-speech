@@ -10,14 +10,13 @@ from typing import Iterator
 import numpy as np
 from scipy.signal import resample_poly
 
-from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import transcript_for_log
-from speech_to_speech.pipeline.turn_latency import record_response_e2e, record_response_tts_ttfa
+from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +24,7 @@ logger = logging.getLogger(__name__)
 KITTEN_MAX_TOKENS = 512
 
 
-class KittenTTSHandler(BaseHandler[TTSIn, TTSOut]):
+class KittenTTSHandler(BaseTTSHandler):
     def setup(
         self,
         should_listen: Event,
@@ -117,9 +116,6 @@ class KittenTTSHandler(BaseHandler[TTSIn, TTSOut]):
             audio.append(waveform)
         return np.concatenate(audio, axis=-1), first_audio_at_s
 
-    def _is_cancelled(self, generation: int | None) -> bool:
-        return generation is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(generation)
-
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         speculative_turns = self.speculative_turns
         if isinstance(tts_input, EndOfResponse):
@@ -145,48 +141,35 @@ class KittenTTSHandler(BaseHandler[TTSIn, TTSOut]):
         logger.debug("KittenTTS synthesizing: %s", transcript_for_log(text))
 
         # Synthesis start: after speculative gate / voice resolve, before provider work.
-        started_at_s = perf_counter()
+        timer = self._latency_timer(tts_input, cancel_gen)
         # Synthesis completes before delivery; every inference fits the token limit.
         # Let BaseHandler report failures through its privacy-safe exception logger.
         audio_chunk, first_audio_at_s = self._generate_audio(text=text, voice=voice)
-        if self._is_cancelled(cancel_gen):
+        if self._is_stale(cancel_gen):
             return
 
         audio = np.asarray(audio_chunk, dtype=np.float32).reshape(-1)
         if audio.size == 0:
             return
 
-        store = getattr(self, "turn_latency_store", None)
-        response_key = getattr(tts_input, "response_key", None)
-        speech_stopped_at_s = getattr(tts_input, "speech_stopped_at_s", None)
-
         # Use the first model waveform, excluding later synthesis and concatenation.
         # Publish only after the assembled output passes cancellation/empty checks.
         if first_audio_at_s is not None:
-            record_response_tts_ttfa(store, response_key, first_audio_at_s - started_at_s)
+            timer.first_provider_audio(first_audio_at_s)
 
         audio = resample_poly(audio, up=2, down=3)
         audio_int16 = np.clip(audio * 32768, -32768, 32767).astype(np.int16)
-        first_yielded = True
 
         def emit(block: np.ndarray) -> Iterator[TTSOut]:
-            nonlocal first_yielded
-            if first_yielded:
-                if speech_stopped_at_s is not None:
-                    record_response_e2e(
-                        store,
-                        response_key,
-                        max(0.0, perf_counter() - speech_stopped_at_s),
-                    )
-                first_yielded = False
+            timer.first_yield()
             yield block
 
         n = (len(audio_int16) // self.blocksize) * self.blocksize
         for i in range(0, n, self.blocksize):
-            if self._is_cancelled(cancel_gen):
+            if self._is_stale(cancel_gen):
                 return
             yield from emit(audio_int16[i : i + self.blocksize])
         if n < len(audio_int16):
-            if self._is_cancelled(cancel_gen):
+            if self._is_stale(cancel_gen):
                 return
             yield from emit(np.pad(audio_int16[n:], (0, self.blocksize - (len(audio_int16) - n))))

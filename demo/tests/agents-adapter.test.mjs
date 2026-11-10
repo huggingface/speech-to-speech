@@ -198,3 +198,39 @@ test("the client negotiates speculative snapshot extensions on the wire", async 
     "speech_to_speech.input_audio_transcription.snapshot",
   ]);
 });
+
+test("over WebRTC each barge-in asks for the heard text of the last two replies", () => {
+  globalThis.localStorage = { getItem() { return null; } };
+  globalThis.OpenAIAgentsRealtime = realtime;
+  const client = new S2sRealtimeClient({ transport: "webrtc" });
+  const sent = [];
+  client._transport = { sendEvent(event) { sent.push(event); } };
+  const heard = [];
+  client.addEventListener("assistant-heard", (event) => heard.push(event.detail));
+  const reply = (responseId, itemId, text) => {
+    const ids = { response_id: responseId, item_id: itemId, output_index: 0, content_index: 0 };
+    client._onTransportEvent({ type: "response.output_audio_transcript.delta", ...ids, delta: text });
+    client._onTransportEvent({ type: "response.output_audio_transcript.done", ...ids, transcript: text });
+  };
+  reply("r0", "item-0", "Hello.");
+  reply("r1", "item-1", "Let me check.");
+  reply("r2", "item-2", "It is sunny today.");
+  reply("r2", "item-3", "Anything else?");
+  const retrieves = () => sent.map((event) => event.item_id);
+
+  client._onTransportEvent({ type: "input_audio_buffer.speech_started", item_id: "user-1" });
+  assert.deepEqual(retrieves(), ["item-1", "item-2", "item-3"]);
+  assert.equal(sent[0].event_id, "heard_text_item-1");
+  // A backchannel that did not interrupt must not stop a later barge-in's check.
+  client._onTransportEvent({ type: "input_audio_buffer.speech_started", item_id: "user-2" });
+  assert.equal(sent.length, 6);
+
+  const retrieved = (id, status, transcript) => client._onTransportEvent({ type: "conversation.item.retrieved", item: {
+    id, type: "message", role: "assistant", status, content: [{ type: "output_audio", transcript }],
+  } });
+  retrieved("item-1", "completed", "Let me check.");
+  // A reply still generating returns its pending text; it was not cut.
+  retrieved("item-2", "in_progress", "It is sunny today. And warm.");
+  retrieved("item-2", "incomplete", "It is");
+  assert.deepEqual(heard, [{ responseId: "r2", text: "It is Anything else?" }]);
+});

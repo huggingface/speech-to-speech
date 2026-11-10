@@ -5,6 +5,7 @@ import logging
 from typing import TYPE_CHECKING, Literal
 
 from openai.types.realtime import (
+    ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionFailedEvent,
     InputAudioBufferAppendEvent,
     InputAudioBufferCommittedEvent,
@@ -263,12 +264,30 @@ class AudioHandler(RealtimeBaseHandler):
                 )
             )
         if pending.transcription is not None:
+            if isinstance(pending.transcription, ConversationItemInputAudioTranscriptionCompletedEvent):
+                self._record_published_transcript(conn_id, item_id, pending.transcription.transcript)
             events.append(pending.transcription)
             pending.transcription = None
         if pending.input_closed:
             st.pending_input_terminals.pop(item_id, None)
             self._release_input_item_state_by_id(conn_id, item_id)
         return events
+
+    def _record_published_transcript(self, conn_id: str, item_id: str, transcript: str) -> None:
+        """Remember the transcript a client received, bounded by retained history."""
+        st = self._state(conn_id)
+        retained_ids = st.runtime_config.chat.item_ids()
+        transcripts = {
+            known_id: text
+            for known_id, text in st.published_input_transcripts.items()
+            if known_id != item_id and (known_id in retained_ids or not text)
+        }
+        transcripts[item_id] = transcript
+        # Empty transcripts never enter the chat; keep only the most recent ones.
+        empty_ids = [known_id for known_id, text in transcripts.items() if not text]
+        for known_id in empty_ids[:-128]:
+            del transcripts[known_id]
+        st.published_input_transcripts = transcripts
 
     def handle_audio_append(self, conn_id: str, event: InputAudioBufferAppendEvent) -> list[bytes]:
         """Decode base64 audio, resample to pipeline rate, and split into 512-sample PCM16 chunks for the VAD."""
@@ -485,14 +504,19 @@ class AudioHandler(RealtimeBaseHandler):
         self,
         conn_id: str,
         response_key: str | None = None,
+        samples: int = 0,
     ) -> tuple[str, str, int, list[ServerEvent]]:
-        """Ensure an audio response and reserve its assistant output identity."""
+        """Ensure an audio response and reserve its assistant output identity.
+
+        *samples* counts the pipeline-rate audio the caller is delivering.
+        """
         resp_id, item_id, events = self.begin_audio_response(conn_id, response_key)
         st = self._state(conn_id)
         assistant_item_id, output_index = self._service.response._ensure_assistant_output_item(
             conn_id,
             item_id,
         )
+        self._service.response.record_audio_samples(conn_id, assistant_item_id, samples)
         pending = next(item for item in st.pending_text_outputs if int(item["output_index"]) == output_index)
         events.extend(self._service.response._begin_message_output(conn_id, pending, wants_audio=True))
         st.audio_output_started = True
@@ -511,6 +535,7 @@ class AudioHandler(RealtimeBaseHandler):
         resp_id, assistant_item_id, assistant_output_index, events = self.begin_audio_output(
             conn_id,
             response_key,
+            len(audio) // 2,
         )
         rp = st.current_response_params
         client_out_rate = None
