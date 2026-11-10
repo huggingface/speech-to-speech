@@ -287,6 +287,17 @@
               </label>
             </div>
 
+            <div class="tool-row">
+              <div class="tool-info">
+                <span id="show-reasoning-label" class="tool-name">Show reasoning</span>
+                <span id="show-reasoning-hint" class="tool-desc">Show collapsible reasoning in Conversation. Applies immediately.</span>
+              </div>
+              <label class="switch">
+                <input id="show-reasoning" type="checkbox" role="switch" aria-labelledby="show-reasoning-label" aria-describedby="show-reasoning-hint" />
+                <span class="switch-track" aria-hidden="true"></span>
+              </label>
+            </div>
+
             <label class="field">
               <span>Microphone</span>
               <select id="audio-input">
@@ -436,6 +447,6 @@
     </dialog>
 
     <script src="vendor/openai-realtime-agents.umd.js"></script>
-    <script type="module" src="main.js?v=reasoning-text-20261110"></script>
+    <script type="module" src="main.js?v=reasoning-visibility-20261110"></script>
   </body>
 </html>

@@ -55,7 +55,7 @@ import { LocalVad } from "./ws/local-vad.js";
 import { normalizeReasoningEffort } from "./ui/reasoning.js";
 
 export const AUDIO_SAMPLE_RATE = 24_000;
-export const AUDIO_WORKLET_VERSION = "reasoning-text-20261110";
+export const AUDIO_WORKLET_VERSION = "reasoning-visibility-20261110";
 export const DEFAULT_PLAYBACK_BUFFER_MS = 0;
 const MIC_CHUNK_MS = 40;
 // Retrieves the client sends to learn what an interrupted reply left in history.

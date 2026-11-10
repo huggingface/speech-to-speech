@@ -40,7 +40,7 @@ function heardPrefixLength(shown, heard) {
 
 export class ChatView {
   /**
-   * @param {{ onUserAudioPlaybackChange?: (playing: boolean) => void }} [options]
+   * @param {{ onUserAudioPlaybackChange?: (playing: boolean) => void; showReasoning?: boolean }} [options]
    */
   constructor(options = {}) {
     /** @type {HTMLButtonElement} */
@@ -57,6 +57,7 @@ export class ChatView {
     this._chatHistory = $("#chat-history");
     /** @type {HTMLDivElement} */
     this._bubbleStack = $("#bubble-stack");
+    this.setShowReasoning(options.showReasoning === true);
 
     this._panelOpen = false;
     this._scrollQueued = false;
@@ -623,6 +624,12 @@ export class ChatView {
     }
   }
 
+  /** @param {boolean} show */
+  setShowReasoning(show) {
+    this._showReasoning = show;
+    this._chatHistory.classList.toggle("hide-reasoning", !show);
+  }
+
   /** Provider-exposed text belongs only in collapsed history, never a speech bubble.
    * @param {{responseId: string; delta: string; kind: "reasoning" | "summary"}} detail */
   onReasoning({ responseId, delta, kind }) {
@@ -645,8 +652,10 @@ export class ChatView {
       hist.appendChild(section);
     }
     section.querySelector(".reasoning-text")?.append(document.createTextNode(delta));
-    this._scrollToBottom();
-    this._markUnread();
+    if (this._showReasoning) {
+      this._scrollToBottom();
+      this._markUnread();
+    }
   }
 
   /**

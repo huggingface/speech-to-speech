@@ -2880,3 +2880,7 @@ body.cam-on .footer {
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   user-select: text;
 }
+.chat-history.hide-reasoning .hist-reasoning,
+.chat-history.hide-reasoning .hist-msg.assistant:has(.hist-reasoning):not(:has(.hist-body:not([hidden]), .hist-timings)) {
+  display: none;
+}

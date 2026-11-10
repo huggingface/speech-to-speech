@@ -17,10 +17,10 @@
  * @typedef {S2sRealtimeClient} RealtimeClient
  */
 
-import { S2sRealtimeClient, normalizePlaybackBufferMs } from "./s2s-realtime-client.js?v=reasoning-text-20261110";
+import { S2sRealtimeClient, normalizePlaybackBufferMs } from "./s2s-realtime-client.js?v=reasoning-visibility-20261110";
 import { ReasoningControl } from "./ui/reasoning.js";
 import { $, truncateError, errorMessage, DEBUG } from "./ui/dom.js";
-import { ChatView } from "./ui/chat.js?v=reasoning-text-20261110";
+import { ChatView } from "./ui/chat.js?v=reasoning-visibility-20261110";
 import { Account } from "./ui/account.js";
 
 const DEFAULT_VOICE = "Aiden";
@@ -37,6 +37,7 @@ const STORAGE_KEYS = {
   noiseGate: "s2s.ws.noiseGate",
   playbackBufferMs: "s2s.ws.playbackBufferMs",
   localVad: "s2s.audio.localVad",
+  showReasoning: "s2s.ws.showReasoning",
   // "ws" | "webrtc". Not under the historical "s2s.ws." prefix — it selects
   // between the transports rather than configuring the WS one.
   transport: "s2s.transport",
@@ -117,6 +118,7 @@ function loadSettings() {
     noiseGate: loadGateThreshold(),
     playbackBufferMs: normalizePlaybackBufferMs(localStorage.getItem(STORAGE_KEYS.playbackBufferMs)),
     localVad: localStorage.getItem(STORAGE_KEYS.localVad) !== "off",
+    showReasoning: localStorage.getItem(STORAGE_KEYS.showReasoning) === "on",
     // Default WebSocket: the proven path stays the first-run experience.
     transport: localStorage.getItem(STORAGE_KEYS.transport) === "webrtc" ? "webrtc" : "ws",
     audioInputId: localStorage.getItem(STORAGE_KEYS.audioInputId) || "",
@@ -145,6 +147,7 @@ function saveSettings(s) {
   localStorage.setItem(STORAGE_KEYS.noiseGate, String(s.noiseGate));
   localStorage.setItem(STORAGE_KEYS.playbackBufferMs, String(s.playbackBufferMs));
   localStorage.setItem(STORAGE_KEYS.localVad, s.localVad ? "on" : "off");
+  localStorage.setItem(STORAGE_KEYS.showReasoning, s.showReasoning ? "on" : "off");
   localStorage.setItem(STORAGE_KEYS.transport, s.transport);
   localStorage.setItem(STORAGE_KEYS.audioInputId, s.audioInputId || "");
   localStorage.setItem(STORAGE_KEYS.audioOutputId, s.audioOutputId || "");
@@ -274,6 +277,8 @@ const playbackBufferField = $("#playback-buffer-field");
 const inputPlaybackBuffer = $("#playback-buffer-ms");
 /** @type {HTMLSelectElement} */
 const inputLocalVad = $("#local-vad");
+/** @type {HTMLInputElement} */
+const inputShowReasoning = $("#show-reasoning");
 /** @type {HTMLSelectElement} */
 const inputVoice = $("#voice");
 /** @type {HTMLSelectElement} */
@@ -372,6 +377,7 @@ function pushToolsToSession() {
 // streaming state. The client's events are forwarded to its on* methods.
 let userAudioReplaying = false;
 const chat = new ChatView({
+  showReasoning: settings.showReasoning,
   onUserAudioPlaybackChange(playing) {
     userAudioReplaying = playing;
     syncMicMuteState();
@@ -472,6 +478,7 @@ function openSettings() {
   inputVoice.value = settings.voice;
   inputPlaybackBuffer.value = String(settings.playbackBufferMs);
   inputLocalVad.value = settings.localVad ? "on" : "off";
+  inputShowReasoning.checked = settings.showReasoning;
   inputInstructions.value = settings.instructions;
   syncGateUi();
   updateRestartAvailability();
@@ -1008,6 +1015,7 @@ function readSettingsFromForm() {
     noiseGate: readGateThreshold(),
     playbackBufferMs: normalizePlaybackBufferMs(inputPlaybackBuffer.value),
     localVad: inputLocalVad.value !== "off",
+    showReasoning: inputShowReasoning.checked,
     transport: /** @type {"ws" | "webrtc"} */ (
       transportSelectable()
         ? (inputTransport.value === "webrtc" ? "webrtc" : "ws")
@@ -1101,6 +1109,7 @@ settingsForm.addEventListener("submit", (event) => {
 
   settings = readSettingsFromForm();
   saveSettings(settings);
+  chat.setShowReasoning(settings.showReasoning);
 
   // Voice + instructions can apply to a live session without reconnecting; a
   // changed connection URL only takes effect on the next restart. Speaker
@@ -1112,6 +1121,12 @@ settingsForm.addEventListener("submit", (event) => {
       void client.setAudioOutputDevice(settings.audioOutputId);
     }
   }
+});
+
+inputShowReasoning.addEventListener("change", () => {
+  settings.showReasoning = inputShowReasoning.checked;
+  localStorage.setItem(STORAGE_KEYS.showReasoning, settings.showReasoning ? "on" : "off");
+  chat.setShowReasoning(settings.showReasoning);
 });
 
 // The noise gate applies live (worklet param), so tune it without a restart:

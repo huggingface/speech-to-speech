@@ -44,6 +44,7 @@ test("reasoning picker supports touch, keyboard, persistence, and server default
     });
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
     await page.waitForFunction(() => !document.body.classList.contains("booting"));
+    assert.equal(await page.locator("#chat-history").evaluate((el) => el.classList.contains("hide-reasoning")), true);
     const rtc = await page.evaluate(async () => {
       const { S2sRealtimeClient } = await import("/s2s-realtime-client.js");
       const { RealtimeSession, OpenAIRealtimeWebRTC } = window.OpenAIAgentsRealtime;
@@ -108,7 +109,7 @@ test("reasoning picker supports touch, keyboard, persistence, and server default
     // backend's acknowledgement until after checking that selection alone
     // cannot show a successful confirmation.
     await page.evaluate(async () => {
-      const { S2sRealtimeClient } = await import("/s2s-realtime-client.js?v=reasoning-text-20261110");
+      const { S2sRealtimeClient } = await import("/s2s-realtime-client.js?v=reasoning-visibility-20261110");
       S2sRealtimeClient.prototype.connect = async function () {
         window.demoClient = this;
         this._setStatus("connected");
@@ -117,6 +118,14 @@ test("reasoning picker supports touch, keyboard, persistence, and server default
     });
     // Use the settings form to update the in-memory connection target too.
     await page.locator("#settings-btn").click();
+    const showReasoning = page.getByRole("switch", { name: "Show reasoning", exact: true });
+    assert.equal(await showReasoning.isChecked(), false, "reasoning is hidden by default");
+    if (process.env.S2S_UI_SCREENSHOTS) {
+      await showReasoning.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: `${process.env.S2S_UI_SCREENSHOTS}/reasoning-settings-${width}.png` });
+    }
+    await showReasoning.focus();
+    await page.keyboard.press("Space");
     await page.locator("#lb-url").fill("ws://unused/v1/realtime");
     await page.locator("#settings-save").click();
     await page.locator("#main-circle").click();
@@ -155,7 +164,7 @@ test("reasoning picker supports touch, keyboard, persistence, and server default
     });
     await page.locator("#chat-btn").click();
     await page.evaluate(() => document.querySelector(".chat-panel-inner").getAnimations().forEach((animation) => animation.finish()));
-    const row = page.locator(".hist-msg.assistant").last();
+    const row = page.locator(".hist-msg.assistant").first();
     const reasoningDetails = row.locator(".hist-reasoning");
     assert.equal(await reasoningDetails.getAttribute("open"), null);
     assert.equal(await reasoningDetails.locator(".reasoning-text").isVisible(), false);
@@ -183,11 +192,49 @@ test("reasoning picker supports touch, keyboard, persistence, and server default
     assert.equal(await summaryRow.locator(".hist-note").textContent(), "Interrupted");
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     await page.locator("#chat-panel-close").click();
+
+    // The saved display preference hides existing and future sections without
+    // changing the answer text, and restoring it retains received reasoning.
+    await page.locator("#settings-btn").click();
+    assert.equal(await showReasoning.isChecked(), true);
+    await showReasoning.focus();
+    await page.keyboard.press("Space");
+    assert.equal(await page.evaluate(() => localStorage.getItem("s2s.ws.showReasoning")), "off");
+    assert.equal(await page.locator("#chat-history").evaluate((el) => el.classList.contains("hide-reasoning")), true);
+    await page.locator("#settings-save").click();
+    await page.locator("#chat-btn").click();
+    assert.equal(await reasoningDetails.isVisible(), false);
+    assert.equal(await summaryRow.isVisible(), false, "no empty reasoning-only row when hidden");
+    assert.equal(await row.locator(".hist-body").innerText(), "Option A is the better fit.");
+    await page.evaluate(() => demoClient._onTransportEvent({ type: "speech_to_speech.reasoning.delta", response_id: "hidden-reply", kind: "reasoning", delta: "Reasoning received while hidden." }));
+    const hiddenRow = page.locator(".hist-msg.assistant").last();
+    assert.equal(await hiddenRow.isVisible(), false);
+    await page.locator("#chat-panel-close").click();
+    await page.locator("#settings-btn").click();
+    await page.locator("label.switch:has(#show-reasoning)").click();
+    assert.equal(await page.evaluate(() => localStorage.getItem("s2s.ws.showReasoning")), "on");
+    await page.locator("#settings-save").click();
+    await page.locator("#chat-btn").click();
+    assert.equal(await reasoningDetails.isVisible(), true);
+    assert.equal(await hiddenRow.isVisible(), true);
+    assert.equal(await hiddenRow.locator(".hist-reasoning").getAttribute("open"), null);
+    await page.locator("#chat-panel-close").click();
     await page.locator("#stop-btn").click();
     assert.equal(await status.getAttribute("data-state"), "idle");
     // Late acknowledgements from a closed conversation cannot reconfirm it.
     await echo({ effort: "none" });
     assert.equal(await status.getAttribute("data-state"), "idle");
+    await page.reload();
+    await page.waitForFunction(() => !document.body.classList.contains("booting"));
+    await page.locator("#settings-btn").click();
+    assert.equal(await showReasoning.isChecked(), true, "enabled preference survives a reload");
+    await showReasoning.focus();
+    await page.keyboard.press("Space");
+    await page.locator("#settings-save").click();
+    await page.reload();
+    await page.waitForFunction(() => !document.body.classList.contains("booting"));
+    await page.locator("#settings-btn").click();
+    assert.equal(await showReasoning.isChecked(), false, "disabled preference survives a reload");
     assert.deepEqual(errors, []);
     await page.close();
   }
