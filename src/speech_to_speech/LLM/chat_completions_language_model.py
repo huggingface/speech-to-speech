@@ -402,9 +402,9 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
     ) -> dict[str, Any]:
         return _build_chat_optional_kwargs(req_tools, req_tool_choice, reasoning_effort)
 
-    def _request(self, api_input: list[dict[str, Any]], optional_kwargs: dict[str, Any]) -> Any:
+    def _request(self, api_input: list[dict[str, Any]], optional_kwargs: dict[str, Any], *, client: Any = None) -> Any:
         return _request_chat_completions(
-            client=self.client,
+            client=client or self.client,
             model_name=self.model_name,
             messages=api_input,
             stream=self.stream,

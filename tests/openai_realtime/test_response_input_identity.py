@@ -25,6 +25,7 @@ from speech_to_speech.pipeline.events import (
 from speech_to_speech.pipeline.messages import AssistantToolCallPart
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnPhase
 from speech_to_speech.VAD.vad_handler import VADHandler
+from tests.llm_history import close_llm_runners as close_llm_runners
 from tests.llm_history import drive_llm
 from tests.test_vad_iterator import _FakeVADModel
 
@@ -483,7 +484,8 @@ async def test_completed_answer_suppresses_duplicate_tool_followup(
                 )
 
             handler.client = SimpleNamespace(responses=SimpleNamespace(create=provider_create))
-        outputs = list(handler.process(request))
+        # The streaming backend drives its own event loop, so it cannot run on this one.
+        outputs = await asyncio.to_thread(lambda: list(handler.process(request)))
         terminal = next(item for item in outputs if isinstance(item, EndOfResponse))
         assert terminal.error is None
         if backend == "local":

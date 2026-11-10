@@ -163,9 +163,11 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
         self,
         api_input: list[dict[str, Any]],
         optional_kwargs: dict[str, Any],
+        *,
+        client: Any = None,
     ) -> Any:
         return _request_chat_completions(
-            client=self.client,
+            client=client or self.client,
             model_name=self.model_name,
             messages=api_input,
             stream=self.stream,
@@ -203,10 +205,10 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
             optional_kwargs["tool_choice"] = req_tool_choice
         return optional_kwargs
 
-    def _request(self, api_input: Any, optional_kwargs: dict[str, Any]) -> Any:
+    def _request(self, api_input: Any, optional_kwargs: dict[str, Any], *, client: Any = None) -> Any:
         create_kwargs = dict(optional_kwargs)
         extra_body = create_kwargs.pop("extra_body", self._extra_body)
-        return self.client.responses.create(
+        return (client or self.client).responses.create(
             model=self.model_name,
             input=api_input,
             stream=self.stream,
