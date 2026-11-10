@@ -934,6 +934,148 @@ def test_non_streaming_text_only_preserves_symbols():
     assert text == "**bold** 🎉"  # symbols not stripped
 
 
+# ── Native tool-call markup leaked as content ─────────────────────────────────
+
+
+def _stream_events(chunks):
+    events = list(ccm._iter_chat_stream_events(_FakeStream(chunks)))
+    spoken = "".join(e.text for e in events if isinstance(e, ccm.TextDelta))
+    messages = [e.content[0].text for e in events if isinstance(e, ccm.AssistantMessage)]
+    tools = [e.item for e in events if isinstance(e, ccm.ToolCall)]
+    return spoken, messages, tools
+
+
+def _tool_chunk():
+    return _chunk(tool_calls=[_tc_delta(0, id="srv_1", name="search", arguments='{"q":"x"}')])
+
+
+def test_streaming_drops_leaked_tool_call_tag_and_keeps_tool_call():
+    """vLLM (qwen3_xml parser, tool_choice=required) streams "<tool_call>\\n\\n" as
+    content alongside the structured tool call; nothing of it must be spoken."""
+    h = _make_handler(stream=True)
+    h.client.chat.completions.create = lambda **k: _FakeStream(
+        [
+            _chunk(content="<tool_call>\n\n"),
+            _tool_chunk(),
+            _chunk(usage=SimpleNamespace(prompt_tokens=5, completion_tokens=5)),
+        ]
+    )
+    text, tools, _usage, chat, _end = _drive(
+        h,
+        tools=[{"type": "function", "name": "search", "parameters": {"type": "object"}}],
+        tool_choice="required",
+    )
+    assert text == ""
+    assert len(tools) == 1 and tools[0].name == "search"
+    assert not any(getattr(i, "role", None) == "assistant" for i in chat.buffer)
+
+    spoken, messages, tools = _stream_events([_chunk(content="<tool_call>\n\n"), _tool_chunk()])
+    assert spoken == ""
+    assert messages == []
+    assert [t.name for t in tools] == ["search"]
+
+
+def test_streaming_drops_tool_call_tag_split_across_chunks():
+    spoken, messages, tools = _stream_events([_chunk(content="<tool_"), _chunk(content="call>\n"), _tool_chunk()])
+    assert spoken == ""
+    assert messages == []
+    assert [t.name for t in tools] == ["search"]
+
+
+@pytest.mark.parametrize(
+    "pieces",
+    [["\n <tool_call>\n"], ["\n", " <tool_call>", "\n"], ["\n ", "<tool_", "call>\n"]],
+)
+def test_streaming_drops_whitespace_around_tool_call_tag(pieces):
+    events = list(ccm._iter_chat_stream_events(_FakeStream([*(_chunk(content=p) for p in pieces), _tool_chunk()])))
+    assert not any(isinstance(e, ccm.TextDelta) for e in events)
+    assert not any(isinstance(e, ccm.AssistantMessage) for e in events)
+    assert [e.item.name for e in events if isinstance(e, ccm.ToolCall)] == ["search"]
+
+
+def test_streaming_keeps_leading_whitespace_of_real_text():
+    spoken, messages, _tools = _stream_events([_chunk(content=" "), _chunk(content="Hi there")])
+    assert spoken == " Hi there"
+    assert messages == [" Hi there"]
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        [_chunk(content="<tool_"), _tool_chunk(), _chunk(content="call>\n")],
+        [
+            _chunk(content="<tool_", tool_calls=[_tc_delta(0, id="srv_1", name="search", arguments='{"q":"x"}')]),
+            _chunk(content="call>\n"),
+        ],
+    ],
+)
+def test_streaming_tool_delta_does_not_flush_pending_tag_prefix(chunks):
+    spoken, messages, tools = _stream_events(chunks)
+    assert spoken == ""
+    assert messages == []
+    assert [t.name for t in tools] == ["search"]
+
+
+def test_streaming_resolved_tag_prefix_keeps_text_tool_order():
+    events = list(
+        ccm._iter_chat_stream_events(_FakeStream([_chunk(content="<tool_"), _tool_chunk(), _chunk(content="x")]))
+    )
+    order = [
+        (type(e).__name__, getattr(e, "text", None) or getattr(getattr(e, "item", None), "name", None))
+        for e in events
+        if isinstance(e, (ccm.TextDelta, ccm.ToolCall))
+    ]
+    assert order == [("TextDelta", "<tool_"), ("ToolCall", "search"), ("TextDelta", "x")]
+
+
+def test_streaming_keeps_text_before_tool_call_tag():
+    spoken, messages, tools = _stream_events([_chunk(content="Sure! <tool_call>"), _tool_chunk()])
+    assert spoken == "Sure! "
+    assert messages == ["Sure! "]
+    assert [t.name for t in tools] == ["search"]
+
+
+@pytest.mark.parametrize(
+    "pieces",
+    [["a < b"], ["a <", " b"], ["a ", "<", " b"], ["x <tool", " y"]],
+)
+def test_streaming_keeps_non_tag_angle_brackets(pieces):
+    spoken, messages, _tools = _stream_events([_chunk(content=p) for p in pieces])
+    assert spoken == "".join(pieces)
+    assert messages == ["".join(pieces)]
+
+
+def test_streaming_drops_trailing_tool_call_end_tag():
+    spoken, messages, _tools = _stream_events([_chunk(content="Done."), _chunk(content="</tool_call>")])
+    assert spoken == "Done."
+    assert messages == ["Done."]
+
+
+def test_non_streaming_drops_leaked_tool_call_tag():
+    h = _make_handler(stream=False)
+    h.client.chat.completions.create = lambda **k: SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content="<tool_call>\n\n",
+                    tool_calls=[
+                        SimpleNamespace(id="srv_1", function=SimpleNamespace(name="search", arguments='{"q":"x"}'))
+                    ],
+                )
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=2, completion_tokens=2),
+    )
+    text, tools, _usage, chat, _end = _drive(
+        h,
+        tools=[{"type": "function", "name": "search", "parameters": {"type": "object"}}],
+        tool_choice="required",
+    )
+    assert text == ""
+    assert len(tools) == 1 and tools[0].name == "search"
+    assert not any(getattr(i, "role", None) == "assistant" for i in chat.buffer)
+
+
 # ── tool_choice decoupled from tools ──────────────────────────────────────────
 
 
