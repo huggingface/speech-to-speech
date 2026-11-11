@@ -92,7 +92,7 @@ def backend_language_capabilities(
         elif name == "sense-voice":
             auto = str(getattr(handler, "language", config.get("language", ""))).strip().lower() == "auto"
     elif kind == "tts":
-        selection = name not in {"chatTTS", "pocket", "kitten", "drama3", "minimax"}
+        selection = name not in {"chatTTS", "pocket", "kitten", "drama3", "minimax", "nvidia_nim"}
         if name == "kokoro":
             languages, auto = getattr(module, "KOKORO_NATIVE_LANGUAGES", None), False
         elif name == "facebookMMS":

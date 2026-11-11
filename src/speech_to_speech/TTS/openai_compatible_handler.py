@@ -168,11 +168,10 @@ class HttpSpeechOperation:
 
             if trace is not None:
                 trace.dispatch()
-            async with client.stream("POST", self.endpoint_url, headers=headers, json=self.payload) as response:
-                try:
-                    response.raise_for_status()
-                except httpx.HTTPStatusError as exc:
-                    raise SpeechRequestError(f"speech server returned HTTP {exc.response.status_code}") from exc
+            async with client.stream(
+                "POST", self.endpoint_url, headers=headers, **self._request_body_kwargs()
+            ) as response:
+                await self._raise_for_status(response)
                 self._validate_content_type(response)
                 async for chunk in response.aiter_bytes():
                     if self._cancelled.is_set():
@@ -186,6 +185,15 @@ class HttpSpeechOperation:
             except asyncio.CancelledError:
                 await close_task
                 raise
+
+    def _request_body_kwargs(self) -> dict[str, Any]:
+        return {"json": self.payload}
+
+    async def _raise_for_status(self, response: httpx.Response) -> None:
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise SpeechRequestError(f"speech server returned HTTP {exc.response.status_code}") from exc
 
     def _publish(self, results: Queue[tuple[bool, object]], result: tuple[bool, object]) -> bool:
         while not self._cancelled.is_set():

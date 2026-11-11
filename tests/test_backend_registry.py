@@ -162,6 +162,7 @@ def test_language_coverage_uses_loaded_metadata_and_native_language_tables():
     assert "na" not in capability.languages
     assert capability.supports_auto is True
     assert not backend_language_capabilities("tts", "minimax", {}, SimpleNamespace()).supports_language_selection
+    assert not backend_language_capabilities("tts", "nvidia_nim", {}, SimpleNamespace()).supports_language_selection
 
 
 @pytest.mark.parametrize("declared", [False, True])

@@ -268,6 +268,7 @@ This installs the package in editable mode. With the environment activated, use 
 | TTS | OpenAI-compatible `/v1/audio/speech` endpoint | local or remote HTTP server | built-in |
 | TTS | [Fish Audio Drama-3](https://huggingface.co/fishaudio/drama-3) (`--tts drama3`) | SGLang Omni on a local or remote GPU host | built-in client |
 | TTS | [MiniMax](https://platform.minimax.io/docs/api-reference/speech-t2a-http) | hosted HTTP streaming | built-in |
+| TTS | [NVIDIA Speech NIM](./docs/nvidia-nim-tts.md) (`--tts nvidia_nim`) | local or NVIDIA-hosted NIM over HTTP | built-in client |
 
 Optional [streaming speaker diarization](./examples/streaming-diarization/README.md)
 adds speaker labels to transcribed turns. Enable it with `--diarization` after
