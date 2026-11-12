@@ -20,6 +20,8 @@ from openai.types.responses import (
 from starlette.testclient import TestClient
 
 from speech_to_speech.LLM.chat import (
+    PENDING_TOOL_OUTPUT,
+    RUNNING_TOOL_STATUS,
     Chat,
     CompactionResult,
     ResponsesAssistantMessage,
@@ -103,17 +105,20 @@ def test_delete_call_preserves_output_but_omits_orphan_from_model():
     assert chat.delete_item(output.id) is output
 
 
-def test_delete_output_requires_replacement_before_response(service, conn_id):
+def test_deleted_output_leaves_its_call_running_until_replaced(service, conn_id):
     chat = service._state(conn_id).runtime_config.chat
     chat.add_item(_call())
     chat.add_item(_output())
     assert chat.delete_item("client_output").type == "function_call_output"
     assert chat.has_pending_tool_calls()
-    result = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
-    assert result.type == "error"
-    assert result.error.type == "function_call_output_pending"
+    assert [(message["role"], message["content"]) for message in chat.to_transformers_chat()] == [
+        ("assistant", ""),
+        ("tool", PENDING_TOOL_OUTPUT),
+        ("user", RUNNING_TOOL_STATUS.format(calls="lookup({})")),
+    ]
     chat.add_item(_output())
     assert not chat.has_pending_tool_calls()
+    assert chat.to_transformers_chat()[-1]["content"] == "result"
     assert (
         service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create")).type == "response.created"
     )
@@ -441,14 +446,14 @@ def test_delete_discards_hidden_prefetch_and_late_write(service, conn_id):
     assert st.runtime_config.chat.to_transformers_chat() == []
 
 
-def test_generated_message_binding_preserves_pending_tool_context():
+def test_generated_message_binding_keeps_its_pending_call_until_rollback():
     chat = Chat(10)
     first = make_assistant_message("before")
     last = make_assistant_message("after")
     chat.add_provisional_generation_items("response", [first, _call(), last])
     chat.bind_assistant_item_ids("response", [_wire_message("wire_first"), _call(), _wire_message("wire_last")])
     assert [item.id for item in chat.buffer] == ["wire_first", "client_call", "wire_last"]
-    assert chat._ordered_pending_calls["call_test"] == {"wire_first", "client_call", "wire_last"}
+    assert chat.has_pending_tool_calls()
     chat.rollback_provisional_generation("response")
     assert not chat.buffer
     assert not chat.has_pending_tool_calls()

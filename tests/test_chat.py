@@ -31,6 +31,8 @@ from openai.types.realtime.realtime_response_create_params import RealtimeRespon
 
 from speech_to_speech.LLM.chat import (
     AUDIO_INPUT_HISTORY_PLACEHOLDER,
+    PENDING_TOOL_OUTPUT,
+    RUNNING_TOOL_STATUS,
     Chat,
     ChatItemError,
     CompactionResult,
@@ -1638,7 +1640,7 @@ class TestTurnOrdering:
 
         assert [item.type for item in chat.buffer] == ["message", "function_call", "message"]
 
-    def test_unpaired_ordered_call_hides_its_own_turn_but_not_later_speech(self):
+    def test_unpaired_ordered_call_is_shown_with_a_pending_output(self):
         chat = Chat(size=5)
         chat.add_item(_user("A"))
         anchor = chat.history_anchor_id()
@@ -1650,18 +1652,28 @@ class TestTurnOrdering:
             after_item_id=anchor,
         )
 
-        # The unpaired call and the text emitted after it are not serializable
-        # yet, but the newer user turn still has to reach the provider.
-        assert [(item["role"], item["content"][0]["text"]) for item in chat.to_responses_api_chat()] == [
-            ("user", "A"),
-            ("assistant", "before the call"),
-            ("user", "B"),
+        # The newer user turn can be answered while the tool runs: the call stays
+        # visible, paired with a stand-in output every provider accepts.
+        replay = chat.to_responses_api_chat()
+        assert [item["type"] for item in replay] == [
+            "message",
+            "message",
+            "function_call",
+            "function_call_output",
+            "message",
+            "message",
         ]
+        assert replay[3]["call_id"] == replay[2]["call_id"] == "call_a"
+        assert replay[3]["output"] == PENDING_TOOL_OUTPUT
         assert [(item["role"], item["content"]) for item in chat.to_transformers_chat()] == [
             ("user", "A"),
             ("assistant", "before the call"),
-            ("user", "B"),
+            ("assistant", ""),
+            ("tool", PENDING_TOOL_OUTPUT),
+            ("assistant", "after the call"),
+            ("user", "B\n" + RUNNING_TOOL_STATUS.format(calls="my_func({})")),
         ]
+        assert [item.type for item in chat.buffer] == ["message", "message", "function_call", "message", "message"]
 
     def test_paired_call_is_serialized_once_its_output_arrives_after_later_speech(self):
         chat = Chat(size=5)

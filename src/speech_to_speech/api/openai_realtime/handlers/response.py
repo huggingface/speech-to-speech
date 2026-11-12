@@ -916,7 +916,10 @@ class ResponseHandler(RealtimeBaseHandler):
                     add_supported_item(candidate_chat, input_item.model_copy(deep=True))
             except ChatItemError as exc:
                 return self.make_error(message=str(exc), _type="invalid_input_item")
-            if candidate_chat.has_pending_tool_calls():
+            if candidate_chat.has_incomplete_tool_batch():
+                # Clients that request a follow-up after every tool result rely on
+                # this to get one reply for a batch of parallel calls. Any other
+                # response is generated while tools run.
                 return self.make_error(
                     message="Cannot create a response while function call outputs are pending.",
                     _type="function_call_output_pending",

@@ -389,6 +389,14 @@ Both handlers yield ordered `AssistantTextPart` and `AssistantToolCallPart` valu
 3. If the tool result needs to be spoken to the user, such as camera/search/data results, the client sends `response.create` to trigger follow-up generation.
 4. For fire-and-forget robot actions such as dance, emotion, head movement, stop, or idle tools, the client can stop after `conversation.item.created`; the assistant should already have spoken the natural lead-in before the tool call.
 
+### Long-running tools
+
+A tool that has not returned does not block the conversation: the user can keep talking, and `response.create` is accepted while calls are running. The model is shown each running call paired with a stand-in output saying the tool is still running, so every backend gets a valid request and the model can see it already made the call. While any call is running, the newest user message in the request also carries one line, marked as not said by the user, that lists the calls still running; with several in flight, models otherwise lose track and issue them again.
+
+The result is accepted whenever it arrives, in any order, and never starts a response by itself. If the model has replied to something else in the meantime, the result is shown to it where it arrived, as a message marked as not said by the user, so the client's follow-up `response.create` announces it. Stored history and the wire protocol are unchanged; both renderings exist only in the model request.
+
+One request is still rejected with `function_call_output_pending`: a `response.create` sent right after a tool result while other calls from the same batch are running and the user has said nothing since. Clients that request a follow-up after every result therefore get one reply for the whole batch.
+
 ### Packaged Python client tools
 
 The microphone/speaker client used by `talk` and `local` only executes explicitly declared Python tools. An importable tool module provides flattened Realtime function definitions in `TOOLS` and an async `execute_tool(name, arguments)` callback:
