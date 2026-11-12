@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from queue import Queue
 from threading import Event, Thread
 
-import httpx
+import httpx2
 import numpy as np
 import pytest
 
@@ -43,14 +43,14 @@ def _event(audio=b"", *, status=1, status_code=0):
 
 def _transport(monkeypatch, body, *, content_type="text/event-stream", status_code=200):
     requests = []
-    original = httpx.AsyncClient
+    original = httpx2.AsyncClient
 
     def respond(request):
         requests.append(request)
-        return httpx.Response(status_code, headers={"Content-Type": content_type}, content=body, request=request)
+        return httpx2.Response(status_code, headers={"Content-Type": content_type}, content=body, request=request)
 
     monkeypatch.setattr(
-        httpx, "AsyncClient", lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs)
+        httpx2, "AsyncClient", lambda **kwargs: original(transport=httpx2.MockTransport(respond), **kwargs)
     )
     return requests
 
@@ -306,11 +306,11 @@ def test_cancel_then_new_response_discards_buffered_old_audio(monkeypatch):
 def test_reopened_turn_during_http_startup_never_commits_or_emits(monkeypatch):
     tracker = SpeculativeTurnTracker()
     tracker.start_turn()
-    original = httpx.AsyncClient
+    original = httpx2.AsyncClient
 
     def respond(request):
         reopen(tracker)
-        return httpx.Response(
+        return httpx2.Response(
             200,
             headers={"Content-Type": "text/event-stream"},
             content=_event(np.zeros(512, dtype="<i2").tobytes()) + _event(status=2),
@@ -318,7 +318,7 @@ def test_reopened_turn_during_http_startup_never_commits_or_emits(monkeypatch):
         )
 
     monkeypatch.setattr(
-        httpx, "AsyncClient", lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs)
+        httpx2, "AsyncClient", lambda **kwargs: original(transport=httpx2.MockTransport(respond), **kwargs)
     )
     handler = _handler(speculative_turns=tracker)
     assert list(handler.process(TTSInput(text="Hello", turn_id="turn_1", turn_revision=0))) == []

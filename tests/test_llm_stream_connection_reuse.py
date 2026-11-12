@@ -1,8 +1,9 @@
-"""Streamed LLM turns must share one HTTP connection.
+"""Streamed LLM turns against a real HTTP/1.1 provider.
 
-The provider here is a real HTTP/1.1 server so the test sees what httpx does
-with the connection: openai 2.x stops reading at ``data: [DONE]``, before the
-end of the chunked body, and httpx drops a connection closed at that point.
+The provider is a real server so the tests see what the HTTP client does with
+the connection and what the SDK raises. openai before 3.30 stopped reading at
+``data: [DONE]``, before the end of the chunked body, and the connection was
+dropped instead of reused; every streamed turn then paid a new handshake.
 """
 
 from __future__ import annotations
@@ -13,11 +14,11 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import httpx2
 import pytest
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.realtime.realtime_session_create_request import RealtimeSessionCreateRequest
 
-import speech_to_speech.LLM.base_openai_compatible_language_model as base_mod
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.LLM.chat_completions_language_model import ChatCompletionsApiModelHandler
@@ -116,9 +117,7 @@ class _Provider:
                     if stall_before_done is not None:
                         stall_before_done.wait(10)
                     self._write(b"data: [DONE]\n\n")
-                    # Servers send the end of the body as a separate write, so
-                    # it reaches the client after the SDK has seen [DONE].
-                    time.sleep(0.02)
+                    # Like real servers, send the end of the body as its own write.
                     self.wfile.write(b"0\r\n\r\n")
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
@@ -161,8 +160,6 @@ def _request(turn: int) -> GenerateResponseRequest:
 
 @pytest.mark.parametrize(("handler_cls", "events"), BACKENDS)
 def test_streamed_turns_reuse_one_connection(handler_cls, events, monkeypatch):
-    # Reuse must not depend on how fast this machine delivers the last bytes.
-    monkeypatch.setattr(base_mod, "STREAM_BODY_DRAIN_TIMEOUT_S", 5.0)
     provider = _Provider(events)
     handler = _handler(handler_cls, provider, monkeypatch)
     try:
@@ -179,7 +176,6 @@ def test_streamed_turns_reuse_one_connection(handler_cls, events, monkeypatch):
 
 @pytest.mark.parametrize(("handler_cls", "events"), BACKENDS)
 def test_interrupted_stream_does_not_wait_for_the_rest_of_the_body(handler_cls, events, monkeypatch):
-    monkeypatch.setattr(base_mod, "STREAM_BODY_DRAIN_TIMEOUT_S", 30.0)
     stall = threading.Event()
     provider = _Provider(events, stall_before_done=stall)
     handler = _handler(handler_cls, provider, monkeypatch)
@@ -193,6 +189,23 @@ def test_interrupted_stream_does_not_wait_for_the_rest_of_the_body(handler_cls, 
                 handler.cancel_scope.cancel()
         assert isinstance(outputs[-1], EndOfResponse)
         assert time.monotonic() - started < 5, "the interrupted turn waited for the provider"
+    finally:
+        stall.set()
+        handler.cleanup()
+        provider.close()
+
+
+@pytest.mark.parametrize(("handler_cls", "events"), BACKENDS)
+def test_stalled_stream_ends_the_turn_with_the_read_timeout(handler_cls, events, monkeypatch):
+    stall = threading.Event()
+    provider = _Provider(events, stall_before_done=stall)
+    handler = _handler(handler_cls, provider, monkeypatch)
+    handler.request_timeout_s = 0.3
+    handler.request_timeout = httpx2.Timeout(0.3)
+    try:
+        outputs = list(drive_llm(handler, _request(0)))
+        assert isinstance(outputs[-1], EndOfResponse)
+        assert outputs[-1].error == "Language model generation timed out after 0.3s."
     finally:
         stall.set()
         handler.cleanup()

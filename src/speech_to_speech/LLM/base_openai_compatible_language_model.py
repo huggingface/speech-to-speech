@@ -5,7 +5,7 @@ import ipaddress
 import logging
 import os
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Callable, Generator, Iterator
+from collections.abc import Callable, Generator, Iterator
 from queue import Empty, Full, Queue
 from threading import BoundedSemaphore, Lock, Thread, current_thread
 from threading import Event as ThreadingEvent
@@ -13,9 +13,9 @@ from time import perf_counter
 from typing import Any, Literal, Optional
 from urllib.parse import urlparse
 
-import httpx
+import httpx2
 from nltk import sent_tokenize
-from openai import AsyncOpenAI, OpenAI
+from openai import APITimeoutError, AsyncOpenAI, OpenAI
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemAssistantMessage,
     RealtimeConversationItemFunctionCall,
@@ -75,8 +75,6 @@ PREFETCH_PROVIDER_WORKER_LIMIT = 1
 PREFETCH_STREAM_QUEUE_MAXSIZE = 16
 PREFETCH_WORKER_ACQUIRE_TIMEOUT_S = 0.05
 PROVIDER_FAILURE_FALLBACK = "I'm having trouble responding right now. Please try again."
-# How long a finished stream may wait for the end of its HTTP body.
-STREAM_BODY_DRAIN_TIMEOUT_S = 0.1
 
 
 # ── Normalised provider events ────────────────────────────────────────────────
@@ -89,65 +87,10 @@ class _StreamInterrupted(Exception):
     """A cancelled or stopped turn abandoned its provider stream before it ended."""
 
 
-class _ReusableStreamBody(httpx.AsyncByteStream):
-    """Let a finished streamed response return its connection to the pool.
-
-    openai 2.x closes a stream as soon as it reads ``data: [DONE]``, before the
-    end of the chunked body, and httpx discards an HTTP/1.1 connection whose
-    body was not read to its end. Every streamed turn then paid a new TCP and
-    TLS handshake. On close this reads the rest of the body, for at most
-    ``STREAM_BODY_DRAIN_TIMEOUT_S``, unless a read failed or the caller
-    abandoned the stream: an interruption must not wait for the provider.
-    openai 3.30 does this itself; drop the class once the pin is past it.
-    """
-
-    def __init__(self, stream: httpx.AsyncByteStream) -> None:
-        self._stream = stream
-        self._parts = aiter(stream)
-        self._drain_on_close = True
-
-    def abandon(self) -> None:
-        self._drain_on_close = False
-
-    async def __aiter__(self) -> AsyncIterator[bytes]:
-        while True:
-            try:
-                part = await anext(self._parts)
-            except StopAsyncIteration:
-                self._drain_on_close = False
-                return
-            except BaseException:
-                # A failed or cancelled read leaves nothing worth waiting for.
-                self._drain_on_close = False
-                raise
-            yield part
-
-    async def aclose(self) -> None:
-        try:
-            if self._drain_on_close:
-                self._drain_on_close = False
-                try:
-                    async with asyncio.timeout(STREAM_BODY_DRAIN_TIMEOUT_S):
-                        async for _ in self._parts:
-                            # Buffered data must not outrun the deadline.
-                            await asyncio.sleep(0)
-                except Exception:
-                    pass  # The reply is complete; only the connection is lost.
-        finally:
-            await self._stream.aclose()
-
-    @classmethod
-    def install(cls, response: Any) -> _ReusableStreamBody | None:
-        """Wrap the HTTP body behind an SDK stream that has not been read yet."""
-        http_response = getattr(response, "response", None)
-        if not isinstance(http_response, httpx.Response) or http_response.http_version != "HTTP/1.1":
-            # HTTP/2 keeps its connection when one of its streams is closed early.
-            return None
-        if not isinstance(http_response.stream, httpx.AsyncByteStream):
-            return None
-        body = cls(http_response.stream)
-        http_response.stream = body
-        return body
+def _read_timed_out(exc: Exception) -> bool:
+    """Whether a provider read timed out; the SDK raises it as ``APITimeoutError``."""
+    cause = exc.__cause__ if isinstance(exc, APITimeoutError) else exc
+    return isinstance(cause, httpx2.ReadTimeout)
 
 
 class TextDelta(BaseModel):
@@ -302,7 +245,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.audio_history_turns = max(0, audio_history_turns)
         self.reasoning_effort = reasoning_effort
         self.request_timeout_s = float(request_timeout_s)
-        self.request_timeout = httpx.Timeout(
+        self.request_timeout = httpx2.Timeout(
             self.request_timeout_s,
             connect=min(10.0, self.request_timeout_s),
         )
@@ -545,16 +488,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if self._async_client is None:
                 self._async_client = self._make_async_client()
             response = await request(client=self._async_client)
-            body = _ReusableStreamBody.install(response)
             async with response:
-                try:
-                    async for chunk in response:
-                        yield chunk
-                except BaseException:
-                    # Interrupted or failed: close now instead of reading on.
-                    if body is not None:
-                        body.abandon()
-                    raise
+                async for chunk in response:
+                    yield chunk
 
         chunks = stream_chunks()
 
@@ -1030,20 +966,21 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         generation_completed = yield from self._consume_nonstreaming(observed_events, state, turn)
             except _StreamInterrupted:
                 logger.info("LLM generation cancelled (interruption)")
-            except httpx.ReadTimeout:
-                logger.warning(
-                    "OpenAI API read timed out after %.1fs; ending the current response",
-                    self.request_timeout_s,
-                )
-                error_message = f"Language model generation timed out after {self.request_timeout_s:.1f}s."
             except Exception as exc:
-                # Any other generation failure must still terminate the response: record
+                # Any generation failure must still terminate the response: record
                 # the error and fall through to the EndOfResponse below. Without this the
                 # exception would escape process() and no EndOfResponse would be emitted,
                 # leaving st.in_response stuck and locking every subsequent response.
-                log_exception(logger, "LLM generation failed; ending the current response", exc)
-                if error_message is None:
-                    error_message = f"Language model generation failed: {exc}"
+                if _read_timed_out(exc):
+                    logger.warning(
+                        "OpenAI API read timed out after %.1fs; ending the current response",
+                        self.request_timeout_s,
+                    )
+                    error_message = f"Language model generation timed out after {self.request_timeout_s:.1f}s."
+                else:
+                    log_exception(logger, "LLM generation failed; ending the current response", exc)
+                    if error_message is None:
+                        error_message = f"Language model generation failed: {exc}"
             finally:
                 self._close_response(events)
                 self._close_response(api_response)
