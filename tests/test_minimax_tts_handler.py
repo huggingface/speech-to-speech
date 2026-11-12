@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import struct
 from contextlib import contextmanager
 from queue import Queue
 from threading import Event, Thread
@@ -22,6 +23,8 @@ from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.s2s_pipeline import parse_arguments, prepare_all_args
 from speech_to_speech.TTS.minimax_tts_handler import MiniMaxTTSHandler
 from tests.turns import reopen
+
+CRLF = bytes((13, 10))
 
 
 def _handler(**kwargs):
@@ -93,6 +96,11 @@ def _streaming_endpoint(initial):
                         return
                 except socket.timeout:
                     continue
+                except ConnectionError:
+                    # An abortive close (RST) arrives as an error rather than a
+                    # zero-length read; both mean the client is gone.
+                    closed.set()
+                    return
             final = _event(status=2)
             try:
                 connection.sendall(f"{len(final):x}\r\n".encode() + final + b"\r\n0\r\n\r\n")
@@ -115,6 +123,36 @@ def test_requires_minimax_key_and_does_not_fall_back_to_openai(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "wrong-provider-key")
     with pytest.raises(ValueError, match="MINIMAX_API_KEY"):
         _handler(api_key=None)
+
+
+def test_streaming_endpoint_reports_abortive_client_close():
+    """A client that aborts the connection must still be seen as closed.
+
+    The fixture used to treat only a zero-length read as a close. A client that
+    leaves the response body unread and then closes makes the kernel send RST, so
+    `recv` raises ConnectionError instead and `closed` was never set, which is the
+    intermittent failure reported in #802.
+    """
+    with _streaming_endpoint(_event(np.arange(512, dtype="<i2").tobytes())) as (base_url, sent, closed, _release):
+        host, port = base_url.removeprefix("http://").split(":")
+        client = socket.create_connection((host, int(port)), timeout=2)
+        request = [
+            b"POST /v1/t2a_v2 HTTP/1.1",
+            b"Host: localhost",
+            b"Content-Length: 0",
+            b"",
+            b"",
+        ]
+        client.sendall(CRLF.join(request))
+
+        try:
+            assert client.recv(1024)  # response headers; the body stays unread
+            assert sent.wait(2)
+        finally:
+            # Unread body data plus SO_LINGER=0 makes the close abortive (RST).
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            client.close()
+        assert closed.wait(2)
 
 
 def test_environment_key_and_explicit_override(monkeypatch):
