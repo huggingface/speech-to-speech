@@ -15,7 +15,14 @@ from urllib.parse import urlparse
 
 import httpx2
 from nltk import sent_tokenize
-from openai import APITimeoutError, AsyncOpenAI, OpenAI
+from openai import (
+    DEFAULT_CONNECTION_LIMITS,
+    APITimeoutError,
+    AsyncOpenAI,
+    DefaultAsyncHttpx2Client,
+    DefaultHttpx2Client,
+    OpenAI,
+)
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemAssistantMessage,
     RealtimeConversationItemFunctionCall,
@@ -75,6 +82,18 @@ PREFETCH_PROVIDER_WORKER_LIMIT = 1
 PREFETCH_STREAM_QUEUE_MAXSIZE = 16
 PREFETCH_WORKER_ACQUIRE_TIMEOUT_S = 0.05
 PROVIDER_FAILURE_FALLBACK = "I'm having trouble responding right now. Please try again."
+# How long an idle provider connection stays open for the next request. The
+# SDK's 5 s is shorter than the pause between two turns of a conversation, so
+# every turn would open a new connection.
+KEEPALIVE_EXPIRY_S = 60.0
+
+
+def _connection_limits() -> httpx2.Limits:
+    return httpx2.Limits(
+        max_connections=DEFAULT_CONNECTION_LIMITS.max_connections,
+        max_keepalive_connections=DEFAULT_CONNECTION_LIMITS.max_keepalive_connections,
+        keepalive_expiry=KEEPALIVE_EXPIRY_S,
+    )
 
 
 # ── Normalised provider events ────────────────────────────────────────────────
@@ -258,7 +277,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             and self._is_local_base_url(base_url)
         ):
             api_key = "none"
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            http_client=DefaultHttpx2Client(limits=_connection_limits()),
+        )
         self._async_runner: asyncio.Runner | None = None
         self._async_client: AsyncOpenAI | None = None
         self._extra_body = self._build_extra_body(base_url, disable_thinking, reasoning_effort)
@@ -474,20 +497,43 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             organization=self.client.organization,
             project=self.client.project,
             max_retries=self.client.max_retries,
+            http_client=DefaultAsyncHttpx2Client(limits=_connection_limits()),
         )
 
-    def _iter_stream_chunks_interruptibly(self, request: Callable[..., Any], turn: _Turn) -> Iterator[Any]:
-        """Advance async provider reads on the serial handler's persistent loop."""
+    def _async_loop(self) -> asyncio.AbstractEventLoop:
         if self._async_runner is None:
             # Keep this private loop out of the calling thread's event-loop policy.
             self._async_runner = asyncio.Runner(loop_factory=asyncio.new_event_loop)
-        loop = self._async_runner.get_loop()
+        return self._async_runner.get_loop()
+
+    def _streaming_client(self) -> AsyncOpenAI:
+        if self._async_client is None:
+            self._async_client = self._make_async_client()
+        return self._async_client
+
+    def _send_warmup(self, send: Callable[[Any], Any]) -> None:
+        """Send the warmup request on the client that will serve turns.
+
+        Streamed turns use the async client. Warming that one builds it and its
+        TLS context before the first turn, and leaves a connection the turn can
+        reuse if it follows within ``KEEPALIVE_EXPIRY_S``.
+        """
+        if not self.stream:
+            send(self.client.with_options(max_retries=WARMUP_MAX_RETRIES))
+            return
+
+        async def warm() -> None:
+            await send(self._streaming_client().with_options(max_retries=WARMUP_MAX_RETRIES))
+
+        self._async_loop().run_until_complete(warm())
+
+    def _iter_stream_chunks_interruptibly(self, request: Callable[..., Any], turn: _Turn) -> Iterator[Any]:
+        """Advance async provider reads on the serial handler's persistent loop."""
+        loop = self._async_loop()
         stopped = object()
 
         async def stream_chunks():
-            if self._async_client is None:
-                self._async_client = self._make_async_client()
-            response = await request(client=self._async_client)
+            response = await request(client=self._streaming_client())
             async with response:
                 async for chunk in response:
                     yield chunk

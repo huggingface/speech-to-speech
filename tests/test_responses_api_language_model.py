@@ -1154,7 +1154,7 @@ def test_setup_uses_dummy_api_key_for_custom_base_url(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     class FakeOpenAI:
-        def __init__(self, *, api_key, base_url):
+        def __init__(self, *, api_key, base_url, http_client):
             captured["api_key"] = api_key
             captured["base_url"] = base_url
 
@@ -1175,7 +1175,7 @@ def test_setup_preserves_environment_api_key_for_custom_base_url(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "secret-from-environment")
 
     class FakeOpenAI:
-        def __init__(self, *, api_key, base_url):
+        def __init__(self, *, api_key, base_url, http_client):
             captured["api_key"] = api_key
             captured["base_url"] = base_url
 
@@ -1196,7 +1196,7 @@ def test_setup_does_not_inject_dummy_key_for_remote_custom_url(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     class FakeOpenAI:
-        def __init__(self, *, api_key, base_url):
+        def __init__(self, *, api_key, base_url, http_client):
             captured["api_key"] = api_key
             captured["base_url"] = base_url
 

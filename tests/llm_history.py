@@ -55,6 +55,8 @@ def mock_async_client(handler):
     _async_runners.append(handler._async_runner)
     client = MagicMock()
     client.close = AsyncMock()
+    # Request-scoped options apply to the synchronous fake the calls end up on.
+    client.with_options.side_effect = lambda **options: (handler.client.with_options(**options), client)[1]
     for path in (("responses",), ("chat", "completions")):
 
         async def create(*args, _path=path, **kwargs):

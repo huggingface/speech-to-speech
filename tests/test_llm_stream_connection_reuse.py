@@ -4,6 +4,8 @@ The provider is a real server so the tests see what the HTTP client does with
 the connection and what the SDK raises. openai before 3.30 stopped reading at
 ``data: [DONE]``, before the end of the chunked body, and the connection was
 dropped instead of reused; every streamed turn then paid a new handshake.
+The SDK also closes a connection that has been idle for 5 s, which is shorter
+than the pause between two turns of a conversation.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ import pytest
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.realtime.realtime_session_create_request import RealtimeSessionCreateRequest
 
+import speech_to_speech.LLM.base_openai_compatible_language_model as base_mod
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.LLM.chat_completions_language_model import ChatCompletionsApiModelHandler
@@ -81,6 +84,29 @@ def _responses_events() -> list[bytes]:
     return [_sse({**event, "sequence_number": i}, event=event["type"]) for i, event in enumerate(events)]
 
 
+def _plain_reply(path: str) -> dict:
+    """The non-streamed reply to a warmup request."""
+    if path.endswith("/responses"):
+        return {
+            "id": "resp_warmup",
+            "object": "response",
+            "created_at": 0,
+            "model": "fake",
+            "status": "completed",
+            "output": [],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+    return {
+        "id": "chatcmpl-warmup",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "fake",
+        "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "Hi."}}],
+    }
+
+
 BACKENDS = [
     pytest.param(ChatCompletionsApiModelHandler, _chat_events(), id="chat-completions"),
     pytest.param(ResponsesApiModelHandler, _responses_events(), id="responses"),
@@ -88,14 +114,24 @@ BACKENDS = [
 
 
 class _Provider:
-    """Stream ``events`` as a chunked SSE body that ends with ``[DONE]``."""
+    """Stream ``events`` as a chunked SSE body that ends with ``[DONE]``.
 
-    def __init__(self, events: list[bytes], *, stall_before_done: threading.Event | None = None) -> None:
+    A request that does not ask for a stream, like the warmup, gets a JSON reply.
+    """
+
+    def __init__(
+        self,
+        events: list[bytes],
+        *,
+        stall_before_done: threading.Event | None = None,
+        idle_timeout_s: float | None = None,
+    ) -> None:
         self.connections: list[tuple[str, int]] = []
         provider = self
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
+            timeout = idle_timeout_s  # the server closes a connection idle for this long
 
             def log_message(self, *args):
                 pass
@@ -105,9 +141,16 @@ class _Provider:
                 self.wfile.flush()
 
             def do_POST(self):
-                self.rfile.read(int(self.headers["Content-Length"]))
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 provider.connections.append(self.client_address)
                 self.send_response(200)
+                if not body.get("stream"):
+                    reply = json.dumps(_plain_reply(self.path)).encode()
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(reply)))
+                    self.end_headers()
+                    self.wfile.write(reply)
+                    return
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Transfer-Encoding", "chunked")
                 self.end_headers()
@@ -135,8 +178,9 @@ class _Provider:
         self._thread.join()
 
 
-def _handler(handler_cls, provider: _Provider, monkeypatch):
-    monkeypatch.setattr(handler_cls, "warmup", lambda self: None)
+def _handler(handler_cls, provider: _Provider, monkeypatch, *, warmup: bool = False):
+    if not warmup:
+        monkeypatch.setattr(handler_cls, "warmup", lambda self: None)
     return handler_cls(
         threading.Event(),
         queue.Queue(),
@@ -169,6 +213,56 @@ def test_streamed_turns_reuse_one_connection(handler_cls, events, monkeypatch):
             assert outputs[-1].error is None
         assert len(provider.connections) == 4
         assert len(set(provider.connections)) == 1, "each streamed turn opened a new connection"
+    finally:
+        handler.cleanup()
+        provider.close()
+
+
+@pytest.mark.parametrize(("handler_cls", "events"), BACKENDS)
+def test_first_streamed_turn_reuses_the_warmup_connection(handler_cls, events, monkeypatch):
+    provider = _Provider(events)
+    handler = _handler(handler_cls, provider, monkeypatch, warmup=True)
+    try:
+        outputs = list(drive_llm(handler, _request(0)))
+        assert outputs[-1].error is None
+        assert len(provider.connections) == 2, "expected the warmup and one turn"
+        assert len(set(provider.connections)) == 1, "the first turn opened its own connection"
+    finally:
+        handler.cleanup()
+        provider.close()
+
+
+def test_clients_keep_idle_connections_for_the_pause_between_turns(monkeypatch):
+    seen = []
+    for name in ("DefaultHttpx2Client", "DefaultAsyncHttpx2Client"):
+        make_client = getattr(base_mod, name)
+        monkeypatch.setattr(
+            base_mod, name, lambda *, limits, _make=make_client: seen.append(limits) or _make(limits=limits)
+        )
+    provider = _Provider(_chat_events())
+    handler = _handler(ChatCompletionsApiModelHandler, provider, monkeypatch, warmup=True)
+    try:
+        assert [limits.keepalive_expiry for limits in seen] == [base_mod.KEEPALIVE_EXPIRY_S] * 2
+        # Turns of a spoken conversation are usually more than the SDK's 5 s apart.
+        assert base_mod.KEEPALIVE_EXPIRY_S >= 30
+    finally:
+        handler.cleanup()
+        provider.close()
+
+
+@pytest.mark.parametrize(("handler_cls", "events"), BACKENDS)
+def test_turn_after_the_provider_closed_the_idle_connection_succeeds(handler_cls, events, monkeypatch):
+    # vLLM, for one, closes a connection that has been idle for 5 s.
+    provider = _Provider(events, idle_timeout_s=0.2)
+    handler = _handler(handler_cls, provider, monkeypatch)
+    try:
+        for turn in range(2):
+            if turn:
+                time.sleep(0.6)
+            outputs = list(drive_llm(handler, _request(turn)))
+            assert "".join(o.text for o in outputs if isinstance(o, LLMResponseChunk)) == REPLY
+            assert outputs[-1].error is None
+        assert len(set(provider.connections)) == 2
     finally:
         handler.cleanup()
         provider.close()
