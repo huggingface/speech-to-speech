@@ -81,7 +81,8 @@ flowchart LR
 | `input_audio_buffer.append` | Stream base64 PCM audio. Decoded, resampled to 16 kHz, and chunked for the VAD. |
 | `session.update` | Deep-merge session config (instructions, tools, voice, turn detection, audio format, reasoning effort). |
 | `conversation.item.create` | Inject `input_text` or `function_call_output` into the LLM context without triggering generation. |
-| `conversation.item.truncate` | Accepted for stock WebSocket SDK interruption. Playback is client-owned, while an explicit `response.cancel` or automatic server-VAD cancellation already discards provisional generation, so this is an acknowledgement-free no-op. |
+| `conversation.item.truncate` | Cuts the assistant item's history to the transcript heard before `audio_end_ms` (see [Interrupted replies](#interrupted-replies)). No `conversation.item.truncated` acknowledgement is sent. |
+| `conversation.item.retrieve` | Return the server's current copy of a user, assistant, or function item the client has seen. Speech transcribed by the STT stage comes back as `input_audio` with the transcript the client was sent and no audio bytes. An assistant item keeps the shape it was delivered in, during and after its response: `output_audio` with a transcript for audio replies, `output_text` for text replies. Unknown IDs get an `error` with type `conversation_item_not_found`. |
 | `response.create` | Trigger LLM generation. Supports per-response `instructions`, `tool_choice`, and `reasoning` overrides. |
 | `response.cancel` | Cancel the in-progress or queued response and re-enable listening. |
 
@@ -95,6 +96,7 @@ flowchart LR
 | `input_audio_buffer.speech_started` | VAD detected user speech. |
 | `input_audio_buffer.speech_stopped` | End of user speech segment. |
 | `conversation.item.created` | Acknowledges injected `input_text` from `conversation.item.create`. |
+| `conversation.item.retrieved` | Answers `conversation.item.retrieve` with the full item. |
 | `conversation.item.input_audio_transcription.delta` | Incremental transcript text for the active input-audio content part (when live transcription is enabled). |
 | `conversation.item.input_audio_transcription.completed` | Final transcript for the user turn (with duration usage). |
 | `speech_to_speech.input_audio_transcription.snapshot` | Cumulative, replaceable speculative transcript hypothesis for the active input item (opt-in via `session.extensions`). |
@@ -206,7 +208,7 @@ uv run pytest tests/test_provider_response_status.py -q
 
 ### Official Agents SDK compatibility
 
-CI pins `@openai/agents` 0.14.3 and runs independent integration jobs against
+CI pins `@openai/agents` 0.21.0 and runs independent integration jobs against
 the SDK's stock `OpenAIRealtimeWebSocket` and `OpenAIRealtimeWebRTC`
 transports. Both use a normal `RealtimeSession` with only its endpoint URL
 changed.
@@ -217,7 +219,7 @@ changed.
 | Microphone input | `input_audio_buffer.append` | RTP audio track |
 | Assistant audio | `response.output_audio.delta` | RTP audio track |
 | Input and output transcription events | ✅ | ✅ |
-| Explicit cancellation | `response.cancel` + accepted `conversation.item.truncate` | `response.cancel` + `output_audio_buffer.clear` |
+| Explicit cancellation | `response.cancel` + `conversation.item.truncate` | `response.cancel` + `output_audio_buffer.clear` |
 | Server-VAD barge-in | `speech_started` cancels with `turn_detected`; adapter clears local PCM playback | `speech_started` cancels with `turn_detected`; server clears pending RTP audio |
 | Function call execution, output submission, and follow-up response | ✅ | ✅ |
 
@@ -226,11 +228,68 @@ Unlisted events, hosted features, and every future SDK behavior are not implied
 to be supported. The browser demo uses the same stock transports through a
 narrow adapter; its lower-level transport hooks only feed visualization,
 WebSocket PCM playback/replay, and existing UI events. One pinned-SDK gap is
-handled there as well: `@openai/agents` 0.14.3 omits `tools` when the updated
+handled there as well: `@openai/agents` 0.21.0 still omits `tools` when the updated
 list is empty, so the adapter uses the stock transport's `sendEvent` hook for
 an explicit `session.update` with `tools: []`. HF queueing, authentication,
 metering, camera capture, and device selection remain outside the Realtime
 protocol layer. No custom SDK transport is used.
+
+### Interrupted replies
+
+Model history keeps only the assistant speech the user heard, so the next
+response does not assume an interrupted explanation was delivered.
+
+- A cancelled audio response keeps only the transcript of the audio already
+  sent to the client. Text whose audio was never synthesized is dropped. If the
+  last segment was still being synthesized, its full duration is estimated from
+  the session's measured speaking rate, or 12 characters per second before one
+  is measured. With no audio sent, no assistant message is kept.
+- Over WebSocket, the server estimates playback: it assumes the client plays
+  each audio chunk in real time from the moment it is sent. On server-VAD
+  barge-in with `interrupt_response` enabled, and on `response.cancel`, audio
+  sent but not yet played by that estimate is removed from the newest assistant
+  items. This covers clients that only flush their player and never send
+  `conversation.item.truncate`. The estimate assumes the client stops playback
+  at that point. It ignores network delay and the client's startup buffering
+  and output latency, so it can count a little more as heard than actually
+  played. A client that keeps playing after those events loses heard speech
+  from history instead.
+- A client that tracks playback can report its position with
+  `conversation.item.truncate`. The position is measured against the item's
+  original audio and replaces the server's estimate, so it can also restore
+  words the estimate removed, or the whole item in its original place. An item
+  the client deleted with `conversation.item.delete` stays deleted. The
+  browser demo, the packaged `local`/`talk` client, and the stock Agents SDK
+  WebSocket transport from 0.20.0 (0.21.0 is pinned here) send it. The
+  packaged client then sends `conversation.item.retrieve` and shows the heard
+  text in the terminal, redrawing the interrupted line when it is still the
+  last one. Earlier SDK
+  versions reset their playback position at `response.output_audio.done`,
+  which this server sends before `input_audio_buffer.speech_started` on
+  server-VAD barge-in. They then send no truncate and emit no
+  `audio_interrupted`, so apps that flush their player on that event keep
+  playing the cancelled reply while its history is cut by the estimate.
+- WebRTC playback is paced by the server. When barge-in, `response.cancel`, or
+  `output_audio_buffer.clear` discards queued RTP audio, the discarded duration
+  is removed from the newest assistant items. On barge-in this happens before
+  `input_audio_buffer.speech_started` is sent, so a client that then retrieves
+  the reply sees the cut. Send `response.cancel` before
+  `output_audio_buffer.clear`: a clear alone leaves the active reply's history
+  untouched.
+- An item cut this way becomes `incomplete` and its text is the heard prefix. No
+  marker is added to the text. An item with no heard audio is removed from
+  model history, but, as after a truncation to 0 ms, it still exists:
+  `conversation.item.retrieve` returns it `incomplete` with an empty transcript,
+  and `conversation.item.delete` removes it for good. Replies that play to the
+  end are unchanged.
+
+The server records each transcript part with the audio synthesized after it.
+Parts whose audio played completely are kept. In the part playing at the cutoff,
+words are kept in proportion to its played audio, by characters, and only when
+they fit completely. A segment can hold several sentences, because the LLM
+batches sentences for TTS. Timing is therefore approximate within one segment,
+and errs toward dropping a partly heard word. Truncation of an item whose response
+is still in progress is ignored; cancel the response first.
 
 ### Input transcription semantics
 
@@ -511,6 +570,37 @@ OpenAI documents `minimal`, `low`, `medium`, `high`, and `xhigh`. This server ad
 - `"reasoning": null` in `session.update` clears the client's choice and restores the server's startup setting. A partial object such as `"reasoning": {}` keeps the current effort.
 
 Other values return an `invalid_request_error`. When the client sets no effort, the startup flags (`--responses_api_reasoning_effort`, `--responses_api_disable_thinking`) apply unchanged. A client effort is sent as `reasoning.effort` on Responses requests and as `reasoning_effort` on Chat Completions requests, and it replaces the startup `chat_template_kwargs.enable_thinking=false` for that request. The local transformers/mlx-lm backend ignores it.
+
+### Reading provider reasoning
+
+Clients can also opt in to readable provider reasoning by including
+`"speech_to_speech.reasoning.delta"` in the session's `extensions` array. The
+server emits this extension over either transport:
+
+```json
+{"type":"speech_to_speech.reasoning.delta","event_id":"evt_1","response_id":"resp_1","kind":"reasoning","delta":"Compare the choices first."}
+```
+
+`kind` is `reasoning` for provider-exposed reasoning text and `summary` for a
+provider reasoning summary. Deltas belong to `response_id`. On every setup,
+the LLM handler collects readable reasoning and attaches it to the first
+answer-text or tool-call chunk. The extension events arrive after
+`response.created` and before the answer/tool output they accompany. Responses
+with neither deliver reasoning with their normal completion, before
+`response.done`. Any readable text supplied late by the provider is also
+included at completion. Reasoning tokens are not streamed live.
+
+Reasoning is separate from answer transcripts, output items, synthesized
+speech, and client-visible history. Chat Completions reads the provider's
+`reasoning_content` or string `reasoning` field. Responses reads reasoning
+text/summary deltas and readable completed reasoning parts without repeating
+text already collected. Nothing is emitted for encrypted-only reasoning or
+providers that do not expose text.
+
+Reasoning alone never commits a turn or closes its reopen window: the server
+only receives reasoning alongside output that already commits the turn, or at
+the normal response terminal. Reasoning from cancelled or superseded
+generations is discarded by the existing generation and speculative-turn gates.
 
 ---
 

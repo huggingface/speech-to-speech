@@ -47,7 +47,8 @@ from speech_to_speech.pipeline.messages import (
     TokenUsage,
 )
 from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
-from tests.llm_history import drive_llm
+from tests.llm_history import close_llm_runners as close_llm_runners
+from tests.llm_history import drive_llm, mock_async_client
 
 
 def _make_text_delta_event(text):
@@ -233,6 +234,10 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None, rea
     )
     handler._prefetch_workers_lock = Lock()
     handler._prefetch_workers = set()
+    handler.stop_event = Event()
+    handler._async_runner = None
+    handler._async_client = None
+    handler._make_async_client = lambda: mock_async_client(handler)
     return handler
 
 
@@ -1943,3 +1948,36 @@ def test_responses_backend_keeps_injected_context_with_session_instructions():
         assert prompt.count("CURRENT CHAT SNAPSHOT") == 1
         assert request.runtime_config.chat.init_chat_message is snapshot
         assert snapshot.content[0].text == "CURRENT CHAT SNAPSHOT"
+
+
+@pytest.mark.parametrize("effort", [None, ""])
+def test_unset_reasoning_effort_is_not_sent_in_the_request(effort):
+    """Models without reasoning support (gpt-4.1) reject reasoning.effort, so an empty value omits it."""
+    handler = _make_handler(disable_thinking=True, reasoning_effort=effort)
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _make_stream([_make_text_delta_event("Ok"), _make_output_item_done_event(content="Ok")])
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+
+    list(handler.process(_make_request("Hi")))
+
+    assert "reasoning" not in captured
+    assert captured["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def test_set_reasoning_effort_is_still_sent_in_the_request():
+    handler = _make_handler(reasoning_effort="low")
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _make_stream([_make_text_delta_event("Ok"), _make_output_item_done_event(content="Ok")])
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+
+    list(handler.process(_make_request("Hi")))
+
+    assert captured["reasoning"] == {"effort": "low"}

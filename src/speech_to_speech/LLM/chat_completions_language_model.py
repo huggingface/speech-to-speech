@@ -30,6 +30,7 @@ from speech_to_speech.LLM.base_openai_compatible_language_model import (
     BaseOpenAICompatibleHandler,
     ProviderEvent,
     ProviderResponseEnd,
+    ReasoningDelta,
     TextDelta,
     ToolCall,
     Usage,
@@ -39,6 +40,16 @@ from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn
 from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
+
+
+def _chat_reasoning_text(message: Any) -> str | None:
+    # Compatible providers use either name. Never interpret opaque objects or
+    # encrypted provider payloads as readable reasoning.
+    for name in ("reasoning_content", "reasoning"):
+        text = getattr(message, name, None)
+        if isinstance(text, str) and text:
+            return text
+    return None
 
 
 def _to_chat_tools(req_tools: Any) -> list[ChatCompletionToolParam] | None:
@@ -263,6 +274,9 @@ def _iter_chat_stream_events(api_response: Stream[ChatCompletionChunk]) -> Itera
             ending = _chat_response_end(finish_reason)
             yield ending
         delta = chunk.choices[0].delta
+        reasoning = _chat_reasoning_text(delta)
+        if reasoning:
+            yield ReasoningDelta(text=reasoning)
         text_piece = delta.content or getattr(delta, "refusal", None)
         continuing_tool = bool(tool_accum)
         if continuing_tool:
@@ -297,6 +311,9 @@ def _iter_chat_response_events(api_response: Any) -> Iterator[ProviderEvent]:
     message = api_response.choices[0].message if api_response.choices else None
     if message is None:
         return
+    reasoning = _chat_reasoning_text(message)
+    if reasoning:
+        yield ReasoningDelta(text=reasoning)
     raw_content = message.content or getattr(message, "refusal", None)
     if raw_content:
         yield AssistantMessage(content=[AssistantContent(type="output_text", text=raw_content)])
@@ -385,9 +402,9 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
     ) -> dict[str, Any]:
         return _build_chat_optional_kwargs(req_tools, req_tool_choice, reasoning_effort)
 
-    def _request(self, api_input: list[dict[str, Any]], optional_kwargs: dict[str, Any]) -> Any:
+    def _request(self, api_input: list[dict[str, Any]], optional_kwargs: dict[str, Any], *, client: Any = None) -> Any:
         return _request_chat_completions(
-            client=self.client,
+            client=client or self.client,
             model_name=self.model_name,
             messages=api_input,
             stream=self.stream,

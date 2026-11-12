@@ -16,6 +16,7 @@ import multiprocessing
 import signal
 import sys
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, field
@@ -29,6 +30,7 @@ from urllib.parse import urlsplit, urlunsplit
 from jsonschema import SchemaError, ValidationError
 from jsonschema.validators import validator_for
 from openai import AsyncOpenAI
+from rich.cells import cell_len
 from rich.console import Console
 from websockets.exceptions import ConnectionClosed
 
@@ -244,10 +246,25 @@ def build_session_update(config: RealtimeAudioClientConfig) -> dict[str, Any]:
     return {"type": "session.update", "session": session}
 
 
-class PlaybackBuffer:
-    """Thread-safe audio state shared by the Realtime loop and sounddevice callbacks."""
+_AudioItem = tuple[str, int]
+# Assistant audio cut off by an interruption: (item_id, content_index, played ms).
+_PlaybackTruncation = tuple[str, int, int]
 
-    def __init__(self, recv_rate: int, startup_buffer_ms: float = _PLAYBACK_START_BUFFER_MS) -> None:
+
+class PlaybackBuffer:
+    """Thread-safe audio state shared by the Realtime loop and sounddevice callbacks.
+
+    Audio appended with its assistant item is tracked through playback. When
+    ``clear()`` discards an item's unplayed audio, ``on_interrupted`` receives
+    how much of that item played so the server can truncate its history.
+    """
+
+    def __init__(
+        self,
+        recv_rate: int,
+        startup_buffer_ms: float = _PLAYBACK_START_BUFFER_MS,
+        on_interrupted: Callable[[list[_PlaybackTruncation]], None] | None = None,
+    ) -> None:
         if recv_rate <= 0:
             raise ValueError("recv_rate must be positive")
         if not 0 <= startup_buffer_ms < float("inf"):
@@ -260,6 +277,10 @@ class PlaybackBuffer:
         self._active_until = 0.0
         self._playing = False
         self._input_complete = False
+        self._on_interrupted = on_interrupted
+        # Queued bytes per item, in playback order, and bytes already played.
+        self._queued_items: deque[list[Any]] = deque()
+        self._played_bytes: dict[_AudioItem, int] = {}
 
     def clear(self) -> None:
         with self._lock:
@@ -267,8 +288,21 @@ class PlaybackBuffer:
             self._audio.clear()
             self._playing = False
             self._input_complete = False
+            interrupted = dict.fromkeys(item for item, _ in self._queued_items if item is not None)
+            truncations = [
+                (
+                    item_id,
+                    content_index,
+                    self._played_bytes.get((item_id, content_index), 0) * 1000 // (2 * self.recv_rate),
+                )
+                for item_id, content_index in interrupted
+            ]
+            self._queued_items.clear()
+            self._played_bytes.clear()
+        if truncations and self._on_interrupted is not None:
+            self._on_interrupted(truncations)
 
-    def append(self, audio: bytes) -> None:
+    def append(self, audio: bytes, item: _AudioItem | None = None) -> None:
         if not audio:
             return
         with self._lock:
@@ -276,6 +310,14 @@ class PlaybackBuffer:
                 self._playing = False
             self._input_complete = False
             self._audio.extend(audio)
+            if self._queued_items and self._queued_items[-1][0] == item:
+                self._queued_items[-1][1] += len(audio)
+            else:
+                # Audio items arrive one after another, so an item that is
+                # neither queued nor receiving this audio has finished playing.
+                queued = {entry[0] for entry in self._queued_items}
+                self._played_bytes = {key: n for key, n in self._played_bytes.items() if key in queued or key == item}
+                self._queued_items.append([item, len(audio)])
             self._active_until = time.monotonic() + max(0.15, len(audio) / (2 * self.recv_rate))
 
     def finish(self) -> None:
@@ -301,16 +343,56 @@ class PlaybackBuffer:
             if available:
                 outdata[:available] = self._audio[:available]
                 del self._audio[:available]
+                self._mark_played(available)
             if available < needed:
                 outdata[available:] = b"\x00" * (needed - available)
                 self._playing = False
             if not self._audio and self._input_complete:
                 self._playing = False
 
+    def _mark_played(self, played: int) -> None:
+        """Attribute bytes just rendered to their queued items; caller holds the lock."""
+        while played and self._queued_items:
+            entry = self._queued_items[0]
+            count = min(played, entry[1])
+            entry[1] -= count
+            played -= count
+            if entry[0] is not None:
+                self._played_bytes[entry[0]] = self._played_bytes.get(entry[0], 0) + count
+            if entry[1] == 0:
+                self._queued_items.popleft()
+
     @property
     def buffered_bytes(self) -> int:
         with self._lock:
             return len(self._audio)
+
+
+# Retrieve requests the client sends to learn what an interrupted reply left in history.
+_HEARD_TEXT_EVENT_PREFIX = "heard_text_"
+# Assistant lines remembered for comparison with their heard text.
+_ASSISTANT_LINE_HISTORY = 32
+
+
+class _AssistantLineGuard(logging.Handler):
+    """Note that log output followed the last assistant line."""
+
+    def __init__(self, renderer: _FriendlyEventRenderer) -> None:
+        super().__init__()
+        self._renderer = renderer
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self._renderer.last_assistant_line = None
+
+
+def _heard_text_event_id(item_id: str) -> str:
+    return f"{_HEARD_TEXT_EVENT_PREFIX}{item_id}"
+
+
+def _assistant_item_text(item: Any) -> str:
+    """Join an assistant item's transcript or text parts the way they streamed."""
+    parts = (getattr(part, "transcript", None) or getattr(part, "text", None) for part in item.content or [])
+    return " ".join(part.strip() for part in parts if part and part.strip())
 
 
 class _FriendlyEventRenderer:
@@ -327,11 +409,16 @@ class _FriendlyEventRenderer:
         self.streamed_assistant_transcripts: set[_AssistantTranscriptStream] = set()
         self.status = ""
         self.status_visible = False
+        self.live_assistant_text = ""
+        self.assistant_text_by_item: dict[str, str] = {}
+        # (item id, terminal rows) of an assistant line when it is the last output.
+        self.last_assistant_line: tuple[str, int] | None = None
 
     def print_conversation(self, text: str, *, style: str, end: str = "\n") -> None:
+        self.last_assistant_line = None
         self._clear_status()
         if self.conversation_only:
-            self.console.print(text, style=style, end=end, markup=False, highlight=False, soft_wrap=True)
+            self.console.print(text, style=style, end=end, markup=False, emoji=False, highlight=False, soft_wrap=True)
         else:
             print(text, end=end, flush=True)
         if end == "\n":
@@ -411,8 +498,10 @@ class _FriendlyEventRenderer:
                 return
             self.print_conversation("ASSISTANT: ", style="green", end="")
             self.live_assistant_stream = stream_key
+            self.live_assistant_text = ""
         self.streamed_assistant_transcripts.add(stream_key)
         self.print_conversation(delta, style="green", end="")
+        self.live_assistant_text += delta
 
     def render_assistant_text_done(self, event: Any) -> None:
         stream_key = self._assistant_stream_key(event)
@@ -423,12 +512,48 @@ class _FriendlyEventRenderer:
             return
         self.clear_live_user_text()
         self.finish_live_assistant_text()
-        self.print_conversation(f"ASSISTANT: {event.transcript or ''}", style="green")
+        transcript = event.transcript or ""
+        self.print_conversation(f"ASSISTANT: {transcript}", style="green")
+        self._remember_assistant_line(getattr(event, "item_id", None), transcript)
 
     def finish_live_assistant_text(self) -> None:
         if self.live_assistant_stream is not None:
+            item_id = self.live_assistant_stream[1]
             self.live_assistant_stream = None
             self.print_conversation("", style="green")
+            self._remember_assistant_line(item_id, self.live_assistant_text)
+            self.live_assistant_text = ""
+
+    def _remember_assistant_line(self, item_id: str | None, text: str) -> None:
+        if item_id is None:
+            return
+        self.assistant_text_by_item.pop(item_id, None)
+        self.assistant_text_by_item[item_id] = text
+        while len(self.assistant_text_by_item) > _ASSISTANT_LINE_HISTORY:
+            self.assistant_text_by_item.pop(next(iter(self.assistant_text_by_item)))
+        width = max(1, self.console.width)
+        rows = sum(max(1, -(-cell_len(row.expandtabs(8)) // width)) for row in f"ASSISTANT: {text}".split("\n"))
+        self.last_assistant_line = (item_id, rows)
+
+    def render_heard_assistant_text(self, item_id: str, heard: str) -> None:
+        """Show the part of an interrupted reply that the model history kept.
+
+        The reply's line is redrawn in place while it is still the last line on
+        a terminal; otherwise the heard text is printed as a new line.
+        """
+        shown = self.assistant_text_by_item.get(item_id)
+        if shown is not None and " ".join(shown.split()) == " ".join(heard.split()):
+            return
+        self.clear_live_user_text()
+        self.finish_live_assistant_text()
+        last = self.last_assistant_line
+        if self.conversation_only and self.console.is_terminal and last is not None and last[0] == item_id:
+            self._clear_status()
+            self.console.file.write(f"\x1b[{last[1]}F\x1b[J")
+            self.console.file.flush()
+        self.assistant_text_by_item.pop(item_id, None)
+        line = f"ASSISTANT: {heard} [interrupted]" if heard else "ASSISTANT: [interrupted, nothing heard]"
+        self.print_conversation(line, style="green")
 
     def reset_assistant_text(self) -> None:
         self.finish_live_assistant_text()
@@ -453,6 +578,7 @@ def handle_server_event(
 
     if print_json:
         renderer.finish_live_assistant_text()
+        renderer.last_assistant_line = None
         try:
             print(f"EVENT: {event.model_dump_json()}", flush=True)
         except Exception:
@@ -532,7 +658,9 @@ def handle_server_event(
     elif event.type in {"response.output_item.added", "response.output_item.done"}:
         return
     elif event.type == "response.output_audio.delta":
-        playback.append(base64.b64decode(event.delta))
+        item_id = getattr(event, "item_id", None)
+        item = (item_id, getattr(event, "content_index", 0)) if item_id is not None else None
+        playback.append(base64.b64decode(event.delta), item)
     elif event.type == "response.output_audio.done":
         playback.finish()
         renderer.finish_live_assistant_text()
@@ -561,6 +689,19 @@ def handle_server_event(
             renderer.print_conversation(f"ERROR: response {event.response.status}", style="red")
     elif event.type == "output_audio_buffer.cleared":
         playback.clear()
+    elif event.type == "conversation.item.retrieved":
+        item = event.item
+        # Only a cut item carries heard text; a reply still generating or one
+        # that played to the end keeps the transcript already shown.
+        if getattr(item, "role", None) == "assistant" and item.id is not None and item.status == "incomplete":
+            renderer.render_heard_assistant_text(item.id, _assistant_item_text(item))
+    elif (
+        event.type == "error"
+        and event.error.type == "conversation_item_not_found"
+        and (getattr(event.error, "event_id", None) or "").startswith(_HEARD_TEXT_EVENT_PREFIX)
+    ):
+        # The interrupted reply was removed from history: none of it was heard.
+        renderer.render_heard_assistant_text(event.error.event_id.removeprefix(_HEARD_TEXT_EVENT_PREFIX), "")
     elif event.type == "error":
         renderer.clear_live_user_text()
         renderer.finish_live_assistant_text()
@@ -604,8 +745,14 @@ class _ToolCoordinatorError(RuntimeError):
 class _ToolCallCoordinator:
     """Execute declared tools without blocking event reception or racing responses."""
 
-    def __init__(self, conn: Any, config: RealtimeAudioClientConfig) -> None:
+    def __init__(
+        self,
+        conn: Any,
+        config: RealtimeAudioClientConfig,
+        report: Callable[[str], None] | None = None,
+    ) -> None:
         self._conn = conn
+        self._report = report or (lambda line: print(line, flush=True))
         self._executor = config.tool_executor
         self._tool_validators = _validate_tool_config(config.tools, self._executor)
         self._default_create_response = config.tool_response_create
@@ -721,7 +868,7 @@ class _ToolCallCoordinator:
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"
             log_exception(logger, f"Local tool {display_name} failed", exc, level=logging.DEBUG)
-            print(f"TOOL ERROR: {display_name} call_id={call_id}: {message}", flush=True)
+            self._report(f"TOOL ERROR: {display_name} call_id={call_id}: {message}")
             output = json.dumps({"error": message})
             create_response = True
         return _ToolExecutionResult(call_id=call_id, output=output, create_response=create_response)
@@ -794,7 +941,7 @@ class _ToolCallCoordinator:
     def _schedule_call(self, response_id: str, call: Any) -> None:
         call_id = getattr(call, "call_id", None)
         if not isinstance(call_id, str) or not call_id:
-            print("TOOL ERROR: received a call without call_id; cannot return an output", flush=True)
+            self._report("TOOL ERROR: received a call without call_id; cannot return an output")
             return
         batch = self._batch(response_id)
         if call_id in batch.call_ids:
@@ -1143,15 +1290,15 @@ class _PlaybackCommands:
     def __init__(self, commands: Any) -> None:
         self._commands = commands
 
-    def append(self, audio: bytes) -> None:
+    def append(self, audio: bytes, item: _AudioItem | None = None) -> None:
         if audio:
-            self._commands.put_nowait(("append", audio))
+            self._commands.put_nowait(("append", audio, item))
 
     def clear(self) -> None:
-        self._commands.put_nowait(("clear", b""))
+        self._commands.put_nowait(("clear", b"", None))
 
     def finish(self) -> None:
-        self._commands.put_nowait(("finish", b""))
+        self._commands.put_nowait(("finish", b"", None))
 
 
 def _run_audio_worker(
@@ -1161,23 +1308,25 @@ def _run_audio_worker(
     stop_event: Any,
     errors: Any,
     ready: Any,
+    truncations: Any,
 ) -> None:
     # The parent handles Ctrl-C and requests orderly stream shutdown.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     if stop_event.is_set():
         mic_queue.cancel_join_thread()
+        truncations.cancel_join_thread()
         errors.close()
         return
-    playback = PlaybackBuffer(config.recv_rate, config.playback_buffer_ms)
+    playback = PlaybackBuffer(config.recv_rate, config.playback_buffer_ms, truncations.put_nowait)
 
     def receive_playback() -> None:
         while not stop_event.is_set():
             try:
-                command, audio = commands.get(timeout=0.1)
+                command, audio, item = commands.get(timeout=0.1)
             except Empty:
                 continue
             if command == "append":
-                playback.append(audio)
+                playback.append(audio, item)
             elif command == "clear":
                 playback.clear()
             elif command == "finish":
@@ -1200,6 +1349,7 @@ def _run_audio_worker(
         receiver.join(timeout=1)
         # The parent stops consuming microphone audio during shutdown.
         mic_queue.cancel_join_thread()
+        truncations.cancel_join_thread()
         errors.close()
 
 
@@ -1209,6 +1359,7 @@ class _AudioWorker:
     def __init__(self, config: RealtimeAudioClientConfig) -> None:
         context = multiprocessing.get_context("spawn")
         self.mic_queue = context.Queue(maxsize=128)
+        self.truncations = context.Queue()
         self._commands = context.Queue()
         # Pending playback can be discarded when the worker exits.
         self._commands._ignore_epipe = True  # type: ignore[attr-defined]
@@ -1229,7 +1380,15 @@ class _AudioWorker:
         )
         self._process = context.Process(
             target=_run_audio_worker,
-            args=(worker_config, self.mic_queue, self._commands, self._stop, self._error_sender, self._ready),
+            args=(
+                worker_config,
+                self.mic_queue,
+                self._commands,
+                self._stop,
+                self._error_sender,
+                self._ready,
+                self.truncations,
+            ),
             name="realtime-audio",
         )
 
@@ -1242,6 +1401,7 @@ class _AudioWorker:
         # Only the child writes microphone PCM. Keeping this duplicate open would
         # leave a read of a partial queue message blocked if the child dies.
         self.mic_queue._writer.close()  # type: ignore[attr-defined]
+        self.truncations._writer.close()  # type: ignore[attr-defined]
         # Only the child reads playback. Close our duplicate so its exit also
         # releases the queue feeder when it is blocked writing pending audio.
         self._commands._reader.close()  # type: ignore[attr-defined]
@@ -1271,6 +1431,7 @@ class _AudioWorker:
         self._commands.cancel_join_thread()
         self._commands.close()
         self.mic_queue.close()
+        self.truncations.close()
         self._errors.close()
         self._error_sender.close()
 
@@ -1282,16 +1443,21 @@ async def _run_audio_session(
 ) -> None:
     worker = _AudioWorker(config) if config.echo_cancellation else None
     mic_queue: Any = worker.mic_queue if worker is not None else Queue(maxsize=128)
+    truncations: Any = worker.truncations if worker is not None else Queue()
     playback: PlaybackBuffer | _PlaybackCommands
     audio_context: AbstractContextManager[Any]
     if worker is None:
-        playback = PlaybackBuffer(config.recv_rate, config.playback_buffer_ms)
+        playback = PlaybackBuffer(config.recv_rate, config.playback_buffer_ms, truncations.put_nowait)
         audio_context = _open_audio_streams(config, playback, mic_queue)
     else:
         playback = worker.playback
         audio_context = worker
     renderer = _FriendlyEventRenderer(conversation_only=config.conversation_only)
-    tool_calls = _ToolCallCoordinator(conn, config)
+    tool_calls = _ToolCallCoordinator(conn, config, lambda line: renderer.print_conversation(line, style="red"))
+    # Log records reach the same terminal, so an assistant line they follow is
+    # no longer the last output and must not be redrawn in place.
+    output_guard = _AssistantLineGuard(renderer)
+    logging.getLogger().addHandler(output_guard)
 
     voices = VoiceSelection(conn, config, renderer.show_status) if len(config.voice_choices) > 1 else None
 
@@ -1326,6 +1492,35 @@ async def _run_audio_session(
                 }
             )
 
+    async def send_truncations() -> None:
+        """Tell the server how much interrupted assistant audio actually played."""
+        while not stop_event.is_set():
+            try:
+                interrupted = await asyncio.to_thread(truncations.get, True, 0.1)
+            except Empty:
+                continue
+            except (EOFError, OSError):
+                if worker is None:
+                    raise
+                await worker.wait_for_failure()
+            for item_id, content_index, audio_end_ms in interrupted:
+                await conn.send(
+                    {
+                        "type": "conversation.item.truncate",
+                        "item_id": item_id,
+                        "content_index": content_index,
+                        "audio_end_ms": audio_end_ms,
+                    }
+                )
+                # The answer carries the heard text the model history kept.
+                await conn.send(
+                    {
+                        "type": "conversation.item.retrieve",
+                        "event_id": _heard_text_event_id(item_id),
+                        "item_id": item_id,
+                    }
+                )
+
     async def receive_events() -> None:
         while worker is not None and not worker._ready.is_set():
             await asyncio.sleep(0.01)
@@ -1348,6 +1543,7 @@ async def _run_audio_session(
         streams.enter_context(audio_context)
         tasks = {
             asyncio.create_task(send_audio()),
+            asyncio.create_task(send_truncations()),
             asyncio.create_task(receive_events()),
             asyncio.create_task(_wait_for_stop(stop_event)),
             asyncio.create_task(tool_calls.wait_for_failure()),
@@ -1387,6 +1583,7 @@ async def _run_audio_session(
         try:
             await tool_calls.close()
         finally:
+            logging.getLogger().removeHandler(output_guard)
             streams.close()
             renderer.clear_live_user_text()
             renderer.reset_assistant_text()
