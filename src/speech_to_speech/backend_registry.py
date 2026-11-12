@@ -31,6 +31,7 @@ from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import (
 from speech_to_speech.arguments_classes.nemotron_streaming_stt_arguments import (
     NemotronStreamingSTTHandlerArguments,
 )
+from speech_to_speech.arguments_classes.nvidia_nim_tts_arguments import NvidiaNimTTSHandlerArguments
 from speech_to_speech.arguments_classes.omnivoice_tts_arguments import OmniVoiceTTSHandlerArguments
 from speech_to_speech.arguments_classes.openai_realtime_stt_arguments import OpenAIRealtimeSTTHandlerArguments
 from speech_to_speech.arguments_classes.openai_stt_arguments import OpenAICompatibleSTTHandlerArguments
@@ -689,6 +690,18 @@ TTS_BACKENDS = build_backend_registry(
                 context_kwargs=True,
             ),
             config_prefix="minimax_tts",
+        ),
+        BackendSpec(
+            "nvidia_nim",
+            "tts",
+            NvidiaNimTTSHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.TTS.nvidia_nim_tts_handler",
+                "NvidiaNimTTSHandler",
+                setup_should_listen=True,
+                context_kwargs=True,
+            ),
+            config_prefix="nvidia_nim_tts",
         ),
         BackendSpec(
             "supertonic",

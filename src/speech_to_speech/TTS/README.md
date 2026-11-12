@@ -6,7 +6,7 @@ The default voice is Qwen3-TTS CustomVoice with speaker `Aiden`, through MLX Aud
 speech-to-speech local --qwen3_tts_speaker Ryan
 ```
 
-Change `--tts` to pick another synthesizer, installing its extra where needed; the other stages keep their local defaults. `--tts openai` connects to a separate speech endpoint and `--tts minimax` to a hosted provider, as described below.
+Change `--tts` to pick another synthesizer, installing its extra where needed; the other stages keep their local defaults. `--tts openai` connects to a separate speech endpoint and `--tts minimax` to a hosted provider, and `--tts nvidia_nim` to an NVIDIA Speech NIM, as described below.
 
 ## Available TTS modes (`--tts`)
 
@@ -24,6 +24,7 @@ Runtime-supported values in `s2s_pipeline.py`:
 - `drama3` → `drama3_handler.py`
 - `supertonic` → `supertonic_tts_handler.py`
 - `minimax` → `minimax_tts_handler.py`
+- `nvidia_nim` → `nvidia_nim_tts_handler.py`
 
 Deprecated TTS implementations, including MeloTTS, live in [`../../../archive/TTS`](../../../archive/TTS) and are no longer wired into `s2s_pipeline.py`.
 
@@ -389,3 +390,16 @@ warmup request. `--minimax_tts_timeout` bounds each synthesis request (30 second
 by default); `--minimax_tts_base_url` selects a regional endpoint.
 
 See the [MiniMax API reference](https://platform.minimax.io/docs/api-reference/speech-t2a-http).
+
+## NVIDIA Speech NIM
+
+Select a self-hosted or NVIDIA-hosted Speech NIM (Riva TTS, Magpie voices):
+
+```bash
+speech-to-speech serve --tts nvidia_nim \
+  --nvidia_nim_tts_base_url http://localhost:9000 \
+  --nvidia_nim_tts_voice Magpie-Multilingual.EN-US.Aria.Happy
+```
+
+See [`docs/nvidia-nim-tts.md`](../../../docs/nvidia-nim-tts.md) for deployment,
+flags, voices, and emotional styles.
