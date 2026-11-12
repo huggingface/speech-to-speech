@@ -1165,3 +1165,22 @@ def test_process_custom_voice_uses_assistant_language_only_when_enabled(
     assert captured["language"] == expected
     assert handler.language == configured_language
     assert not hasattr(handler, "_active_language")
+
+
+@pytest.mark.parametrize("sample_count", [700, 1300])
+@pytest.mark.parametrize("cancel_after_first", [False, True])
+def test_stream_preserves_short_tail_and_discards_pending_audio_on_cancel(cancel_after_first, sample_count):
+    from speech_to_speech.pipeline.cancel_scope import CancelScope
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.blocksize = 512
+    handler.cancel_scope = CancelScope()
+    samples = np.full(sample_count, 0.25, dtype=np.float32)
+    stream = handler._stream(iter([(samples[:100], 16000, None), (samples[100:], 16000, None)]), "test")
+    first = next(stream)
+    assert first.size == 512
+    if cancel_after_first:
+        handler.cancel_scope.cancel()
+        assert list(stream) == []
+    else:
+        np.testing.assert_array_equal(np.concatenate([first, *stream]), (samples * 32768).astype(np.int16))

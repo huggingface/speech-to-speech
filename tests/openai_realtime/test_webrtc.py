@@ -1619,3 +1619,31 @@ async def test_conversation_delete_uses_shared_data_channel_dispatch():
         assert unit.service._state(conn_id).runtime_config.chat.init_chat_message is None
     finally:
         unit.service.unregister(conn_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["completed", "incomplete", "failed", "cancelled", "discard"])
+async def test_output_resampler_does_not_carry_speech_into_next_response(ending):
+    unit = _make_unit()
+    session_id = unit.service.register()
+    rtc = WebRTCSession(Mock(), on_client_event=AsyncMock(), on_audio=Mock(), on_open=AsyncMock(), on_closed=Mock())
+    samples = np.zeros(700, dtype=np.int16)
+    samples[-1] = 20000
+    await rtc.send_audio_chunk(unit.service, session_id, samples.tobytes())
+    if ending == "discard":
+        rtc.discard_pending_audio()
+    await rtc.send_events(
+        unit.service.finish_response(session_id, status="cancelled" if ending == "discard" else ending)
+    )
+    first = np.frombuffer(bytes(rtc._track._buffer), dtype=np.int16)
+    if ending not in ("cancelled", "discard"):
+        assert first.size == samples.size * 3
+        assert np.max(np.abs(first[-60:].astype(int))) >= 19000
+    else:
+        assert not np.any(first)
+    rtc._track.clear()
+    await rtc.send_audio_chunk(unit.service, session_id, bytes(1400))
+    await rtc.send_events(unit.service.finish_response(session_id))
+    second = np.frombuffer(bytes(rtc._track._buffer), dtype=np.int16)
+    assert second.size == 2100
+    assert not np.any(second)

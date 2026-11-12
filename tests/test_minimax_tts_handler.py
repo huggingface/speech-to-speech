@@ -163,7 +163,7 @@ def test_payload_and_credentials_use_minimax_protocol(monkeypatch, model, conten
 
 
 @pytest.mark.parametrize("sample_count", [100, 512, 1024, 1500])
-def test_fragmented_sse_preserves_samples_and_pads_only_tail(sample_count):
+def test_fragmented_sse_preserves_samples_without_padding(sample_count):
     handler = _handler()
     samples = np.arange(sample_count, dtype="<i2")
     pcm = samples.tobytes()
@@ -172,11 +172,9 @@ def test_fragmented_sse_preserves_samples_and_pads_only_tail(sample_count):
     fragments = iter(body[i : i + 37] for i in range(0, len(body), 37))
     chunks = list(handler._decode_pcm_stream(fragments))
     assert chunks
-    assert all(chunk.dtype == np.int16 and chunk.shape == (512,) for chunk in chunks)
+    assert all(chunk.dtype == np.int16 and chunk.ndim == 1 and 0 < chunk.size <= 512 for chunk in chunks)
     output = np.concatenate(chunks)
-    assert len(output) == ((sample_count + 511) // 512) * 512
-    np.testing.assert_array_equal(output[:sample_count], samples)
-    assert np.all(output[sample_count:] == 0)
+    np.testing.assert_array_equal(output, samples)
 
 
 def test_null_data_heartbeat_is_safe():
@@ -396,6 +394,6 @@ def test_live_minimax_synthesis(model):
     handler = _handler(api_key=None, model=model)
     chunks = list(handler.process(TTSInput(text="Hello from MiniMax.")))
     assert chunks
-    assert all(chunk.dtype == np.int16 and chunk.shape == (512,) for chunk in chunks)
+    assert all(chunk.dtype == np.int16 and chunk.ndim == 1 and 0 < chunk.size <= 512 for chunk in chunks)
     assert np.any(np.concatenate(chunks))
     assert handler.queue_out.empty()
