@@ -10,7 +10,7 @@ from math import isfinite
 from threading import Event
 from typing import Any
 
-import httpx
+import httpx2
 import numpy as np
 
 from speech_to_speech.pipeline.cancel_scope import CancelScope
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 class MiniMaxSpeechOperation(HttpSpeechOperation):
-    def _validate_content_type(self, response: httpx.Response) -> None:
+    def _validate_content_type(self, response: httpx2.Response) -> None:
         media_type = response.headers.get("content-type", "").partition(";")[0].strip().lower()
         # MiniMax documents streaming responses under both media types.
         # The decoder still requires SSE data frames and a terminal status.

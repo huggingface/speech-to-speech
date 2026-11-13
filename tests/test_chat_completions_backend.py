@@ -15,7 +15,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
-import httpx
+import httpx2
 import numpy as np
 import pytest
 from openai import APIConnectionError, InternalServerError, RateLimitError
@@ -990,14 +990,14 @@ def test_generation_error_emits_failed_end_of_response():
 
 
 def _api_error_response(status_code):
-    request = httpx.Request("POST", "https://provider.example/v1/chat/completions")
-    return httpx.Response(status_code, request=request)
+    request = httpx2.Request("POST", "https://provider.example/v1/chat/completions")
+    return httpx2.Response(status_code, request=request)
 
 
 @pytest.mark.parametrize(
     ("error", "message"),
     [
-        (APIConnectionError(request=httpx.Request("POST", "https://provider.example")), "Connection error"),
+        (APIConnectionError(request=httpx2.Request("POST", "https://provider.example")), "Connection error"),
         (RateLimitError("rate limited", response=_api_error_response(429), body=None), "rate limited"),
         (InternalServerError("server failed", response=_api_error_response(500), body=None), "server failed"),
     ],

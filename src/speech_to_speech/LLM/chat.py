@@ -1109,7 +1109,9 @@ class Chat:
                 if content:
                     _append_user_input(result, content)
             elif isinstance(item, ResponsesAssistantMessage):
-                result.append(cast(ResponseInputItemParam, item.response_item.model_dump(exclude_unset=True)))
+                result.append(
+                    cast(ResponseInputItemParam, item.response_item.model_dump(exclude_unset=True, by_alias=True))
+                )
             elif isinstance(item, RealtimeConversationItemAssistantMessage):
                 assistant_content: list[ResponseOutputTextParam] = []
                 for assistant_part in item.content:
@@ -1128,10 +1130,12 @@ class Chat:
                         )
                     )
             elif isinstance(item, ResponseReasoningItem):
-                result.append(cast(ResponseInputItemParam, item.model_dump(exclude_unset=True)))
+                result.append(cast(ResponseInputItemParam, item.model_dump(exclude_unset=True, by_alias=True)))
             elif isinstance(item, ResponsesFunctionCall):
                 if item.call_id not in self._pending_tool_calls:
-                    result.append(cast(ResponseInputItemParam, item.response_item.model_dump(exclude_unset=True)))
+                    result.append(
+                        cast(ResponseInputItemParam, item.response_item.model_dump(exclude_unset=True, by_alias=True))
+                    )
             elif isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None:
                 if item.call_id in self._pending_tool_calls:
                     continue

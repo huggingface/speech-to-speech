@@ -3,7 +3,7 @@ import json
 from queue import Queue
 from threading import Event
 
-import httpx
+import httpx2
 import numpy as np
 import pytest
 from scipy.io import wavfile
@@ -23,18 +23,18 @@ def test_drama3_sglang_request_and_resampled_audio(monkeypatch, tmp_path, clone)
     samples = np.round(10000 * np.sin(2 * np.pi * 440 * np.arange(4410) / 44100)).astype("<i2")
     pcm = samples.tobytes()
 
-    class AudioStream(httpx.AsyncByteStream):
+    class AudioStream(httpx2.AsyncByteStream):
         async def __aiter__(self):
             for offset in range(0, len(pcm), 997):
                 yield pcm[offset : offset + 997]
 
     def respond(request):
         requests.append(request)
-        return httpx.Response(200, headers={"Content-Type": "audio/pcm"}, stream=AudioStream())
+        return httpx2.Response(200, headers={"Content-Type": "audio/pcm"}, stream=AudioStream())
 
-    original = httpx.AsyncClient
+    original = httpx2.AsyncClient
     monkeypatch.setattr(
-        httpx, "AsyncClient", lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs)
+        httpx2, "AsyncClient", lambda **kwargs: original(transport=httpx2.MockTransport(respond), **kwargs)
     )
     monkeypatch.setenv("OPENAI_API_KEY", "wrong-provider-key")
     monkeypatch.delenv("DRAMA3_API_KEY", raising=False)
@@ -99,8 +99,8 @@ def test_invalid_configuration_fails_before_warmup(monkeypatch, kwargs):
 
 
 def test_drama3_startup_rejects_incompatible_server(monkeypatch):
-    original = httpx.AsyncClient
-    transport = httpx.MockTransport(lambda request: httpx.Response(422, text="unsupported speech fields"))
-    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original(transport=transport, **kwargs))
+    original = httpx2.AsyncClient
+    transport = httpx2.MockTransport(lambda request: httpx2.Response(422, text="unsupported speech fields"))
+    monkeypatch.setattr(httpx2, "AsyncClient", lambda **kwargs: original(transport=transport, **kwargs))
     with pytest.raises(SpeechRequestError, match="HTTP 422"):
         _handler()

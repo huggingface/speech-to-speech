@@ -30,7 +30,7 @@ from scipy.signal import resample_poly
 aiortc = pytest.importorskip("aiortc")
 av = pytest.importorskip("av")
 
-import httpx  # noqa: E402  (ships with the openai dependency)
+import httpx2  # noqa: E402  (ships with the openai dependency)
 from aioice.ice import Connection  # noqa: E402
 from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription, clock  # noqa: E402
 from aiortc.codecs.opus import OpusDecoder, OpusEncoder  # noqa: E402
@@ -1242,7 +1242,7 @@ class TestWebRTCLoopback:
             offer = await pc.createOffer()
             await pc.setLocalDescription(offer)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx2.AsyncClient() as client:
                 resp = await client.post(
                     f"http://127.0.0.1:{server_env.port}/v1/realtime/calls",
                     content=pc.localDescription.sdp,
@@ -1376,7 +1376,7 @@ class TestWebRTCLoopback:
             await pc.close()
 
     async def test_rejects_wrong_content_type(self, server_env):
-        async with httpx.AsyncClient() as client:
+        async with httpx2.AsyncClient() as client:
             resp = await client.post(
                 f"http://127.0.0.1:{server_env.port}/v1/realtime/calls",
                 json={"sdp": "nope"},
@@ -1392,7 +1392,7 @@ class TestWebRTCLoopback:
             offer = await pc.createOffer()
             await pc.setLocalDescription(offer)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx2.AsyncClient() as client:
                 first = await client.post(
                     f"http://127.0.0.1:{server_env.port}/v1/realtime/calls",
                     content=pc.localDescription.sdp,
@@ -1422,7 +1422,7 @@ class TestWebRTCLoopback:
             offer = await pc.createOffer()
             await pc.setLocalDescription(offer)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx2.AsyncClient() as client:
                 resp = await client.post(
                     f"http://127.0.0.1:{server_env.port}/v1/realtime/calls",
                     content=pc.localDescription.sdp,
@@ -1445,7 +1445,7 @@ class TestWebRTCLoopback:
         await _wait_for_release(server_env)
 
     async def test_invalid_offer_releases_unit(self, server_env):
-        async with httpx.AsyncClient() as client:
+        async with httpx2.AsyncClient() as client:
             resp = await client.post(
                 f"http://127.0.0.1:{server_env.port}/v1/realtime/calls",
                 content="not an sdp",
@@ -1474,7 +1474,7 @@ class TestWebRTCLoopback:
             offer = await pc.createOffer()
             await pc.setLocalDescription(offer)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx2.AsyncClient() as client:
                 resp = await client.post(
                     f"http://127.0.0.1:{server_env.port}/v1/realtime/calls",
                     content=pc.localDescription.sdp,

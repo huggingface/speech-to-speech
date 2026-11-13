@@ -13,9 +13,9 @@ from time import perf_counter
 from typing import Any, Literal, Optional
 from urllib.parse import urlparse
 
-import httpx
+import httpx2
 from nltk import sent_tokenize
-from openai import AsyncOpenAI, OpenAI
+from openai import APITimeoutError, AsyncOpenAI, OpenAI
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemAssistantMessage,
     RealtimeConversationItemFunctionCall,
@@ -85,6 +85,12 @@ PROVIDER_FAILURE_FALLBACK = "I'm having trouble responding right now. Please try
 
 class _StreamInterrupted(Exception):
     """A cancelled or stopped turn abandoned its provider stream before it ended."""
+
+
+def _read_timed_out(exc: Exception) -> bool:
+    """Whether a provider read timed out; the SDK raises it as ``APITimeoutError``."""
+    cause = exc.__cause__ if isinstance(exc, APITimeoutError) else exc
+    return isinstance(cause, httpx2.ReadTimeout)
 
 
 class TextDelta(BaseModel):
@@ -239,7 +245,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.audio_history_turns = max(0, audio_history_turns)
         self.reasoning_effort = reasoning_effort
         self.request_timeout_s = float(request_timeout_s)
-        self.request_timeout = httpx.Timeout(
+        self.request_timeout = httpx2.Timeout(
             self.request_timeout_s,
             connect=min(10.0, self.request_timeout_s),
         )
@@ -960,20 +966,21 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         generation_completed = yield from self._consume_nonstreaming(observed_events, state, turn)
             except _StreamInterrupted:
                 logger.info("LLM generation cancelled (interruption)")
-            except httpx.ReadTimeout:
-                logger.warning(
-                    "OpenAI API read timed out after %.1fs; ending the current response",
-                    self.request_timeout_s,
-                )
-                error_message = f"Language model generation timed out after {self.request_timeout_s:.1f}s."
             except Exception as exc:
-                # Any other generation failure must still terminate the response: record
+                # Any generation failure must still terminate the response: record
                 # the error and fall through to the EndOfResponse below. Without this the
                 # exception would escape process() and no EndOfResponse would be emitted,
                 # leaving st.in_response stuck and locking every subsequent response.
-                log_exception(logger, "LLM generation failed; ending the current response", exc)
-                if error_message is None:
-                    error_message = f"Language model generation failed: {exc}"
+                if _read_timed_out(exc):
+                    logger.warning(
+                        "OpenAI API read timed out after %.1fs; ending the current response",
+                        self.request_timeout_s,
+                    )
+                    error_message = f"Language model generation timed out after {self.request_timeout_s:.1f}s."
+                else:
+                    log_exception(logger, "LLM generation failed; ending the current response", exc)
+                    if error_message is None:
+                        error_message = f"Language model generation failed: {exc}"
             finally:
                 self._close_response(events)
                 self._close_response(api_response)

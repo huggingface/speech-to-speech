@@ -6,7 +6,7 @@ from time import sleep
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import httpx
+import httpx2
 import numpy as np
 import pytest
 from openai import Stream
@@ -111,15 +111,21 @@ def test_reasoning_tool_continuation_replays_original_provider_items(stream):
         encrypted_content="opaque-provider-content",
         status="completed",
     )
-    call = ResponseFunctionToolCall(
-        id="fc_original",
-        call_id="call_original",
-        type="function_call",
-        name="weather",
-        arguments='{"city":"Paris"}',
-        status="completed",
+    # ``async`` is a Python keyword, so the SDK model stores it as ``async_``.
+    # The replayed item must still carry the provider's own key.
+    call = ResponseFunctionToolCall.model_validate(
+        {
+            "id": "fc_original",
+            "call_id": "call_original",
+            "type": "function_call",
+            "name": "weather",
+            "arguments": '{"city":"Paris"}',
+            "status": "completed",
+            "async": False,
+        }
     )
-    originals = [item.model_dump(exclude_unset=True) for item in [reasoning, call]]
+    originals = [item.model_dump(exclude_unset=True, by_alias=True) for item in [reasoning, call]]
+    assert originals[1]["async"] is False
     handler = _make_handler(stream=stream)
     request = _make_request("Weather?", chat_size=5)
     requests = []
@@ -157,7 +163,7 @@ def test_reasoning_tool_continuation_replays_original_provider_items(stream):
     )
     continuation = list(drive_llm(handler, request))
     assert next(output for output in continuation if isinstance(output, EndOfResponse)).error is None
-    assert [item.model_dump(exclude_unset=True) for item in [reasoning, call]] == originals
+    assert [item.model_dump(exclude_unset=True, by_alias=True) for item in [reasoning, call]] == originals
 
 
 def _make_runtime_config(chat_size=2, instructions="You are a helpful AI assistant."):
@@ -666,7 +672,7 @@ def test_first_tts_batch_latency_uses_hosted_generation_start(monkeypatch, mode,
     def create(**kwargs):
         if mode == "failed":
             clock[0] = 10.4
-            raise httpx.ReadTimeout("synthetic provider timeout")
+            raise httpx2.ReadTimeout("synthetic provider timeout")
         if mode != "nonstream":
             return _make_stream(events())
         clock[0] = 10.4
@@ -1211,7 +1217,7 @@ def test_process_read_timeout_speaks_fallback_and_preserves_failure():
 
     def make_timeout_stream():
         stream = MagicMock(spec=Stream)
-        stream.__iter__.side_effect = httpx.ReadTimeout("timed out")
+        stream.__iter__.side_effect = httpx2.ReadTimeout("timed out")
         return stream
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: make_timeout_stream()))
@@ -1233,7 +1239,7 @@ def test_read_timeout_after_partial_text_fails_without_apology_or_history_commit
     class PartialThenTimeoutStream:
         def __iter__(self):
             yield _make_text_delta_event("Partial answer. ")
-            raise httpx.ReadTimeout("timed out")
+            raise httpx2.ReadTimeout("timed out")
 
         def close(self):
             pass
@@ -1257,7 +1263,7 @@ def test_read_timeout_after_tool_call_fails_and_rolls_back_call():
     class ToolThenTimeoutStream:
         def __iter__(self):
             yield _make_function_call_done_event()
-            raise httpx.ReadTimeout("timed out")
+            raise httpx2.ReadTimeout("timed out")
 
         def close(self):
             pass
@@ -1818,7 +1824,7 @@ def test_out_of_band_timeout_after_tool_call_fails_without_apology():
     class ToolThenTimeoutStream:
         def __iter__(self):
             yield _make_function_call_done_event()
-            raise httpx.ReadTimeout("timed out")
+            raise httpx2.ReadTimeout("timed out")
 
         def close(self):
             pass

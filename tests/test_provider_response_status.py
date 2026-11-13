@@ -4,7 +4,7 @@ import json
 from queue import Queue
 from threading import Event
 
-import httpx
+import httpx2
 import pytest
 from openai import OpenAI
 from openai.types.realtime import RealtimeSessionCreateRequest
@@ -109,13 +109,13 @@ def _client(payload, stream):
     def respond(request):
         if stream:
             body = "".join(f"data: {json.dumps(event)}\n\n" for event in payload) + "data: [DONE]\n\n"
-            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
-        return httpx.Response(200, json=payload)
+            return httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+        return httpx2.Response(200, json=payload)
 
     return OpenAI(
         api_key="test",
         base_url="http://provider.invalid/v1",
-        http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+        http_client=httpx2.Client(transport=httpx2.MockTransport(respond)),
     )
 
 
@@ -317,7 +317,7 @@ def test_cancelled_generation_ignores_provider_terminal(backend, signal):
     request = _make_request()
     request.response = RealtimeResponseCreateParams(output_modalities=["text"])
 
-    class CancelBeforeTerminal(httpx.SyncByteStream):
+    class CancelBeforeTerminal(httpx2.SyncByteStream):
         def __iter__(self):
             payload = _provider_payload(backend, True, signal)
             for index, event in enumerate(payload):
@@ -326,11 +326,11 @@ def test_cancelled_generation_ignores_provider_terminal(backend, signal):
                 yield f"data: {json.dumps(event)}\n\n".encode()
             yield b"data: [DONE]\n\n"
 
-    transport = httpx.MockTransport(
-        lambda _: httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=CancelBeforeTerminal())
+    transport = httpx2.MockTransport(
+        lambda _: httpx2.Response(200, headers={"content-type": "text/event-stream"}, stream=CancelBeforeTerminal())
     )
     with OpenAI(
-        api_key="test", base_url="http://provider.invalid/v1", http_client=httpx.Client(transport=transport)
+        api_key="test", base_url="http://provider.invalid/v1", http_client=httpx2.Client(transport=transport)
     ) as client:
         handler.client = client
         outputs = list(handler.process(request))

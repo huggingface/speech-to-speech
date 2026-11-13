@@ -16,7 +16,7 @@ import re
 from collections.abc import AsyncIterator
 from typing import Any
 
-import httpx
+import httpx2
 from fastapi import FastAPI, Request, Response
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
@@ -122,7 +122,7 @@ def _error_response(status_code: int, message: str, error_type: str) -> Response
     )
 
 
-def _verbatim_response(upstream: httpx.Response, content: bytes) -> Response:
+def _verbatim_response(upstream: httpx2.Response, content: bytes) -> Response:
     return Response(
         content=content,
         status_code=upstream.status_code,
@@ -130,7 +130,7 @@ def _verbatim_response(upstream: httpx.Response, content: bytes) -> Response:
     )
 
 
-def _upstream_unreachable(error: httpx.HTTPError) -> Response:
+def _upstream_unreachable(error: httpx2.HTTPError) -> Response:
     logger.warning(f"LLM proxy: upstream request failed: {type(error).__name__}: {error}")
     return _error_response(502, f"Upstream request failed: {type(error).__name__}", "upstream_unreachable")
 
@@ -227,13 +227,13 @@ def _mount_passthrough(
         headers = {"Authorization": f"Bearer {config.upstream_api_key}"}
         # Generation can legitimately take minutes, so only the connect
         # phase gets a timeout; reads (streamed or not) have none.
-        timeout = httpx.Timeout(None, connect=config.connect_timeout_s)
+        timeout = httpx2.Timeout(None, connect=config.connect_timeout_s)
 
         if not body.get("stream"):
             try:
-                async with httpx.AsyncClient(timeout=timeout) as client:
+                async with httpx2.AsyncClient(timeout=timeout) as client:
                     upstream = await client.post(upstream_url, json=body, headers=headers)
-            except httpx.HTTPError as e:
+            except httpx2.HTTPError as e:
                 return _upstream_unreachable(e)
             if upstream.status_code < 400:
                 try:
@@ -245,11 +245,11 @@ def _mount_passthrough(
         # Streaming: forward every upstream byte as it arrives. The client
         # and upstream response stay open for the response's lifetime and are
         # closed by the background task after the last byte is sent.
-        client = httpx.AsyncClient(timeout=timeout)
+        client = httpx2.AsyncClient(timeout=timeout)
         try:
             upstream_request = client.build_request("POST", upstream_url, json=body, headers=headers)
             upstream = await client.send(upstream_request, stream=True)
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             await client.aclose()
             return _upstream_unreachable(e)
         except Exception:
@@ -270,7 +270,7 @@ def _mount_passthrough(
         async def _stream_and_cleanup() -> AsyncIterator[bytes]:
             # The generator owns the cleanup: Starlette only runs background
             # tasks after a successful send, so an upstream failure or a
-            # client disconnect mid-stream would otherwise leak the httpx
+            # client disconnect mid-stream would otherwise leak the httpx2
             # client and its connection. The finally runs on normal
             # exhaustion, on upstream errors, and on cancellation alike; the
             # BackgroundTask below is a harmless second aclose for the
@@ -293,7 +293,7 @@ def _mount_passthrough(
 _SSE_EVENT_END = re.compile(rb"\r\n\r\n|\n\n|\r\r")
 
 
-async def _forward_and_account(upstream: httpx.Response, usage: LLMProxyUsage) -> AsyncIterator[bytes]:
+async def _forward_and_account(upstream: httpx2.Response, usage: LLMProxyUsage) -> AsyncIterator[bytes]:
     """Yield upstream bytes while parsing SSE events for token usage.
 
     ``aiter_bytes`` (not ``aiter_raw``): the upstream may compress the

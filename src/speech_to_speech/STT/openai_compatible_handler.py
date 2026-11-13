@@ -17,7 +17,7 @@ from time import perf_counter
 from typing import Any, Iterator, Literal
 
 import anyio
-import httpx
+import httpx2
 import numpy as np
 
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
@@ -156,7 +156,7 @@ class HttpTranscriptionOperation:
             headers["Authorization"] = f"Bearer {self.api_key}"
         if trace is not None:
             headers.update(trace.headers())
-        client = httpx.AsyncClient(timeout=self.timeout_s)
+        client = httpx2.AsyncClient(timeout=self.timeout_s)
         try:
             if trace is not None:
                 trace.dispatch()
@@ -164,11 +164,11 @@ class HttpTranscriptionOperation:
             response.raise_for_status()
             result = self._parse_response(response.content, response.headers.get("content-type", ""))
             return replace(result, request_ids=(trace.request_id,)) if trace is not None else result
-        except httpx.HTTPStatusError as exc:
+        except httpx2.HTTPStatusError as exc:
             raise TranscriptionRequestError(self._rejection_message(exc.response)) from exc
-        except httpx.TimeoutException as exc:
+        except httpx2.TimeoutException as exc:
             raise TranscriptionRequestError("transcription request timed out") from exc
-        except httpx.HTTPError as exc:
+        except httpx2.HTTPError as exc:
             raise TranscriptionRequestError(f"transcription transport failed: {type(exc).__name__}") from exc
         finally:
             # Repeated cancellation must not interrupt release of the HTTP transport.
@@ -191,7 +191,7 @@ class HttpTranscriptionOperation:
         return {"data": data, "files": {"file": ("audio.wav", self.wav_bytes, "audio/wav")}}
 
     @staticmethod
-    def _rejection_message(response: httpx.Response) -> str:
+    def _rejection_message(response: httpx2.Response) -> str:
         message = f"transcription server returned HTTP {response.status_code}"
         if response.status_code == 413:
             return (

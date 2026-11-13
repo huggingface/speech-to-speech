@@ -286,7 +286,9 @@ def test_ordered_parts_allow_consistent_model_dump_round_trip(model_cls):
         ]
     )
 
-    restored = model_cls.model_validate(original.model_dump())
+    # SDK models with aliased fields, like the tool call's ``async``, only
+    # validate back from a dump made by alias.
+    restored = model_cls.model_validate(original.model_dump(by_alias=True))
 
     assert restored.parts == original.parts
     assert restored.text == "before"
