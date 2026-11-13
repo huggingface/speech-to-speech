@@ -1167,20 +1167,45 @@ def test_process_custom_voice_uses_assistant_language_only_when_enabled(
     assert not hasattr(handler, "_active_language")
 
 
-@pytest.mark.parametrize("sample_count", [700, 1300])
+@pytest.mark.parametrize("cuts", [[], [15360, 30720], [7680, 15360, 23040], [1, 17, 1920, 9999, 20000]])
+def test_stream_resampling_matches_whole_signal_across_chunk_boundaries(cuts):
+    from scipy.signal import resample_poly
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.cancel_scope = None
+    handler.blocksize = 512
+    samples = (0.5 * np.sin(2 * np.pi * 220 * np.arange(36001) / 24000)).astype(np.float32)
+    native_pcm = handler._to_int16(samples).astype(float)
+    expected = np.clip(np.round(resample_poly(native_pcm, 2, 3)), -32768, 32767).astype(np.int16)
+
+    chunks = ((part, 24000, None) for part in np.split(samples, cuts))
+    actual = np.concatenate(list(handler._stream(chunks, "test")))
+
+    np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize("sample_count", [700, 769, 1300])
+@pytest.mark.parametrize("sample_rate", [16000, 24000])
 @pytest.mark.parametrize("cancel_after_first", [False, True])
-def test_stream_preserves_short_tail_and_discards_pending_audio_on_cancel(cancel_after_first, sample_count):
+def test_stream_preserves_short_tail_and_discards_pending_audio_on_cancel(
+    cancel_after_first, sample_rate, sample_count
+):
+    from scipy.signal import resample_poly
+
     from speech_to_speech.pipeline.cancel_scope import CancelScope
 
     handler = object.__new__(Qwen3TTSHandler)
     handler.blocksize = 512
     handler.cancel_scope = CancelScope()
     samples = np.full(sample_count, 0.25, dtype=np.float32)
-    stream = handler._stream(iter([(samples[:100], 16000, None), (samples[100:], 16000, None)]), "test")
+    expected = handler._to_int16(samples)
+    if sample_rate != 16000:
+        expected = np.clip(np.round(resample_poly(expected.astype(float), 2, 3)), -32768, 32767).astype(np.int16)
+    stream = handler._stream(iter([(samples[:100], sample_rate, None), (samples[100:], sample_rate, None)]), "test")
     first = next(stream)
-    assert first.size == 512
+    assert first.size == min(512, len(expected))
     if cancel_after_first:
         handler.cancel_scope.cancel()
         assert list(stream) == []
     else:
-        np.testing.assert_array_equal(np.concatenate([first, *stream]), (samples * 32768).astype(np.int16))
+        np.testing.assert_array_equal(np.concatenate([first, *stream]), expected)
