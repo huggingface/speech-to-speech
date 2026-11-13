@@ -579,6 +579,14 @@ async def test_server_key_is_never_spent_without_server_search(monkeypatch, spac
     assert demo_server.config()["search"] is False
 
 
+def test_config_reports_whether_the_backend_takes_images(monkeypatch):
+    assert demo_server.config()["vision"] is True
+
+    monkeypatch.setattr(demo_server, "VISION", False)
+
+    assert demo_server.config()["vision"] is False
+
+
 async def test_local_search_is_not_gated(monkeypatch, space_search):
     monkeypatch.setattr(demo_server, "SPACE_ID", "")
     monkeypatch.setattr(
