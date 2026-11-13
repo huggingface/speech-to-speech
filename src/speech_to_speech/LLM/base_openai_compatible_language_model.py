@@ -81,6 +81,8 @@ WARMUP_MAX_RETRIES = 6
 PREFETCH_PROVIDER_WORKER_LIMIT = 1
 PREFETCH_STREAM_QUEUE_MAXSIZE = 16
 PREFETCH_WORKER_ACQUIRE_TIMEOUT_S = 0.05
+# A streaming prefetch worker notices cancellation within one 0.05 s poll.
+PREFETCH_WORKER_RELEASE_TIMEOUT_S = 0.5
 PROVIDER_FAILURE_FALLBACK = "I'm having trouble responding right now. Please try again."
 # How long an idle provider connection stays open for the next request. The
 # SDK's 5 s is shorter than the pause between two turns of a conversation, so
@@ -527,10 +529,23 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
         self._async_loop().run_until_complete(warm())
 
-    def _iter_stream_chunks_interruptibly(self, request: Callable[..., Any], turn: _Turn) -> Iterator[Any]:
-        """Advance async provider reads on the serial handler's persistent loop."""
+    def _iter_stream_chunks_interruptibly(
+        self,
+        request: Callable[..., Any],
+        turn: _Turn,
+        *,
+        abandoned: Callable[[], bool] | None = None,
+    ) -> Iterator[Any]:
+        """Advance async provider reads on the serial handler's persistent loop.
+
+        The calling thread drives the loop, so only one thread may iterate at a
+        time. ``abandoned`` adds a reason to stop besides the turn's own.
+        """
         loop = self._async_loop()
         stopped = object()
+
+        def interrupted() -> bool:
+            return self.stop_event.is_set() or self._turn_is_cancelled(turn) or (abandoned is not None and abandoned())
 
         async def stream_chunks():
             response = await request(client=self._streaming_client())
@@ -543,7 +558,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         async def read_chunk():
             pending = asyncio.create_task(anext(chunks))
             try:
-                while not self.stop_event.is_set() and not self._turn_is_cancelled(turn):
+                while not interrupted():
                     ready, _ = await asyncio.wait({pending}, timeout=0.05)
                     if ready:
                         return pending.result()
@@ -553,7 +568,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 await asyncio.gather(pending, return_exceptions=True)
 
         try:
-            while not self.stop_event.is_set() and not self._turn_is_cancelled(turn):
+            while not interrupted():
                 try:
                     chunk = loop.run_until_complete(read_chunk())
                 except StopAsyncIteration:
@@ -569,11 +584,17 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
     def _iter_prefetch_events_interruptibly(
         self,
-        request: Callable[[], Any],
+        request: Callable[..., Any],
         event_iterator: Callable[[Any], Iterator[ProviderEvent]],
         turn: _Turn,
     ) -> Iterator[ProviderEvent]:
-        """Connect and consume one prefetch in a single bounded worker."""
+        """Connect and consume one prefetch in a single bounded worker.
+
+        A streamed prefetch is read through the streaming client, so a tool
+        follow-up can reuse the connection of the turn that called the tool. The
+        worker drives that client's loop until it exits; this thread only waits
+        on the queue meanwhile.
+        """
         transaction = turn.prefetch_transaction
         assert transaction is not None
         results: Queue[tuple[bool, Any]] = Queue(maxsize=PREFETCH_STREAM_QUEUE_MAXSIZE)
@@ -597,11 +618,15 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         def connect_and_read_events() -> None:
             api_response: Any = None
             try:
-                api_response = request()
-                with response_lock:
-                    connected_response.append(api_response)
-                if hasattr(api_response, "close"):
-                    transaction.register_abort(api_response.close)
+                if self.stream:
+                    # Polls for cancellation itself, so it needs no abort from another thread.
+                    api_response = self._iter_stream_chunks_interruptibly(request, turn, abandoned=stop_reader.is_set)
+                else:
+                    api_response = request()
+                    with response_lock:
+                        connected_response.append(api_response)
+                    if hasattr(api_response, "close"):
+                        transaction.register_abort(api_response.close)
                 if reader_cancelled():
                     return
                 for event in event_iterator(api_response):
@@ -656,6 +681,18 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             with response_lock:
                 api_response = connected_response[0] if connected_response else None
             self._close_response(api_response)
+            if self.stream:
+                # The worker closes its own stream. Wait for it, so that the
+                # loop is free for the next request.
+                worker.join(PREFETCH_WORKER_RELEASE_TIMEOUT_S)
+                if worker.is_alive():
+                    self._replace_streaming_client()
+
+    def _replace_streaming_client(self) -> None:
+        """Leave the loop and client to a worker that has not let go of them."""
+        logger.error("A prefetch worker is still using the streaming client; later requests get a new one")
+        self._async_runner = None
+        self._async_client = None
 
     def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
         if self.speculative_turns is None:

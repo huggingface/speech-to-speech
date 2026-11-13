@@ -209,7 +209,10 @@ def _chat_tool_delta(index, *, tool_id=None, name=None, arguments=None):
     )
 
 
-def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None, reasoning_effort="none"):
+def _make_handler(
+    *, disable_thinking=False, stream=True, cancel_scope=None, reasoning_effort="none", blocking_provider=False
+):
+    """``blocking_provider`` lets a fake that blocks be cancelled, as a real provider read can."""
     handler = object.__new__(ResponsesApiModelHandler)
     handler.model_name = "test-model"
     handler.stream = stream
@@ -243,7 +246,7 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None, rea
     handler.stop_event = Event()
     handler._async_runner = None
     handler._async_client = None
-    handler._make_async_client = lambda: mock_async_client(handler)
+    handler._make_async_client = lambda: mock_async_client(handler, in_threads=blocking_provider)
     return handler
 
 
@@ -266,7 +269,7 @@ def test_discarded_prefetch_aborts_blocked_provider_stream(with_tool_prefix):
             self.released.set()
 
     cancel_scope = CancelScope()
-    handler = _make_handler(stream=True, cancel_scope=cancel_scope)
+    handler = _make_handler(stream=True, cancel_scope=cancel_scope, blocking_provider=True)
     stream = BlockingStream()
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: stream))
     request = _make_request()
@@ -286,8 +289,10 @@ def test_discarded_prefetch_aborts_blocked_provider_stream(with_tool_prefix):
     worker.start()
     assert stream.started.wait(timeout=1.0)
     assert staged.wait(timeout=1.0) or not with_tool_prefix
-    # Holding a tool prefix must leave the hidden stream abortable.
+    # Holding a tool prefix must leave the hidden stream abortable: the
+    # prefetch worker closes it while this handler's output is still waiting.
     transaction.discard()
+    assert stream.released.wait(timeout=1.0)
     assert stream.closed
     resume.set()
     worker.join(timeout=1.0)
@@ -356,7 +361,7 @@ def test_discarded_prefetch_does_not_block_on_provider_connect():
         return LateStream()
 
     cancel_scope = CancelScope()
-    handler = _make_handler(stream=True, cancel_scope=cancel_scope)
+    handler = _make_handler(stream=True, cancel_scope=cancel_scope, blocking_provider=True)
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
     request = _make_request()
     transaction = ResponsePrefetchTransaction()
@@ -394,7 +399,7 @@ def test_claimed_prefetch_cancel_does_not_block_on_provider_connect():
         return LateStream()
 
     cancel_scope = CancelScope()
-    handler = _make_handler(stream=True, cancel_scope=cancel_scope)
+    handler = _make_handler(stream=True, cancel_scope=cancel_scope, blocking_provider=True)
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
     request = _make_request()
     transaction = ResponsePrefetchTransaction()
@@ -431,7 +436,7 @@ def test_claimed_prefetch_cancel_aborts_blocked_provider_read():
             self.released.set()
 
     cancel_scope = CancelScope()
-    handler = _make_handler(stream=True, cancel_scope=cancel_scope)
+    handler = _make_handler(stream=True, cancel_scope=cancel_scope, blocking_provider=True)
     stream = BlockingStream()
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: stream))
     request = _make_request()
@@ -515,6 +520,13 @@ def test_repeated_prefetch_invalidation_bounds_provider_connect_workers():
     claimed_outputs = list(handler.process(claimed_request))
 
     assert any(isinstance(output, LLMResponseChunk) and output.text == "public" for output in claimed_outputs)
+
+    # The stuck worker still holds the streaming client's event loop. An
+    # ordinary turn must get a client of its own instead of failing on it.
+    ordinary_outputs = list(handler.process(_make_request()))
+
+    assert any(isinstance(output, LLMResponseChunk) and output.text == "public" for output in ordinary_outputs)
+    assert next(output for output in ordinary_outputs if isinstance(output, EndOfResponse)).error is None
 
     release_request.set()
     assert response_closed.wait(timeout=1.0)
