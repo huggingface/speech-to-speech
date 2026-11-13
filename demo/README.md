@@ -249,6 +249,9 @@ button, top-right):
   see what you're showing it. This needs a vision-language model on the server
   (`--llm_is_vlm`; the default model is text-only); see the
   [LLM guide](../src/speech_to_speech/LLM/README.md#local-generation-options).
+  Set `VISION=0` (or `false`/`no`/`off`) when the backend cannot take images
+  (e.g. llama.cpp without a multimodal projection file): the camera tool is then
+  neither offered to the model nor auto-started in the browser.
 
 ## Usage limits (deployed Space only)
 

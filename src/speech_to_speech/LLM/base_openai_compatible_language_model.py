@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator, Iterator
 from queue import Empty, Full, Queue
@@ -14,7 +15,7 @@ from urllib.parse import urlparse
 
 import httpx
 from nltk import sent_tokenize
-from openai import OpenAI
+from openai import APIStatusError, OpenAI
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemAssistantMessage,
     RealtimeConversationItemFunctionCall,
@@ -70,6 +71,20 @@ PREFETCH_PROVIDER_WORKER_LIMIT = 1
 PREFETCH_STREAM_QUEUE_MAXSIZE = 16
 PREFETCH_WORKER_ACQUIRE_TIMEOUT_S = 0.05
 PROVIDER_FAILURE_FALLBACK = "I'm having trouble responding right now. Please try again."
+IMAGE_INPUT_UNSUPPORTED_FALLBACK = "Sorry, I can't see images with the current model."
+# Provider wording for a deployment that cannot take image input, e.g. llama.cpp
+# without an mmproj ("image input is not supported"), vLLM ("is not a multimodal
+# model") or OpenAI ("image_url is only supported by certain models").
+_IMAGE_INPUT_UNSUPPORTED_RE = re.compile(
+    r"image[^.]*\b(?:not supported|unsupported|only supported)\b"
+    r"|does not support (?:image|vision)|not a multimodal model",
+    re.IGNORECASE,
+)
+
+
+def _is_image_input_rejection(exc: Exception) -> bool:
+    """Whether the provider refused the request because it cannot process images."""
+    return isinstance(exc, APIStatusError) and bool(_IMAGE_INPUT_UNSUPPORTED_RE.search(str(exc)))
 
 
 # ── Normalised provider events ────────────────────────────────────────────────
@@ -785,6 +800,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         )
         provider_request_started = False
         consumed_image_ids: set[str] = set()
+        image_input_rejected = False
         store = getattr(self, "turn_latency_store", None)
         tracker = store.get_response(turn.response_key) if store else None
         trace_context = HttpRequestContext(
@@ -862,6 +878,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 log_exception(logger, "LLM generation failed; ending the current response", exc)
                 if error_message is None:
                     error_message = f"Language model generation failed: {exc}"
+                image_input_rejected = bool(consumed_image_ids) and _is_image_input_rejection(exc)
             finally:
                 # Store elapsed provider work before an error terminal can finish
                 # the response on the service thread.
@@ -877,8 +894,20 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
             ):
                 state.output_emitted = True
+                # Strip images from history only when the provider explicitly
+                # rejected them (e.g. llama.cpp without mmproj, vLLM non-VL,
+                # OpenAI text-only endpoint). We do NOT strip on transient
+                # failures (network blips, rate limits) so the image is retried.
+                # Prefetch out-of-band turns are skipped: they never write to
+                # history themselves, so there is nothing to un-poison.
+                if image_input_rejected and not is_out_of_band(turn.response):
+                    original_chat.strip_images(consumed_image_ids)
+                    logger.warning(
+                        "Language model rejected image input; removed %d image(s) from history",
+                        len(consumed_image_ids),
+                    )
                 yield LLMResponseChunk(
-                    text=PROVIDER_FAILURE_FALLBACK,
+                    text=IMAGE_INPUT_UNSUPPORTED_FALLBACK if image_input_rejected else PROVIDER_FAILURE_FALLBACK,
                     selected_language=turn.selected_language,
                     runtime_config=turn.runtime_config,
                     response=turn.response,
@@ -889,17 +918,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     response_key=turn.response_key,
                     prefetch_transaction=turn.prefetch_transaction,
                 )
-
-            # On any generation failure, strip images that were included in the
-            # failed request from the persistent conversation history. Without this,
-            # the image stays in original_chat and every subsequent turn resends it
-            # to the backend, which causes all later requests to fail too (state
-            # poisoning). consumed_image_ids was captured from the serialized snapshot
-            # before the request fired, so only images the backend actually saw (and
-            # rejected) are removed, any image a fast client injected mid-generation
-            # for the *next* turn is left intact.
-            if error_message is not None and consumed_image_ids:
-                original_chat.strip_images(consumed_image_ids)
 
             proposal_allowed = (
                 error_message is None
