@@ -106,7 +106,18 @@ def test_chattts_first_audio_reaches_terminal_response(
         return audio[:512]
 
     handler.model = SimpleNamespace(infer=infer)
-    monkeypatch.setattr(chattts_module, "librosa", SimpleNamespace(resample=resample))
+    if stream:
+        original_push = chattts_module.soxr.ResampleStream.resample_chunk
+
+        def push(resampler, pcm, **kwargs):
+            clock[0] = 10.40
+            if cancel_during == "resample":
+                handler.cancel_scope.cancel()
+            return original_push(resampler, pcm, **kwargs)
+
+        monkeypatch.setattr(chattts_module.soxr.ResampleStream, "resample_chunk", push)
+    else:
+        monkeypatch.setattr(chattts_module, "librosa", SimpleNamespace(resample=resample))
     tts_input = TTSInput(
         text="Hello",
         response_key=request.response_key,
@@ -246,6 +257,7 @@ def test_new_timing_fields_fit_realtime_metadata_with_precise_measurements(servi
         "stt_s",
         "llm_ttft_s",
         "llm_s",
+        "llm_first_tts_s",
         "tts_ttfa_s",
         "e2e_s",
         "vad_decision_s",
@@ -268,6 +280,7 @@ def test_new_timing_fields_fit_realtime_metadata_with_precise_measurements(servi
     assert payload["hold_s"] == pytest.approx(precise, abs=1e-9)
     assert payload["e2e_s"] == precise
     assert payload["llm_total_s"] == pytest.approx(precise, abs=1e-9)
+    assert payload["llm_first_tts_s"] == pytest.approx(precise, abs=1e-9)
     assert payload["llm_rounds"] == 1
 
 
@@ -516,7 +529,7 @@ def test_terminal_response_emits_one_latency_record(service, conn_id, caplog, st
 
     cut = " tts=cut" if status == "cancelled" else ""
     assert _latency_lines(caplog) == [
-        "Turn turn_1 rev=0 latency: stt=0.12s llm=1.28s llm_total=1.28s llm_rounds=1 tts_ttfa=0.16s e2e=1.61s "
+        "Turn turn_1 rev=0 latency: stt=0.12s llm=1.28s llm_first_tts=n/a llm_total=1.28s llm_rounds=1 tts_ttfa=0.16s e2e=1.61s "
         f"vad_decision=n/a hold=n/a smart_turn_status=n/a "
         f"status={status}"
         + (" mlx_lock_wait=0.03s[Qwen3TTS:0.03s]" if sys.platform == "darwin" else "")
@@ -570,6 +583,8 @@ def test_unregister_clears_unfinished_measurements_before_session_reuse(service,
     old = service.turn_latency_store.get_or_create_response(request.response_key)
     old.start_llm()
     old.record_llm(9.0)
+    old.record_llm_start(1.0)
+    old.llm_first_tts_s = 5.0
     old.record_tts_ttfa(8.0)
     old.record_e2e(7.0)
     old.vad_decision_s = 6.0
@@ -589,7 +604,7 @@ def test_unregister_clears_unfinished_measurements_before_session_reuse(service,
             service.finish_response(new_conn_id, response_key=fresh.response_key)
         lines = _latency_lines(caplog)
         assert len(lines) == 1
-        assert "stt=0.12s llm=n/a llm_total=n/a llm_rounds=0 tts_ttfa=n/a e2e=n/a" in lines[0]
+        assert "stt=0.12s llm=n/a llm_first_tts=n/a llm_total=n/a llm_rounds=0 tts_ttfa=n/a e2e=n/a" in lines[0]
         assert "vad_decision=n/a hold=n/a smart_turn_status=n/a" in lines[0]
         assert f"response_key={fresh.response_key}" in lines[0]
     finally:

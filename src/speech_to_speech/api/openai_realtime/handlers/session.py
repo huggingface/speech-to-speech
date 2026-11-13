@@ -14,6 +14,8 @@ from openai.types.realtime.realtime_transcription_session_create_request import 
 )
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
+from speech_to_speech.api.openai_realtime.reasoning import SessionCreated, SessionUpdated
+from speech_to_speech.api.openai_realtime.runtime_config import validate_reasoning
 from speech_to_speech.speech_languages import normalize_language
 
 logger = logging.getLogger(__name__)
@@ -39,6 +41,10 @@ class SessionHandler(RealtimeBaseHandler):
                 message="Only 'realtime' session type is supported; transcription sessions are not.",
                 _type="invalid_session_type",
             )
+
+        reasoning_error = validate_reasoning(s)
+        if reasoning_error is not None:
+            return self.make_error(message=reasoning_error, _type="invalid_request_error")
 
         transcription = s.audio.input.transcription if s.audio is not None and s.audio.input is not None else None
         if transcription is not None and isinstance(transcription.language, str):
@@ -84,7 +90,7 @@ class SessionHandler(RealtimeBaseHandler):
         # The SDK model has no `id` field but allows extras, and model_dump()
         # carries them onto the wire.
         session = cfg.session.model_copy(update={"id": conn_id})
-        return SessionCreatedEvent(
+        return SessionCreated(
             type="session.created",
             event_id=self._next_event_id(),
             session=session,
@@ -98,7 +104,7 @@ class SessionHandler(RealtimeBaseHandler):
         """
         cfg = self._state(conn_id).runtime_config
         session = cfg.session.model_copy(update={"id": conn_id})
-        return SessionUpdatedEvent(
+        return SessionUpdated(
             type="session.updated",
             event_id=self._next_event_id(),
             session=session,

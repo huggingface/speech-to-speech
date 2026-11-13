@@ -30,7 +30,7 @@ from scipy.signal import resample_poly
 aiortc = pytest.importorskip("aiortc")
 av = pytest.importorskip("av")
 
-import httpx  # noqa: E402  (ships with the openai dependency)
+import httpx2  # noqa: E402  (ships with the openai dependency)
 from aioice.ice import Connection  # noqa: E402
 from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription, clock  # noqa: E402
 from aiortc.codecs.opus import OpusDecoder, OpusEncoder  # noqa: E402
@@ -41,6 +41,7 @@ from aiortc.rtp import RtcpPacket, RtcpRrPacket, RtcpSrPacket, RtpPacket, is_rtc
 from starlette.testclient import TestClient  # noqa: E402
 
 import speech_to_speech.api.openai_realtime.websocket_router as router_module  # noqa: E402
+from speech_to_speech.api.openai_realtime.pipeline_unit import SessionState  # noqa: E402
 from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES  # noqa: E402
 from speech_to_speech.api.openai_realtime.transports import SessionTransport  # noqa: E402
 from speech_to_speech.api.openai_realtime.webrtc_session import (  # noqa: E402
@@ -51,6 +52,7 @@ from speech_to_speech.api.openai_realtime.webrtc_session import (  # noqa: E402
     PipelineAudioTrack,
     WebRTCSession,
 )
+from speech_to_speech.LLM.chat import make_assistant_message, make_user_message  # noqa: E402
 from speech_to_speech.pipeline.events import (  # noqa: E402
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
@@ -58,6 +60,7 @@ from speech_to_speech.pipeline.events import (  # noqa: E402
     SpeechStartedEvent,
     TokenUsageEvent,
 )
+from speech_to_speech.pipeline.history import ResponseHistory  # noqa: E402
 from speech_to_speech.pipeline.messages import (  # noqa: E402
     AUDIO_RESPONSE_DONE,
     AssistantTextPart,
@@ -88,6 +91,7 @@ class _FakeTransport(SessionTransport):
     def __init__(self):
         self.sent: list[dict] = []
         self.discards = 0
+        self.unplayed_ms = 0.0
 
     async def send_events(self, events):
         self.sent.extend(e.model_dump() for e in events)
@@ -103,6 +107,7 @@ class _FakeTransport(SessionTransport):
 
     def discard_pending_audio(self):
         self.discards += 1
+        return self.unplayed_ms
 
     async def close(self):
         pass
@@ -502,6 +507,16 @@ class TestOutboundAudioPackets:
         ]
         assert max(np.max(np.abs(frame)) for frame in frames) < 100
 
+    async def test_interruption_reports_the_unplayed_audio_it_discards(self, captured_audio_sender):
+        session, _, _ = captured_audio_sender
+        session._track.write(bytes(WEBRTC_SAMPLE_RATE * 2))
+
+        unplayed_ms = session.discard_pending_audio()
+
+        # Paced playback can send at most a frame or two before the discard.
+        assert 1000 - 3 * AUDIO_PTIME * 1000 <= unplayed_ms <= 1000
+        assert session.discard_pending_audio() == 0
+
     async def test_interruption_during_encoding_drops_in_flight_packet(self, captured_audio_sender, monkeypatch):
         session, sender, capture = captured_audio_sender
         encoding = ThreadingEvent()
@@ -641,6 +656,59 @@ class TestWebRTCDispatch:
         with pytest.raises(Empty):
             unit.output_queue.get_nowait()
 
+    async def test_output_audio_buffer_clear_drops_stashed_audio(self):
+        unit = _make_unit()
+        conn_id = unit.service.register()
+        transport = _FakeTransport()
+        unit.session = SessionState(session_id=conn_id, transport=transport)
+        unit.session.pending_output_item = b"\x01\x00" * 512
+
+        await router_module._dispatch_client_event(
+            unit,
+            conn_id,
+            {"type": "output_audio_buffer.clear"},
+            transport,
+            transport_kind="webrtc",
+        )
+
+        assert unit.session.pending_output_item is None
+
+    async def test_output_audio_buffer_clear_keeps_stashed_bookkeeping(self):
+        unit = _make_unit()
+        conn_id = unit.service.register()
+        transport = _FakeTransport()
+        done_event = AssistantResponseDoneEvent(response_key="response_1")
+        unit.session = SessionState(session_id=conn_id, transport=transport)
+        unit.session.pending_output_item = done_event
+
+        await router_module._dispatch_client_event(
+            unit,
+            conn_id,
+            {"type": "output_audio_buffer.clear"},
+            transport,
+            transport_kind="webrtc",
+        )
+
+        assert unit.session.pending_output_item is done_event
+
+    async def test_output_audio_buffer_clear_ignores_other_session_stash(self):
+        unit = _make_unit()
+        conn_id = unit.service.register()
+        transport = _FakeTransport()
+        unit.session = SessionState(session_id="replacement", transport=transport)
+        stashed = b"\x01\x00" * 512
+        unit.session.pending_output_item = stashed
+
+        await router_module._dispatch_client_event(
+            unit,
+            conn_id,
+            {"type": "output_audio_buffer.clear"},
+            transport,
+            transport_kind="webrtc",
+        )
+
+        assert unit.session.pending_output_item is stashed
+
     async def test_output_audio_buffer_clear_rejected_over_websocket(self):
         unit = _make_unit()
         conn_id = unit.service.register()
@@ -701,6 +769,34 @@ class TestWebRTCDispatch:
 
         assert transport.discards == 1
 
+    async def test_response_cancel_keeps_only_played_speech_in_history(self):
+        unit = _make_unit()
+        conn_id = unit.service.register()
+        chat = unit.service._state(conn_id).runtime_config.chat
+        chat.add_item(make_user_message("How can I improve my essay?"))
+        unit.service.dispatch_pipeline_event(
+            conn_id,
+            AssistantOutputEvent(text="Sure, here are five ways to improve it.", response_key="response_1"),
+        )
+        unit.service.encode_audio_chunk(conn_id, bytes(16_000 * 2 * 2), "response_1")
+        # Synthesis finished; most of its audio is still queued on the track.
+        unit.service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key="response_1"))
+        transport = _FakeTransport()
+        transport.unplayed_ms = 1200.0
+
+        await router_module._dispatch_client_event(
+            unit,
+            conn_id,
+            {"type": "response.cancel"},
+            transport,
+            transport_kind="webrtc",
+        )
+
+        assert [(item.role, item.content[0].text) for item in chat.buffer] == [
+            ("user", "How can I improve my essay?"),
+            ("assistant", "Sure, here are"),
+        ]
+
 
 # ---------------------------------------------------------------------------
 # Send-loop barge-in against transport-buffered audio
@@ -736,6 +832,132 @@ class TestBargeInAfterResponseDone:
                 assert spy.discards == 1
                 # Nothing to cancel: no response was active.
                 assert unit.cancel_scope.generation == generation_before
+        stop_event.set()
+
+    def test_speech_start_during_a_reply_keeps_only_played_speech(self):
+        unit = _make_unit()
+        stop_event = ThreadingEvent()
+        app = router_module.create_app(pool=[unit], stop_event=stop_event)
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                assert unit.session is not None
+                session_id = unit.session.session_id
+                service = unit.service
+                chat = service._state(session_id).runtime_config.chat
+                chat.add_item(make_user_message("How can I improve my essay?"))
+                first = "Sure, here are five ways to improve it."
+                second = "First, tighten the thesis so every paragraph supports it."
+                service.dispatch_pipeline_event(session_id, AssistantOutputEvent(text=first, response_key="response_1"))
+                service.encode_audio_chunk(session_id, bytes(16_000 * 2 * 2), "response_1")
+                service.dispatch_pipeline_event(
+                    session_id, AssistantOutputEvent(text=second, response_key="response_1")
+                )
+                service.encode_audio_chunk(session_id, bytes(16_000 * 2 * 3), "response_1")
+                assert service._state(session_id).in_response
+                spy = _FakeTransport()
+                spy.unplayed_ms = 4200.0
+                unit.session.transport = spy
+
+                unit.text_output_queue.put(SpeechStartedEvent())
+
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline and chat.buffer[-1].role != "assistant":
+                    time.sleep(0.02)
+                while time.monotonic() < deadline and chat.buffer[-1].content[0].text != "Sure, here are":
+                    time.sleep(0.02)
+                assert spy.discards == 1
+                assert [(item.role, item.content[0].text) for item in chat.buffer] == [
+                    ("user", "How can I improve my essay?"),
+                    ("assistant", "Sure, here are"),
+                ]
+        stop_event.set()
+
+    def test_history_is_cut_before_speech_started_reaches_the_client(self):
+        """A client that retrieves the reply on speech_started sees the cut."""
+        unit = _make_unit()
+        stop_event = ThreadingEvent()
+        app = router_module.create_app(pool=[unit], stop_event=stop_event)
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                assert unit.session is not None
+                session_id = unit.session.session_id
+                service = unit.service
+                chat = service._state(session_id).runtime_config.chat
+                chat.add_item(make_user_message("How can I improve my essay?"))
+                text = "Sure, here are five ways to improve it."
+                history = ResponseHistory.capture(
+                    chat,
+                    [make_assistant_message(text)],
+                    after_item_id=chat.history_anchor_id(),
+                    complete=True,
+                )
+                service.dispatch_pipeline_event(
+                    session_id,
+                    AssistantOutputEvent(text=text, response_key="response_1", history=history),
+                )
+                service.encode_audio_chunk(session_id, bytes(16_000 * 2 * 2), "response_1")
+                service.finish_response(session_id, response_key="response_1")
+                seen_at_speech_start = []
+
+                class Spy(_FakeTransport):
+                    async def send_events(self, events):
+                        if any(event.type == "input_audio_buffer.speech_started" for event in events):
+                            seen_at_speech_start.append(chat.buffer[-1].content[0].text)
+                        await super().send_events(events)
+
+                spy = Spy()
+                spy.unplayed_ms = 1200.0
+                unit.session.transport = spy
+
+                unit.text_output_queue.put(SpeechStartedEvent())
+
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline and not seen_at_speech_start:
+                    time.sleep(0.02)
+                assert seen_at_speech_start == ["Sure, here are"]
+        stop_event.set()
+
+    def test_speech_start_cuts_completed_reply_to_played_audio(self):
+        unit = _make_unit()
+        stop_event = ThreadingEvent()
+        app = router_module.create_app(pool=[unit], stop_event=stop_event)
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                assert unit.session is not None
+                session_id = unit.session.session_id
+                service = unit.service
+                chat = service._state(session_id).runtime_config.chat
+                chat.add_item(make_user_message("How can I improve my essay?"))
+                text = "Sure, here are five ways to improve it."
+                history = ResponseHistory.capture(
+                    chat,
+                    [make_assistant_message(text)],
+                    after_item_id=chat.history_anchor_id(),
+                    complete=True,
+                )
+                service.dispatch_pipeline_event(
+                    session_id,
+                    AssistantOutputEvent(text=text, response_key="response_1", history=history),
+                )
+                service.encode_audio_chunk(session_id, bytes(16_000 * 2 * 2), "response_1")
+                service.finish_response(session_id, response_key="response_1")
+                spy = _FakeTransport()
+                spy.unplayed_ms = 1200.0
+                unit.session.transport = spy
+
+                unit.text_output_queue.put(SpeechStartedEvent())
+
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline and chat.buffer[-1].content[0].text == text:
+                    time.sleep(0.02)
+                assert spy.discards == 1
+                assert [(item.role, item.content[0].text) for item in chat.buffer] == [
+                    ("user", "How can I improve my essay?"),
+                    ("assistant", "Sure, here are"),
+                ]
         stop_event.set()
 
 
@@ -1020,7 +1242,7 @@ class TestWebRTCLoopback:
             offer = await pc.createOffer()
             await pc.setLocalDescription(offer)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx2.AsyncClient() as client:
                 resp = await client.post(
                     f"http://127.0.0.1:{server_env.port}/v1/realtime/calls",
                     content=pc.localDescription.sdp,
@@ -1154,7 +1376,7 @@ class TestWebRTCLoopback:
             await pc.close()
 
     async def test_rejects_wrong_content_type(self, server_env):
-        async with httpx.AsyncClient() as client:
+        async with httpx2.AsyncClient() as client:
             resp = await client.post(
                 f"http://127.0.0.1:{server_env.port}/v1/realtime/calls",
                 json={"sdp": "nope"},
@@ -1170,7 +1392,7 @@ class TestWebRTCLoopback:
             offer = await pc.createOffer()
             await pc.setLocalDescription(offer)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx2.AsyncClient() as client:
                 first = await client.post(
                     f"http://127.0.0.1:{server_env.port}/v1/realtime/calls",
                     content=pc.localDescription.sdp,
@@ -1200,7 +1422,7 @@ class TestWebRTCLoopback:
             offer = await pc.createOffer()
             await pc.setLocalDescription(offer)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx2.AsyncClient() as client:
                 resp = await client.post(
                     f"http://127.0.0.1:{server_env.port}/v1/realtime/calls",
                     content=pc.localDescription.sdp,
@@ -1223,7 +1445,7 @@ class TestWebRTCLoopback:
         await _wait_for_release(server_env)
 
     async def test_invalid_offer_releases_unit(self, server_env):
-        async with httpx.AsyncClient() as client:
+        async with httpx2.AsyncClient() as client:
             resp = await client.post(
                 f"http://127.0.0.1:{server_env.port}/v1/realtime/calls",
                 content="not an sdp",
@@ -1252,7 +1474,7 @@ class TestWebRTCLoopback:
             offer = await pc.createOffer()
             await pc.setLocalDescription(offer)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx2.AsyncClient() as client:
                 resp = await client.post(
                     f"http://127.0.0.1:{server_env.port}/v1/realtime/calls",
                     content=pc.localDescription.sdp,
@@ -1397,3 +1619,31 @@ async def test_conversation_delete_uses_shared_data_channel_dispatch():
         assert unit.service._state(conn_id).runtime_config.chat.init_chat_message is None
     finally:
         unit.service.unregister(conn_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["completed", "incomplete", "failed", "cancelled", "discard"])
+async def test_output_resampler_does_not_carry_speech_into_next_response(ending):
+    unit = _make_unit()
+    session_id = unit.service.register()
+    rtc = WebRTCSession(Mock(), on_client_event=AsyncMock(), on_audio=Mock(), on_open=AsyncMock(), on_closed=Mock())
+    samples = np.zeros(700, dtype=np.int16)
+    samples[-1] = 20000
+    await rtc.send_audio_chunk(unit.service, session_id, samples.tobytes())
+    if ending == "discard":
+        rtc.discard_pending_audio()
+    await rtc.send_events(
+        unit.service.finish_response(session_id, status="cancelled" if ending == "discard" else ending)
+    )
+    first = np.frombuffer(bytes(rtc._track._buffer), dtype=np.int16)
+    if ending not in ("cancelled", "discard"):
+        assert first.size == samples.size * 3
+        assert np.max(np.abs(first[-60:].astype(int))) >= 19000
+    else:
+        assert not np.any(first)
+    rtc._track.clear()
+    await rtc.send_audio_chunk(unit.service, session_id, bytes(1400))
+    await rtc.send_events(unit.service.finish_response(session_id))
+    second = np.frombuffer(bytes(rtc._track._buffer), dtype=np.int16)
+    assert second.size == 2100
+    assert not np.any(second)

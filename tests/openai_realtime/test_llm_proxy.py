@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Event as ThreadingEvent
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 import uvicorn
 from pydantic import BaseModel
@@ -302,7 +302,7 @@ class TestStreamingPassthrough:
         )
         with LiveApp(_make_app(_proxy_config(upstream))) as live:
             arrivals: list[float] = []
-            with httpx.stream(
+            with httpx2.stream(
                 "POST",
                 f"http://127.0.0.1:{live.port}/v1/chat/completions",
                 json=STREAM_BODY,

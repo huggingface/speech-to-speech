@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 import os
@@ -12,9 +13,16 @@ from time import perf_counter
 from typing import Any, Literal, Optional
 from urllib.parse import urlparse
 
-import httpx
+import httpx2
 from nltk import sent_tokenize
-from openai import OpenAI
+from openai import (
+    DEFAULT_CONNECTION_LIMITS,
+    APITimeoutError,
+    AsyncOpenAI,
+    DefaultAsyncHttpx2Client,
+    DefaultHttpx2Client,
+    OpenAI,
+)
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemAssistantMessage,
     RealtimeConversationItemFunctionCall,
@@ -26,6 +34,7 @@ from openai.types.realtime.realtime_conversation_item_assistant_message import (
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage, ResponseReasoningItem
 from pydantic import BaseModel, ConfigDict, Field
 
+from speech_to_speech.api.openai_realtime.runtime_config import resolve_reasoning_effort
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.chat import (
     Chat,
@@ -50,6 +59,10 @@ from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
 from speech_to_speech.pipeline.history import ResponseHistory
 from speech_to_speech.pipeline.messages import (
+    AssistantOutputPart,
+    AssistantReasoningPart,
+    AssistantTextPart,
+    AssistantToolCallPart,
     EndOfResponse,
     LLMResponseChunk,
     ResponseIncompleteReason,
@@ -58,6 +71,7 @@ from speech_to_speech.pipeline.messages import (
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
+from speech_to_speech.utils.request_tracing import HttpRequestContext, HttpRequestTrace
 from speech_to_speech.utils.utils import audio_to_wav_base64, is_out_of_band, response_wants_audio
 
 logger = logging.getLogger(__name__)
@@ -67,7 +81,21 @@ WARMUP_MAX_RETRIES = 6
 PREFETCH_PROVIDER_WORKER_LIMIT = 1
 PREFETCH_STREAM_QUEUE_MAXSIZE = 16
 PREFETCH_WORKER_ACQUIRE_TIMEOUT_S = 0.05
+# A streaming prefetch worker notices cancellation within one 0.05 s poll.
+PREFETCH_WORKER_RELEASE_TIMEOUT_S = 0.5
 PROVIDER_FAILURE_FALLBACK = "I'm having trouble responding right now. Please try again."
+# How long an idle provider connection stays open for the next request. The
+# SDK's 5 s is shorter than the pause between two turns of a conversation, so
+# every turn would open a new connection.
+KEEPALIVE_EXPIRY_S = 60.0
+
+
+def _connection_limits() -> httpx2.Limits:
+    return httpx2.Limits(
+        max_connections=DEFAULT_CONNECTION_LIMITS.max_connections,
+        max_keepalive_connections=DEFAULT_CONNECTION_LIMITS.max_keepalive_connections,
+        keepalive_expiry=KEEPALIVE_EXPIRY_S,
+    )
 
 
 # ── Normalised provider events ────────────────────────────────────────────────
@@ -76,11 +104,28 @@ PROVIDER_FAILURE_FALLBACK = "I'm having trouble responding right now. Please try
 # lives in one place. Subclasses differ only in how they produce these events.
 
 
+class _StreamInterrupted(Exception):
+    """A cancelled or stopped turn abandoned its provider stream before it ended."""
+
+
+def _read_timed_out(exc: Exception) -> bool:
+    """Whether a provider read timed out; the SDK raises it as ``APITimeoutError``."""
+    cause = exc.__cause__ if isinstance(exc, APITimeoutError) else exc
+    return isinstance(cause, httpx2.ReadTimeout)
+
+
 class TextDelta(BaseModel):
     """Incremental assistant text. Always RAW (unfiltered); the base applies
     ``remove_unspeechable`` for the audio path."""
 
     text: str
+
+
+class ReasoningDelta(BaseModel):
+    """Readable provider output, kept separate from the assistant's answer."""
+
+    text: str
+    kind: Literal["reasoning", "summary"] = "reasoning"
 
 
 class AssistantMessage(BaseModel):
@@ -125,9 +170,11 @@ class ProviderResponseEnd(BaseModel):
     history_item_order: list[str] | None = None
 
 
-ProviderEvent = TextDelta | AssistantMessage | ToolCall | ResponseReasoningItem | Usage | ProviderResponseEnd
+ProviderEvent = (
+    TextDelta | ReasoningDelta | AssistantMessage | ToolCall | ResponseReasoningItem | Usage | ProviderResponseEnd
+)
 SerializeFn = Callable[[Chat], Any]
-RequestFn = Callable[[Any, dict[str, Any]], Any]
+RequestFn = Callable[..., Any]
 EventIteratorFn = Callable[[Any], Iterator[ProviderEvent]]
 
 
@@ -163,6 +210,7 @@ class _GenState(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     output_emitted: bool = False
+    reasoning: dict[Literal["reasoning", "summary"], list[str]] = Field(default_factory=dict)
     ending: ProviderResponseEnd = Field(default_factory=ProviderResponseEnd)
 
 
@@ -218,7 +266,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.audio_history_turns = max(0, audio_history_turns)
         self.reasoning_effort = reasoning_effort
         self.request_timeout_s = float(request_timeout_s)
-        self.request_timeout = httpx.Timeout(
+        self.request_timeout = httpx2.Timeout(
             self.request_timeout_s,
             connect=min(10.0, self.request_timeout_s),
         )
@@ -231,7 +279,13 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             and self._is_local_base_url(base_url)
         ):
             api_key = "none"
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            http_client=DefaultHttpx2Client(limits=_connection_limits()),
+        )
+        self._async_runner: asyncio.Runner | None = None
+        self._async_client: AsyncOpenAI | None = None
         self._extra_body = self._build_extra_body(base_url, disable_thinking, reasoning_effort)
         self._prefetch_worker_slots = BoundedSemaphore(PREFETCH_PROVIDER_WORKER_LIMIT)
         self._prefetch_workers_lock = Lock()
@@ -306,7 +360,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         ...
 
     @abstractmethod
-    def _request(self, api_input: Any, optional_kwargs: dict[str, Any]) -> Any:
+    def _request(self, api_input: Any, optional_kwargs: dict[str, Any], *, client: Any = None) -> Any:
         """Issue the create() call and return the response or stream."""
         ...
 
@@ -330,8 +384,17 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             yield from self._iter_response_events(api_response)
 
     @abstractmethod
-    def _build_optional_kwargs(self, req_tools: Any, req_tool_choice: Any) -> dict[str, Any]:
-        """Build the per-request tools/tool_choice kwargs in the backend's shape."""
+    def _build_optional_kwargs(
+        self,
+        req_tools: Any,
+        req_tool_choice: Any,
+        reasoning_effort: str | None = None,
+    ) -> dict[str, Any]:
+        """Build the per-request tools/tool_choice/reasoning kwargs in the backend's shape.
+
+        ``reasoning_effort`` is the client's Realtime ``reasoning.effort``; ``None``
+        keeps the startup default.
+        """
         ...
 
     # ── audio-input protocol hooks ───────────────────────────────────────────
@@ -345,16 +408,17 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         response: Any,
         req_tools: Any,
         req_tool_choice: Any,
+        reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
         """Build audio request parameters in the selected backend's shape."""
-        kwargs = self._build_optional_kwargs(req_tools, req_tool_choice)
+        kwargs = self._build_optional_kwargs(req_tools, req_tool_choice, reasoning_effort)
         max_tokens = getattr(response, "max_output_tokens", None) if response is not None else None
         kwargs.setdefault("max_tokens", max_tokens or self.audio_max_tokens)
         kwargs.setdefault("temperature", self.audio_temperature)
         return kwargs
 
-    def _request_audio(self, api_input: Any, optional_kwargs: dict[str, Any]) -> Any:
-        return self._request(api_input, optional_kwargs)
+    def _request_audio(self, api_input: Any, optional_kwargs: dict[str, Any], *, client: Any = None) -> Any:
+        return self._request(api_input, optional_kwargs, client=client)
 
     def _iter_audio_events(self, api_response: Any) -> Iterator[ProviderEvent]:
         yield from self._iter_events(api_response)
@@ -362,10 +426,22 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
     _audio_to_wav_base64 = staticmethod(audio_to_wav_base64)
 
     def cleanup(self) -> None:
-        client = getattr(self, "client", None)
-        if client is not None:
-            del self.client
-            client.close()
+        runner = getattr(self, "_async_runner", None)
+        client = getattr(self, "_async_client", None)
+        self._async_runner = None
+        self._async_client = None
+        try:
+            if runner is not None:
+                try:
+                    if client is not None:
+                        runner.run(client.close())
+                finally:
+                    runner.close()
+        finally:
+            client = getattr(self, "client", None)
+            if client is not None:
+                del self.client
+                client.close()
 
     # ── speculative-turn / cancellation gating ─────────────────────────────────
 
@@ -416,13 +492,109 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             raise
         return worker
 
+    def _make_async_client(self) -> AsyncOpenAI:
+        return AsyncOpenAI(
+            api_key=self.client.api_key,
+            base_url=self.client.base_url,
+            organization=self.client.organization,
+            project=self.client.project,
+            max_retries=self.client.max_retries,
+            http_client=DefaultAsyncHttpx2Client(limits=_connection_limits()),
+        )
+
+    def _async_loop(self) -> asyncio.AbstractEventLoop:
+        if self._async_runner is None:
+            # Keep this private loop out of the calling thread's event-loop policy.
+            self._async_runner = asyncio.Runner(loop_factory=asyncio.new_event_loop)
+        return self._async_runner.get_loop()
+
+    def _streaming_client(self) -> AsyncOpenAI:
+        if self._async_client is None:
+            self._async_client = self._make_async_client()
+        return self._async_client
+
+    def _send_warmup(self, send: Callable[[Any], Any]) -> None:
+        """Send the warmup request on the client that will serve turns.
+
+        Streamed turns use the async client. Warming that one builds it and its
+        TLS context before the first turn, and leaves a connection the turn can
+        reuse if it follows within ``KEEPALIVE_EXPIRY_S``.
+        """
+        if not self.stream:
+            send(self.client.with_options(max_retries=WARMUP_MAX_RETRIES))
+            return
+
+        async def warm() -> None:
+            await send(self._streaming_client().with_options(max_retries=WARMUP_MAX_RETRIES))
+
+        self._async_loop().run_until_complete(warm())
+
+    def _iter_stream_chunks_interruptibly(
+        self,
+        request: Callable[..., Any],
+        turn: _Turn,
+        *,
+        abandoned: Callable[[], bool] | None = None,
+    ) -> Iterator[Any]:
+        """Advance async provider reads on the serial handler's persistent loop.
+
+        The calling thread drives the loop, so only one thread may iterate at a
+        time. ``abandoned`` adds a reason to stop besides the turn's own.
+        """
+        loop = self._async_loop()
+        stopped = object()
+
+        def interrupted() -> bool:
+            return self.stop_event.is_set() or self._turn_is_cancelled(turn) or (abandoned is not None and abandoned())
+
+        async def stream_chunks():
+            response = await request(client=self._streaming_client())
+            async with response:
+                async for chunk in response:
+                    yield chunk
+
+        chunks = stream_chunks()
+
+        async def read_chunk():
+            pending = asyncio.create_task(anext(chunks))
+            try:
+                while not interrupted():
+                    ready, _ = await asyncio.wait({pending}, timeout=0.05)
+                    if ready:
+                        return pending.result()
+                return stopped
+            finally:
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+
+        try:
+            while not interrupted():
+                try:
+                    chunk = loop.run_until_complete(read_chunk())
+                except StopAsyncIteration:
+                    return
+                if chunk is stopped:
+                    break
+                yield chunk
+            # Returning here would look like a finished stream, and the event
+            # parsers would flush partial text and tool calls as a complete reply.
+            raise _StreamInterrupted
+        finally:
+            loop.run_until_complete(chunks.aclose())
+
     def _iter_prefetch_events_interruptibly(
         self,
-        request: Callable[[], Any],
+        request: Callable[..., Any],
         event_iterator: Callable[[Any], Iterator[ProviderEvent]],
         turn: _Turn,
     ) -> Iterator[ProviderEvent]:
-        """Connect and consume one prefetch in a single bounded worker."""
+        """Connect and consume one prefetch in a single bounded worker.
+
+        A streamed prefetch is read through the streaming client, so a tool
+        follow-up can reuse the connection of the turn that called the tool. The
+        worker drives that client's loop until it exits; this thread only waits
+        on the queue meanwhile.
+        """
         transaction = turn.prefetch_transaction
         assert transaction is not None
         results: Queue[tuple[bool, Any]] = Queue(maxsize=PREFETCH_STREAM_QUEUE_MAXSIZE)
@@ -446,11 +618,15 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         def connect_and_read_events() -> None:
             api_response: Any = None
             try:
-                api_response = request()
-                with response_lock:
-                    connected_response.append(api_response)
-                if hasattr(api_response, "close"):
-                    transaction.register_abort(api_response.close)
+                if self.stream:
+                    # Polls for cancellation itself, so it needs no abort from another thread.
+                    api_response = self._iter_stream_chunks_interruptibly(request, turn, abandoned=stop_reader.is_set)
+                else:
+                    api_response = request()
+                    with response_lock:
+                        connected_response.append(api_response)
+                    if hasattr(api_response, "close"):
+                        transaction.register_abort(api_response.close)
                 if reader_cancelled():
                     return
                 for event in event_iterator(api_response):
@@ -505,6 +681,18 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             with response_lock:
                 api_response = connected_response[0] if connected_response else None
             self._close_response(api_response)
+            if self.stream:
+                # The worker closes its own stream. Wait for it, so that the
+                # loop is free for the next request.
+                worker.join(PREFETCH_WORKER_RELEASE_TIMEOUT_S)
+                if worker.is_alive():
+                    self._replace_streaming_client()
+
+    def _replace_streaming_client(self) -> None:
+        """Leave the loop and client to a worker that has not let go of them."""
+        logger.error("A prefetch worker is still using the streaming client; later requests get a new one")
+        self._async_runner = None
+        self._async_client = None
 
     def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
         if self.speculative_turns is None:
@@ -527,21 +715,35 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
     # ── output helpers ──────────────────────────────────────────────────────--
 
+    @staticmethod
+    def _take_reasoning(state: _GenState) -> list[AssistantReasoningPart]:
+        parts = [AssistantReasoningPart(text="".join(text), kind=kind) for kind, text in state.reasoning.items()]
+        state.reasoning.clear()
+        return parts
+
     def _chunk(
         self,
         turn: _Turn,
+        state: _GenState,
         *,
         text: str = "",
         tools: list[ResponseFunctionToolCall] | None = None,
         language_code: Optional[str] = None,
         history: ResponseHistory | None = None,
     ) -> LLMResponseChunk:
+        has_output = bool(text.strip() if turn.wants_audio else text) or bool(tools)
+        parts: list[AssistantOutputPart] = (
+            list(self._take_reasoning(state)) if has_output and not state.output_emitted else []
+        )
+        state.output_emitted = state.output_emitted or has_output
+        if text:
+            parts.append(AssistantTextPart(text=text))
+        parts.extend(AssistantToolCallPart(tool=tool) for tool in tools or [])
         return LLMResponseChunk(
             history=history,
-            text=text,
+            parts=parts,
             language_code=language_code if language_code is not None else turn.language_code,
             selected_language=turn.selected_language,
-            tools=tools or [],
             runtime_config=turn.runtime_config,
             response=turn.response,
             turn_id=turn.turn_id,
@@ -585,8 +787,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 after_item_id=turn.history_anchor_id,
             )
         )
-        state.output_emitted = True
-        yield self._chunk(turn, tools=[item], history=history)
+        yield self._chunk(turn, state, tools=[item], history=history)
 
     # ── consumption ─────────────────────────────────────────────────────────--
 
@@ -606,8 +807,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
                 logger.info("LLM generation cancelled (stale speculative turn)")
                 return
-            state.output_emitted = True
-            yield self._chunk(turn, text=" ".join(batch))
+            yield self._chunk(turn, state, text=" ".join(batch))
 
         for event in events:
             # Provider usage is billable even when cancellation rolls back the
@@ -629,6 +829,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 state.history_items.append(event.to_chat_item())
             elif isinstance(event, ResponseReasoningItem):
                 state.history_items.append(event.model_copy(deep=True))
+            elif isinstance(event, ReasoningDelta):
+                if event.text and turn.runtime_config.reasoning_text_enabled:
+                    state.reasoning.setdefault(event.kind, []).append(event.text)
             elif isinstance(event, ToolCall):
                 if state.ending.status != "completed":
                     continue
@@ -655,8 +858,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                             logger.info("LLM generation cancelled (stale speculative turn)")
                             cancelled = True
                             break
-                        state.output_emitted = True
-                        yield self._chunk(turn, text=event.text)
+                        yield self._chunk(turn, state, text=event.text)
                     continue
                 new_text = remove_unspeechable(event.text)
                 state.clean_text += new_text
@@ -718,6 +920,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 state.history_items.append(event.to_chat_item())
             elif isinstance(event, ResponseReasoningItem):
                 state.history_items.append(event.model_copy(deep=True))
+            elif isinstance(event, ReasoningDelta):
+                if event.text and turn.runtime_config.reasoning_text_enabled:
+                    state.reasoning.setdefault(event.kind, []).append(event.text)
             elif isinstance(event, ToolCall):
                 if state.ending.status != "completed":
                     continue
@@ -734,8 +939,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     and not self._turn_is_cancelled(turn)
                     and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
                 ):
-                    state.output_emitted = True
-                    yield self._chunk(turn, text=out)
+                    yield self._chunk(turn, state, text=out)
         logger.debug("Clean text: %s", transcript_for_log(state.clean_text))
         logger.info("Tools: %s", transcript_for_log(state.tools))
         return (
@@ -775,9 +979,18 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         consumed_image_ids: set[str] = set()
         store = getattr(self, "turn_latency_store", None)
         tracker = store.get_response(turn.response_key) if store else None
+        trace_context = HttpRequestContext(
+            "llm",
+            session_id=getattr(turn.runtime_config, "trace_session_id", None),
+            turn_id=turn.turn_id,
+            turn_revision=turn.turn_revision,
+            response_key=turn.response_key,
+        )
 
         try:
             generation_started_at_s = perf_counter()
+            if tracker is not None:
+                tracker.record_llm_start(generation_started_at_s)
             try:
                 api_input = (serialize_fn or self._serialize)(active_chat)
                 # Images the model actually sees this turn; only these are stripped on
@@ -791,12 +1004,17 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     error_message = "Cannot generate a response: no instructions and no input were provided."
                 else:
 
-                    def make_request() -> Any:
+                    def make_request(*, client: Any = None) -> Any:
                         nonlocal provider_request_started
                         provider_request_started = True
                         if tracker is not None:
                             tracker.start_llm()
-                        return (request_fn or self._request)(api_input, optional_kwargs)
+                        trace = HttpRequestTrace(trace_context)
+                        trace.dispatch()
+                        options = trace.request_options(optional_kwargs)
+                        if client is None:
+                            return (request_fn or self._request)(api_input, options)
+                        return (request_fn or self._request)(api_input, options, client=client)
 
                     if turn.prefetch_transaction is not None:
                         events = self._iter_prefetch_events_interruptibly(
@@ -805,7 +1023,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                             turn,
                         )
                     else:
-                        api_response = make_request()
+                        api_response = (
+                            self._iter_stream_chunks_interruptibly(make_request, turn)
+                            if self.stream
+                            else make_request()
+                        )
                         events = (event_iterator_fn or self._iter_events)(api_response)
                 if events is not None:
 
@@ -825,21 +1047,26 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         generation_completed = yield from self._consume_streaming(observed_events, state, turn)
                     else:
                         generation_completed = yield from self._consume_nonstreaming(observed_events, state, turn)
-            except httpx.ReadTimeout:
-                logger.warning(
-                    "OpenAI API read timed out after %.1fs; ending the current response",
-                    self.request_timeout_s,
-                )
-                error_message = f"Language model generation timed out after {self.request_timeout_s:.1f}s."
+            except _StreamInterrupted:
+                logger.info("LLM generation cancelled (interruption)")
             except Exception as exc:
-                # Any other generation failure must still terminate the response: record
+                # Any generation failure must still terminate the response: record
                 # the error and fall through to the EndOfResponse below. Without this the
                 # exception would escape process() and no EndOfResponse would be emitted,
                 # leaving st.in_response stuck and locking every subsequent response.
-                log_exception(logger, "LLM generation failed; ending the current response", exc)
-                if error_message is None:
-                    error_message = f"Language model generation failed: {exc}"
+                if _read_timed_out(exc):
+                    logger.warning(
+                        "OpenAI API read timed out after %.1fs; ending the current response",
+                        self.request_timeout_s,
+                    )
+                    error_message = f"Language model generation timed out after {self.request_timeout_s:.1f}s."
+                else:
+                    log_exception(logger, "LLM generation failed; ending the current response", exc)
+                    if error_message is None:
+                        error_message = f"Language model generation failed: {exc}"
             finally:
+                self._close_response(events)
+                self._close_response(api_response)
                 # Store elapsed provider work before an error terminal can finish
                 # the response on the service thread.
                 if tracker is not None and provider_request_started:
@@ -855,7 +1082,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             ):
                 state.output_emitted = True
                 yield LLMResponseChunk(
-                    text=PROVIDER_FAILURE_FALLBACK,
+                    parts=[*self._take_reasoning(state), AssistantTextPart(text=PROVIDER_FAILURE_FALLBACK)],
                     selected_language=turn.selected_language,
                     runtime_config=turn.runtime_config,
                     response=turn.response,
@@ -901,6 +1128,14 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 )
             yield EndOfResponse(
                 history=history,
+                reasoning=(
+                    self._take_reasoning(state)
+                    if error_message is None
+                    and generation_completed
+                    and not self._turn_is_cancelled(turn)
+                    and self._turn_is_latest(turn.turn_id, turn.turn_revision)
+                    else []
+                ),
                 turn_id=turn.turn_id,
                 turn_revision=turn.turn_revision,
                 cancel_generation=turn.gen,
@@ -985,7 +1220,12 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         wants_audio = response_wants_audio(response)
         self._apply_config(active_chat, instructions, wants_audio, language_name=lang_name)
 
-        optional_kwargs = self._build_audio_optional_kwargs(response, req_tools, req_tool_choice)
+        optional_kwargs = self._build_audio_optional_kwargs(
+            response,
+            req_tools,
+            req_tool_choice,
+            resolve_reasoning_effort(runtime_config, response),
+        )
         input_history = None
         if request.audio is not None:
             audio_b64 = self._audio_to_wav_base64(request.audio, request.audio_sample_rate)
@@ -1002,9 +1242,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             item for item in active_chat.buffer if isinstance(item, RealtimeConversationItemUserMessage)
         ]
 
-        # CancelScope.is_stale(gen) is checked when the stream iterator advances; a
-        # blocked read inside httpx cannot be aborted by cancel_scope.cancel() from
-        # the websocket router. Mitigations: request_timeout_s / ReadTimeout.
         turn = _Turn(
             language_code=language_code,
             selected_language=request.selected_language,
@@ -1102,11 +1339,12 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         wants_audio = response_wants_audio(response)
         self._apply_config(active_chat, instructions, wants_audio, language_name=lang_name)
 
-        optional_kwargs = self._build_optional_kwargs(req_tools, req_tool_choice)
+        optional_kwargs = self._build_optional_kwargs(
+            req_tools,
+            req_tool_choice,
+            resolve_reasoning_effort(runtime_config, response),
+        )
 
-        # CancelScope.is_stale(gen) is checked when the stream iterator advances; a
-        # blocked read inside httpx cannot be aborted by cancel_scope.cancel() from
-        # the websocket router. Mitigations: request_timeout_s / ReadTimeout.
         turn = _Turn(
             language_code=language_code,
             selected_language=request.selected_language,

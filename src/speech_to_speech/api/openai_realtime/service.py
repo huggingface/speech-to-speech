@@ -13,6 +13,7 @@ from openai.types.realtime import (
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
     ConversationItemInputAudioTranscriptionFailedEvent,
+    ConversationItemRetrieveEvent,
     ConversationItemTruncateEvent,
     InputAudioBufferAppendEvent,
     InputAudioBufferCommitEvent,
@@ -25,7 +26,6 @@ from openai.types.realtime import (
     RealtimeConversationItemUserMessage,
     RealtimeError,
     RealtimeErrorEvent,
-    RealtimeSessionCreateRequest,
     ResponseAudioDeltaEvent,
     ResponseAudioDoneEvent,
     ResponseAudioTranscriptDeltaEvent,
@@ -49,6 +49,7 @@ from openai.types.realtime.conversation_item_input_audio_transcription_completed
     UsageTranscriptTextUsageDuration,
 )
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+from openai.types.realtime.realtime_server_event import ConversationItemRetrieved
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from speech_to_speech.api.openai_realtime.handlers import (
@@ -63,6 +64,12 @@ from speech_to_speech.api.openai_realtime.input_state import (
     InputItemState,
     PendingInputTerminal,
     SpeechToSpeechInputAudioTranscriptionSnapshotEvent,
+)
+from speech_to_speech.api.openai_realtime.reasoning import (
+    ResponseCreate,
+    SessionRequest,
+    SessionUpdate,
+    SpeechToSpeechReasoningDeltaEvent,
 )
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.api.openai_realtime.visemes import SpeechToSpeechVisemesEvent
@@ -89,6 +96,7 @@ from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, 
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
 from speech_to_speech.pipeline.turn_latency import SpeechLatencyAnchor, TurnLatencyStore
 from speech_to_speech.speech_languages import SpeechLanguageCapabilities
+from speech_to_speech.utils.request_tracing import log_response_binding
 from speech_to_speech.utils.utils import _generate_id, audio_to_wav_base64
 
 logger = logging.getLogger(__name__)
@@ -121,11 +129,12 @@ _EVENT_TYPE_TO_MODEL: dict[str, type[BaseModel]] = {
     "input_audio_buffer.append": InputAudioBufferAppendEvent,
     "input_audio_buffer.commit": InputAudioBufferCommitEvent,
     "output_audio_buffer.clear": OutputAudioBufferClearEvent,
-    "session.update": SessionUpdateEvent,
+    "session.update": SessionUpdate,
     "conversation.item.create": ConversationItemCreateEvent,
     "conversation.item.delete": ConversationItemDeleteEvent,
     "conversation.item.truncate": ConversationItemTruncateEvent,
-    "response.create": ResponseCreateEvent,
+    "conversation.item.retrieve": ConversationItemRetrieveEvent,
+    "response.create": ResponseCreate,
     "response.cancel": ResponseCancelEvent,
 }
 
@@ -137,11 +146,13 @@ ClientEvent = Union[
     ConversationItemCreateEvent,
     ConversationItemDeleteEvent,
     ConversationItemTruncateEvent,
+    ConversationItemRetrieveEvent,
     ResponseCreateEvent,
     ResponseCancelEvent,
 ]
 
 ServerEvent = Union[
+    SpeechToSpeechReasoningDeltaEvent,
     SpeechToSpeechVisemesEvent,
     SessionCreatedEvent,
     SessionUpdatedEvent,
@@ -151,6 +162,7 @@ ServerEvent = Union[
     InputAudioBufferCommittedEvent,
     ConversationItemCreatedEvent,
     ConversationItemDeletedEvent,
+    ConversationItemRetrieved,
     ConversationItemInputAudioTranscriptionDeltaEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionFailedEvent,
@@ -267,6 +279,13 @@ class ConnState(BaseModel):
     last_item_id: Optional[str] = None
     acknowledged_item_ids: list[str] = Field(default_factory=list)
     deleted_input_turn_ids: dict[str, None] = Field(default_factory=dict)
+    # Final transcript sent to the client for each published speech item. The
+    # chat may hold different text (speaker annotations) or nothing (empty
+    # transcripts), so conversation.item.retrieve answers from here.
+    published_input_transcripts: dict[str, str] = Field(default_factory=dict)
+    # Delivered assistant messages that were audio. The chat holds their text,
+    # so retrieval restores the output_audio shape the client saw.
+    audio_output_item_ids: dict[str, None] = Field(default_factory=dict)
     current_response_params: RealtimeResponseCreateParams | None = None
     pending_assistant_item_id: Optional[str] = None
     pending_assistant_output_index: Optional[int] = None
@@ -280,6 +299,12 @@ class ConnState(BaseModel):
     # flags. Kept as plain internal data to avoid coupling connection state to
     # protocol event models.
     pending_text_outputs: list[dict[str, Any]] = Field(default_factory=list)
+    # Recent assistant audio items, oldest first: transcript segments with the
+    # pipeline-rate samples delivered after each. Truncation maps a playback
+    # position back to the transcript the user heard.
+    assistant_audio_segments: dict[str, list[list[Any]]] = Field(default_factory=dict)
+    # Played position (pipeline samples) each truncated assistant item was cut to.
+    assistant_audio_cuts: dict[str, int] = Field(default_factory=dict)
     # Keyed by output index so response.done can preserve interleaving with
     # assistant message items.
     pending_function_calls: dict[int, RealtimeConversationItemFunctionCall] = Field(default_factory=dict)
@@ -456,12 +481,13 @@ class RealtimeService:
         state = ConnState(
             runtime_config=RuntimeConfig(
                 chat=Chat(self._chat_size),
-                session=RealtimeSessionCreateRequest(
+                session=SessionRequest(
                     type="realtime",
                     instructions=self._default_instructions,
                 ),
             )
         )
+        state.runtime_config.bind_trace_session(state.session_id)
         self._conns[state.session_id] = state
         self.total_usage.connections += 1
         return state.session_id
@@ -502,6 +528,7 @@ class RealtimeService:
         source: Literal["speech", "client", "tool"] = "speech",
         speech_anchor: SpeechLatencyAnchor | None = None,
     ) -> None:
+        existing = self.turn_latency_store.get_response(response_key)
         tracker = self.turn_latency_store.get_or_create_response(
             response_key,
             turn_id=turn_id,
@@ -511,6 +538,14 @@ class RealtimeService:
             parent_call_id=parent_call_id,
         )
         tracker.source = source
+        if existing is None:
+            log_response_binding(
+                session_id=self._state(conn_id).session_id,
+                response_key=response_key,
+                turn_id=turn_id,
+                turn_revision=turn_revision,
+                source=source,
+            )
         if source == "speech" and speech_anchor is None and turn_id is not None:
             speech_anchor = self._state(conn_id).speech_latency_anchors.get((turn_id, turn_revision))
         tracker.speech_anchor = speech_anchor
@@ -575,8 +610,9 @@ class RealtimeService:
         self,
         conn_id: str,
         response_key: str | None = None,
+        samples: int = 0,
     ) -> tuple[str, str, int, list[ServerEvent]]:
-        return self.audio.begin_audio_output(conn_id, response_key)
+        return self.audio.begin_audio_output(conn_id, response_key, samples)
 
     def encode_audio_chunk(
         self,
@@ -595,6 +631,12 @@ class RealtimeService:
 
     def handle_response_create(self, conn_id: str, event: ResponseCreateEvent) -> ServerEvent | None:
         return self.response.handle_response_create(conn_id, event)
+
+    def handle_conversation_item_truncate(self, conn_id: str, event: ConversationItemTruncateEvent) -> None:
+        self.response.handle_conversation_item_truncate(conn_id, event)
+
+    def truncate_unplayed_audio(self, conn_id: str, unplayed_ms: float) -> None:
+        self.response.truncate_unplayed_audio(conn_id, unplayed_ms)
 
     def handle_response_cancel(self, conn_id: str) -> list[ServerEvent]:
         return self.response.handle_response_cancel(conn_id)
@@ -655,6 +697,11 @@ class RealtimeService:
         # Hidden follow-up work captured the old history; it cannot be reused.
         self.response.discard_tool_followup_prefetch(conn_id)
         return self.conversation.handle_conversation_item_delete(conn_id, event)
+
+    def handle_conversation_item_retrieve(
+        self, conn_id: str, event: ConversationItemRetrieveEvent
+    ) -> list[ServerEvent]:
+        return self.conversation.handle_conversation_item_retrieve(conn_id, event)
 
     def dispatch_pipeline_event(self, conn_id: str, event: PipelineEvent) -> list[ServerEvent]:
         """Route an internal pipeline event to the appropriate handler."""

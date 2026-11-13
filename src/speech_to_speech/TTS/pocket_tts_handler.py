@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from itertools import chain
 from threading import Event
 from time import perf_counter
 from typing import Any, Callable, Iterator, cast
@@ -16,6 +17,7 @@ from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfRespons
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import transcript_for_log
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
+from speech_to_speech.TTS.pcm_blocks import PCMBlockBuffer
 from speech_to_speech.TTS.persian_normalization import normalize
 from speech_to_speech.TTS.pocket_tts_farsi import PersianPhonemizer
 from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
@@ -347,7 +349,7 @@ class PocketTTSHandler(BaseTTSHandler):
         from speech_to_speech.api.openai_realtime.utils import StreamingPcm16Resampler
 
         resampler = StreamingPcm16Resampler(self.model.sample_rate, self.sample_rate)
-        pending = np.empty(0, dtype="<i2")
+        blocks = PCMBlockBuffer(self.blocksize)
 
         def record_first_provider_audio(first_audio_at_s: float) -> None:
             if timer.first_provider_audio(first_audio_at_s):
@@ -367,21 +369,15 @@ class PocketTTSHandler(BaseTTSHandler):
             # Keep filter history across chunks instead of restarting at every
             # playback block, which introduces periodic boundary artifacts.
             converted = np.frombuffer(resampler.push(pcm.tobytes()), dtype="<i2")
-            pending = np.concatenate((pending, converted))
-            while len(pending) >= self.blocksize:
+            for block in blocks.push(converted):
                 if self._is_stale(gen):
                     return
-                yield from emit(pending[: self.blocksize].copy())
-                pending = pending[self.blocksize :]
+                yield from emit(block)
 
         if self._is_stale(gen):
             return
         tail = np.frombuffer(resampler.flush(), dtype="<i2")
-        pending = np.concatenate((pending, tail))
-        for index in range(0, len(pending), self.blocksize):
+        for block in chain(blocks.push(tail), blocks.flush()):
             if self._is_stale(gen):
                 return
-            block = pending[index : index + self.blocksize]
-            if len(block) < self.blocksize:
-                block = np.pad(block, (0, self.blocksize - len(block)))
-            yield from emit(block.copy())
+            yield from emit(block)
