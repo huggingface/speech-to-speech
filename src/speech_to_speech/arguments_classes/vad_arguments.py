@@ -80,13 +80,17 @@ class VADHandlerArguments:
     speculative_reopen_ms: int = field(
         default=800,
         metadata={
-            "help": "Keep a soft-ended Realtime turn reopenable for this many milliseconds unless a response commits it. Default is 800 ms."
+            "help": "Output grace (ms) from turn finalization when Smart Turn reports complete, is disabled, "
+            "or fails. The first assistant text waits until this grace expires before it can be sent to TTS. "
+            "Default is 800 ms."
         },
     )
     unanswered_reopen_ms: int = field(
         default=7000,
         metadata={
-            "help": "Sanity cap (ms) for reopening a soft-ended speculative turn that has not yet been answered by any assistant output. While a turn is uncommitted, resumed speech within this window reopens the same turn instead of starting a new one. Has no effect below speculative_reopen_ms and is clamped to smart_turn_max_wait_ms when Smart Turn is enabled."
+            "help": "Streamed-audio time limit (ms) for reopening an uncommitted, soft-ended turn when speech resumes. "
+            "The effective limit is at least --speculative_reopen_ms and, with Smart Turn enabled, at least "
+            "--smart_turn_max_wait_ms. It can extend beyond the output grace. Default is 7000 ms."
         },
     )
     short_segment_merge_ms: int = field(
@@ -116,13 +120,17 @@ class VADHandlerArguments:
     smart_turn_max_wait_ms: int = field(
         default=2000,
         metadata={
-            "help": "Speculative reopen grace used when Smart Turn reports an incomplete turn. Resumed speech creates a newer turn revision; otherwise output may commit after this delay. Default is 2000 ms."
+            "help": "Output grace (ms) from turn finalization when Smart Turn reports incomplete. "
+            "The first assistant text waits until this grace expires before it can be sent to TTS. "
+            "Default is 2000 ms."
         },
     )
     smart_turn_incomplete_delay_ms: int = field(
         default=600,
         metadata={
-            "help": "Delay STT and LLM processing after Smart Turn reports an incomplete turn, allowing resumed speech to invalidate the revision before expensive work begins. This delay runs within smart_turn_max_wait_ms. Default is 600 ms."
+            "help": "Extra delay (ms) before processing final speech input when Smart Turn reports incomplete. "
+            "It starts with the output grace and is capped by --smart_turn_max_wait_ms. "
+            "Default is 600 ms."
         },
     )
     smart_turn_cpu_count: int = field(

@@ -86,8 +86,9 @@ class TurnLatencyTracker:
     ``e2e_s`` runs from estimated speech end to first yielded TTS audio.
     TTFT remains an internal measurement, omitted from the simplified record.
 
-    ``vad_settle_s`` is the whole final STT input gate wait, where
-    ``smart_turn_wait_s`` only covers the client-requested processing delay.
+    ``vad_settle_s`` is the whole final STT input gate wait.
+    ``smart_turn_wait_s`` is the union of actual waits for the processing
+    delay and the output grace.
 
     MLX lock waits and holds are summed per handler, so the bracketed breakdown
     accounts for the printed total however often a turn takes the lock.
