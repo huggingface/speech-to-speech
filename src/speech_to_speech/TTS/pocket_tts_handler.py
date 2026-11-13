@@ -290,27 +290,15 @@ class PocketTTSHandler(BaseTTSHandler):
         return 0.1  # 100ms threshold
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
-        speculative_turns = getattr(self, "speculative_turns", None)
         if isinstance(tts_input, EndOfResponse):
             self._failed_responses.discard(self._response_identity(tts_input))
-            if speculative_turns and not speculative_turns.wait_for_gate(
-                tts_input.turn_id,
-                tts_input.turn_revision,
-            ):
-                if tts_input.response_key is None:
-                    return
-                tts_input.cleanup_only = True
-            yield AUDIO_RESPONSE_DONE
+            if self._gate_end_of_response(tts_input):
+                yield AUDIO_RESPONSE_DONE
             return
 
         if self._response_identity(tts_input) in self._failed_responses:
             return
-        if speculative_turns and not speculative_turns.wait_for_gate(
-            tts_input.turn_id,
-            tts_input.turn_revision,
-            commit=True,
-        ):
-            logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
+        if not self._admit_input(tts_input):
             return
 
         gen = tts_input.cancel_generation
