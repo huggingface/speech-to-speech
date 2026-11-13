@@ -245,6 +245,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         stream_batch_sentences: int = 3,
         enable_lang_prompt: bool = False,
         compact_history: bool = False,
+        audio_input: bool = False,
         audio_max_tokens: int = 256,
         audio_temperature: float = 0.0,
         audio_content_type: Literal["input_audio", "audio_url"] = "input_audio",
@@ -258,6 +259,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.stream_batch_sentences = max(1, stream_batch_sentences)
         self.enable_lang_prompt = enable_lang_prompt
         self.gen_kwargs = dict(gen_kwargs)
+        self.audio_input = audio_input
         self.audio_max_tokens = audio_max_tokens
         self.audio_temperature = audio_temperature
         if audio_content_type not in {"input_audio", "audio_url"}:
