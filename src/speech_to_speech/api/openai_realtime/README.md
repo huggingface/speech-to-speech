@@ -397,6 +397,23 @@ The result is accepted whenever it arrives, in any order, and never starts a res
 
 One request is still rejected with `function_call_output_pending`: a `response.create` sent right after a tool result while other calls from the same batch are running and the user has said nothing since. Clients that request a follow-up after every result therefore get one reply for the whole batch.
 
+#### Start-and-notify: the pattern to prefer for work that takes minutes
+
+When the client controls the tool, make it return at once and report the outcome later:
+
+1. The tool starts the work in the background and returns a handle straight away, for example `{"job_id": "a1", "state": "started"}`. The model's next reply ("I've started that") is then based on a real result.
+2. When the work finishes, fails or needs input, the client adds a user message marked as not coming from the user and asks for a response:
+
+```json
+{"type": "conversation.item.create", "item": {"type": "message", "role": "user", "content": [
+  {"type": "input_text", "text": "[background event, not said by the user] Job a1 finished: the site is in ~/sites/bakery"}]}}
+{"type": "response.create"}
+```
+
+3. The session instructions say what such messages are ("messages marked [background event] come from the system, not the user: tell the user briefly what happened") and when to call the tool ("call start_job at once; do not ask for details first"). A status tool lets the model answer "how is it going?".
+
+The client chooses the moment to deliver the event, typically once the user has stopped speaking and no reply is playing, and can drop one that is no longer relevant. With this pattern no call is ever left without a result, so the stand-in described above never appears; that behaviour remains the fallback for tools that cannot return early.
+
 ### Packaged Python client tools
 
 The microphone/speaker client used by `talk` and `local` only executes explicitly declared Python tools. An importable tool module provides flattened Realtime function definitions in `TOOLS` and an async `execute_tool(name, arguments)` callback:
