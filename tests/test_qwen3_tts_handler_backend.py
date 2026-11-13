@@ -1181,6 +1181,31 @@ def test_stream_resampling_matches_whole_signal_across_chunk_boundaries(cuts):
     chunks = ((part, 24000, None) for part in np.split(samples, cuts))
     actual = np.concatenate(list(handler._stream(chunks, "test")))
 
-    assert np.array_equal(actual[: len(expected)], expected)
-    assert np.all(actual[len(expected) :] == 0)
-    assert len(actual) == ((len(expected) + handler.blocksize - 1) // handler.blocksize) * handler.blocksize
+    np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize("sample_count", [700, 769, 1300])
+@pytest.mark.parametrize("sample_rate", [16000, 24000])
+@pytest.mark.parametrize("cancel_after_first", [False, True])
+def test_stream_preserves_short_tail_and_discards_pending_audio_on_cancel(
+    cancel_after_first, sample_rate, sample_count
+):
+    from scipy.signal import resample_poly
+
+    from speech_to_speech.pipeline.cancel_scope import CancelScope
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.blocksize = 512
+    handler.cancel_scope = CancelScope()
+    samples = np.full(sample_count, 0.25, dtype=np.float32)
+    expected = handler._to_int16(samples)
+    if sample_rate != 16000:
+        expected = np.clip(np.round(resample_poly(expected.astype(float), 2, 3)), -32768, 32767).astype(np.int16)
+    stream = handler._stream(iter([(samples[:100], sample_rate, None), (samples[100:], sample_rate, None)]), "test")
+    first = next(stream)
+    assert first.size == min(512, len(expected))
+    if cancel_after_first:
+        handler.cancel_scope.cancel()
+        assert list(stream) == []
+    else:
+        np.testing.assert_array_equal(np.concatenate([first, *stream]), expected)

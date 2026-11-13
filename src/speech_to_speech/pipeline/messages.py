@@ -114,8 +114,16 @@ class AssistantToolCallPart(BaseModel):
     tool: ResponseFunctionToolCall
 
 
+class AssistantReasoningPart(BaseModel):
+    """Provider-exposed reasoning or summary, never speech or answer text."""
+
+    type: Literal["reasoning"] = "reasoning"
+    text: str
+    kind: Literal["reasoning", "summary"] = "reasoning"
+
+
 AssistantOutputPart: TypeAlias = Annotated[
-    AssistantTextPart | AssistantToolCallPart,
+    AssistantTextPart | AssistantToolCallPart | AssistantReasoningPart,
     Field(discriminator="type"),
 ]
 
@@ -203,6 +211,7 @@ class EndOfResponse(PipelineMessage):
     """
 
     history: ResponseHistory | None = Field(default=None, exclude=True, repr=False)
+    reasoning: list[AssistantReasoningPart] = Field(default_factory=list)
 
     tag: Literal["end_of_response"] = "end_of_response"
     turn_id: str | None = None

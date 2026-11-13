@@ -504,14 +504,19 @@ class AudioHandler(RealtimeBaseHandler):
         self,
         conn_id: str,
         response_key: str | None = None,
+        samples: int = 0,
     ) -> tuple[str, str, int, list[ServerEvent]]:
-        """Ensure an audio response and reserve its assistant output identity."""
+        """Ensure an audio response and reserve its assistant output identity.
+
+        *samples* counts the pipeline-rate audio the caller is delivering.
+        """
         resp_id, item_id, events = self.begin_audio_response(conn_id, response_key)
         st = self._state(conn_id)
         assistant_item_id, output_index = self._service.response._ensure_assistant_output_item(
             conn_id,
             item_id,
         )
+        self._service.response.record_audio_samples(conn_id, assistant_item_id, samples)
         pending = next(item for item in st.pending_text_outputs if int(item["output_index"]) == output_index)
         events.extend(self._service.response._begin_message_output(conn_id, pending, wants_audio=True))
         st.audio_output_started = True
@@ -530,6 +535,7 @@ class AudioHandler(RealtimeBaseHandler):
         resp_id, assistant_item_id, assistant_output_index, events = self.begin_audio_output(
             conn_id,
             response_key,
+            len(audio) // 2,
         )
         rp = st.current_response_params
         client_out_rate = None

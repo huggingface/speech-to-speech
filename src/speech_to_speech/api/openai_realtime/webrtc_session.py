@@ -79,8 +79,8 @@ def rtc_configuration_from_env() -> Optional[RTCConfiguration]:
 class PcmResampler:
     """Stateful mono/s16 resampler around av.AudioResampler.
 
-    One instance per direction per session: the libswresample filter state
-    carries across calls, so 20 ms frames resample without the boundary
+    The libswresample filter state carries across calls within a stream,
+    so 20 ms frames resample without the boundary
     artifacts a stateless per-chunk resample would introduce. Also downmixes
     multi-channel input (browser Opus is typically stereo) to mono.
     """
@@ -89,7 +89,7 @@ class PcmResampler:
         self._resampler = av.AudioResampler(format="s16", layout="mono", rate=target_rate)
         self._pts = 0
 
-    def resample_frame(self, frame: av.AudioFrame) -> bytes:
+    def resample_frame(self, frame: av.AudioFrame | None) -> bytes:
         out = bytearray()
         for resampled in self._resampler.resample(frame):
             out += resampled.to_ndarray().tobytes()
@@ -388,6 +388,13 @@ class WebRTCSession(SessionTransport):
     # ── SessionTransport interface ────────────────
 
     async def send_events(self, events: list[ServerEvent]) -> None:
+        for event in events:
+            if event.type == "response.done":
+                if event.response.status == "cancelled":
+                    self.discard_pending_audio()
+                else:
+                    self._track.write(self._out_resampler.resample_frame(None))
+                    self._out_resampler = PcmResampler(WEBRTC_SAMPLE_RATE)
         dc = self._dc
         if dc is None or dc.readyState != "open":
             return
@@ -409,17 +416,21 @@ class WebRTCSession(SessionTransport):
         _resp_id, _item_id, _output_index, events = service.begin_audio_output(
             session_id,
             response_key,
+            len(pcm) // 2,
         )
         if events:
             await self.send_events(events)
         self._track.write(self._out_resampler.resample_pcm(pcm, PIPELINE_SAMPLE_RATE))
 
-    def discard_pending_audio(self) -> None:
+    def discard_pending_audio(self) -> float:
+        unplayed_ms = self._track.buffered_bytes / 2 / WEBRTC_SAMPLE_RATE * 1000
+        self._out_resampler = PcmResampler(WEBRTC_SAMPLE_RATE)
         self._track.clear()
         if self._sender is not None:
             # Drop codec lookahead too, so interrupted speech cannot reappear
             # when a later response wakes the track.
             setattr(self._sender, "_RTCRtpSender__encoder", None)
+        return unplayed_ms
 
     # ── Internals ─────────────────────────────────
 
