@@ -148,6 +148,33 @@ During setup, the handler transcribes one second of synthetic silence through
 the configured endpoint. Endpoint, authentication, model, or response-format
 failures therefore prevent the realtime server from accepting sessions.
 
+### Word boosting
+
+Servers such as NVIDIA NeMo-Speech accept a `speech_contexts` form field on
+`/v1/audio/transcriptions` to boost domain vocabulary. Pass it as a JSON array;
+each entry needs a nonempty `phrases` list and may set a numeric `boost`:
+
+```bash
+speech-to-speech local \
+  --stt openai \
+  --openai_stt_base_url http://localhost:8000/v1 \
+  --openai_stt_model nemotron-3.5-asr-streaming-0.6b.q8_0 \
+  --openai_stt_speech_contexts '[{"phrases":["Acme","Widget"],"boost":3.0}]'
+```
+
+Set `--openai_stt_model` to the model the server actually serves (see its
+`GET /v1/models`). Leaving it unset sends the default
+`nvidia/parakeet-tdt-0.6b-v3`, which may not match the served model. Boosting
+only takes effect on models that support it; NeMo-Speech documents
+cache-aware RNNT models such as Nemotron 3.5 ASR Streaming, with a GGUF that
+embeds the tokenizer.
+
+The boost scale is server-specific; for NeMo-Speech cache-aware RNNT models,
+values of 2–3 are typical. `--openai_stt_prompt` sends OpenAI's single
+`prompt` vocabulary hint instead or in addition. Malformed `speech_contexts`
+fail at setup. Both fields apply only to the `transcription` profile and are
+not sent when unset; servers that do not support a field may ignore it.
+
 ## Turn and session lifecycle
 
 Each pipeline delivers STT results asynchronously so HTTP work does not block

@@ -350,6 +350,87 @@ def test_openai_stt_warmup_failure_prevents_handler_construction(monkeypatch):
         )
 
 
+def test_unset_word_boosting_leaves_form_data_unchanged():
+    operation = HttpTranscriptionOperation(
+        endpoint_url="http://127.0.0.1:1/v1/audio/transcriptions",
+        api_key=None,
+        model="test-model",
+        wav_bytes=b"RIFF-test-wave",
+        language="en",
+        response_format="json",
+        timeout_s=2,
+    )
+
+    assert operation._request_kwargs()["data"] == {"response_format": "json", "model": "test-model", "language": "en"}
+
+
+def test_word_boosting_fields_reach_form_data(monkeypatch):
+    contexts = '[{"phrases": ["Acme", "Widget"], "boost": 3.0}]'
+    _handler(monkeypatch, speech_contexts=contexts, prompt="Acme")
+    kwargs = _FakeOperation.instances[-1].kwargs
+    operation = HttpTranscriptionOperation(**kwargs)
+
+    data = operation._request_kwargs()["data"]
+    assert data["speech_contexts"] == contexts
+    assert data["prompt"] == "Acme"
+    assert list(data)[-2:] == ["speech_contexts", "prompt"]
+
+
+def test_unset_word_boosting_is_not_passed_by_handler(monkeypatch):
+    _handler(monkeypatch)
+    data = HttpTranscriptionOperation(**_FakeOperation.instances[-1].kwargs)._request_kwargs()["data"]
+
+    assert "speech_contexts" not in data
+    assert "prompt" not in data
+
+
+@pytest.mark.parametrize(
+    "contexts",
+    [
+        "not json",
+        '{"phrases": ["Acme"]}',
+        "[]",
+        '["Acme"]',
+        '[{"boost": 3.0}]',
+        '[{"phrases": []}]',
+        '[{"phrases": [""]}]',
+        '[{"phrases": [1]}]',
+        '[{"phrases": ["Acme"], "boost": "high"}]',
+        '[{"phrases": ["Acme"], "boost": true}]',
+        '[{"phrases": ["Acme"], "boost": null}]',
+        '[{"phrases": ["Acme"], "boost": NaN}]',
+        '[{"phrases": ["Acme"], "boost": Infinity}]',
+        '[{"phrases": ["Acme"], "boost": -Infinity}]',
+        '[{"phrases": ["Acme"], "boost": 1e999}]',
+    ],
+)
+def test_invalid_speech_contexts_fail_setup(monkeypatch, contexts):
+    with pytest.raises(ValueError, match="speech_contexts"):
+        _handler(monkeypatch, speech_contexts=contexts)
+
+
+@pytest.mark.parametrize(
+    "contexts",
+    [
+        '[{"phrases": ["Acme"]}]',
+        '[{"phrases": ["Acme"], "boost": 3}]',
+        '[{"phrases": ["Acme"], "boost": 3.0}]',
+    ],
+)
+def test_valid_speech_contexts_pass_setup(monkeypatch, contexts):
+    _handler(monkeypatch, speech_contexts=contexts)
+    data = HttpTranscriptionOperation(**_FakeOperation.instances[-1].kwargs)._request_kwargs()["data"]
+
+    assert data["speech_contexts"] == contexts
+
+
+@pytest.mark.parametrize("field", ["speech_contexts", "prompt"])
+def test_nemotron_profile_rejects_word_boosting(monkeypatch, field):
+    value = '[{"phrases": ["Acme"]}]' if field == "speech_contexts" else "Acme"
+    with pytest.raises(ValueError, match="transcription profile"):
+        _handler(monkeypatch, profile="nemotron", model="transcribe", **{field: value})
+
+
 def test_openai_stt_returns_final_transcription(monkeypatch):
     handler = _handler(monkeypatch)
     _FakeOperation.results = [HttpTranscriptionResult(text="hello", language="en")]
