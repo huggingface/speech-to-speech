@@ -37,7 +37,7 @@ from speech_to_speech.LLM.chat import (
     make_user_message,
 )
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
-from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
+from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler, _response_end
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.messages import (
     EndOfResponse,
@@ -1770,6 +1770,10 @@ def test_interrupted_audio_tool_turn_rolls_back_user_call_and_fast_output():
     assert cfg.chat.buffer == []
     assert cfg.chat._pending_tool_calls == {}
     assert cfg.chat._user_turn_count == 0
+
+
+def test_completed_response_end_keeps_the_provider_status_for_diagnostics():
+    assert _response_end(SimpleNamespace(status="completed")).finish_reason == "completed"
 
 
 # ── Out-of-band (conversation="none") responses ──────────────────────────
