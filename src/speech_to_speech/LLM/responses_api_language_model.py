@@ -24,7 +24,6 @@ from openai.types.responses import (
 )
 
 from speech_to_speech.LLM.base_openai_compatible_language_model import (
-    WARMUP_MAX_RETRIES,
     AssistantMessage,
     BaseOpenAICompatibleHandler,
     ProviderEvent,
@@ -85,31 +84,33 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
         """Keep Responses reasoning out of the Chat-Completions-shaped extra body."""
         return super()._build_extra_body(
             base_url,
-            disable_thinking=disable_thinking and reasoning_effort is None,
+            disable_thinking=disable_thinking and not reasoning_effort,
             reasoning_effort=None,
         )
 
     def _reasoning_kwargs(self, reasoning_effort: str | None = None) -> dict[str, Any]:
         effort = reasoning_effort or self.reasoning_effort
-        if effort is None:
+        if not effort:
             return {}
         return {"reasoning": {"effort": effort}}
 
     def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
         start = time.time()
-        self.client.with_options(max_retries=WARMUP_MAX_RETRIES).responses.create(
-            model=self.model_name,
-            input=[
-                {
-                    "type": "message",
-                    "role": "system",
-                    "content": [{"type": "input_text", "text": "You are a helpful assistant"}],
-                },
-                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello"}]},
-            ],
-            timeout=self.request_timeout,
-            **self._reasoning_kwargs(),
+        self._send_warmup(
+            lambda client: client.responses.create(
+                model=self.model_name,
+                input=[
+                    {
+                        "type": "message",
+                        "role": "system",
+                        "content": [{"type": "input_text", "text": "You are a helpful assistant"}],
+                    },
+                    {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello"}]},
+                ],
+                timeout=self.request_timeout,
+                **self._reasoning_kwargs(),
+            )
         )
         end = time.time()
         logger.info(f"{self.__class__.__name__}:  warmed up! time: {(end - start):.3f} s")

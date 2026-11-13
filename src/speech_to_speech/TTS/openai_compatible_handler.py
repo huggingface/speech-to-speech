@@ -11,7 +11,7 @@ from threading import Event, Lock, Thread
 from time import perf_counter
 from typing import Any, Iterator, cast
 
-import httpx
+import httpx2
 import numpy as np
 from scipy.signal import firwin, upfirdn
 
@@ -24,6 +24,7 @@ from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfRespons
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.turn_latency import TTSResponseTimer
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
+from speech_to_speech.TTS.pcm_blocks import PCMBlockBuffer
 from speech_to_speech.utils.request_tracing import HttpRequestContext, HttpRequestTrace
 
 logger = logging.getLogger(__name__)
@@ -160,7 +161,7 @@ class HttpSpeechOperation:
         cancel_check: Callable[[], bool],
         trace: HttpRequestTrace | None = None,
     ) -> None:
-        client = httpx.AsyncClient(timeout=self.timeout_s)
+        client = httpx2.AsyncClient(timeout=self.timeout_s)
         try:
             if self._cancelled.is_set() or cancel_check():
                 self._cancelled.set()
@@ -171,7 +172,7 @@ class HttpSpeechOperation:
             async with client.stream("POST", self.endpoint_url, headers=headers, json=self.payload) as response:
                 try:
                     response.raise_for_status()
-                except httpx.HTTPStatusError as exc:
+                except httpx2.HTTPStatusError as exc:
                     raise SpeechRequestError(f"speech server returned HTTP {exc.response.status_code}") from exc
                 self._validate_content_type(response)
                 async for chunk in response.aiter_bytes():
@@ -196,7 +197,7 @@ class HttpSpeechOperation:
             return True
         return False
 
-    def _validate_content_type(self, response: httpx.Response) -> None:
+    def _validate_content_type(self, response: httpx2.Response) -> None:
         headers = getattr(response, "headers", None)
         if headers is None:
             return
@@ -218,9 +219,9 @@ class HttpSpeechOperation:
     def _normalize_error(self, exc: Exception) -> BaseException:
         if isinstance(exc, (SpeechRequestCancelled, SpeechRequestError)):
             return exc
-        if isinstance(exc, httpx.TimeoutException):
+        if isinstance(exc, httpx2.TimeoutException):
             return SpeechRequestError("speech request timed out")
-        if isinstance(exc, httpx.HTTPError):
+        if isinstance(exc, httpx2.HTTPError):
             if self._deadline_exceeded.is_set():
                 return SpeechRequestError("speech request timed out")
             if self._cancelled.is_set():
@@ -446,25 +447,13 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         if isinstance(tts_input, EndOfResponse):
-            if self.speculative_turns and not self.speculative_turns.wait_for_gate(
-                tts_input.turn_id,
-                tts_input.turn_revision,
-            ):
-                if tts_input.response_key is None:
-                    return
-                tts_input.cleanup_only = True
-            with self._operation_lock:
-                self._failed_responses.discard(self._response_identity(tts_input))
-            yield AUDIO_RESPONSE_DONE
+            if self._gate_end_of_response(tts_input):
+                with self._operation_lock:
+                    self._failed_responses.discard(self._response_identity(tts_input))
+                yield AUDIO_RESPONSE_DONE
             return
 
-        if self.speculative_turns and not self.speculative_turns.wait_for_gate(
-            tts_input.turn_id,
-            tts_input.turn_revision,
-        ):
-            logger.debug(
-                "Dropping stale remote TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision
-            )
+        if not self._admit_input(tts_input, commit=False):
             return
 
         cancel_generation = tts_input.cancel_generation
@@ -776,24 +765,17 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
         on_first_source_audio: Callable[[], None] | None = None,
     ) -> Iterator[np.ndarray]:
         resampler = _StreamingFIRResampler(source_rate, PIPELINE_SAMPLE_RATE)
-        sample_remainder: np.ndarray = np.empty(0, dtype=np.int16)
+        blocks = PCMBlockBuffer(self.blocksize)
         for samples in sample_chunks:
             if on_first_source_audio is not None and samples.size:
                 on_first_source_audio()
                 on_first_source_audio = None
             converted = resampler.push(samples)
-            sample_remainder = np.concatenate((sample_remainder, converted))
-            while sample_remainder.size >= self.blocksize:
-                yield sample_remainder[: self.blocksize].copy()
-                sample_remainder = sample_remainder[self.blocksize :]
+            yield from blocks.push(converted)
 
         converted = resampler.push(np.empty(0, dtype=np.float64), final=True)
-        sample_remainder = np.concatenate((sample_remainder, converted))
-        while sample_remainder.size >= self.blocksize:
-            yield sample_remainder[: self.blocksize].copy()
-            sample_remainder = sample_remainder[self.blocksize :]
-        if sample_remainder.size:
-            yield np.pad(sample_remainder, (0, self.blocksize - sample_remainder.size))
+        yield from blocks.push(converted)
+        yield from blocks.flush()
 
     def _log_first_audio_latency(self, tts_input: TTSInput, timer: TTSResponseTimer) -> None:
         logger.info("OpenAI-compatible TTS time to first audio: %.3fs", perf_counter() - timer.started_at_s)

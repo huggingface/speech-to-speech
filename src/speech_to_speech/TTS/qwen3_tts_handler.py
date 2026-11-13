@@ -24,6 +24,7 @@ import torch
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.api.openai_realtime.utils import StreamingPcm16Resampler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.control import SESSION_END, is_control_message
@@ -40,6 +41,7 @@ from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception
 from speech_to_speech.pipeline.turn_latency import TTSResponseTimer, bind_active_turn_latency_tracker
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
+from speech_to_speech.TTS.pcm_blocks import PCMBlockBuffer
 from speech_to_speech.utils.mlx_lock import MLXLockContext
 from speech_to_speech.utils.utils import resolve_device
 
@@ -677,14 +679,6 @@ class Qwen3TTSHandler(BaseTTSHandler):
                 "Provide qwen3_tts_ref_audio or qwen3_tts_ref_spk, or use a CustomVoice/VoiceDesign model."
             )
 
-    def _resample_to_pipeline_sr(self, audio: np.ndarray, sr: int) -> np.ndarray:
-        if sr == PIPELINE_SR:
-            return audio
-        from scipy.signal import resample_poly
-
-        gcd = np.gcd(PIPELINE_SR, sr)
-        return resample_poly(audio, up=PIPELINE_SR // gcd, down=sr // gcd)
-
     def _prepare_audio_chunk(self, item: Any) -> tuple[np.ndarray | None, int | None]:
         if isinstance(item, tuple):
             audio_chunk, sr, _timing = item
@@ -713,7 +707,8 @@ class Qwen3TTSHandler(BaseTTSHandler):
         total_samples = 0
         first_chunk = True
         found_speech = False
-        leftover = np.array([], dtype=np.int16)
+        blocks = PCMBlockBuffer(self.blocksize)
+        resampler: StreamingPcm16Resampler | None = None
 
         for item in gen:
             if self._is_stale(cancel_gen):
@@ -731,8 +726,11 @@ class Qwen3TTSHandler(BaseTTSHandler):
                     timer.first_provider_audio()
                 first_chunk = False
 
-            audio_chunk = self._resample_to_pipeline_sr(audio_chunk, sr)
-            audio_chunk = self._to_int16(audio_chunk)
+            # One filter for the whole utterance: resampling each streamed chunk
+            # separately restarts the FIR against zero padding at every chunk edge.
+            if resampler is None:
+                resampler = StreamingPcm16Resampler(sr, PIPELINE_SR)
+            audio_chunk = np.frombuffer(resampler.push(self._to_int16(audio_chunk).tobytes()), dtype=np.int16)
 
             # Trim the initial silent ramp-up, but keep enough preroll to avoid
             # shaving soft initial phonemes at the start of the utterance.
@@ -745,18 +743,26 @@ class Qwen3TTSHandler(BaseTTSHandler):
                 audio_chunk = audio_chunk[start_idx:]
                 found_speech = True
 
-            audio_chunk = np.concatenate([leftover, audio_chunk])
+            for block in blocks.push(audio_chunk):
+                if self._is_stale(cancel_gen):
+                    return
+                yield block
+                total_samples += len(block)
 
-            n = (len(audio_chunk) // self.blocksize) * self.blocksize
-            for i in range(0, n, self.blocksize):
-                yield audio_chunk[i : i + self.blocksize]
-                total_samples += self.blocksize
-            leftover = audio_chunk[n:]
-
-        if len(leftover) > 0:
-            chunk = np.pad(leftover, (0, self.blocksize - len(leftover)))
-            yield chunk
-            total_samples += len(leftover)
+        if self._is_stale(cancel_gen):
+            return
+        if resampler is not None and found_speech:
+            tail = np.frombuffer(resampler.flush(), dtype=np.int16)
+            for block in blocks.push(tail):
+                if self._is_stale(cancel_gen):
+                    return
+                yield block
+                total_samples += len(block)
+        for block in blocks.flush():
+            if self._is_stale(cancel_gen):
+                return
+            yield block
+            total_samples += len(block)
 
         generation_time = perf_counter() - start
         audio_duration = total_samples / PIPELINE_SR
@@ -827,24 +833,12 @@ class Qwen3TTSHandler(BaseTTSHandler):
         return combined_text, language_code
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
-        speculative_turns = getattr(self, "speculative_turns", None)
         if isinstance(tts_input, EndOfResponse):
-            if speculative_turns and not speculative_turns.wait_for_gate(
-                tts_input.turn_id,
-                tts_input.turn_revision,
-            ):
-                if tts_input.response_key is None:
-                    return
-                tts_input.cleanup_only = True
-            yield AUDIO_RESPONSE_DONE
+            if self._gate_end_of_response(tts_input):
+                yield AUDIO_RESPONSE_DONE
             return
 
-        if speculative_turns and not speculative_turns.wait_for_gate(
-            tts_input.turn_id,
-            tts_input.turn_revision,
-            commit=True,
-        ):
-            logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
+        if not self._admit_input(tts_input):
             return
 
         runtime_config = tts_input.runtime_config

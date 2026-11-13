@@ -15,7 +15,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
-import httpx
+import httpx2
 import numpy as np
 import pytest
 from openai import APIConnectionError, InternalServerError, RateLimitError
@@ -107,7 +107,10 @@ class _FakeClient:
 def _make_handler(stream=True, *, base_url="http://fake/v1", reasoning_effort=None):
     """Build a handler whose warmup hits the fake client (no network)."""
     orig_openai = base_mod.OpenAI
+    orig_async_client = ChatCompletionsApiModelHandler._make_async_client
     base_mod.OpenAI = _FakeClient
+    # A streaming handler warms up through its async client.
+    ChatCompletionsApiModelHandler._make_async_client = mock_async_client
     try:
         h = ChatCompletionsApiModelHandler(
             threading.Event(),
@@ -125,6 +128,7 @@ def _make_handler(stream=True, *, base_url="http://fake/v1", reasoning_effort=No
         )
     finally:
         base_mod.OpenAI = orig_openai
+        ChatCompletionsApiModelHandler._make_async_client = orig_async_client
     h._make_async_client = lambda: mock_async_client(h)
     return h
 
@@ -990,14 +994,14 @@ def test_generation_error_emits_failed_end_of_response():
 
 
 def _api_error_response(status_code):
-    request = httpx.Request("POST", "https://provider.example/v1/chat/completions")
-    return httpx.Response(status_code, request=request)
+    request = httpx2.Request("POST", "https://provider.example/v1/chat/completions")
+    return httpx2.Response(status_code, request=request)
 
 
 @pytest.mark.parametrize(
     ("error", "message"),
     [
-        (APIConnectionError(request=httpx.Request("POST", "https://provider.example")), "Connection error"),
+        (APIConnectionError(request=httpx2.Request("POST", "https://provider.example")), "Connection error"),
         (RateLimitError("rate limited", response=_api_error_response(429), body=None), "rate limited"),
         (InternalServerError("server failed", response=_api_error_response(500), body=None), "server failed"),
     ],

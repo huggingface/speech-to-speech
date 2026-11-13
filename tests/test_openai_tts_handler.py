@@ -157,9 +157,9 @@ def test_openai_tts_warmup_uses_configured_request(monkeypatch):
 
 
 def test_openai_tts_warmup_http_failure_aborts_construction(monkeypatch):
-    transport = tts_module.httpx.MockTransport(lambda request: tts_module.httpx.Response(404, request=request))
-    client = tts_module.httpx.AsyncClient(transport=transport)
-    monkeypatch.setattr(tts_module.httpx, "AsyncClient", lambda **kwargs: client)
+    transport = tts_module.httpx2.MockTransport(lambda request: tts_module.httpx2.Response(404, request=request))
+    client = tts_module.httpx2.AsyncClient(transport=transport)
+    monkeypatch.setattr(tts_module.httpx2, "AsyncClient", lambda **kwargs: client)
 
     with pytest.raises(tts_module.SpeechRequestError, match="speech server returned HTTP 404"):
         OpenAICompatibleTTSHandler(
@@ -171,7 +171,7 @@ def test_openai_tts_warmup_http_failure_aborts_construction(monkeypatch):
         )
 
 
-def test_openai_tts_streams_resampled_fixed_size_pcm(monkeypatch):
+def test_openai_tts_streams_resampled_pcm_with_short_tail(monkeypatch):
     handler = _openai_tts_handler(monkeypatch, cancel_scope=CancelScope())
     handler.model = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     handler.voice = "aiden"
@@ -181,8 +181,8 @@ def test_openai_tts_streams_resampled_fixed_size_pcm(monkeypatch):
 
     assert chunks
     assert all(isinstance(chunk, np.ndarray) for chunk in chunks)
-    assert all(chunk.dtype == np.int16 and chunk.shape == (512,) for chunk in chunks)
-    assert sum(chunk.size for chunk in chunks) == 2048
+    assert all(chunk.dtype == np.int16 and chunk.ndim == 1 and 0 < chunk.size <= 512 for chunk in chunks)
+    assert sum(chunk.size for chunk in chunks) == 1600
     payload = _FakeSpeechOperation.instances[0].payload
     assert payload["input"] == "Hello"
     assert payload["voice"] == "aiden"
@@ -618,7 +618,7 @@ def test_openai_tts_standard_request_yields_audio_before_response_eof(monkeypatc
     received_payload: dict[str, object] = {}
     encoded = np.arange(2400, dtype="<i2").tobytes()
 
-    class GatedAudioStream(tts_module.httpx.AsyncByteStream):
+    class GatedAudioStream(tts_module.httpx2.AsyncByteStream):
         async def __aiter__(self):
             yield encoded
             while not release_response.is_set():
@@ -630,16 +630,16 @@ def test_openai_tts_standard_request_yields_audio_before_response_eof(monkeypatc
 
     def respond(request):
         received_payload.update(json.loads(request.content))
-        return tts_module.httpx.Response(
+        return tts_module.httpx2.Response(
             200,
             headers={"Content-Type": "audio/pcm"},
             stream=GatedAudioStream(),
             request=request,
         )
 
-    transport = tts_module.httpx.MockTransport(respond)
-    client = tts_module.httpx.AsyncClient(transport=transport)
-    monkeypatch.setattr(tts_module.httpx, "AsyncClient", lambda **kwargs: client)
+    transport = tts_module.httpx2.MockTransport(respond)
+    client = tts_module.httpx2.AsyncClient(transport=transport)
+    monkeypatch.setattr(tts_module.httpx2, "AsyncClient", lambda **kwargs: client)
     monkeypatch.setattr(OpenAICompatibleTTSHandler, "warmup", lambda self: None)
     handler = OpenAICompatibleTTSHandler(
         Event(),
@@ -901,8 +901,8 @@ def test_openai_tts_decodes_wav_stream(monkeypatch):
     chunks = list(handler.process(TTSInput(text="Hello")))
 
     assert chunks
-    assert all(chunk.dtype == np.int16 and chunk.shape == (512,) for chunk in chunks)
-    assert sum(chunk.size for chunk in chunks) == 2048
+    assert all(chunk.dtype == np.int16 and chunk.ndim == 1 and 0 < chunk.size <= 512 for chunk in chunks)
+    assert sum(chunk.size for chunk in chunks) == 1600
     payload = _FakeSpeechOperation.instances[0].payload
     assert payload["response_format"] == "wav"
     assert "stream" not in payload
@@ -918,7 +918,7 @@ def test_openai_tts_wav_yields_audio_before_response_eof(monkeypatch):
     wav_bytes[40:44] = b"\xff\xff\xff\xff"
     first_part_size = 44 + 2400 * 2
 
-    class GatedWavStream(tts_module.httpx.AsyncByteStream):
+    class GatedWavStream(tts_module.httpx2.AsyncByteStream):
         async def __aiter__(self):
             yield bytes(wav_bytes[:first_part_size])
             while not release_response.is_set():
@@ -930,15 +930,15 @@ def test_openai_tts_wav_yields_audio_before_response_eof(monkeypatch):
             pass
 
     def respond(request):
-        return tts_module.httpx.Response(
+        return tts_module.httpx2.Response(
             200,
             headers={"Content-Type": "audio/wav"},
             stream=GatedWavStream(),
             request=request,
         )
 
-    client = tts_module.httpx.AsyncClient(transport=tts_module.httpx.MockTransport(respond))
-    monkeypatch.setattr(tts_module.httpx, "AsyncClient", lambda **kwargs: client)
+    client = tts_module.httpx2.AsyncClient(transport=tts_module.httpx2.MockTransport(respond))
+    monkeypatch.setattr(tts_module.httpx2, "AsyncClient", lambda **kwargs: client)
     monkeypatch.setattr(OpenAICompatibleTTSHandler, "warmup", lambda self: None)
     handler = OpenAICompatibleTTSHandler(
         Event(),
@@ -975,8 +975,8 @@ def test_openai_tts_decodes_streaming_wav_with_unknown_data_length(monkeypatch):
     chunks = list(handler.process(TTSInput(text="Hello")))
 
     assert chunks
-    assert all(chunk.dtype == np.int16 and chunk.shape == (512,) for chunk in chunks)
-    assert sum(chunk.size for chunk in chunks) == 2048
+    assert all(chunk.dtype == np.int16 and chunk.ndim == 1 and 0 < chunk.size <= 512 for chunk in chunks)
+    assert sum(chunk.size for chunk in chunks) == 1600
 
 
 def test_openai_tts_cancellation_before_audio_does_not_commit(monkeypatch):
@@ -1083,11 +1083,11 @@ def test_openai_tts_session_teardown_stops_publication_and_closes_operation(monk
 
 
 def test_http_speech_cancellation_after_completion_is_harmless(monkeypatch):
-    transport = tts_module.httpx.MockTransport(
-        lambda request: tts_module.httpx.Response(200, content=b"\x00\x00", request=request)
+    transport = tts_module.httpx2.MockTransport(
+        lambda request: tts_module.httpx2.Response(200, content=b"\x00\x00", request=request)
     )
-    client = tts_module.httpx.AsyncClient(transport=transport)
-    monkeypatch.setattr(tts_module.httpx, "AsyncClient", lambda **kwargs: client)
+    client = tts_module.httpx2.AsyncClient(transport=transport)
+    monkeypatch.setattr(tts_module.httpx2, "AsyncClient", lambda **kwargs: client)
     operation = HttpSpeechOperation(
         endpoint_url="http://localhost:8000/v1/audio/speech",
         api_key=None,
@@ -1125,7 +1125,7 @@ def test_http_speech_cancellation_during_client_construction_prevents_dispatch(m
         async def aclose(self) -> None:
             pass
 
-    monkeypatch.setattr(tts_module.httpx, "AsyncClient", BlockingClient)
+    monkeypatch.setattr(tts_module.httpx2, "AsyncClient", BlockingClient)
     operation = HttpSpeechOperation(
         endpoint_url="http://localhost:8000/v1/audio/speech",
         api_key=None,
@@ -1198,7 +1198,7 @@ def test_http_speech_timeout_is_a_total_deadline(monkeypatch):
         async def aclose(self) -> None:
             await response.aclose()
 
-    monkeypatch.setattr(tts_module.httpx, "AsyncClient", TricklingClient)
+    monkeypatch.setattr(tts_module.httpx2, "AsyncClient", TricklingClient)
     operation = HttpSpeechOperation(
         endpoint_url="http://localhost:8000/v1/audio/speech",
         api_key=None,
@@ -1219,16 +1219,16 @@ def test_http_speech_timeout_is_a_total_deadline(monkeypatch):
     ["application/json; charset=utf-8", "application/problem+json", "text/plain"],
 )
 def test_openai_tts_rejects_non_audio_success_responses(monkeypatch, content_type):
-    transport = tts_module.httpx.MockTransport(
-        lambda request: tts_module.httpx.Response(
+    transport = tts_module.httpx2.MockTransport(
+        lambda request: tts_module.httpx2.Response(
             200,
             headers={"Content-Type": content_type},
             content=b'{"error":"upstream failure"}',
             request=request,
         )
     )
-    client = tts_module.httpx.AsyncClient(transport=transport)
-    monkeypatch.setattr(tts_module.httpx, "AsyncClient", lambda **kwargs: client)
+    client = tts_module.httpx2.AsyncClient(transport=transport)
+    monkeypatch.setattr(tts_module.httpx2, "AsyncClient", lambda **kwargs: client)
     monkeypatch.setattr(OpenAICompatibleTTSHandler, "warmup", lambda self: None)
     handler = OpenAICompatibleTTSHandler(
         Event(),
@@ -1266,7 +1266,7 @@ def test_http_speech_accepts_matching_or_ambiguous_content_types(response_format
         timeout_s=1,
     )
 
-    operation._validate_content_type(tts_module.httpx.Response(200, headers=headers))
+    operation._validate_content_type(tts_module.httpx2.Response(200, headers=headers))
 
 
 @pytest.mark.parametrize(
@@ -1290,7 +1290,7 @@ def test_http_speech_rejects_known_audio_format_mismatches(response_format, cont
         tts_module.SpeechRequestError,
         match=f"speech endpoint returned {actual_format} audio for requested {response_format} format",
     ):
-        operation._validate_content_type(tts_module.httpx.Response(200, headers={"Content-Type": content_type}))
+        operation._validate_content_type(tts_module.httpx2.Response(200, headers={"Content-Type": content_type}))
 
 
 def test_http_speech_validates_against_decoder_format_when_payload_is_overridden():
@@ -1306,20 +1306,20 @@ def test_http_speech_validates_against_decoder_format_when_payload_is_overridden
         tts_module.SpeechRequestError,
         match="speech endpoint returned mp3 audio for requested pcm format",
     ):
-        operation._validate_content_type(tts_module.httpx.Response(200, headers={"Content-Type": "audio/mpeg"}))
+        operation._validate_content_type(tts_module.httpx2.Response(200, headers={"Content-Type": "audio/mpeg"}))
 
 
 def test_openai_tts_audio_format_mismatch_emits_failure_without_audio(monkeypatch):
-    transport = tts_module.httpx.MockTransport(
-        lambda request: tts_module.httpx.Response(
+    transport = tts_module.httpx2.MockTransport(
+        lambda request: tts_module.httpx2.Response(
             200,
             headers={"Content-Type": "audio/mpeg"},
             content=b"ID3 invalid for raw PCM",
             request=request,
         )
     )
-    client = tts_module.httpx.AsyncClient(transport=transport)
-    monkeypatch.setattr(tts_module.httpx, "AsyncClient", lambda **kwargs: client)
+    client = tts_module.httpx2.AsyncClient(transport=transport)
+    monkeypatch.setattr(tts_module.httpx2, "AsyncClient", lambda **kwargs: client)
     monkeypatch.setattr(OpenAICompatibleTTSHandler, "warmup", lambda self: None)
     handler = OpenAICompatibleTTSHandler(
         Event(),
