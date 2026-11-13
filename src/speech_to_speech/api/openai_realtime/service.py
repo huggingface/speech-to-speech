@@ -26,7 +26,6 @@ from openai.types.realtime import (
     RealtimeConversationItemUserMessage,
     RealtimeError,
     RealtimeErrorEvent,
-    RealtimeSessionCreateRequest,
     ResponseAudioDeltaEvent,
     ResponseAudioDoneEvent,
     ResponseAudioTranscriptDeltaEvent,
@@ -66,7 +65,12 @@ from speech_to_speech.api.openai_realtime.input_state import (
     PendingInputTerminal,
     SpeechToSpeechInputAudioTranscriptionSnapshotEvent,
 )
-from speech_to_speech.api.openai_realtime.reasoning import SpeechToSpeechReasoningDeltaEvent
+from speech_to_speech.api.openai_realtime.reasoning import (
+    ResponseCreate,
+    SessionRequest,
+    SessionUpdate,
+    SpeechToSpeechReasoningDeltaEvent,
+)
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.api.openai_realtime.visemes import SpeechToSpeechVisemesEvent
 from speech_to_speech.LLM.chat import Chat, make_user_audio_message, make_user_message
@@ -125,12 +129,12 @@ _EVENT_TYPE_TO_MODEL: dict[str, type[BaseModel]] = {
     "input_audio_buffer.append": InputAudioBufferAppendEvent,
     "input_audio_buffer.commit": InputAudioBufferCommitEvent,
     "output_audio_buffer.clear": OutputAudioBufferClearEvent,
-    "session.update": SessionUpdateEvent,
+    "session.update": SessionUpdate,
     "conversation.item.create": ConversationItemCreateEvent,
     "conversation.item.delete": ConversationItemDeleteEvent,
     "conversation.item.truncate": ConversationItemTruncateEvent,
     "conversation.item.retrieve": ConversationItemRetrieveEvent,
-    "response.create": ResponseCreateEvent,
+    "response.create": ResponseCreate,
     "response.cancel": ResponseCancelEvent,
 }
 
@@ -477,7 +481,7 @@ class RealtimeService:
         state = ConnState(
             runtime_config=RuntimeConfig(
                 chat=Chat(self._chat_size),
-                session=RealtimeSessionCreateRequest(
+                session=SessionRequest(
                     type="realtime",
                     instructions=self._default_instructions,
                 ),

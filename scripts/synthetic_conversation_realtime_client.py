@@ -55,7 +55,7 @@ import time
 import wave
 from pathlib import Path
 
-import httpx
+import httpx2
 import numpy as np
 import soundfile as sf
 import websockets
@@ -259,7 +259,7 @@ def _truncate_transcript(s: str, max_len: int = 20) -> str:
 async def _lb_allocate_session(
     lb_url: str,
     auth_headers: dict[str, str],
-    http: httpx.AsyncClient,
+    http: httpx2.AsyncClient,
 ) -> dict:
     """POST {lb_url}/session → returns dict with connect_url, session_id, session_token."""
     resp = await http.post(f"{lb_url}/session", headers=auth_headers, timeout=30.0)
@@ -272,7 +272,7 @@ async def _lb_send_event(
     session_id: str,
     session_token: str,
     event: str,
-    http: httpx.AsyncClient,
+    http: httpx2.AsyncClient,
 ) -> None:
     """POST {lb_url}/internal/sessions/{id}/event with {session_token, event}."""
     url = f"{lb_url}/internal/sessions/{session_id}/event"
@@ -313,7 +313,7 @@ async def run_client(
     lb_session_id: str | None = None
     lb_session_token: str | None = None
 
-    async with httpx.AsyncClient() as http:
+    async with httpx2.AsyncClient() as http:
         # Step 1: allocate a slot via the LB (if configured).
         if args.lb_url:
             try:

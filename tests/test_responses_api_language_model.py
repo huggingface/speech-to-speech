@@ -6,7 +6,7 @@ from time import sleep
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import httpx
+import httpx2
 import numpy as np
 import pytest
 from openai import Stream
@@ -112,15 +112,21 @@ def test_reasoning_tool_continuation_replays_original_provider_items(stream):
         encrypted_content="opaque-provider-content",
         status="completed",
     )
-    call = ResponseFunctionToolCall(
-        id="fc_original",
-        call_id="call_original",
-        type="function_call",
-        name="weather",
-        arguments='{"city":"Paris"}',
-        status="completed",
+    # ``async`` is a Python keyword, so the SDK model stores it as ``async_``.
+    # The replayed item must still carry the provider's own key.
+    call = ResponseFunctionToolCall.model_validate(
+        {
+            "id": "fc_original",
+            "call_id": "call_original",
+            "type": "function_call",
+            "name": "weather",
+            "arguments": '{"city":"Paris"}',
+            "status": "completed",
+            "async": False,
+        }
     )
-    originals = [item.model_dump(exclude_unset=True) for item in [reasoning, call]]
+    originals = [item.model_dump(exclude_unset=True, by_alias=True) for item in [reasoning, call]]
+    assert originals[1]["async"] is False
     handler = _make_handler(stream=stream)
     request = _make_request("Weather?", chat_size=5)
     requests = []
@@ -158,7 +164,7 @@ def test_reasoning_tool_continuation_replays_original_provider_items(stream):
     )
     continuation = list(drive_llm(handler, request))
     assert next(output for output in continuation if isinstance(output, EndOfResponse)).error is None
-    assert [item.model_dump(exclude_unset=True) for item in [reasoning, call]] == originals
+    assert [item.model_dump(exclude_unset=True, by_alias=True) for item in [reasoning, call]] == originals
 
 
 def _make_runtime_config(chat_size=2, instructions="You are a helpful AI assistant."):
@@ -204,7 +210,10 @@ def _chat_tool_delta(index, *, tool_id=None, name=None, arguments=None):
     )
 
 
-def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None, reasoning_effort="none"):
+def _make_handler(
+    *, disable_thinking=False, stream=True, cancel_scope=None, reasoning_effort="none", blocking_provider=False
+):
+    """``blocking_provider`` lets a fake that blocks be cancelled, as a real provider read can."""
     handler = object.__new__(ResponsesApiModelHandler)
     handler.model_name = "test-model"
     handler.stream = stream
@@ -238,7 +247,7 @@ def _make_handler(*, disable_thinking=False, stream=True, cancel_scope=None, rea
     handler.stop_event = Event()
     handler._async_runner = None
     handler._async_client = None
-    handler._make_async_client = lambda: mock_async_client(handler)
+    handler._make_async_client = lambda: mock_async_client(handler, in_threads=blocking_provider)
     return handler
 
 
@@ -261,7 +270,7 @@ def test_discarded_prefetch_aborts_blocked_provider_stream(with_tool_prefix):
             self.released.set()
 
     cancel_scope = CancelScope()
-    handler = _make_handler(stream=True, cancel_scope=cancel_scope)
+    handler = _make_handler(stream=True, cancel_scope=cancel_scope, blocking_provider=True)
     stream = BlockingStream()
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: stream))
     request = _make_request()
@@ -281,8 +290,10 @@ def test_discarded_prefetch_aborts_blocked_provider_stream(with_tool_prefix):
     worker.start()
     assert stream.started.wait(timeout=1.0)
     assert staged.wait(timeout=1.0) or not with_tool_prefix
-    # Holding a tool prefix must leave the hidden stream abortable.
+    # Holding a tool prefix must leave the hidden stream abortable: the
+    # prefetch worker closes it while this handler's output is still waiting.
     transaction.discard()
+    assert stream.released.wait(timeout=1.0)
     assert stream.closed
     resume.set()
     worker.join(timeout=1.0)
@@ -351,7 +362,7 @@ def test_discarded_prefetch_does_not_block_on_provider_connect():
         return LateStream()
 
     cancel_scope = CancelScope()
-    handler = _make_handler(stream=True, cancel_scope=cancel_scope)
+    handler = _make_handler(stream=True, cancel_scope=cancel_scope, blocking_provider=True)
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
     request = _make_request()
     transaction = ResponsePrefetchTransaction()
@@ -389,7 +400,7 @@ def test_claimed_prefetch_cancel_does_not_block_on_provider_connect():
         return LateStream()
 
     cancel_scope = CancelScope()
-    handler = _make_handler(stream=True, cancel_scope=cancel_scope)
+    handler = _make_handler(stream=True, cancel_scope=cancel_scope, blocking_provider=True)
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
     request = _make_request()
     transaction = ResponsePrefetchTransaction()
@@ -426,7 +437,7 @@ def test_claimed_prefetch_cancel_aborts_blocked_provider_read():
             self.released.set()
 
     cancel_scope = CancelScope()
-    handler = _make_handler(stream=True, cancel_scope=cancel_scope)
+    handler = _make_handler(stream=True, cancel_scope=cancel_scope, blocking_provider=True)
     stream = BlockingStream()
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: stream))
     request = _make_request()
@@ -510,6 +521,13 @@ def test_repeated_prefetch_invalidation_bounds_provider_connect_workers():
     claimed_outputs = list(handler.process(claimed_request))
 
     assert any(isinstance(output, LLMResponseChunk) and output.text == "public" for output in claimed_outputs)
+
+    # The stuck worker still holds the streaming client's event loop. An
+    # ordinary turn must get a client of its own instead of failing on it.
+    ordinary_outputs = list(handler.process(_make_request()))
+
+    assert any(isinstance(output, LLMResponseChunk) and output.text == "public" for output in ordinary_outputs)
+    assert next(output for output in ordinary_outputs if isinstance(output, EndOfResponse)).error is None
 
     release_request.set()
     assert response_closed.wait(timeout=1.0)
@@ -667,7 +685,7 @@ def test_first_tts_batch_latency_uses_hosted_generation_start(monkeypatch, mode,
     def create(**kwargs):
         if mode == "failed":
             clock[0] = 10.4
-            raise httpx.ReadTimeout("synthetic provider timeout")
+            raise httpx2.ReadTimeout("synthetic provider timeout")
         if mode != "nonstream":
             return _make_stream(events())
         clock[0] = 10.4
@@ -1151,7 +1169,7 @@ def test_setup_uses_dummy_api_key_for_custom_base_url(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     class FakeOpenAI:
-        def __init__(self, *, api_key, base_url):
+        def __init__(self, *, api_key, base_url, http_client):
             captured["api_key"] = api_key
             captured["base_url"] = base_url
 
@@ -1172,7 +1190,7 @@ def test_setup_preserves_environment_api_key_for_custom_base_url(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "secret-from-environment")
 
     class FakeOpenAI:
-        def __init__(self, *, api_key, base_url):
+        def __init__(self, *, api_key, base_url, http_client):
             captured["api_key"] = api_key
             captured["base_url"] = base_url
 
@@ -1193,7 +1211,7 @@ def test_setup_does_not_inject_dummy_key_for_remote_custom_url(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     class FakeOpenAI:
-        def __init__(self, *, api_key, base_url):
+        def __init__(self, *, api_key, base_url, http_client):
             captured["api_key"] = api_key
             captured["base_url"] = base_url
 
@@ -1214,7 +1232,7 @@ def test_process_read_timeout_speaks_fallback_and_preserves_failure():
 
     def make_timeout_stream():
         stream = MagicMock(spec=Stream)
-        stream.__iter__.side_effect = httpx.ReadTimeout("timed out")
+        stream.__iter__.side_effect = httpx2.ReadTimeout("timed out")
         return stream
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: make_timeout_stream()))
@@ -1236,7 +1254,7 @@ def test_read_timeout_after_partial_text_fails_without_apology_or_history_commit
     class PartialThenTimeoutStream:
         def __iter__(self):
             yield _make_text_delta_event("Partial answer. ")
-            raise httpx.ReadTimeout("timed out")
+            raise httpx2.ReadTimeout("timed out")
 
         def close(self):
             pass
@@ -1260,7 +1278,7 @@ def test_read_timeout_after_tool_call_fails_and_rolls_back_call():
     class ToolThenTimeoutStream:
         def __iter__(self):
             yield _make_function_call_done_event()
-            raise httpx.ReadTimeout("timed out")
+            raise httpx2.ReadTimeout("timed out")
 
         def close(self):
             pass
@@ -1821,7 +1839,7 @@ def test_out_of_band_timeout_after_tool_call_fails_without_apology():
     class ToolThenTimeoutStream:
         def __iter__(self):
             yield _make_function_call_done_event()
-            raise httpx.ReadTimeout("timed out")
+            raise httpx2.ReadTimeout("timed out")
 
         def close(self):
             pass

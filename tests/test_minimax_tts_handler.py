@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import os
 import socket
+import struct
 from contextlib import contextmanager
 from queue import Queue
 from threading import Event, Thread
 
-import httpx
+import httpx2
 import numpy as np
 import pytest
 
@@ -22,6 +23,8 @@ from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.s2s_pipeline import parse_arguments, prepare_all_args
 from speech_to_speech.TTS.minimax_tts_handler import MiniMaxTTSHandler
 from tests.turns import reopen
+
+CRLF = bytes((13, 10))
 
 
 def _handler(**kwargs):
@@ -40,14 +43,14 @@ def _event(audio=b"", *, status=1, status_code=0):
 
 def _transport(monkeypatch, body, *, content_type="text/event-stream", status_code=200):
     requests = []
-    original = httpx.AsyncClient
+    original = httpx2.AsyncClient
 
     def respond(request):
         requests.append(request)
-        return httpx.Response(status_code, headers={"Content-Type": content_type}, content=body, request=request)
+        return httpx2.Response(status_code, headers={"Content-Type": content_type}, content=body, request=request)
 
     monkeypatch.setattr(
-        httpx, "AsyncClient", lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs)
+        httpx2, "AsyncClient", lambda **kwargs: original(transport=httpx2.MockTransport(respond), **kwargs)
     )
     return requests
 
@@ -93,6 +96,11 @@ def _streaming_endpoint(initial):
                         return
                 except socket.timeout:
                     continue
+                except ConnectionError:
+                    # An abortive close (RST) arrives as an error rather than a
+                    # zero-length read; both mean the client is gone.
+                    closed.set()
+                    return
             final = _event(status=2)
             try:
                 connection.sendall(f"{len(final):x}\r\n".encode() + final + b"\r\n0\r\n\r\n")
@@ -115,6 +123,36 @@ def test_requires_minimax_key_and_does_not_fall_back_to_openai(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "wrong-provider-key")
     with pytest.raises(ValueError, match="MINIMAX_API_KEY"):
         _handler(api_key=None)
+
+
+def test_streaming_endpoint_reports_abortive_client_close():
+    """A client that aborts the connection must still be seen as closed.
+
+    The fixture used to treat only a zero-length read as a close. A client that
+    leaves the response body unread and then closes makes the kernel send RST, so
+    `recv` raises ConnectionError instead and `closed` was never set, which is the
+    intermittent failure reported in #802.
+    """
+    with _streaming_endpoint(_event(np.arange(512, dtype="<i2").tobytes())) as (base_url, sent, closed, _release):
+        host, port = base_url.removeprefix("http://").split(":")
+        client = socket.create_connection((host, int(port)), timeout=2)
+        request = [
+            b"POST /v1/t2a_v2 HTTP/1.1",
+            b"Host: localhost",
+            b"Content-Length: 0",
+            b"",
+            b"",
+        ]
+        client.sendall(CRLF.join(request))
+
+        try:
+            assert client.recv(1024)  # response headers; the body stays unread
+            assert sent.wait(2)
+        finally:
+            # Unread body data plus SO_LINGER=0 makes the close abortive (RST).
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            client.close()
+        assert closed.wait(2)
 
 
 def test_environment_key_and_explicit_override(monkeypatch):
@@ -163,7 +201,7 @@ def test_payload_and_credentials_use_minimax_protocol(monkeypatch, model, conten
 
 
 @pytest.mark.parametrize("sample_count", [100, 512, 1024, 1500])
-def test_fragmented_sse_preserves_samples_and_pads_only_tail(sample_count):
+def test_fragmented_sse_preserves_samples_without_padding(sample_count):
     handler = _handler()
     samples = np.arange(sample_count, dtype="<i2")
     pcm = samples.tobytes()
@@ -172,11 +210,9 @@ def test_fragmented_sse_preserves_samples_and_pads_only_tail(sample_count):
     fragments = iter(body[i : i + 37] for i in range(0, len(body), 37))
     chunks = list(handler._decode_pcm_stream(fragments))
     assert chunks
-    assert all(chunk.dtype == np.int16 and chunk.shape == (512,) for chunk in chunks)
+    assert all(chunk.dtype == np.int16 and chunk.ndim == 1 and 0 < chunk.size <= 512 for chunk in chunks)
     output = np.concatenate(chunks)
-    assert len(output) == ((sample_count + 511) // 512) * 512
-    np.testing.assert_array_equal(output[:sample_count], samples)
-    assert np.all(output[sample_count:] == 0)
+    np.testing.assert_array_equal(output, samples)
 
 
 def test_null_data_heartbeat_is_safe():
@@ -270,11 +306,11 @@ def test_cancel_then_new_response_discards_buffered_old_audio(monkeypatch):
 def test_reopened_turn_during_http_startup_never_commits_or_emits(monkeypatch):
     tracker = SpeculativeTurnTracker()
     tracker.start_turn()
-    original = httpx.AsyncClient
+    original = httpx2.AsyncClient
 
     def respond(request):
         reopen(tracker)
-        return httpx.Response(
+        return httpx2.Response(
             200,
             headers={"Content-Type": "text/event-stream"},
             content=_event(np.zeros(512, dtype="<i2").tobytes()) + _event(status=2),
@@ -282,7 +318,7 @@ def test_reopened_turn_during_http_startup_never_commits_or_emits(monkeypatch):
         )
 
     monkeypatch.setattr(
-        httpx, "AsyncClient", lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs)
+        httpx2, "AsyncClient", lambda **kwargs: original(transport=httpx2.MockTransport(respond), **kwargs)
     )
     handler = _handler(speculative_turns=tracker)
     assert list(handler.process(TTSInput(text="Hello", turn_id="turn_1", turn_revision=0))) == []
@@ -396,6 +432,6 @@ def test_live_minimax_synthesis(model):
     handler = _handler(api_key=None, model=model)
     chunks = list(handler.process(TTSInput(text="Hello from MiniMax.")))
     assert chunks
-    assert all(chunk.dtype == np.int16 and chunk.shape == (512,) for chunk in chunks)
+    assert all(chunk.dtype == np.int16 and chunk.ndim == 1 and 0 < chunk.size <= 512 for chunk in chunks)
     assert np.any(np.concatenate(chunks))
     assert handler.queue_out.empty()

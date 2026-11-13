@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from itertools import chain
 from threading import Event
 from typing import Any, Iterator
 
@@ -16,6 +17,7 @@ from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
+from speech_to_speech.TTS.pcm_blocks import PCMBlockBuffer
 from speech_to_speech.utils.utils import validate_device
 
 logger = logging.getLogger(__name__)
@@ -55,24 +57,12 @@ class ChatTTSHandler(BaseTTSHandler):
         _ = self.model.infer("text")
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
-        speculative_turns = getattr(self, "speculative_turns", None)
         if isinstance(tts_input, EndOfResponse):
-            if speculative_turns and not speculative_turns.wait_for_gate(
-                tts_input.turn_id,
-                tts_input.turn_revision,
-            ):
-                if tts_input.response_key is None:
-                    return
-                tts_input.cleanup_only = True
-            yield AUDIO_RESPONSE_DONE
+            if self._gate_end_of_response(tts_input):
+                yield AUDIO_RESPONSE_DONE
             return
 
-        if speculative_turns and not speculative_turns.wait_for_gate(
-            tts_input.turn_id,
-            tts_input.turn_revision,
-            commit=True,
-        ):
-            logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
+        if not self._admit_input(tts_input):
             return
 
         text = tts_input.text
@@ -89,7 +79,14 @@ class ChatTTSHandler(BaseTTSHandler):
 
         # Synthesis start: after speculative gate / MPS housekeeping, before provider work.
         timer = self._latency_timer(tts_input, _cancel_gen)
-        wavs_gen = self.model.infer(text, params_infer_code=self.params_infer_code, stream=self.stream)
+        # ChatTTS >= 0.2.2 splits text into sentences by default and synthesizes them as one batch, so each
+        # streamed chunk would hold one row per sentence and the loop below plays only the first row.
+        # Streaming the text as a single row keeps every sentence; non-stream output already joins them.
+        # The 384-token text-refinement limit then covers the whole streamed input too, so very long text
+        # can reach it before the audio limit.
+        wavs_gen = self.model.infer(
+            text, params_infer_code=self.params_infer_code, stream=self.stream, split_text=not self.stream
+        )
 
         def emit(block: np.ndarray) -> Iterator[TTSOut]:
             timer.first_yield()
@@ -97,7 +94,7 @@ class ChatTTSHandler(BaseTTSHandler):
 
         if self.stream:
             resampler = soxr.ResampleStream(24000, 16000, 1, dtype="float32", quality="HQ")
-            pending = np.empty(0, dtype="<i2")
+            blocks = PCMBlockBuffer(self.chunk_size)
             for gen in wavs_gen:
                 if self._is_stale(_cancel_gen):
                     logger.info("TTS generation cancelled (interruption)")
@@ -114,25 +111,19 @@ class ChatTTSHandler(BaseTTSHandler):
                 timer.first_provider_audio()
                 converted = resampler.resample_chunk(chunk)
                 converted = np.clip(converted * 32768, -32768, 32767).astype(np.int16)
-                pending = np.concatenate((pending, converted))
-                while len(pending) >= self.chunk_size:
+                for block in blocks.push(converted):
                     if self._is_stale(_cancel_gen):
                         return
-                    yield from emit(pending[: self.chunk_size].copy())
-                    pending = pending[self.chunk_size :]
+                    yield from emit(block)
 
             if self._is_stale(_cancel_gen):
                 return
             tail = resampler.resample_chunk(np.empty(0, dtype=np.float32), last=True)
             tail = np.clip(tail * 32768, -32768, 32767).astype(np.int16)
-            pending = np.concatenate((pending, tail))
-            for index in range(0, len(pending), self.chunk_size):
+            for block in chain(blocks.push(tail), blocks.flush()):
                 if self._is_stale(_cancel_gen):
                     return
-                block = pending[index : index + self.chunk_size]
-                if len(block) < self.chunk_size:
-                    block = np.pad(block, (0, self.chunk_size - len(block)))
-                yield from emit(block.copy())
+                yield from emit(block)
         else:
             wavs = wavs_gen
             if len(wavs[0]) == 0:

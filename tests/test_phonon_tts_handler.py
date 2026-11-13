@@ -145,10 +145,8 @@ def test_resampling_is_independent_of_native_chunk_boundaries():
     output = list(handler.process(TTSInput(text="Hello")))
     expected = np.clip(soxr.resample(samples, 24000, 16000, quality="HQ") * 32768, -32768, 32767).astype(np.int16)
     actual = np.concatenate(output)
-    assert all(block.shape == (512,) and block.dtype == np.int16 for block in output)
-    np.testing.assert_array_equal(actual[: expected.size], expected)
-    np.testing.assert_array_equal(actual[expected.size :], 0)
-    assert actual.size - expected.size < 512
+    assert all(block.ndim == 1 and 0 < block.size <= 512 and block.dtype == np.int16 for block in output)
+    np.testing.assert_array_equal(actual, expected)
     assert stream.closed
 
 
@@ -175,10 +173,10 @@ def test_first_audio_and_speech_e2e_are_recorded(monkeypatch):
     assert tracker.e2e_s == pytest.approx(1.05)
 
 
-def test_clipping_and_padding_without_resampling():
+def test_clipping_preserves_short_tail_without_resampling():
     handler, _, _ = make_handler([np.array([2, -2, 0.5], dtype=np.float32)], sample_rate=16000, blocksize=4)
     output = list(handler.process(TTSInput(text="Hello")))
-    np.testing.assert_array_equal(output[0], [32767, -32768, 16384, 0])
+    np.testing.assert_array_equal(output[0], [32767, -32768, 16384])
 
 
 @pytest.mark.parametrize("quiet", [False, True])
@@ -353,7 +351,7 @@ def test_supplied_checkpoint_generates_pipeline_audio():
         setup_kwargs={"model_name": os.environ["PHONON_TEST_CHECKPOINT"], "num_threads": 4},
     )
     output = list(handler.process(TTSInput(text="Hello. This is a local speech test.")))
-    assert output and all(block.shape == (512,) and block.dtype == np.int16 for block in output)
+    assert output and all(block.ndim == 1 and 0 < block.size <= 512 and block.dtype == np.int16 for block in output)
     assert np.max(np.abs(np.concatenate(output).astype(np.int32))) > 0
 
 

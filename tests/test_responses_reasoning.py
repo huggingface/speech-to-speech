@@ -3,7 +3,7 @@
 import json
 from types import SimpleNamespace
 
-import httpx
+import httpx2
 import pytest
 from openai import OpenAI
 from openai.types.realtime import RealtimeConversationItemFunctionCall, RealtimeConversationItemFunctionCallOutput
@@ -556,7 +556,7 @@ def test_pinned_sdk_pending_snapshot_preserves_previous_completed_response(strea
             "usage": None,
         }
         if not stream:
-            return httpx.Response(200, json=response)
+            return httpx2.Response(200, json=response)
         indexes = list(range(len(output)))
         if reverse_done:
             indexes.reverse()
@@ -570,7 +570,7 @@ def test_pinned_sdk_pending_snapshot_preserves_previous_completed_response(strea
             for sequence, index in enumerate(indexes)
         ]
         events.append({"type": "response.completed", "sequence_number": len(events), "response": response})
-        return httpx.Response(
+        return httpx2.Response(
             200,
             headers={"content-type": "text/event-stream"},
             content="".join(f"data: {json.dumps(event)}\n\n" for event in events),
@@ -579,7 +579,7 @@ def test_pinned_sdk_pending_snapshot_preserves_previous_completed_response(strea
     handler = _make_handler(stream=stream)
     request = _make_request(chat_size=5)
     chat = request.runtime_config.chat
-    with OpenAI(api_key="test", http_client=httpx.Client(transport=httpx.MockTransport(respond))) as client:
+    with OpenAI(api_key="test", http_client=httpx2.Client(transport=httpx2.MockTransport(respond))) as client:
         handler.client = client
         for key in ["response-A", "response-B"]:
             request.response_key = key
@@ -645,7 +645,7 @@ def test_pinned_sdk_parses_and_serializes_reasoning_tool_continuation(stream, re
             assert body["input"][2:end] == originals
             assert body["input"][end]["call_id"] == "call_1"
         if not stream:
-            return httpx.Response(200, json=response)
+            return httpx2.Response(200, json=response)
         indexes = list(range(len(output)))
         if reverse_done:
             indexes.reverse()
@@ -660,11 +660,11 @@ def test_pinned_sdk_parses_and_serializes_reasoning_tool_continuation(stream, re
         ]
         events.append({"type": "response.completed", "sequence_number": len(events), "response": response})
         data = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=data)
+        return httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=data)
 
     handler = _make_handler(stream=stream)
     request = _make_request(chat_size=5)
-    with OpenAI(api_key="test", http_client=httpx.Client(transport=httpx.MockTransport(respond))) as client:
+    with OpenAI(api_key="test", http_client=httpx2.Client(transport=httpx2.MockTransport(respond))) as client:
         handler.client = client
         first = list(drive_llm(handler, request))
         assert any(isinstance(item, LLMResponseChunk) and item.tools for item in first)
