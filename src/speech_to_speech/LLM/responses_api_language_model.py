@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, Literal
 
 from openai import Stream
 from openai.types.realtime.realtime_conversation_item_assistant_message import (
@@ -18,15 +18,17 @@ from openai.types.responses import (
     ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
     ResponseReasoningItem,
+    ResponseReasoningSummaryTextDeltaEvent,
+    ResponseReasoningTextDeltaEvent,
     ResponseTextDeltaEvent,
 )
 
 from speech_to_speech.LLM.base_openai_compatible_language_model import (
-    WARMUP_MAX_RETRIES,
     AssistantMessage,
     BaseOpenAICompatibleHandler,
     ProviderEvent,
     ProviderResponseEnd,
+    ReasoningDelta,
     TextDelta,
     ToolCall,
     Usage,
@@ -43,6 +45,15 @@ from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn
 from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
+
+
+def _reasoning_parts(item: ResponseReasoningItem) -> Iterator[tuple[Literal["reasoning", "summary"], int, str]]:
+    for index, part in enumerate(item.content or []):
+        if isinstance(part.text, str) and part.text:
+            yield "reasoning", index, part.text
+    for index, summary in enumerate(item.summary):
+        if isinstance(summary.text, str) and summary.text:
+            yield "summary", index, summary.text
 
 
 def _response_end(response: Any, *, status: str | None = None) -> ProviderResponseEnd:
@@ -73,32 +84,34 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
         """Keep Responses reasoning out of the Chat-Completions-shaped extra body."""
         return super()._build_extra_body(
             base_url,
-            disable_thinking=disable_thinking and reasoning_effort is None,
+            disable_thinking=disable_thinking and not reasoning_effort,
             reasoning_effort=None,
         )
 
     def _reasoning_kwargs(self, reasoning_effort: str | None = None) -> dict[str, Any]:
         effort = reasoning_effort or self.reasoning_effort
-        if effort is None:
+        if not effort:
             return {}
         return {"reasoning": {"effort": effort}}
 
     def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
         start = time.time()
-        self.client.with_options(max_retries=WARMUP_MAX_RETRIES).responses.create(
-            model=self.model_name,
-            input=[
-                {
-                    "type": "message",
-                    "role": "system",
-                    "content": [{"type": "input_text", "text": "You are a helpful assistant"}],
-                },
-                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello"}]},
-            ],
-            timeout=self.request_timeout,
-            max_output_tokens=64,
-            **self._reasoning_kwargs(),
+        self._send_warmup(
+            lambda client: client.responses.create(
+                model=self.model_name,
+                input=[
+                    {
+                        "type": "message",
+                        "role": "system",
+                        "content": [{"type": "input_text", "text": "You are a helpful assistant"}],
+                    },
+                    {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello"}]},
+                ],
+                timeout=self.request_timeout,
+                max_output_tokens=64,
+                **self._reasoning_kwargs(),
+            )
         )
         end = time.time()
         logger.info(f"{self.__class__.__name__}:  warmed up! time: {(end - start):.3f} s")
@@ -152,9 +165,11 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
         self,
         api_input: list[dict[str, Any]],
         optional_kwargs: dict[str, Any],
+        *,
+        client: Any = None,
     ) -> Any:
         return _request_chat_completions(
-            client=self.client,
+            client=client or self.client,
             model_name=self.model_name,
             messages=api_input,
             stream=self.stream,
@@ -192,10 +207,10 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
             optional_kwargs["tool_choice"] = req_tool_choice
         return optional_kwargs
 
-    def _request(self, api_input: Any, optional_kwargs: dict[str, Any]) -> Any:
+    def _request(self, api_input: Any, optional_kwargs: dict[str, Any], *, client: Any = None) -> Any:
         create_kwargs = dict(optional_kwargs)
         extra_body = create_kwargs.pop("extra_body", self._extra_body)
-        return self.client.responses.create(
+        return (client or self.client).responses.create(
             model=self.model_name,
             input=api_input,
             stream=self.stream,
@@ -213,8 +228,38 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
     def _iter_stream_events(self, api_response: Stream) -> Iterator[ProviderEvent]:
         saw_terminal = False
         history_item_ids: dict[int, str] = {}
+        reasoning_text: dict[tuple[str, str, int], str] = {}
+
+        def reasoning_delta(
+            item_id: str, kind: Literal["reasoning", "summary"], index: int, text: str, *, full: bool = False
+        ) -> Iterator[ProviderEvent]:
+            key = (item_id, kind, index)
+            previous = reasoning_text.get(key, "")
+            # Completed items repeat their streamed text. Send only a missing
+            # suffix, or the whole part when the provider did not stream it.
+            delta = text[len(previous) :] if full and text.startswith(previous) else "" if full and previous else text
+            if not delta:
+                return
+            prefix = "\n\n" if not previous and any(k[1] == kind for k in reasoning_text) else ""
+            reasoning_text[key] = previous + delta
+            yield ReasoningDelta(text=prefix + delta, kind=kind)
+
         for raw_event in api_response:
-            if isinstance(raw_event, ResponseTextDeltaEvent):
+            if isinstance(raw_event, ResponseReasoningTextDeltaEvent):
+                yield from reasoning_delta(
+                    raw_event.item_id,
+                    "reasoning",
+                    raw_event.content_index,
+                    raw_event.delta,
+                )
+            elif isinstance(raw_event, ResponseReasoningSummaryTextDeltaEvent):
+                yield from reasoning_delta(
+                    raw_event.item_id,
+                    "summary",
+                    raw_event.summary_index,
+                    raw_event.delta,
+                )
+            elif isinstance(raw_event, ResponseTextDeltaEvent):
                 yield TextDelta(text=raw_event.delta)
             elif isinstance(raw_event, ResponseOutputItemDoneEvent):
                 item = raw_event.item
@@ -227,6 +272,8 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
                     yield event
                 elif isinstance(item, ResponseReasoningItem):
                     history_item_ids[raw_event.output_index] = item.id
+                    for kind, index, text in _reasoning_parts(item):
+                        yield from reasoning_delta(item.id, kind, index, text, full=True)
                     yield item
                 elif isinstance(item, ResponseOutputMessage):
                     message_id = _generate_id("msg")
@@ -252,6 +299,7 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
             )
 
     def _iter_response_events(self, api_response: Any) -> Iterator[ProviderEvent]:
+        reasoning_kinds_seen: set[str] = set()
         usage = api_response.usage
         if usage:
             yield Usage(input_tokens=usage.input_tokens or 0, output_tokens=usage.output_tokens or 0)
@@ -260,6 +308,9 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
             if isinstance(message, ResponseFunctionToolCall):
                 yield self._tool_call(message)
             elif isinstance(message, ResponseReasoningItem):
+                for kind, _index, text in _reasoning_parts(message):
+                    yield ReasoningDelta(text=("\n\n" if kind in reasoning_kinds_seen else "") + text, kind=kind)
+                    reasoning_kinds_seen.add(kind)
                 yield message
             elif isinstance(message, ResponseOutputMessage):
                 yield AssistantMessage(content=self._assistant_content(message.content), response_item=message)

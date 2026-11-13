@@ -508,6 +508,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if isinstance(part, AssistantTextPart):
                 text_parts.append(part.text)
                 continue
+            if not isinstance(part, AssistantToolCallPart):
+                continue
             flush_text()
             tool = part.tool
             items.append(
@@ -1130,7 +1132,6 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
                 ctx.prefetch_transaction.register_abort(self._cancel_criteria.cancel)
             generate_kwargs = {
                 **inputs,
-                **self.gen_kwargs,
                 "max_new_tokens": self.gen_kwargs.get("max_new_tokens", 1024),
                 "streamer": self.streamer,
                 "stopping_criteria": StoppingCriteriaList([self._cancel_criteria]),

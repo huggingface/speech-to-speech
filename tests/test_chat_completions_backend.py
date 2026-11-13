@@ -1,6 +1,6 @@
 """Unit tests for the chat-completions LLM backend.
 
-These run without a GPU or a live server: the OpenAI client is faked at the
+These run without a GPU or a hosted server: the OpenAI client is faked at the
 module level, so the streaming/non-streaming parse logic and the format
 converters are exercised purely in-process.
 
@@ -12,9 +12,10 @@ from __future__ import annotations
 import json
 import queue
 import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
-import httpx
+import httpx2
 import numpy as np
 import pytest
 from openai import APIConnectionError, InternalServerError, RateLimitError
@@ -49,7 +50,8 @@ from speech_to_speech.pipeline.messages import (
     TTSInput,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-from tests.llm_history import drive_llm
+from tests.llm_history import close_llm_runners as close_llm_runners
+from tests.llm_history import drive_llm, mock_async_client
 from tests.turns import reopen
 
 # ── Fakes ────────────────────────────────────────────────────────────────────
@@ -112,7 +114,10 @@ def _make_handler(
 ):
     """Build a handler whose warmup hits the fake client (no network)."""
     orig_openai = base_mod.OpenAI
+    orig_async_client = ChatCompletionsApiModelHandler._make_async_client
     base_mod.OpenAI = _FakeClient
+    # A streaming handler warms up through its async client.
+    ChatCompletionsApiModelHandler._make_async_client = mock_async_client
     try:
         h = ChatCompletionsApiModelHandler(
             threading.Event(),
@@ -132,6 +137,8 @@ def _make_handler(
         )
     finally:
         base_mod.OpenAI = orig_openai
+        ChatCompletionsApiModelHandler._make_async_client = orig_async_client
+    h._make_async_client = lambda: mock_async_client(h)
     return h
 
 
@@ -407,6 +414,108 @@ def test_chat_completions_backend_uses_configured_audio_url_payload():
     audio_part = handler.client.chat.completions.last_kwargs["messages"][-1]["content"][0]
     assert audio_part["type"] == "audio_url"
     assert audio_part["audio_url"]["url"].startswith("data:audio/wav;base64,UklGR")
+
+
+def test_cancel_keepalive_stream_releases_next_request(monkeypatch):
+    reading, release = threading.Event(), threading.Event()
+    requests = []
+
+    class Provider(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            requests.append(self.client_address)
+            chunk = {
+                "id": "test",
+                "choices": [{"index": 0, "delta": {"content": "Ready."}, "finish_reason": "stop"}],
+            }
+            payload = b"data: " + json.dumps(chunk).encode() + b"\n\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            if len(requests) == 1:
+                self.send_header("Connection", "close")
+            else:
+                self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            try:
+                if len(requests) == 1:
+                    reading.set()
+                    while not release.wait(0.05):
+                        self.wfile.write(b": keep-alive\n\n")
+                        self.wfile.flush()
+                self.wfile.write(payload)
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+    serving = threading.Thread(target=server.serve_forever)
+    serving.start()
+    monkeypatch.setattr(ChatCompletionsApiModelHandler, "warmup", lambda self: None)
+    handler = ChatCompletionsApiModelHandler(
+        threading.Event(),
+        queue.Queue(),
+        queue.Queue(),
+        setup_kwargs={
+            "base_url": f"http://127.0.0.1:{server.server_port}/v1",
+            "api_key": "none",
+            "cancel_scope": CancelScope(),
+        },
+    )
+    handler.request_timeout = 0.6
+    response = RealtimeResponseCreateParams(output_modalities=["text"])
+    outputs = []
+    worker = threading.Thread(target=lambda: outputs.append(_drive(handler, response=response)))
+    try:
+        worker.start()
+        assert reading.wait(2)
+        handler.cancel_scope.cancel()
+        worker.join(1)
+        assert not worker.is_alive(), "cancelled turn is still reading SSE keep-alives"
+        assert outputs[0][-1].error is None
+        for _ in range(2):
+            text, _, _, _, end = _drive(handler, response=response)
+            assert text == "Ready."
+            assert end.error is None
+        assert len(requests) == 3
+        assert requests[1] == requests[2], "ordinary turns did not reuse the HTTP connection"
+    finally:
+        release.set()
+        worker.join(2)
+        handler.cleanup()
+        server.shutdown()
+        server.server_close()
+        serving.join()
+
+
+@pytest.mark.parametrize("interrupt", ["stop", "cancel"])
+def test_interrupted_stream_does_not_flush_a_partial_tool_call(caplog, interrupt):
+    h = _make_handler(stream=True)
+    h.cancel_scope = CancelScope()
+
+    def chunks():
+        yield _chunk(tool_calls=[_tc_delta(0, id="srv_1", name="search_docs", arguments='{"query": "bo')])
+        # The turn is interrupted while the provider is still sending arguments.
+        h.stop_event.set() if interrupt == "stop" else h.cancel_scope.cancel()
+        yield _chunk(tool_calls=[_tc_delta(0, arguments="ld")])
+
+    h.client.chat.completions.create = lambda **k: _FakeStream(chunks())
+    with caplog.at_level("WARNING"):
+        _text, tools, _usage, chat, end = _drive(
+            h,
+            tools=[{"type": "function", "name": "search_docs", "parameters": {"type": "object"}}],
+            tool_choice="required",
+        )
+
+    assert tools == [], "an abandoned stream must not surface truncated tool arguments"
+    assert end.error is None
+    assert end.history is None or not end.history.complete
+    assert [item.type for item in chat.buffer] == ["message"]
+    assert "without a finish_reason" not in caplog.text
 
 
 def test_streaming_text_and_usage():
@@ -909,14 +1018,14 @@ def test_generation_error_emits_failed_end_of_response():
 
 
 def _api_error_response(status_code):
-    request = httpx.Request("POST", "https://provider.example/v1/chat/completions")
-    return httpx.Response(status_code, request=request)
+    request = httpx2.Request("POST", "https://provider.example/v1/chat/completions")
+    return httpx2.Response(status_code, request=request)
 
 
 @pytest.mark.parametrize(
     ("error", "message"),
     [
-        (APIConnectionError(request=httpx.Request("POST", "https://provider.example")), "Connection error"),
+        (APIConnectionError(request=httpx2.Request("POST", "https://provider.example")), "Connection error"),
         (RateLimitError("rate limited", response=_api_error_response(429), body=None), "rate limited"),
         (InternalServerError("server failed", response=_api_error_response(500), body=None), "server failed"),
     ],

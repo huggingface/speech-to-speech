@@ -8,7 +8,7 @@ import wave
 from queue import Queue
 from threading import Event, Thread
 
-import httpx
+import httpx2
 import numpy as np
 import pytest
 from openai.types.realtime import RealtimeSessionCreateRequest, SessionUpdateEvent
@@ -41,10 +41,10 @@ def native_server(monkeypatch):
 
     def serve(request):
         requests.append(request)
-        return httpx.Response(200, json=replies.pop(0) if replies else response())
+        return httpx2.Response(200, json=replies.pop(0) if replies else response())
 
-    client_class = httpx.AsyncClient
-    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client_class(transport=httpx.MockTransport(serve), **kw))
+    client_class = httpx2.AsyncClient
+    monkeypatch.setattr(httpx2, "AsyncClient", lambda **kw: client_class(transport=httpx2.MockTransport(serve), **kw))
     return requests, replies
 
 
@@ -275,8 +275,8 @@ def test_native_request_cancellation_interrupts_http_and_allows_reuse(monkeypatc
         finally:
             cancelled.set()
 
-    client_class = httpx.AsyncClient
-    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client_class(transport=httpx.MockTransport(serve), **kw))
+    client_class = httpx2.AsyncClient
+    monkeypatch.setattr(httpx2, "AsyncClient", lambda **kw: client_class(transport=httpx2.MockTransport(serve), **kw))
     operation = NemotronTranscriptionOperation(
         "https://asr.example/v1/chat/completions", None, "model", b"audio", None, "json", 5
     )

@@ -48,7 +48,7 @@ import os
 from urllib.parse import urlsplit, urlunsplit
 
 import auth
-import httpx
+import httpx2
 import limiter
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
@@ -303,9 +303,9 @@ async def search(req: SearchRequest, request: Request):
     headers = {"X-API-KEY": key, "Content-Type": "application/json"}
     payload = {"q": query, "num": MAX_RESULTS}
     try:
-        async with httpx.AsyncClient(timeout=12.0) as http:
+        async with httpx2.AsyncClient(timeout=12.0) as http:
             resp = await http.post(SERPER_URL, headers=headers, json=payload)
-    except httpx.RequestError as exc:
+    except httpx2.RequestError as exc:
         logger.warning("Serper unreachable: %r", exc)
         raise HTTPException(status_code=502, detail="Search provider unreachable.")
 
@@ -388,9 +388,9 @@ async def calls(request: Request):
     try:
         # Generous timeout: the s2s server waits for its own ICE gathering
         # (up to ~5 s) before returning the answer.
-        async with httpx.AsyncClient(timeout=15.0) as http:
+        async with httpx2.AsyncClient(timeout=15.0) as http:
             resp = await http.post(url, headers={"Content-Type": "application/sdp"}, content=offer)
-    except httpx.RequestError as exc:
+    except httpx2.RequestError as exc:
         logger.warning("s2s calls endpoint unreachable: %r", exc)
         raise HTTPException(status_code=502, detail="Speech service unreachable.")
 
@@ -446,13 +446,13 @@ async def session(request: Request):
 
     url = f"{LOAD_BALANCER_URL.rstrip('/')}/session"
     try:
-        async with httpx.AsyncClient(timeout=15.0) as http:
+        async with httpx2.AsyncClient(timeout=15.0) as http:
             lb = await http.post(
                 url,
                 headers=_load_balancer_headers(request),
                 content="{}",
             )
-    except httpx.RequestError as exc:
+    except httpx2.RequestError as exc:
         logger.warning("Load balancer unreachable: %r", exc)
         raise HTTPException(status_code=502, detail="Speech service unreachable.")
 
@@ -533,7 +533,7 @@ def _load_balancer_headers(request: Request | None = None) -> dict[str, str]:
     return headers
 
 
-def _log_load_balancer_failure(operation: str, response: httpx.Response) -> None:
+def _log_load_balancer_failure(operation: str, response: httpx2.Response) -> None:
     """Log enough ingress metadata to diagnose failures without credentials."""
     response_headers = {
         name: value
@@ -567,9 +567,9 @@ async def queue_status(queue_id: str, request: Request):
 
     url = f"{LOAD_BALANCER_URL.rstrip('/')}/queue/{queue_id}"
     try:
-        async with httpx.AsyncClient(timeout=15.0) as http:
+        async with httpx2.AsyncClient(timeout=15.0) as http:
             lb = await http.get(url, headers=_load_balancer_headers(request))
-    except httpx.RequestError as exc:
+    except httpx2.RequestError as exc:
         logger.warning("Load balancer unreachable: %r", exc)
         raise HTTPException(status_code=502, detail="Speech service unreachable.")
 
@@ -660,11 +660,11 @@ async def _lb_leave(queue_id: str, request: Request | None = None) -> None:
     """Best-effort: tell the LB to drop a waiting ticket."""
     url = f"{LOAD_BALANCER_URL.rstrip('/')}/queue/{queue_id}"
     try:
-        async with httpx.AsyncClient(timeout=5.0) as http:
+        async with httpx2.AsyncClient(timeout=5.0) as http:
             response = await http.delete(url, headers=_load_balancer_headers(request))
             if response.status_code not in {200, 404}:
                 _log_load_balancer_failure("queue leave", response)
-    except httpx.RequestError as exc:
+    except httpx2.RequestError as exc:
         logger.warning("Queue leave failed: %r", exc)
 
 

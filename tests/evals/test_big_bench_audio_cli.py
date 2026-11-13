@@ -1,7 +1,7 @@
 import json
 from contextlib import asynccontextmanager
 
-import httpx
+import httpx2
 import pytest
 
 from speech_to_speech.evals.big_bench_audio import __main__ as cli
@@ -54,7 +54,7 @@ async def test_item_failure_preserves_and_uploads_other_results(monkeypatch, tmp
     def resolve(item, subset):
         attempts.append(item.id)
         if stage == "download" and item.id == failed_id:
-            raise httpx.ReadTimeout("Audio download timed out")
+            raise httpx2.ReadTimeout("Audio download timed out")
         return item.id
 
     def decode(item_id):

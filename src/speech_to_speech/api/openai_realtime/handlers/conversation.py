@@ -183,12 +183,14 @@ class ConversationHandler(RealtimeBaseHandler):
     def _apply_delete(self, conn_id: str, event: ConversationItemDeleteEvent) -> list[ServerEvent]:
         st = self._state(conn_id)
         chat = st.runtime_config.chat
+        # A reply removed as unheard still exists on the wire; deleting it is final.
+        unheard = event.item_id in chat.unheard_assistant_item_ids()
         removed = chat.delete_item(event.item_id)
         # Committed speech is already on the wire while STT still owns its
         # input state; its Chat entry is only written when transcription ends.
         committed_input = event.item_id in st.input_items and event.item_id in st.acknowledged_item_ids
         empty_input = st.published_input_transcripts.pop(event.item_id, None) == ""
-        if removed is None and not committed_input and not empty_input:
+        if removed is None and not committed_input and not empty_input and not unheard:
             error = self.make_error(
                 f"No conversation item with id '{event.item_id}' found.", "conversation_item_not_found"
             )
@@ -210,8 +212,12 @@ class ConversationHandler(RealtimeBaseHandler):
             while len(st.deleted_input_turn_ids) > 128:
                 st.deleted_input_turn_ids.pop(next(iter(st.deleted_input_turn_ids)))
         st.pending_input_terminals.pop(event.item_id, None)
+        # A deleted reply's audio records must not let a late playback report
+        # edit a new item that reuses its id.
+        st.assistant_audio_segments.pop(event.item_id, None)
+        st.assistant_audio_cuts.pop(event.item_id, None)
         self._service.audio._release_input_item_state_by_id(conn_id, event.item_id)
-        retained_ids = chat.item_ids() | st.input_items.keys()
+        retained_ids = chat.item_ids() | chat.unheard_assistant_item_ids() | st.input_items.keys()
         st.acknowledged_item_ids = [item_id for item_id in st.acknowledged_item_ids if item_id in retained_ids]
         if removed is not None and removed.type == "function_call" and removed.call_id is not None:
             st.input_turn_by_call_id.pop(removed.call_id, None)
@@ -295,6 +301,22 @@ class ConversationHandler(RealtimeBaseHandler):
             # An empty transcript never enters the chat, but the client was
             # told about the item and its empty completed transcription.
             return self._user_audio_item(item_id, "")
+        if item_id in st.runtime_config.chat.unheard_assistant_item_ids():
+            # A reply nobody heard is kept out of model history, but like a
+            # truncation to 0 ms it still exists, with nothing heard.
+            content = (
+                AssistantContent(type="output_audio", transcript="")
+                if item_id in st.audio_output_item_ids
+                else AssistantContent(type="output_text", text="")
+            )
+            return RealtimeConversationItemAssistantMessage(
+                id=item_id,
+                object="realtime.item",
+                type="message",
+                role="assistant",
+                status="incomplete",
+                content=[content],
+            )
         return None
 
     @staticmethod
@@ -362,7 +384,8 @@ class ConversationHandler(RealtimeBaseHandler):
     def record_acknowledged_item(self, conn_id: str, item_id: str) -> None:
         """Track retained wire chronology so deleting the tail restores its predecessor."""
         st = self._state(conn_id)
-        retained_ids = st.runtime_config.chat.item_ids() | st.input_items.keys()
+        chat = st.runtime_config.chat
+        retained_ids = chat.item_ids() | chat.unheard_assistant_item_ids() | st.input_items.keys()
         retained_ids.update(str(item["item_id"]) for item in st.pending_text_outputs)
         retained_ids.update(call.id for call in st.pending_function_calls.values() if call.id is not None)
         st.acknowledged_item_ids = [

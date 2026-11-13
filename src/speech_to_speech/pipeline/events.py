@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from speech_to_speech.pipeline.history import ResponseHistory
 from speech_to_speech.pipeline.messages import (
     AssistantOutputPart,
+    AssistantReasoningPart,
     AssistantToolCallPart,
     ResponseIncompleteReason,
     _normalize_assistant_output_fields,
@@ -155,6 +156,7 @@ class AssistantToolCallReadyEvent(PipelineEvent):
 
     type: Literal["assistant_tool_call_ready"] = "assistant_tool_call_ready"
     part: AssistantToolCallPart
+    reasoning: list[AssistantReasoningPart] = Field(default_factory=list)
     output_sequence: int
     turn_id: str | None = None
     turn_revision: int | None = None
@@ -177,6 +179,7 @@ class AssistantResponseDoneEvent(PipelineEvent):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
     history: ResponseHistory | None = Field(default=None, exclude=True, repr=False)
+    reasoning: list[AssistantReasoningPart] = Field(default_factory=list)
 
     type: Literal["assistant_response_done"] = "assistant_response_done"
     status: Literal["completed", "incomplete"] = "completed"

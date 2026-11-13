@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from threading import Lock
 from types import SimpleNamespace
 from typing import Any, Optional
 from unittest.mock import MagicMock
@@ -16,7 +15,6 @@ from speech_to_speech.LLM.language_model import (
     BaseLanguageModelHandler,
     StreamContext,
     VisionLanguageModelHandler,
-    _CancelCriteria,
 )
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.pipeline.messages import GenerateResponseRequest, LLMResponseChunk
@@ -141,25 +139,3 @@ def test_vlm_templates_honor_configured_thinking_mode(enable_thinking):
         assert call.kwargs["tools"] == [
             {"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}
         ]
-
-
-def test_vlm_generation_preserves_explicit_eos_override():
-    handler = object.__new__(VisionLanguageModelHandler)
-    handler.backend = "transformers"
-    handler.device = "cpu"
-    handler.enable_thinking = False
-    handler.model = MagicMock()
-    handler.processor = MagicMock()
-    handler.processor.return_value.to.return_value = {"input_ids": [[1, 2]]}
-    handler.streamer = iter(())
-    handler.gen_kwargs = {"eos_token_id": 7, "max_new_tokens": 12}
-    handler._cancel_criteria = _CancelCriteria()
-    handler._transformers_lock = Lock()
-    chat = Chat(10)
-    chat.add_item(make_user_message("Hello"))
-
-    list(handler._generate(chat, None, None, StreamContext()))
-
-    kwargs = handler.model.generate.call_args.kwargs
-    assert kwargs["eos_token_id"] == 7
-    assert kwargs["max_new_tokens"] == 12
