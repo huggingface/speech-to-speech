@@ -7,6 +7,7 @@ from queue import Empty
 from threading import Lock, Thread
 from time import perf_counter
 from typing import Any, Literal, Optional, Protocol, runtime_checkable
+from zoneinfo import ZoneInfo
 
 import torch
 from nltk import sent_tokenize
@@ -53,8 +54,10 @@ from speech_to_speech.LLM.tool_call.function_call import (
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.LLM.tool_call.tool_prompt import END_CODE, ENTER_CODE, build_block_regex, build_tool_system_prompt
 from speech_to_speech.LLM.utils import (
+    current_date_for_prompt,
     image_url_to_pil,
     language_name_for_prompt,
+    prompt_timezone,
     remove_markdown,
     remove_unspeechable,
     resolve_auto_language,
@@ -179,6 +182,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
     _cancel_criteria: _CancelCriteria
     streamer: Iterable[str]
     tokenizer: _Tokenizer
+    current_date: bool = False
+    current_date_tz: ZoneInfo | None = None
 
     def setup(
         self,
@@ -194,6 +199,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         stream_batch_sentences: int = 3,
         enable_lang_prompt: bool = False,
         compact_history: bool = False,
+        current_date: bool = False,
+        timezone: Optional[str] = None,
         **_kwargs: Any,
     ) -> None:
         if backend == "transformers":
@@ -206,6 +213,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.enable_thinking = enable_thinking
         self.stream_batch_sentences = max(1, stream_batch_sentences)
         self.enable_lang_prompt = enable_lang_prompt
+        self.current_date = current_date
+        self.current_date_tz = prompt_timezone(timezone)
 
         self._load_model(model_name, device, torch_dtype, gen_kwargs)
 
@@ -291,11 +300,12 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         wants_audio: bool = True,
         *,
         language_name: str | None = None,
+        current_date: str | None = None,
     ) -> None:
         raw_tools = raw_tools or []
 
         function_tools = [FunctionTool(**t.model_dump()) for t in raw_tools if t.type == "function"]
-        if not instructions and not language_name and not function_tools:
+        if not instructions and not language_name and not function_tools and not current_date:
             return
 
         build_system_prompt = build_voice_system_prompt if wants_audio else build_text_system_prompt
@@ -306,6 +316,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 instructions or "",
                 tool_section=tool_section,
                 language_name=language_name,
+                current_date=current_date,
             )
             block_regex = build_block_regex()
             enter_code = ENTER_CODE
@@ -315,13 +326,17 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             # Models that saw earlier tool calls may still emit one; keep detecting
             # tool blocks so they are stripped from speech, but expose no tools so
             # nothing gets executed.
-            full_instructions = build_system_prompt(instructions or "", language_name=language_name)
+            full_instructions = build_system_prompt(
+                instructions or "", language_name=language_name, current_date=current_date
+            )
             block_regex = build_block_regex()
             enter_code = ENTER_CODE
             end_code = END_CODE
             function_tools = []
         else:
-            full_instructions = build_system_prompt(instructions or "", language_name=language_name)
+            full_instructions = build_system_prompt(
+                instructions or "", language_name=language_name, current_date=current_date
+            )
             block_regex = None
             enter_code = None
             end_code = None
@@ -676,6 +691,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             ctx,
             response_wants_audio(response),
             language_name=lang_name,
+            current_date=current_date_for_prompt(enable=self.current_date, timezone=self.current_date_tz),
         )
 
         # Images the model sees this turn; only these are stripped on write-back,

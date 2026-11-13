@@ -2,7 +2,9 @@ import base64
 import io
 import re
 from collections.abc import Callable
+from datetime import datetime, tzinfo
 from typing import Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests  # type: ignore[import-untyped]
 from PIL import Image
@@ -151,6 +153,30 @@ def language_name_for_prompt(language_code: Optional[str], *, enable: bool) -> O
         return None
     _, lang_name = resolve_auto_language(language_code)
     return lang_name
+
+
+def format_current_date(now: datetime) -> str:
+    """Build the ``--llm_current_date`` line, e.g. 'Today is Wednesday, November 4, 2026.'"""
+    return f"Today is {now:%A}, {now:%B} {now.day}, {now.year}."
+
+
+def current_date_for_prompt(*, enable: bool, timezone: Optional[tzinfo] = None) -> Optional[str]:
+    """Today's date line for the system prompt; call per request so it rolls over at midnight."""
+    if not enable:
+        return None
+    return format_current_date(datetime.now(timezone))
+
+
+def prompt_timezone(name: Optional[str]) -> Optional[ZoneInfo]:
+    """Resolve ``--llm_timezone`` to a ``ZoneInfo``, or ``None`` for the server's local time."""
+    if not name:
+        return None
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        raise ValueError(
+            f"Unknown --llm_timezone {name!r}: use an IANA name like 'America/New_York' (on Windows, install 'tzdata')"
+        ) from None
 
 
 def resolve_auto_language(language_code: Optional[str]) -> tuple[Optional[str], Optional[str]]:

@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
@@ -36,6 +37,17 @@ class LanguageModelBaseArguments:
             "help": "When True, add a language instruction to the system prompt for the current turn "
             "(e.g. 'Please reply to my message in French.'). Default is False."
         },
+    )
+    llm_current_date: bool = field(
+        default=False,
+        metadata={
+            "help": "Prepend today's date to the system prompt ('Today is Weekday, Month D, YYYY.'). "
+            "Helps time-sensitive answers."
+        },
+    )
+    llm_timezone: Optional[str] = field(
+        default=None,
+        metadata={"help": "IANA timezone for --llm_current_date (default: server local time)."},
     )
     compact_history: bool = field(
         default=True,

@@ -58,6 +58,14 @@ speech-to-speech local --llm_backend responses-api
 
 Speech recognition and synthesis stay local either way. With a hosted provider, transcribed text and conversation history are sent to it. See [LLM backends](../../../README.md#llm-backends) for the llama.cpp setup, provider examples, and direct audio input.
 
+## Current date
+
+`--llm_current_date` puts today's date on the first line of the system prompt, computed for each request, for example `Today is Wednesday, November 4, 2026.` Without it, models tend to answer time-sensitive questions ("who won this year?") with their training-era year, even when a search tool returns current results. It is off by default and works with every LLM backend. `--llm_timezone` sets the IANA timezone (for example `America/New_York`); the default is the server's local time.
+
+```bash
+speech-to-speech local --llm_current_date --llm_timezone America/New_York
+```
+
 ## Language behavior
 
 `--enable_lang_prompt` adds a per-turn instruction asking the LLM to reply in the language reported by STT. It is off by default. Parakeet chooses its transcription language automatically; the Whisper backends accept `--language auto` or a fixed code.
