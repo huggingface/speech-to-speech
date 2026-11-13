@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import queue
+import select
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,7 +29,12 @@ from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.LLM.chat_completions_language_model import ChatCompletionsApiModelHandler
 from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.messages import EndOfResponse, GenerateResponseRequest, LLMResponseChunk
+from speech_to_speech.pipeline.messages import (
+    EndOfResponse,
+    GenerateResponseRequest,
+    LLMResponseChunk,
+    ResponsePrefetchTransaction,
+)
 from tests.llm_history import drive_llm
 
 REPLY = "Hello there."
@@ -127,6 +134,7 @@ class _Provider:
         idle_timeout_s: float | None = None,
     ) -> None:
         self.connections: list[tuple[str, int]] = []
+        self.disconnected = threading.Event()  # the client closed a stalled stream
         provider = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -157,13 +165,19 @@ class _Provider:
                 try:
                     for event in events:
                         self._write(event)
-                    if stall_before_done is not None:
-                        stall_before_done.wait(10)
+                    while stall_before_done is not None and not stall_before_done.wait(0.02):
+                        readable, _, _ = select.select([self.connection], [], [], 0)
+                        if readable and not self.connection.recv(1, socket.MSG_PEEK):
+                            provider.disconnected.set()
+                            self.close_connection = True
+                            return
                     self._write(b"data: [DONE]\n\n")
                     # Like real servers, send the end of the body as its own write.
                     self.wfile.write(b"0\r\n\r\n")
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
+                    # A client that closes with data still unread resets the connection.
+                    provider.disconnected.set()
                     self.close_connection = True
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -189,7 +203,7 @@ def _handler(handler_cls, provider: _Provider, monkeypatch, *, warmup: bool = Fa
     )
 
 
-def _request(turn: int) -> GenerateResponseRequest:
+def _request(turn: int, *, prefetch: bool = False) -> GenerateResponseRequest:
     chat = Chat(10)
     chat.add_item(make_user_message("Hello"))
     session = RealtimeSessionCreateRequest(type="realtime", instructions="You are helpful.")
@@ -199,6 +213,7 @@ def _request(turn: int) -> GenerateResponseRequest:
         language_code="en",
         turn_id=f"turn_{turn}",
         turn_revision=0,
+        prefetch_transaction=ResponsePrefetchTransaction() if prefetch else None,
     )
 
 
@@ -302,5 +317,57 @@ def test_stalled_stream_ends_the_turn_with_the_read_timeout(handler_cls, events,
         assert outputs[-1].error == "Language model generation timed out after 0.3s."
     finally:
         stall.set()
+        handler.cleanup()
+        provider.close()
+
+
+@pytest.mark.parametrize(("handler_cls", "events"), BACKENDS)
+def test_tool_followup_prefetch_reuses_the_turn_connection(handler_cls, events, monkeypatch):
+    provider = _Provider(events)
+    handler = _handler(handler_cls, provider, monkeypatch)
+    try:
+        # A tool follow-up is prefetched moments after the turn that called the tool.
+        for request in (_request(0), _request(1, prefetch=True), _request(2)):
+            outputs = list(drive_llm(handler, request))
+            assert "".join(o.text for o in outputs if isinstance(o, LLMResponseChunk)) == REPLY
+            assert outputs[-1].error is None
+        assert len(provider.connections) == 3
+        assert len(set(provider.connections)) == 1, "the prefetch did not share the turns' connection"
+    finally:
+        handler.cleanup()
+        provider.close()
+
+
+@pytest.mark.parametrize(("handler_cls", "events"), BACKENDS)
+def test_discarded_prefetch_closes_the_provider_stream_while_output_waits(handler_cls, events, monkeypatch):
+    stall = threading.Event()
+    provider = _Provider(events, stall_before_done=stall)
+    handler = _handler(handler_cls, provider, monkeypatch)
+    request = _request(0, prefetch=True)
+    staged, resume = threading.Event(), threading.Event()
+
+    def consume():
+        for output in drive_llm(handler, request):
+            if isinstance(output, LLMResponseChunk):
+                staged.set()
+                resume.wait(5)  # Output can wait behind slow speech synthesis.
+
+    consumer = threading.Thread(target=consume)
+    try:
+        consumer.start()
+        assert staged.wait(2)
+        request.prefetch_transaction.discard()
+        assert provider.disconnected.wait(2), "the hidden stream stayed open after the prefetch was discarded"
+        resume.set()
+        consumer.join(2)
+        assert not consumer.is_alive()
+
+        stall.set()
+        outputs = list(drive_llm(handler, _request(1)))
+        assert outputs[-1].error is None
+    finally:
+        stall.set()
+        resume.set()
+        consumer.join(2)
         handler.cleanup()
         provider.close()
