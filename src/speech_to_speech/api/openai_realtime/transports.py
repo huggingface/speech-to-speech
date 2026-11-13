@@ -14,11 +14,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from fastapi import WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
+
+from speech_to_speech.api.openai_realtime.handlers.audio import PIPELINE_SAMPLE_RATE
 
 if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import RealtimeService, ServerEvent
@@ -45,12 +49,14 @@ class SessionTransport(ABC):
         """Deliver a pipeline-rate PCM16 chunk to the client."""
 
     @abstractmethod
-    def discard_pending_audio(self) -> None:
-        """Drop transport-buffered audio that has not reached the client yet.
+    def discard_pending_audio(self) -> float:
+        """Drop assistant audio the client has not played yet.
 
-        WebSocket clients buffer audio on their side, so this is a no-op there;
-        the WebRTC transport paces playback server-side and must flush its
-        track buffer for barge-in to actually silence the assistant.
+        The WebRTC transport paces playback server-side and must flush its
+        track buffer for barge-in to actually silence the assistant. WebSocket
+        clients buffer audio on their side and flush it themselves; that
+        transport only estimates how much was left.
+        Returns the duration of unplayed audio in milliseconds.
         """
 
     @abstractmethod
@@ -85,9 +91,17 @@ class WebSocketTransport(SessionTransport):
 
     kind = "websocket"
 
-    def __init__(self, websocket: WebSocket) -> None:
+    def __init__(self, websocket: WebSocket, *, clock: Callable[[], float] = time.monotonic) -> None:
         self.websocket = websocket
         self._send_lock = asyncio.Lock()
+        self._clock = clock
+        # When the client should finish playing the audio sent so far, assuming
+        # it plays in real time from the moment each chunk is sent.
+        self._playback_end = 0.0
+        # Audio of sends still in progress, and a counter that tells a send
+        # finishing after a discard not to add its discarded audio back.
+        self._sending_seconds = 0.0
+        self._discards = 0
 
     async def send_events(self, events: list[ServerEvent]) -> None:
         async with self._send_lock:
@@ -101,12 +115,31 @@ class WebSocketTransport(SessionTransport):
         pcm: bytes,
         response_key: str | None = None,
     ) -> None:
-        await self.send_events(service.encode_audio_chunk(session_id, pcm, response_key))
+        events = service.encode_audio_chunk(session_id, pcm, response_key)
+        # History counts this audio as delivered from here on, so a discard
+        # during the send must count it as unplayed.
+        seconds = len(pcm) / 2 / PIPELINE_SAMPLE_RATE if events else 0.0
+        discards = self._discards
+        self._sending_seconds += seconds
+        try:
+            await self.send_events(events)
+        finally:
+            if discards == self._discards:
+                self._sending_seconds -= seconds
+        if seconds and discards == self._discards:
+            self._playback_end = max(self._playback_end, self._clock()) + seconds
 
-    def discard_pending_audio(self) -> None:
-        # Unplayed audio lives client-side over WebSocket; truncation is the
-        # client's responsibility.
-        pass
+    def discard_pending_audio(self) -> float:
+        # The client flushes its own player on barge-in. Report the audio it
+        # had not played yet, including sends still in progress, so clients
+        # that never send conversation.item.truncate still get history cut to
+        # what they heard.
+        now = self._clock()
+        unplayed = max(0.0, self._playback_end - now) + self._sending_seconds
+        self._playback_end = now
+        self._sending_seconds = 0.0
+        self._discards += 1
+        return unplayed * 1000
 
     async def close(self) -> None:
         try:

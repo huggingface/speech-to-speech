@@ -41,7 +41,7 @@ async def test_serper_search_returns_answer_and_organic_results(monkeypatch):
     )
     monkeypatch.setattr(realtime_web_search_tool, "SERPER_API_KEY", "test-key")
     monkeypatch.setattr(
-        realtime_web_search_tool.httpx,
+        realtime_web_search_tool.httpx2,
         "AsyncClient",
         lambda **kwargs: FakeAsyncClient(response, captured, **kwargs),
     )

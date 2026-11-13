@@ -106,7 +106,18 @@ def test_chattts_first_audio_reaches_terminal_response(
         return audio[:512]
 
     handler.model = SimpleNamespace(infer=infer)
-    monkeypatch.setattr(chattts_module, "librosa", SimpleNamespace(resample=resample))
+    if stream:
+        original_push = chattts_module.soxr.ResampleStream.resample_chunk
+
+        def push(resampler, pcm, **kwargs):
+            clock[0] = 10.40
+            if cancel_during == "resample":
+                handler.cancel_scope.cancel()
+            return original_push(resampler, pcm, **kwargs)
+
+        monkeypatch.setattr(chattts_module.soxr.ResampleStream, "resample_chunk", push)
+    else:
+        monkeypatch.setattr(chattts_module, "librosa", SimpleNamespace(resample=resample))
     tts_input = TTSInput(
         text="Hello",
         response_key=request.response_key,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import itertools
+import re
 import sys
 from types import SimpleNamespace
 from typing import Any
@@ -48,7 +50,8 @@ def test_streaming_accepts_a_flat_chunk(handler_factory) -> None:
     blocks = _blocks(handler_factory([_tone()]))
 
     assert blocks, "a one-second chunk must produce audio"
-    assert all(len(block) == 512 for block in blocks)
+    assert all(0 < len(block) <= 512 for block in blocks)
+    assert sum(map(len, blocks)) == 16000
 
 
 def test_flat_and_column_chunks_produce_identical_audio(handler_factory) -> None:
@@ -68,3 +71,86 @@ def test_streaming_stops_on_an_empty_chunk(handler_factory) -> None:
 
 def test_streaming_stops_on_a_none_chunk(handler_factory) -> None:
     assert _blocks(handler_factory([None])) == []
+
+
+@pytest.mark.parametrize("terminator", [None, np.empty((1, 0)), "exhaustion"])
+def test_streaming_is_independent_of_provider_boundaries(handler_factory, terminator):
+    tone = _tone(48000)
+    chunks = list(np.split(tone, 4))
+    if not isinstance(terminator, str):
+        chunks.append(terminator)
+    handler = handler_factory(chunks)
+    actual = np.concatenate(_blocks(handler))
+    expected = np.concatenate(_blocks(handler_factory([tone])))
+    assert actual.size == 32000
+    np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_array_equal(np.concatenate(_blocks(handler)), expected)
+
+
+def test_cancellation_discards_buffered_audio(handler_factory):
+    from speech_to_speech.pipeline.cancel_scope import CancelScope
+
+    handler = handler_factory([_tone(12000)])
+    handler.cancel_scope = CancelScope()
+    stream = handler.process(TTSInput(text="hello"))
+    next(stream)
+    handler.cancel_scope.cancel()
+    assert list(stream) == []
+
+
+def test_streaming_preserves_hq_filtering_and_starts_on_first_chunk(handler_factory):
+    import soxr
+
+    samples = np.arange(48000)
+    audio = sum(0.2 * np.sin(2 * np.pi * frequency * samples / 24000) for frequency in (440, 8200, 8500))
+    audio = audio.astype(np.float32)
+    consumed = []
+
+    def infer(*_args, **_kwargs):
+        for chunk in np.split(audio, 4):
+            consumed.append(True)
+            yield [chunk]
+
+    handler = handler_factory([])
+    handler.model = SimpleNamespace(infer=infer)
+    stream = handler.process(TTSInput(text="hello"))
+    first = [next(stream) for _ in range(15)]
+    assert len(consumed) == 1
+    actual = np.concatenate(first + list(stream))
+    expected = np.clip(soxr.resample(audio, 24000, 16000, quality="HQ") * 32768, -32768, 32767).astype(np.int16)
+    np.testing.assert_allclose(actual[: len(expected)], expected, atol=1)
+    assert not np.any(actual[len(expected) :])
+
+
+def _stream_like_chattts(text: str, split_text: bool = True, **_kwargs: Any) -> Any:
+    """Stream like ChatTTS >= 0.2.2, which splits the text after ". " unless split_text=False and synthesizes
+    the sentences as one batch: each chunk is (sentences, samples), one zero-padded row per sentence.
+    Sentence k is the constant level k / 10, so the output shows which sentences were played."""
+    sentences = [s for s in re.split(r"(?<=\.\s)", text) if s]
+    speech = [np.full(4000 * k, k / 10, dtype=np.float32) for k in range(1, len(sentences) + 1)]
+    rows = speech if split_text else [np.concatenate(speech)]
+    wavs = np.zeros((len(rows), max(len(row) for row in rows)), dtype=np.float32)
+    for i, row in enumerate(rows):
+        wavs[i, : len(row)] = row
+    return iter([wavs[:, start : start + 6000] for start in range(0, wavs.shape[1], 6000)])
+
+
+def test_streaming_speaks_every_sentence_of_the_input(handler_factory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Playing row 0 of each chunk used to drop every sentence after the first."""
+    import soxr
+
+    from speech_to_speech.TTS import chatTTS_handler
+
+    # Keep the samples as they are so each sentence's level can be read back. Streaming resamples
+    # with soxr; the librosa stub covers the non-streaming path.
+    monkeypatch.setattr(soxr.ResampleStream, "resample_chunk", lambda self, chunk, **_kwargs: chunk)
+    monkeypatch.setattr(chatTTS_handler, "librosa", SimpleNamespace(resample=lambda chunk, **_kwargs: chunk))
+    handler = handler_factory([])
+    handler.model = SimpleNamespace(infer=_stream_like_chattts)
+
+    audio = np.concatenate(list(handler.process(TTSInput(text="One sentence here. Another one here. A third one."))))
+    levels = np.rint(audio[audio != 0] / 32768 * 10).astype(int).tolist()
+
+    # Each sentence plays in full and in order, not interleaved with the others.
+    runs = [(level, len(list(group))) for level, group in itertools.groupby(levels)]
+    assert runs == [(1, 4000), (2, 8000), (3, 12000)]

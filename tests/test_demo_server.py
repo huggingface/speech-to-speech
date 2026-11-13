@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
-import httpx
+import httpx2
 import pytest
 
 DEMO_DIR = Path(__file__).resolve().parents[1] / "demo"
@@ -28,7 +28,9 @@ async def test_local_vad_assets_are_served_with_browser_content_types(monkeypatc
         destination = tmp_path / "vendor" / "local-vad" / filename
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(b"bundled asset")
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=demo_server.app), base_url="http://test") as client:
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=demo_server.app), base_url="http://test"
+    ) as client:
         response = await client.get(f"/vendor/local-vad/{filename}")
     assert response.status_code == 200
     assert response.headers["content-type"].startswith(media_type)
@@ -37,7 +39,9 @@ async def test_local_vad_assets_are_served_with_browser_content_types(monkeypatc
 
 async def test_local_vad_missing_assets_fail_without_exposing_other_package_files(monkeypatch, tmp_path):
     monkeypatch.setattr(demo_server, "HERE", str(tmp_path))
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=demo_server.app), base_url="http://test") as client:
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=demo_server.app), base_url="http://test"
+    ) as client:
         assert (await client.get("/vendor/local-vad/not-an-asset.js")).status_code == 404
         response = await client.get("/vendor/local-vad/silero_vad_v6.onnx")
     assert response.status_code == 503
@@ -49,9 +53,9 @@ def _mock_whoami(monkeypatch, payload):
 
     def get(url, **kwargs):
         calls.append((url, kwargs))
-        return httpx.Response(200, json=payload, request=httpx.Request("GET", url))
+        return httpx2.Response(200, json=payload, request=httpx2.Request("GET", url))
 
-    monkeypatch.setattr(httpx, "get", get)
+    monkeypatch.setattr(httpx2, "get", get)
     monkeypatch.setattr(demo_auth, "_whoami_cache", {})
     return calls
 
@@ -60,7 +64,7 @@ def test_resolve_tier_prefers_oauth_pro_without_hub_lookup(monkeypatch):
     def unexpected_get(*args, **kwargs):
         pytest.fail("OAuth PRO users must not require a whoami-v2 lookup")
 
-    monkeypatch.setattr(httpx, "get", unexpected_get)
+    monkeypatch.setattr(httpx2, "get", unexpected_get)
 
     assert demo_auth.resolve_tier({"is_pro": True}, "hf_user_token") == "pro"
 
@@ -113,14 +117,14 @@ def test_failed_whoami_falls_back_without_blocking_retry(monkeypatch):
     def get(url, **kwargs):
         calls.append((url, kwargs))
         if len(calls) == 1:
-            raise httpx.ConnectError("Hub unavailable")
-        return httpx.Response(
+            raise httpx2.ConnectError("Hub unavailable")
+        return httpx2.Response(
             200,
             json={"isPro": True, "orgs": []},
-            request=httpx.Request("GET", url),
+            request=httpx2.Request("GET", url),
         )
 
-    monkeypatch.setattr(httpx, "get", get)
+    monkeypatch.setattr(httpx2, "get", get)
 
     assert demo_auth.resolve_tier({"is_pro": False}, "hf_user_token") == "free"
     assert demo_auth._whoami_cache == {}
@@ -147,14 +151,14 @@ async def test_me_reuses_whoami_resolution_and_retries_next_request(monkeypatch)
     def get(url, **kwargs):
         calls.append((url, kwargs))
         if len(calls) == 1:
-            raise httpx.ConnectError("Hub unavailable")
-        return httpx.Response(
+            raise httpx2.ConnectError("Hub unavailable")
+        return httpx2.Response(
             200,
             json={"isPro": True, "orgs": []},
-            request=httpx.Request("GET", url),
+            request=httpx2.Request("GET", url),
         )
 
-    monkeypatch.setattr(httpx, "get", get)
+    monkeypatch.setattr(httpx2, "get", get)
 
     first = json.loads((await demo_server.me(object())).body)
 
@@ -278,7 +282,7 @@ def test_load_balancer_headers_authenticate_anonymous_request_with_service_token
 
 
 def test_load_balancer_failure_logs_safe_diagnostic_headers(caplog):
-    response = httpx.Response(
+    response = httpx2.Response(
         429,
         headers={
             "Authorization": "Bearer secret",
@@ -311,12 +315,12 @@ async def test_session_preserves_load_balancer_authentication_failure(monkeypatc
             pass
 
         async def post(self, *args, **kwargs):
-            return httpx.Response(401, json={"reason": "token_invalid"})
+            return httpx2.Response(401, json={"reason": "token_invalid"})
 
     monkeypatch.setattr(demo_server, "LOAD_BALANCER_URL", "https://load-balancer.example")
     monkeypatch.setattr(demo_server, "AUTH_ENABLED", True)
     monkeypatch.setattr(demo_server, "LIMITER_ENABLED", False)
-    monkeypatch.setattr(demo_server.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(demo_server.httpx2, "AsyncClient", FakeAsyncClient)
     monkeypatch.setattr(demo_server.auth, "oauth_login_required_reason", lambda request: None)
     monkeypatch.setattr(demo_server.auth, "resolve_identity", lambda request: ("free", ["key"], None))
     monkeypatch.setattr(demo_server.auth, "current_access_token", lambda request: "hf_user_token")
@@ -391,12 +395,12 @@ def space_search(monkeypatch, tmp_path):
 
         async def post(self, url, headers=None, json=None):
             serper_keys.append(headers["X-API-KEY"])
-            return httpx.Response(200, json={"organic": [{"title": "t", "link": "u"}]})
+            return httpx2.Response(200, json={"organic": [{"title": "t", "link": "u"}]})
 
     monkeypatch.setattr(demo_server, "SPACE_ID", "smolagents/hf-realtime-voice")
     monkeypatch.setattr(demo_server, "SERPER_KEY", "server-key")
     monkeypatch.setattr(demo_server, "SERVER_SEARCH", True)
-    monkeypatch.setattr(demo_server.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(demo_server.httpx2, "AsyncClient", FakeAsyncClient)
     monkeypatch.setattr(demo_server.auth, "oauth_login_required_reason", lambda request: None)
     monkeypatch.setenv("USAGE_DB_PATH", str(tmp_path / "usage.sqlite3"))
     monkeypatch.setattr(demo_server.limiter, "_db_path", None)

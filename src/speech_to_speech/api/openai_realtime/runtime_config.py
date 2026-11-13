@@ -1,11 +1,56 @@
+from typing import Any
+
 from openai.types.realtime import RealtimeSessionCreateRequest
 from openai.types.realtime.realtime_audio_config import RealtimeAudioConfig
 from openai.types.realtime.realtime_audio_config_input import RealtimeAudioConfigInput
 from openai.types.realtime.realtime_audio_config_output import RealtimeAudioConfigOutput
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
+from speech_to_speech.api.openai_realtime.reasoning import SessionRequest
 from speech_to_speech.LLM.chat import Chat
 from speech_to_speech.utils.request_tracing import safe_identifier
+
+# OpenAI Realtime ``reasoning.effort`` levels, plus ``none`` so clients can also
+# switch reasoning off on providers that support it (e.g. gpt-5.x, HF router).
+REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
+
+
+def reasoning_effort_of(params: Any) -> str | None:
+    """Read ``reasoning.effort`` from a Realtime session or response config.
+
+    Events parsed by the service carry it as a plain dict (see ``reasoning.py``);
+    a config built from the SDK's own classes carries a model. Handle both.
+    """
+    reasoning = getattr(params, "reasoning", None) if params is not None else None
+    if reasoning is None:
+        return None
+    effort = reasoning.get("effort") if isinstance(reasoning, dict) else getattr(reasoning, "effort", None)
+    return effort or None
+
+
+def validate_reasoning(params: Any) -> str | None:
+    """Return an error message when ``params.reasoning`` is malformed, else ``None``."""
+    reasoning = getattr(params, "reasoning", None) if params is not None else None
+    if reasoning is None:
+        return None
+    if isinstance(reasoning, dict):
+        effort = reasoning.get("effort")
+    elif isinstance(reasoning, BaseModel):
+        effort = getattr(reasoning, "effort", None)
+    else:
+        return "reasoning must be an object."
+    if effort is not None and effort not in REASONING_EFFORTS:
+        return f"Invalid reasoning.effort {effort!r}; expected one of: {', '.join(REASONING_EFFORTS)}."
+    return None
+
+
+def resolve_reasoning_effort(runtime_config: Any, response: Any = None) -> str | None:
+    """Effective per-request effort: ``response.create`` overrides the session.
+
+    ``None`` means the client set nothing and the backend's startup default applies.
+    """
+    session = getattr(runtime_config, "session", None) if runtime_config is not None else None
+    return reasoning_effort_of(response) or reasoning_effort_of(session)
 
 
 def _apply_update(current: BaseModel, update: BaseModel) -> None:
@@ -39,8 +84,8 @@ class RuntimeConfig(BaseModel):
     model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True)
 
     chat: Chat = Field(default_factory=lambda: Chat(10))
-    session: RealtimeSessionCreateRequest = Field(
-        default_factory=lambda: RealtimeSessionCreateRequest(type="realtime"),
+    session: SessionRequest = Field(
+        default_factory=lambda: SessionRequest(type="realtime"),
         validate_default=True,
     )
     last_assistant_language: str | None = Field(default=None, exclude=True)
@@ -52,27 +97,19 @@ class RuntimeConfig(BaseModel):
         return self._trace_session_id
 
     def bind_trace_session(self, session_id: str) -> None:
+        """Label remote-request traces with the owning server session (set once at registration)."""
         if safe_identifier(session_id) is None:
             raise ValueError("invalid server trace session ID")
-        if self._trace_session_id not in (None, session_id):
-            raise ValueError("runtime config already belongs to another trace session")
         self._trace_session_id = session_id
 
-    def for_trace_session(self, session_id: str) -> "RuntimeConfig":
-        """Adopt settings without relabeling an earlier session's config."""
-        if self.trace_session_id not in (None, session_id):
-            # Public settings/history may be reused by a server-side replacement.
-            # Construct a new wrapper from declared fields, never copied private
-            # ownership or client-supplied extras. In-flight work keeps the old one.
-            replacement = type(self).model_construct(**{name: getattr(self, name) for name in type(self).model_fields})
-            replacement.bind_trace_session(session_id)
-            return replacement
-        self.bind_trace_session(session_id)
-        return self
+    @field_validator("session", mode="before")
+    @classmethod
+    def _accept_sdk_session(cls, v: Any) -> Any:
+        return SessionRequest.of(v) if isinstance(v, RealtimeSessionCreateRequest) else v
 
     @field_validator("session", mode="after")
     @classmethod
-    def _ensure_audio_structure(cls, v: RealtimeSessionCreateRequest) -> RealtimeSessionCreateRequest:
+    def _ensure_audio_structure(cls, v: SessionRequest) -> SessionRequest:
         """Guarantee 'audio.input' and 'audio.output' are never None."""
         if v.audio is None:
             v.audio = RealtimeAudioConfig()
@@ -125,9 +162,26 @@ class RuntimeConfig(BaseModel):
             and "speech_to_speech.input_audio_transcription.snapshot" in extensions
         )
 
+    @property
+    def reasoning_text_enabled(self) -> bool:
+        """Whether this client wants the provider's readable reasoning output."""
+        extensions = getattr(self.session, "extensions", None)
+        return isinstance(extensions, (list, tuple, set)) and "speech_to_speech.reasoning.delta" in extensions
+
     def apply_session_update(self, update: RealtimeSessionCreateRequest) -> None:
         """Merge non-None, explicitly-set fields from 'update' into the
         current 'session', preserving any fields not present in the update."""
+        # ``reasoning`` arrives as a plain dict, which _apply_update would
+        # replace wholesale; merge its keys so a partial object (e.g. ``{}``)
+        # keeps the current effort. ``null`` still resets.
+        old_reasoning = getattr(self.session, "reasoning", None)
+        new_reasoning = getattr(update, "reasoning", None)
+        if (
+            "reasoning" in update.model_fields_set
+            and isinstance(new_reasoning, dict)
+            and isinstance(old_reasoning, dict)
+        ):
+            setattr(update, "reasoning", {**old_reasoning, **new_reasoning})
         _apply_update(self.session, update)
 
     @property

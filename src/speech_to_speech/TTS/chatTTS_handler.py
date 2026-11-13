@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import logging
+from itertools import chain
 from threading import Event
 from typing import Any, Iterator
 
 import ChatTTS
 import librosa
 import numpy as np
+import soxr
 import torch
 
 from speech_to_speech.pipeline.cancel_scope import CancelScope
@@ -15,6 +17,7 @@ from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
+from speech_to_speech.TTS.pcm_blocks import PCMBlockBuffer
 from speech_to_speech.utils.utils import validate_device
 
 logger = logging.getLogger(__name__)
@@ -88,36 +91,51 @@ class ChatTTSHandler(BaseTTSHandler):
 
         # Synthesis start: after speculative gate / MPS housekeeping, before provider work.
         timer = self._latency_timer(tts_input, _cancel_gen)
-        wavs_gen = self.model.infer(text, params_infer_code=self.params_infer_code, stream=self.stream)
+        # ChatTTS >= 0.2.2 splits text into sentences by default and synthesizes them as one batch, so each
+        # streamed chunk would hold one row per sentence and the loop below plays only the first row.
+        # Streaming the text as a single row keeps every sentence; non-stream output already joins them.
+        # The 384-token text-refinement limit then covers the whole streamed input too, so very long text
+        # can reach it before the audio limit.
+        wavs_gen = self.model.infer(
+            text, params_infer_code=self.params_infer_code, stream=self.stream, split_text=not self.stream
+        )
 
         def emit(block: np.ndarray) -> Iterator[TTSOut]:
             timer.first_yield()
             yield block
 
         if self.stream:
+            resampler = soxr.ResampleStream(24000, 16000, 1, dtype="float32", quality="HQ")
+            blocks = PCMBlockBuffer(self.chunk_size)
             for gen in wavs_gen:
                 if self._is_stale(_cancel_gen):
                     logger.info("TTS generation cancelled (interruption)")
                     return
                 if gen[0] is None:
-                    return
-                # ChatTTS streams a chunk either as (samples,) or as (1, samples)
-                # depending on version. Indexing the converted array with [0] assumed
-                # the second shape and reduced the first to a single sample, so the
-                # following len() raised "object of type 'numpy.int16' has no len()".
+                    break
+                # ChatTTS versions emit either (samples,) or (1, samples).
                 chunk = np.asarray(gen[0], dtype=np.float32)
                 if chunk.ndim > 1:
                     chunk = chunk[0]
                 if chunk.size == 0:
-                    return
+                    break
                 # Provider samples, before resample / int16 / block assembly.
                 timer.first_provider_audio()
-                audio_chunk = librosa.resample(chunk, orig_sr=24000, target_sr=16000)
-                audio_chunk = (audio_chunk * 32768).astype(np.int16)
-                while len(audio_chunk) > self.chunk_size:
-                    yield from emit(audio_chunk[: self.chunk_size])
-                    audio_chunk = audio_chunk[self.chunk_size :]
-                yield from emit(np.pad(audio_chunk, (0, self.chunk_size - len(audio_chunk))))
+                converted = resampler.resample_chunk(chunk)
+                converted = np.clip(converted * 32768, -32768, 32767).astype(np.int16)
+                for block in blocks.push(converted):
+                    if self._is_stale(_cancel_gen):
+                        return
+                    yield from emit(block)
+
+            if self._is_stale(_cancel_gen):
+                return
+            tail = resampler.resample_chunk(np.empty(0, dtype=np.float32), last=True)
+            tail = np.clip(tail * 32768, -32768, 32767).astype(np.int16)
+            for block in chain(blocks.push(tail), blocks.flush()):
+                if self._is_stale(_cancel_gen):
+                    return
+                yield from emit(block)
         else:
             wavs = wavs_gen
             if len(wavs[0]) == 0:

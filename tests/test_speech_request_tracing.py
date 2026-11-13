@@ -9,7 +9,7 @@ from dataclasses import FrozenInstanceError
 from queue import Queue
 from threading import Event
 
-import httpx
+import httpx2
 import numpy as np
 import pytest
 from openai import OpenAI
@@ -108,26 +108,16 @@ def test_runtime_trace_owner_is_not_a_public_session_field():
     assert "trace_session_id" not in RealtimeSessionCreateRequest.model_json_schema()["properties"]
     with pytest.raises((AttributeError, ValueError)):
         config.trace_session_id = "spoof"
-    with pytest.raises(ValueError, match="another trace session"):
-        config.bind_trace_session("other-server-session")
+    with pytest.raises(ValueError, match="invalid server trace session ID"):
+        config.bind_trace_session("bad\nforged")
 
 
-def test_reused_config_keeps_history_but_cannot_relabel_in_flight_work(caplog):
+def test_each_registered_connection_labels_its_own_config(caplog):
     caplog.set_level("INFO", logger=TRACE_LOGGER)
     first, second = RealtimeService(), RealtimeService()
     first_id, second_id = first.register(), second.register()
-    original = first._state(first_id).runtime_config
-    original.chat.add_item(make_user_message("synthetic history"))
-    old_request = GenerateResponseRequest(runtime_config=original)
-    snapshot = HttpRequestContext("llm", session_id=original.trace_session_id, response_key=old_request.response_key)
-    second._conns[second_id].runtime_config = original
-    adopted = second._state(second_id).runtime_config
-    assert adopted is not original
-    assert adopted.chat is original.chat
-    assert adopted.session is original.session
-    assert adopted.trace_session_id == second_id
-    assert old_request.runtime_config.trace_session_id == first_id
-    assert snapshot.session_id == first_id
+    assert first._state(first_id).runtime_config.trace_session_id == first_id
+    assert second._state(second_id).runtime_config.trace_session_id == second_id
     for service, session in ((first, first_id), (second, second_id)):
         service.bind_response_latency_tracker(session, f"response-{session}", turn_id="turn_1", turn_revision=0)
         service.bind_response_latency_tracker(session, f"response-{session}", turn_id="turn_1", turn_revision=0)
@@ -160,16 +150,16 @@ def test_stt_http_ids_preserve_auth_and_bind_only_accepted_results(monkeypatch, 
     async def respond(request):
         sent.append(request)
         if status != 200:
-            return httpx.Response(status, json={"error": "synthetic failure"})
+            return httpx2.Response(status, json={"error": "synthetic failure"})
         if profile == "nemotron":
-            return httpx.Response(
+            return httpx2.Response(
                 200, json={"choices": [{"finish_reason": "stop", "message": {"content": "synthetic"}}]}
             )
-        return httpx.Response(200, json={"text": "synthetic"})
+        return httpx2.Response(200, json={"text": "synthetic"})
 
-    original_client = httpx.AsyncClient
+    original_client = httpx2.AsyncClient
     monkeypatch.setattr(
-        stt_module.httpx, "AsyncClient", lambda **kw: original_client(transport=httpx.MockTransport(respond), **kw)
+        stt_module.httpx2, "AsyncClient", lambda **kw: original_client(transport=httpx2.MockTransport(respond), **kw)
     )
     monkeypatch.setattr(OpenAICompatibleSTTHandler, "warmup", lambda self: None)
     handler = OpenAICompatibleSTTHandler(
@@ -204,12 +194,12 @@ def test_stt_http_ids_preserve_auth_and_bind_only_accepted_results(monkeypatch, 
 
 def test_window_reuse_links_actual_ids_to_final_revision_and_releases_them(monkeypatch, caplog):
     caplog.set_level("INFO", logger=TRACE_LOGGER)
-    original_client = httpx.AsyncClient
+    original_client = httpx2.AsyncClient
     monkeypatch.setattr(
-        stt_module.httpx,
+        stt_module.httpx2,
         "AsyncClient",
         lambda **kw: original_client(
-            transport=httpx.MockTransport(lambda req: httpx.Response(200, json={"text": "synthetic"})), **kw
+            transport=httpx2.MockTransport(lambda req: httpx2.Response(200, json={"text": "synthetic"})), **kw
         ),
     )
     monkeypatch.setattr(OpenAICompatibleSTTHandler, "warmup", lambda self: None)
@@ -271,9 +261,9 @@ def test_cancelled_stt_dispatch_keeps_old_session_without_accepted_result(monkey
         entered.set()
         await asyncio.Event().wait()
 
-    original_client = httpx.AsyncClient
+    original_client = httpx2.AsyncClient
     monkeypatch.setattr(
-        stt_module.httpx, "AsyncClient", lambda **kw: original_client(transport=httpx.MockTransport(blocked), **kw)
+        stt_module.httpx2, "AsyncClient", lambda **kw: original_client(transport=httpx2.MockTransport(blocked), **kw)
     )
     monkeypatch.setattr(OpenAICompatibleSTTHandler, "warmup", lambda self: None)
     handler = OpenAICompatibleSTTHandler(Event(), Queue(), Queue())
@@ -300,7 +290,7 @@ def test_llm_calls_attach_independent_ids_without_changing_shared_client(monkeyp
     def respond(request):
         sent.append(request)
         if request.url.path.endswith("/responses"):
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={
                     "id": "provider-response",
@@ -319,7 +309,7 @@ def test_llm_calls_attach_independent_ids_without_changing_shared_client(monkeyp
                     ],
                 },
             )
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "id": "provider-response",
@@ -335,7 +325,7 @@ def test_llm_calls_attach_independent_ids_without_changing_shared_client(monkeyp
     client = OpenAI(
         api_key="provider-secret-sentinel",
         base_url="https://provider.test/v1",
-        http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+        http_client=httpx2.Client(transport=httpx2.MockTransport(respond)),
     )
     monkeypatch.setattr(llm_module, "OpenAI", lambda **kwargs: client)
     handler_class = ChatCompletionsApiModelHandler if backend == "chat" else ResponsesApiModelHandler
@@ -369,11 +359,11 @@ def test_tts_batches_have_unique_ids_and_preserve_session_snapshot(monkeypatch, 
 
     def respond(request):
         sent.append(request)
-        return httpx.Response(200, content=np.zeros(512, dtype="<i2").tobytes(), headers={"content-type": "audio/pcm"})
+        return httpx2.Response(200, content=np.zeros(512, dtype="<i2").tobytes(), headers={"content-type": "audio/pcm"})
 
-    original_client = httpx.AsyncClient
+    original_client = httpx2.AsyncClient
     monkeypatch.setattr(
-        tts_module.httpx, "AsyncClient", lambda **kw: original_client(transport=httpx.MockTransport(respond), **kw)
+        tts_module.httpx2, "AsyncClient", lambda **kw: original_client(transport=httpx2.MockTransport(respond), **kw)
     )
     monkeypatch.setattr(OpenAICompatibleTTSHandler, "warmup", lambda self: None)
     handler = OpenAICompatibleTTSHandler(
@@ -412,11 +402,11 @@ def test_tts_worker_uses_the_captured_trace_even_if_operation_is_relabelled(monk
 
     def respond(request):
         sent.append(request)
-        return httpx.Response(200, content=b"\0\0", headers={"content-type": "audio/pcm"})
+        return httpx2.Response(200, content=b"\0\0", headers={"content-type": "audio/pcm"})
 
-    original_client = httpx.AsyncClient
+    original_client = httpx2.AsyncClient
     monkeypatch.setattr(
-        tts_module.httpx, "AsyncClient", lambda **kw: original_client(transport=httpx.MockTransport(respond), **kw)
+        tts_module.httpx2, "AsyncClient", lambda **kw: original_client(transport=httpx2.MockTransport(respond), **kw)
     )
     operation = tts_module.HttpSpeechOperation(
         endpoint_url="https://provider.test/v1/audio/speech",
