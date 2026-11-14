@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 
 
 @dataclass
@@ -15,11 +15,11 @@ class LocalAudioArguments:
             "aliases": ["--tool-module"],
         },
     )
-    local_audio_input_device: Optional[int] = field(
+    local_audio_input_device: Optional[Union[int, str]] = field(
         default=None,
         metadata={"help": "Optional sounddevice input device index used by the local command."},
     )
-    local_audio_output_device: Optional[int] = field(
+    local_audio_output_device: Optional[Union[int, str]] = field(
         default=None,
         metadata={"help": "Optional sounddevice output device index used by the local command."},
     )
