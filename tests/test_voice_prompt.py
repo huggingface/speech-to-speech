@@ -13,7 +13,7 @@ from openai.types.realtime.realtime_response_create_params import RealtimeRespon
 from openai.types.responses import ResponseFunctionToolCall
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
-from speech_to_speech.LLM.chat import Chat, make_user_message
+from speech_to_speech.LLM.chat import PENDING_TOOL_OUTPUT, Chat, make_user_message
 from speech_to_speech.LLM.language_model import LanguageModelHandler, StreamContext
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.LLM.tool_call.tool_prompt import END_CODE, ENTER_CODE, build_block_regex, build_tool_system_prompt
@@ -425,13 +425,25 @@ def test_local_history_commits_text_and_tools_in_emitted_order():
         )
     )
 
-    assert [item["type"] for item in chat.to_responses_api_chat()[1:]] == [
+    # The second call is still running: it stays visible with a stand-in output.
+    replay = chat.to_responses_api_chat()[1:]
+    assert [item["type"] for item in replay] == [
+        "message",
+        "function_call",
+        "function_call_output",
         "message",
         "function_call",
         "function_call_output",
         "message",
     ]
+    assert [item["output"] for item in replay if item["type"] == "function_call_output"] == [
+        "first result",
+        PENDING_TOOL_OUTPUT,
+    ]
     assert [item["role"] for item in chat.to_transformers_chat()[1:]] == [
+        "assistant",
+        "assistant",
+        "tool",
         "assistant",
         "assistant",
         "tool",

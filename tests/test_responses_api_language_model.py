@@ -32,6 +32,7 @@ from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.base_openai_compatible_language_model import WARMUP_MAX_RETRIES, ToolCall, Usage
 from speech_to_speech.LLM.chat import (
     AUDIO_INPUT_HISTORY_PLACEHOLDER,
+    PENDING_TOOL_OUTPUT,
     Chat,
     make_system_message,
     make_user_message,
@@ -1071,13 +1072,12 @@ def test_provider_error_after_text_tool_rolls_back_ordered_call():
     assert not request.runtime_config.chat.has_pending_tool_calls()
 
 
-def test_generation_is_rejected_until_ordered_tool_output_arrives():
+def test_generation_continues_while_ordered_tool_output_is_pending():
     handler = _make_handler()
-    called = False
+    captured = []
 
     def create(**kwargs):
-        nonlocal called
-        called = True
+        captured.append(kwargs["input"])
         return _make_stream([])
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
@@ -1097,11 +1097,14 @@ def test_generation_is_rejected_until_ordered_tool_output_arrives():
 
     outputs = list(handler.process(request))
 
-    assert called is False
-    assert len(outputs) == 1
-    assert isinstance(outputs[0], EndOfResponse)
-    assert outputs[0].error is not None and "function call outputs are pending" in outputs[0].error
+    # The newer message is answered while the tool runs: the provider gets the
+    # call paired with a stand-in output, and stored history is left untouched.
+    assert next(item for item in outputs if isinstance(item, EndOfResponse)).error is None
+    assert [item["type"] for item in captured[0]] == ["message", "function_call", "function_call_output", "message"]
+    assert captured[0][2]["call_id"] == "call_pending"
+    assert captured[0][2]["output"] == PENDING_TOOL_OUTPUT
     assert [item.type for item in chat.buffer] == ["message", "function_call", "message"]
+    assert chat.has_pending_tool_calls()
 
     chat.append_tool_output(
         "call_pending",

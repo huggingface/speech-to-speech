@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import threading
@@ -51,6 +52,26 @@ from speech_to_speech.utils.utils import _generate_id
 logger = logging.getLogger(__name__)
 
 AUDIO_INPUT_HISTORY_PLACEHOLDER = "[User audio input]"
+
+# What a model is shown as the output of a tool call that has not returned yet.
+# Providers and chat templates reject a call without an output, and a model that
+# cannot see its own call issues it again, so the call stays visible with this
+# stand-in until the real output arrives. It is never stored or sent to clients.
+PENDING_TOOL_OUTPUT = (
+    "This tool call is still running and has not returned a result yet. Do not call it again for the "
+    "same request and do not guess its result. Keep helping the user in the meantime; the result will "
+    "be provided as soon as it is ready."
+)
+# How a model is shown a result that arrived after the conversation had moved on.
+LATE_TOOL_RESULT = "[Tool result, not said by the user] {name}({arguments}) has finished. Result: {output}"
+# Added to the newest user message of every request made while calls are
+# running. The stand-ins sit next to their calls, which can be many turns back;
+# with several calls in flight, models lose track of the ones still running and
+# issue them again.
+RUNNING_TOOL_STATUS = (
+    "[Tool status, not said by the user] Still running: {calls}. Each result will arrive on its own, so do "
+    "not repeat a running call. New requests can still use tools as usual."
+)
 
 # Anchor returned by :meth:`Chat.history_anchor_id` for an empty conversation,
 # so a generation that starts from empty history is still written before user
@@ -123,7 +144,6 @@ HistoryCleanupSnapshot = tuple[
     RealtimeConversationItemSystemMessage | None,
     list[SupportedItem],
     dict[str, RealtimeConversationItemFunctionCall],
-    dict[str, set[str]],
     int,
     CompactFn | None,
 ]
@@ -156,13 +176,14 @@ class Chat:
         # oldest complete turn (everything up to the next user message)
         # is evicted -- or, with a compactor, summarized in the background.
         self.buffer: list[SupportedItem] = []
+        # Calls whose output has not arrived. Calls a response emitted also sit in
+        # the buffer at their emitted position, where serializers show them with
+        # a stand-in output until the real one arrives.
         self._pending_tool_calls: dict[str, RealtimeConversationItemFunctionCall] = {}
-        # Local models can emit text after a tool call in the same response.
-        # Those calls stay in their emitted buffer position, but serializers
-        # omit them until a function_call_output pairs the call. Retain each
-        # response's tracked item IDs with its pending calls so prefix gating
-        # cannot cross into an earlier completed response after finalization.
-        self._ordered_pending_calls: dict[str, set[str]] = {}
+        # Calls that a later response replied past while they were running. An
+        # assistant message right after a call is otherwise taken for text of
+        # the response that made the call.
+        self._calls_replied_past: set[str] = set()
         # Assistant output is written eagerly when a tool call is exposed to a
         # realtime client. Keep the exact provisional IDs keyed by response so
         # cancellation can roll them back before accepting deferred client items.
@@ -296,14 +317,12 @@ class Chat:
         if self._has_call_id_in_buffer(call_id):
             self._pending_tool_calls.pop(call_id, None)
             self._mark_call_completed(call_id, output_item.status)
-            self._ordered_pending_calls.pop(call_id, None)
             self.buffer.append(output_item)
             return
 
         if call_id in self._pending_tool_calls:
             logger.info("Re-injecting evicted function_call for call_id=%s", call_id)
             fc = self._pending_tool_calls.pop(call_id)
-            self._ordered_pending_calls.pop(call_id, None)
             fc.status = "completed" if output_item.status is None else output_item.status
             self.buffer.append(fc)
             self.buffer.append(output_item)
@@ -401,7 +420,6 @@ class Chat:
             assert item.call_id is not None
             if ordered_function_call:
                 self._place_locked(item, insert_at)
-                self._ordered_pending_calls.setdefault(item.call_id, set())
             self._pending_tool_calls[item.call_id] = item
             logger.debug("Added function_call to chat (call_id=%s)", item.call_id)
 
@@ -484,6 +502,26 @@ class Chat:
         """Whether the conversation is waiting for any function-call output."""
         with self._lock:
             return bool(self._pending_tool_calls)
+
+    def has_incomplete_tool_batch(self) -> bool:
+        """Whether the newest item is a tool result whose sibling calls are still running.
+
+        A follow-up requested at that point would answer only part of what the
+        user asked for. Once the user has said something after a running call,
+        that call no longer holds back a reply.
+        """
+        with self._lock:
+            if not self.buffer or not isinstance(self.buffer[-1], RealtimeConversationItemFunctionCallOutput):
+                return False
+            unanswered: set[str] = set()
+            for item in self.buffer:
+                if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id in self._pending_tool_calls:
+                    unanswered.add(item.call_id)
+                elif isinstance(item, RealtimeConversationItemUserMessage) and any(
+                    part.type in {"input_text", "input_audio"} for part in item.content
+                ):
+                    unanswered.clear()
+            return bool(unanswered)
 
     def trim_if_needed(self, compactor: CompactFn | None = None) -> None:
         """Enforce the size limit after a generation completes. Fires when
@@ -623,7 +661,6 @@ class Chat:
                     if item.type == "function_call_output" and item.call_id == removed.call_id and item.id is not None
                 )
                 self._pending_tool_calls.pop(removed.call_id, None)
-                self._ordered_pending_calls.pop(removed.call_id, None)
         elif isinstance(removed, RealtimeConversationItemFunctionCallOutput):
             if not any(item.type == "function_call_output" and item.call_id == removed.call_id for item in self.buffer):
                 call = next(
@@ -637,8 +674,6 @@ class Chat:
             tracked_ids.difference_update(target_ids)
             if isinstance(removed, RealtimeConversationItemFunctionCall) and removed.call_id is not None:
                 tracked_call_ids.discard(removed.call_id)
-        for context in self._ordered_pending_calls.values():
-            context.difference_update(target_ids)
         # A summary calculated before deletion must not restore deleted text.
         self._gen_counter += 1
         self._compact_in_flight = False
@@ -803,10 +838,6 @@ class Chat:
                 message.id = item_id
                 tracked_ids.discard(old_id)
                 tracked_ids.add(item_id)
-                for context in self._ordered_pending_calls.values():
-                    if old_id in context:
-                        context.remove(old_id)
-                        context.add(item_id)
 
     def remove_user_message(self, item_id: str) -> bool:
         """Remove an existing user message from the bounded chat buffer."""
@@ -839,8 +870,8 @@ class Chat:
         with self._lock:
             buffer_before = list(self.buffer)
             pending_calls_before = dict(self._pending_tool_calls)
-            ordered_calls_before = deepcopy(self._ordered_pending_calls)
             user_turn_count_before = self._user_turn_count
+            own_call_ids = set(self._provisional_generations.get(response_key, (set(), set()))[1])
             recorded_items: list[SupportedItem] = []
             item_ids: set[str] = set()
             call_ids: set[str] = set()
@@ -882,9 +913,17 @@ class Chat:
             except Exception:
                 self.buffer = buffer_before
                 self._pending_tool_calls = pending_calls_before
-                self._ordered_pending_calls = ordered_calls_before
                 self._user_turn_count = user_turn_count_before
                 raise
+            if any(not isinstance(item, RealtimeConversationItemUserMessage) for item in recorded_items):
+                # This response spoke while calls from earlier responses were
+                # still running: their results, when they come, arrive after it.
+                known_call_ids = set(self._pending_tool_calls) | {
+                    item.call_id for item in self.buffer if isinstance(item, RealtimeConversationItemFunctionCall)
+                }
+                self._calls_replied_past = (
+                    self._calls_replied_past | (set(pending_calls_before) - own_call_ids)
+                ) & known_call_ids
             tracked_item_ids, tracked_call_ids = self._provisional_generations.setdefault(
                 response_key,
                 (set(), set()),
@@ -898,10 +937,6 @@ class Chat:
                 if item.id is not None
                 and isinstance(item, (RealtimeConversationItemAssistantMessage, RealtimeConversationItemFunctionCall))
             )
-            for call_id in tracked_call_ids:
-                context = self._ordered_pending_calls.get(call_id)
-                if context is not None:
-                    context.update(tracked_item_ids)
             if committed_item_ids:
                 tracked_item_ids.difference_update(committed_item_ids)
             return recorded_items
@@ -942,7 +977,6 @@ class Chat:
         self.buffer = kept
         for call_id in call_ids:
             self._pending_tool_calls.pop(call_id, None)
-            self._ordered_pending_calls.pop(call_id, None)
         self._user_turn_count = sum(isinstance(item, RealtimeConversationItemUserMessage) for item in self.buffer)
         logger.debug("Rolled back %d provisional items", len(item_ids))
 
@@ -983,48 +1017,6 @@ class Chat:
                         replacement_added = True
                 item.content = compacted
 
-    def _drop_unpaired_ordered_turns_locked(self, items: Sequence[SupportedItem]) -> list[SupportedItem]:
-        """Drop each unpaired ordered call and the rest of the turn it opened.
-
-        A local model can emit text after a tool call in the same response, and
-        that text is meaningless to a provider until the call has an output. So
-        everything from such a call up to the next user message is omitted --
-        but later turns, which a non-interrupting speaker may have appended
-        while the call was still unpaired, stay in the snapshot.
-
-        Runs on the output of :meth:`_with_adjacent_tool_outputs` so a result
-        that arrived after the unpaired call has already been moved next to the
-        call it completes, instead of being skipped with the unpaired turn.
-        """
-        kept: list[SupportedItem] = []
-        skipping = False
-        for item in items:
-            if isinstance(item, RealtimeConversationItemUserMessage):
-                skipping = False
-            elif isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id in (
-                self._ordered_pending_calls
-            ):
-                # Reasoning can require its following message/call context.
-                # Gate that prefix with the call, without touching live history
-                # or any earlier completed response, even without a tool.
-                response_item_ids = self._ordered_pending_calls[item.call_id]
-                prefix_start = len(kept)
-                reasoning_start = None
-                while (
-                    prefix_start
-                    and kept[prefix_start - 1].id in response_item_ids
-                    and isinstance(kept[prefix_start - 1], (ResponseReasoningItem, ResponsesAssistantMessage))
-                ):
-                    prefix_start -= 1
-                    if isinstance(kept[prefix_start], ResponseReasoningItem):
-                        reasoning_start = prefix_start
-                if reasoning_start is not None:
-                    del kept[reasoning_start:]
-                skipping = True
-            if not skipping:
-                kept.append(item)
-        return kept
-
     def order_response_items(self, item_ids: Sequence[str]) -> None:
         """Apply Responses output-index order to this generation's history items.
 
@@ -1039,29 +1031,92 @@ class Chat:
             for index, item in zip(positions, ordered):
                 self.buffer[index] = item
 
-    def _with_adjacent_tool_outputs(self, items: Sequence[SupportedItem]) -> list[SupportedItem]:
-        """Return a backend-safe snapshot without rewriting canonical chronology."""
+    def _model_history_locked(
+        self, items: Sequence[SupportedItem], *, running_status: bool = True
+    ) -> list[SupportedItem]:
+        """Return what a model is shown for *items*; stored chronology is never rewritten.
+
+        Providers and chat templates need every tool call to be directly followed
+        by an output, while history keeps each output where it arrived:
+
+        - An output that arrived before any later reply sits next to its call.
+        - A call that has not returned gets :data:`PENDING_TOOL_OUTPUT`, so the
+          conversation continues while the tool runs.
+        - An output that arrived after a later reply is shown where it arrived,
+          as a message the user did not say, and its call keeps the stand-in.
+          A later reply is one to new input, or one from a later response that
+          was requested with no new input (``_calls_replied_past``).
+          Replies given in between stay consistent with what the model saw, and
+          the result is the newest thing in the conversation when it lands.
+          Showing it as a repeated call instead teaches models to call a running
+          tool again to fetch its result.
+        - While any call is running, :data:`RUNNING_TOOL_STATUS` follows the
+          newest user message (*running_status*; history that is being summarized
+          is not a request). It is not put after a fresh tool result, where small
+          models answer it instead of relaying the result. It also lists running
+          calls that are not among *items*: ones the client created itself, and
+          ones whose turn was trimmed away.
+        """
         # Deleting a call does not delete its output from wire history, but the
         # remaining result cannot be submitted to a model without that call.
         items = [item for item in items if item.id not in self._deleted_tool_output_ids]
-        call_ids = {
-            item.call_id
+        calls = {
+            item.call_id: item
             for item in items
             if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None
         }
-        outputs_by_call_id: dict[str, list[RealtimeConversationItemFunctionCallOutput]] = {}
+        outputs: dict[str, list[RealtimeConversationItemFunctionCallOutput]] = {}
+        late: set[str] = set()
+        # Running calls, by how far the conversation has moved on since each was issued.
+        issued: set[str] = set()
+        overtaken: set[str] = set()  # New input has followed: a user message or another result.
+        answered: set[str] = set()  # The model has replied to that input.
+        followed: set[str] = set()  # Assistant output has followed, with or without new input.
         for item in items:
-            if isinstance(item, RealtimeConversationItemFunctionCallOutput) and item.call_id in call_ids:
-                outputs_by_call_id.setdefault(item.call_id, []).append(item)
+            if isinstance(item, RealtimeConversationItemFunctionCallOutput) and item.call_id in calls:
+                replied_past = item.call_id in answered or (
+                    item.call_id in followed and item.call_id in self._calls_replied_past
+                )
+                if replied_past and item.call_id not in outputs:
+                    late.add(item.call_id)
+                outputs.setdefault(item.call_id, []).append(item)
+                for running in (issued, overtaken, answered, followed):
+                    running.discard(item.call_id)
+            if isinstance(item, (RealtimeConversationItemUserMessage, RealtimeConversationItemFunctionCallOutput)):
+                overtaken |= issued
+                issued.clear()
+            else:
+                answered |= overtaken
+                overtaken.clear()
+                followed |= issued
+                if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None:
+                    issued.add(item.call_id)
 
-        normalized: list[SupportedItem] = []
+        history: list[SupportedItem] = []
         for item in items:
-            if isinstance(item, RealtimeConversationItemFunctionCallOutput) and item.call_id in call_ids:
+            if isinstance(item, RealtimeConversationItemFunctionCallOutput) and item.call_id in calls:
+                if item.call_id in late:
+                    history.append(_late_tool_result(calls[item.call_id], item))
                 continue
-            normalized.append(item)
+            history.append(item)
             if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None:
-                normalized.extend(outputs_by_call_id.get(item.call_id, []))
-        return normalized
+                if item.call_id in late or item.call_id not in outputs:
+                    history.append(_pending_tool_output(item))
+                else:
+                    history.extend(outputs[item.call_id])
+        still_running = [call for call_id, call in calls.items() if call_id not in outputs]
+        if running_status:
+            still_running = [
+                *(call for call_id, call in self._pending_tool_calls.items() if call_id not in calls),
+                *still_running,
+            ]
+        if still_running and running_status:
+            newest_user = max(
+                (index for index, item in enumerate(history) if isinstance(item, RealtimeConversationItemUserMessage)),
+                default=len(history) - 1,
+            )
+            history.insert(newest_user + 1, _running_tool_status(still_running))
+        return history
 
     def to_responses_api_chat(self, items: list[SupportedItem] | None = None) -> ResponseInputParam:
         """Serialize the chat (system prompt + buffer) for the OpenAI Responses API.
@@ -1072,9 +1127,11 @@ class Chat:
         with self._lock:
             return self._to_responses_api_chat_locked(items if items is not None else self.buffer)
 
-    def _to_responses_api_chat_locked(self, items: list[SupportedItem]) -> ResponseInputParam:
+    def _to_responses_api_chat_locked(
+        self, items: list[SupportedItem], *, running_status: bool = True
+    ) -> ResponseInputParam:
         """Body of :meth:`to_responses_api_chat`. Caller must hold ``_lock``."""
-        buffer_items = self._drop_unpaired_ordered_turns_locked(self._with_adjacent_tool_outputs(items))
+        buffer_items = self._model_history_locked(items, running_status=running_status)
         provider_call_ids = {
             item.call_id: item.response_item.call_id for item in buffer_items if isinstance(item, ResponsesFunctionCall)
         }
@@ -1132,13 +1189,10 @@ class Chat:
             elif isinstance(item, ResponseReasoningItem):
                 result.append(cast(ResponseInputItemParam, item.model_dump(exclude_unset=True, by_alias=True)))
             elif isinstance(item, ResponsesFunctionCall):
-                if item.call_id not in self._pending_tool_calls:
-                    result.append(
-                        cast(ResponseInputItemParam, item.response_item.model_dump(exclude_unset=True, by_alias=True))
-                    )
+                result.append(
+                    cast(ResponseInputItemParam, item.response_item.model_dump(exclude_unset=True, by_alias=True))
+                )
             elif isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None:
-                if item.call_id in self._pending_tool_calls:
-                    continue
                 assert item.call_id is not None and item.call_id != ""
                 function_call = ResponseFunctionToolCallParam(
                     arguments=item.arguments,
@@ -1177,7 +1231,7 @@ class Chat:
             if self.init_chat_message:
                 text = " ".join(p.text for p in self.init_chat_message.content if p.text)
                 messages.append(TransformersSystemMessage(content=text))
-            for item in self._drop_unpaired_ordered_turns_locked(self._with_adjacent_tool_outputs(self.buffer)):
+            for item in self._model_history_locked(self.buffer):
                 if isinstance(item, RealtimeConversationItemUserMessage):
                     has_media = any(p.type in {"input_image", "input_audio"} for p in item.content)
                     content: str | list[dict[str, Any]]
@@ -1190,8 +1244,6 @@ class Chat:
                     text = " ".join(p.text for p in item.content if p.text)
                     messages.append(TransformersAssistantMessage(content=text))
                 elif isinstance(item, RealtimeConversationItemFunctionCall):
-                    if item.call_id in self._pending_tool_calls:
-                        continue
                     assert item.call_id is not None and item.call_id != ""
                     args: Any = item.arguments
                     try:
@@ -1235,10 +1287,10 @@ class Chat:
                 self.init_chat_message,
                 list(self.buffer),
                 dict(self._pending_tool_calls),
-                {call_id: set(item_ids) for call_id, item_ids in self._ordered_pending_calls.items()},
                 self._user_turn_count,
             )
             clone._deleted_tool_output_ids = set(self._deleted_tool_output_ids)
+            clone._calls_replied_past = set(self._calls_replied_past)
             clone._assistant_item_aliases = {wire_id: set(ids) for wire_id, ids in self._assistant_item_aliases.items()}
             if deep:
                 state = deepcopy(state)
@@ -1246,7 +1298,6 @@ class Chat:
                 clone.init_chat_message,
                 clone.buffer,
                 clone._pending_tool_calls,
-                clone._ordered_pending_calls,
                 clone._user_turn_count,
             ) = state
             return clone
@@ -1254,12 +1305,11 @@ class Chat:
     def snapshot_history_cleanup(self) -> HistoryCleanupSnapshot:
         """Capture state changed by deferred image/history cleanup."""
         with self._lock:
-            init_message, buffer, pending_calls, ordered_call_ids, user_turn_count = deepcopy(
+            init_message, buffer, pending_calls, user_turn_count = deepcopy(
                 (
                     self.init_chat_message,
                     self.buffer,
                     self._pending_tool_calls,
-                    self._ordered_pending_calls,
                     self._user_turn_count,
                 )
             )
@@ -1267,7 +1317,6 @@ class Chat:
                 init_message,
                 buffer,
                 pending_calls,
-                ordered_call_ids,
                 user_turn_count,
                 self._deferred_compactor,
             )
@@ -1279,7 +1328,6 @@ class Chat:
                 self.init_chat_message,
                 self.buffer,
                 self._pending_tool_calls,
-                self._ordered_pending_calls,
                 self._user_turn_count,
                 self._deferred_compactor,
             ) = snapshot
@@ -1292,18 +1340,17 @@ class Chat:
                 clone.init_chat_message,
                 clone.buffer,
                 clone._pending_tool_calls,
-                clone._ordered_pending_calls,
                 clone._user_turn_count,
             ) = deepcopy(
                 (
                     self.init_chat_message,
                     self.buffer,
                     self._pending_tool_calls,
-                    self._ordered_pending_calls,
                     self._user_turn_count,
                 )
             )
             clone._deleted_tool_output_ids = set(self._deleted_tool_output_ids)
+            clone._calls_replied_past = set(self._calls_replied_past)
             clone._assistant_item_aliases = {wire_id: set(ids) for wire_id, ids in self._assistant_item_aliases.items()}
             tracked = deepcopy(self._provisional_generations.get(response_key))
         if tracked is not None:
@@ -1319,12 +1366,12 @@ class Chat:
             self.buffer = []
             self.init_chat_message = None
             self._pending_tool_calls = {}
-            self._ordered_pending_calls = {}
             self._provisional_generations = {}
             self._provisional_output_items = {}
             self._deferred_compactor = None
             self._user_turn_count = 0
             self._deleted_tool_output_ids.clear()
+            self._calls_replied_past.clear()
             self._assistant_item_aliases.clear()
             self._unheard_assistant_items.clear()
 
@@ -1422,7 +1469,7 @@ class Chat:
                 and entry.call_id in output_call_ids_after_snapshot
             )
         ]
-        snapshot = self._to_responses_api_chat_locked(items=serializable_items)
+        snapshot = self._to_responses_api_chat_locked(items=serializable_items, running_status=False)
         # Strip media parts so the summarizer doesn't have to handle them.
         for raw in snapshot:
             if not isinstance(raw, dict) or raw.get("role") != "user":
@@ -1701,6 +1748,37 @@ def make_system_message(text: str) -> RealtimeConversationItemSystemMessage:
         role="system",
         content=[SystemContent(type="input_text", text=text)],
     )
+
+
+def _derived_id(prefix: str, source_id: str | None) -> str:
+    """A stable ID for an item that exists only in what a model is shown."""
+    return f"{prefix}_{hashlib.sha256((source_id or '').encode()).hexdigest()[:32]}"
+
+
+def _pending_tool_output(call: RealtimeConversationItemFunctionCall) -> RealtimeConversationItemFunctionCallOutput:
+    assert call.call_id is not None
+    return RealtimeConversationItemFunctionCallOutput(
+        type="function_call_output",
+        id=_derived_id("fco", call.id),
+        call_id=call.call_id,
+        output=PENDING_TOOL_OUTPUT,
+    )
+
+
+def _late_tool_result(
+    call: RealtimeConversationItemFunctionCall,
+    output: RealtimeConversationItemFunctionCallOutput,
+) -> RealtimeConversationItemUserMessage:
+    message = make_user_message(LATE_TOOL_RESULT.format(name=call.name, arguments=call.arguments, output=output.output))
+    message.id = _derived_id("msg", output.id)
+    return message
+
+
+def _running_tool_status(calls: Sequence[RealtimeConversationItemFunctionCall]) -> RealtimeConversationItemUserMessage:
+    listed = ", ".join(f"{call.name}({call.arguments})" for call in calls)
+    message = make_user_message(RUNNING_TOOL_STATUS.format(calls=listed))
+    message.id = _derived_id("msg", "running:" + ",".join(call.call_id or "" for call in calls))
+    return message
 
 
 def add_supported_item(chat: Chat, item: ConversationItem) -> None:

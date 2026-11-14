@@ -1180,15 +1180,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         original_chat = runtime_config.chat
         active_chat = original_chat.copy(deep=True)
         history_anchor_id = active_chat.history_anchor_id()
-        if not is_out_of_band(response) and active_chat.has_pending_tool_calls():
-            yield EndOfResponse(
-                turn_id=turn_id,
-                turn_revision=turn_revision,
-                cancel_generation=gen,
-                response_key=request.response_key,
-                error="Cannot generate a response while function call outputs are pending.",
-            )
-            return
         if is_out_of_band(response):
             try:
                 active_chat = build_active_chat(active_chat, response)
@@ -1300,15 +1291,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         original_chat = runtime_config.chat
         active_chat = original_chat.copy(deep=True)
         history_anchor_id = active_chat.history_anchor_id()
-        if not is_out_of_band(response) and active_chat.has_pending_tool_calls():
-            yield EndOfResponse(
-                turn_id=turn_id,
-                turn_revision=turn_revision,
-                cancel_generation=gen,
-                response_key=request.response_key,
-                error="Cannot generate a response while function call outputs are pending.",
-            )
-            return
         if is_out_of_band(response):
             try:
                 active_chat = build_active_chat(active_chat, response)
