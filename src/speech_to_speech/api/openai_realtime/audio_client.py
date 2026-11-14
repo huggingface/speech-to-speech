@@ -24,7 +24,7 @@ from importlib import import_module
 from ipaddress import ip_address
 from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
-from typing import Any, NoReturn, Optional
+from typing import Any, NoReturn, Optional, Union
 from urllib.parse import urlsplit, urlunsplit
 
 from jsonschema import SchemaError, ValidationError
@@ -72,8 +72,8 @@ class RealtimeAudioClientConfig:
     recv_rate: int = 16000
     playback_buffer_ms: float = _PLAYBACK_START_BUFFER_MS
     chunk_size: int = 1024
-    input_device: Optional[int] = None
-    output_device: Optional[int] = None
+    input_device: Optional[Union[int, str]] = None
+    output_device: Optional[Union[int, str]] = None
     instructions: Optional[str] = None
     voice: Optional[str] = None
     voice_choices: list[str] = field(default_factory=list)
