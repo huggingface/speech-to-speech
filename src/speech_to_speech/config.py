@@ -48,6 +48,7 @@ _MODULE_PIPELINE = {
 _PATH_FIELDS = {
     "vad_firered_model_dir",
     "smart_turn_model_path",
+    "irodori_ref_audio",
     "omnivoice_ref_audio",
     "omnivoice_voice_clone_prompt",
     "omnivoice_ref_voices_dir",

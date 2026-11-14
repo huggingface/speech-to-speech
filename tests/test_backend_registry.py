@@ -569,6 +569,36 @@ def test_omnivoice_cli_config_is_normalized_for_the_handler():
     }
 
 
+def test_irodori_cli_config_is_normalized_for_the_handler():
+    args = parse_arguments(
+        [
+            "--tts",
+            "irodori",
+            "--irodori_model_name",
+            "local/model.safetensors",
+            "--irodori_device",
+            "mps",
+            "--irodori_caption",
+            "落ち着いた男性の声",
+            "--irodori_num_steps",
+            "8",
+        ]
+    )
+
+    assert args.tts_backend.name == "irodori"
+    # Not on PyPI, so there is no extra for the import error to name.
+    assert args.tts_backend.spec.required_extra is None
+    assert args.tts_backend.config == {
+        "model_name": "local/model.safetensors",
+        "device": "mps",
+        "caption": "落ち着いた男性の声",
+        "ref_audio": None,
+        "num_steps": 8,
+        "blocksize": 512,
+        "gen_kwargs": {},
+    }
+
+
 def test_registry_rejects_duplicate_names_and_wrong_kinds():
     spec = BackendSpec("fake", "stt", FakeArguments, _factory)
 
