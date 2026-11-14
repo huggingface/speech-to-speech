@@ -444,3 +444,85 @@ def test_late_result_text_names_the_call_it_answers():
 
     assert "research_report" in text and REPORT_ARGS in text and '{"status": "done"}' in text
     assert "not said by the user" in text
+
+
+@pytest.mark.parametrize("injected", [False, True])
+def test_pending_report_stays_visible_after_trimming(injected):
+    chat = Chat(1)
+    chat.add_item(make_user_message("Make a report."))
+    if injected:
+        chat.add_item(_call("call_report"))
+    else:
+        chat.add_ordered_function_call(_call("call_report"))
+    chat.add_item(make_user_message("What is the capital of Australia?"))
+    chat.add_item(make_assistant_message("Canberra."))
+    if not injected:
+        chat.trim_if_needed()
+    assert chat.has_pending_tool_calls()
+
+    for view in (chat.to_transformers_chat(), chat.to_responses_api_chat()):
+        assert "research_report" in json.dumps(view), view
+
+
+def test_result_for_a_trimmed_call_is_shown_with_its_call_when_it_arrives():
+    chat = Chat(1)
+    chat.add_item(make_user_message("Make a report."))
+    chat.add_ordered_function_call(_call("call_report"))
+    chat.add_item(make_user_message("What is the capital of Australia?"))
+    chat.add_item(make_assistant_message("Canberra."))
+    chat.trim_if_needed()
+    running = _status(f"research_report({REPORT_ARGS})")
+    assert _shape(chat) == [("user", f"What is the capital of Australia?\n{running}"), ("assistant", "Canberra.")]
+
+    chat.add_item(_output("call_report"))
+
+    assert _shape(chat)[-2:] == [("call", "call_report"), ("tool", "call_report", "the report")]
+    assert "Tool status" not in json.dumps(chat.to_transformers_chat())
+    _assert_every_call_has_an_output(chat)
+
+
+def test_running_calls_outside_the_history_are_left_out_of_a_summary():
+    chat = Chat(size=2)
+    summarized: list = []
+    chat.add_item(_call("call_report"))  # created by the client: staged, not part of the history
+    for index in range(2):
+        chat.add_item(make_user_message(f"question {index}"))
+        chat.add_item(make_assistant_message(f"answer {index}"))
+    chat.add_item(make_user_message("latest"))
+
+    chat.trim_if_needed(_make_stub_compactor(captured=summarized))
+    _wait_thread(chat)
+
+    assert summarized and "Tool status" not in str(summarized[0])
+    assert _status(f"research_report({REPORT_ARGS})") in chat.to_transformers_chat()[-1]["content"]
+
+
+def test_reply_from_a_later_response_makes_the_result_late_but_text_of_the_same_response_does_not():
+    same = Chat(8)
+    same.add_item(make_user_message("Make a report."))
+    same.add_provisional_generation_items("resp_1", [_call("call_report"), make_assistant_message("On it.")])
+    same.finalize_provisional_generation("resp_1")
+    same.add_item(_output("call_report"))
+    assert _shape(same) == [
+        ("user", "Make a report."),
+        ("call", "call_report"),
+        ("tool", "call_report", "the report"),
+        ("assistant", "On it."),
+    ]
+
+    later = Chat(8)
+    later.add_item(make_user_message("Make a report."))
+    later.add_provisional_generation_items("resp_1", [_call("call_report")])
+    later.finalize_provisional_generation("resp_1")
+    later.add_provisional_generation_items("resp_2", [make_assistant_message("The report is still running.")])
+    later.finalize_provisional_generation("resp_2")
+    later.add_item(_output("call_report"))
+    assert _shape(later) == [
+        ("user", "Make a report."),
+        ("call", "call_report"),
+        ("tool", "call_report", PENDING_TOOL_OUTPUT),
+        ("assistant", "The report is still running."),
+        ("user", _late()),
+    ]
+    assert _shape(later.copy(deep=True)) == _shape(later)
+    _assert_every_call_has_an_output(later)

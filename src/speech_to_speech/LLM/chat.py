@@ -180,6 +180,10 @@ class Chat:
         # the buffer at their emitted position, where serializers show them with
         # a stand-in output until the real one arrives.
         self._pending_tool_calls: dict[str, RealtimeConversationItemFunctionCall] = {}
+        # Calls that a later response replied past while they were running. An
+        # assistant message right after a call is otherwise taken for text of
+        # the response that made the call.
+        self._calls_replied_past: set[str] = set()
         # Assistant output is written eagerly when a tool call is exposed to a
         # realtime client. Keep the exact provisional IDs keyed by response so
         # cancellation can roll them back before accepting deferred client items.
@@ -867,6 +871,7 @@ class Chat:
             buffer_before = list(self.buffer)
             pending_calls_before = dict(self._pending_tool_calls)
             user_turn_count_before = self._user_turn_count
+            own_call_ids = set(self._provisional_generations.get(response_key, (set(), set()))[1])
             recorded_items: list[SupportedItem] = []
             item_ids: set[str] = set()
             call_ids: set[str] = set()
@@ -910,6 +915,15 @@ class Chat:
                 self._pending_tool_calls = pending_calls_before
                 self._user_turn_count = user_turn_count_before
                 raise
+            if any(not isinstance(item, RealtimeConversationItemUserMessage) for item in recorded_items):
+                # This response spoke while calls from earlier responses were
+                # still running: their results, when they come, arrive after it.
+                known_call_ids = set(self._pending_tool_calls) | {
+                    item.call_id for item in self.buffer if isinstance(item, RealtimeConversationItemFunctionCall)
+                }
+                self._calls_replied_past = (
+                    self._calls_replied_past | (set(pending_calls_before) - own_call_ids)
+                ) & known_call_ids
             tracked_item_ids, tracked_call_ids = self._provisional_generations.setdefault(
                 response_key,
                 (set(), set()),
@@ -1030,6 +1044,8 @@ class Chat:
           conversation continues while the tool runs.
         - An output that arrived after a later reply is shown where it arrived,
           as a message the user did not say, and its call keeps the stand-in.
+          A later reply is one to new input, or one from a later response that
+          was requested with no new input (``_calls_replied_past``).
           Replies given in between stay consistent with what the model saw, and
           the result is the newest thing in the conversation when it lands.
           Showing it as a repeated call instead teaches models to call a running
@@ -1037,7 +1053,9 @@ class Chat:
         - While any call is running, :data:`RUNNING_TOOL_STATUS` follows the
           newest user message (*running_status*; history that is being summarized
           is not a request). It is not put after a fresh tool result, where small
-          models answer it instead of relaying the result.
+          models answer it instead of relaying the result. It also lists running
+          calls that are not among *items*: ones the client created itself, and
+          ones whose turn was trimmed away.
         """
         # Deleting a call does not delete its output from wire history, but the
         # remaining result cannot be submitted to a model without that call.
@@ -1053,12 +1071,16 @@ class Chat:
         issued: set[str] = set()
         overtaken: set[str] = set()  # New input has followed: a user message or another result.
         answered: set[str] = set()  # The model has replied to that input.
+        followed: set[str] = set()  # Assistant output has followed, with or without new input.
         for item in items:
             if isinstance(item, RealtimeConversationItemFunctionCallOutput) and item.call_id in calls:
-                if item.call_id in answered and item.call_id not in outputs:
+                replied_past = item.call_id in answered or (
+                    item.call_id in followed and item.call_id in self._calls_replied_past
+                )
+                if replied_past and item.call_id not in outputs:
                     late.add(item.call_id)
                 outputs.setdefault(item.call_id, []).append(item)
-                for running in (issued, overtaken, answered):
+                for running in (issued, overtaken, answered, followed):
                     running.discard(item.call_id)
             if isinstance(item, (RealtimeConversationItemUserMessage, RealtimeConversationItemFunctionCallOutput)):
                 overtaken |= issued
@@ -1066,6 +1088,7 @@ class Chat:
             else:
                 answered |= overtaken
                 overtaken.clear()
+                followed |= issued
                 if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None:
                     issued.add(item.call_id)
 
@@ -1082,6 +1105,11 @@ class Chat:
                 else:
                     history.extend(outputs[item.call_id])
         still_running = [call for call_id, call in calls.items() if call_id not in outputs]
+        if running_status:
+            still_running = [
+                *(call for call_id, call in self._pending_tool_calls.items() if call_id not in calls),
+                *still_running,
+            ]
         if still_running and running_status:
             newest_user = max(
                 (index for index, item in enumerate(history) if isinstance(item, RealtimeConversationItemUserMessage)),
@@ -1262,6 +1290,7 @@ class Chat:
                 self._user_turn_count,
             )
             clone._deleted_tool_output_ids = set(self._deleted_tool_output_ids)
+            clone._calls_replied_past = set(self._calls_replied_past)
             clone._assistant_item_aliases = {wire_id: set(ids) for wire_id, ids in self._assistant_item_aliases.items()}
             if deep:
                 state = deepcopy(state)
@@ -1321,6 +1350,7 @@ class Chat:
                 )
             )
             clone._deleted_tool_output_ids = set(self._deleted_tool_output_ids)
+            clone._calls_replied_past = set(self._calls_replied_past)
             clone._assistant_item_aliases = {wire_id: set(ids) for wire_id, ids in self._assistant_item_aliases.items()}
             tracked = deepcopy(self._provisional_generations.get(response_key))
         if tracked is not None:
@@ -1341,6 +1371,7 @@ class Chat:
             self._deferred_compactor = None
             self._user_turn_count = 0
             self._deleted_tool_output_ids.clear()
+            self._calls_replied_past.clear()
             self._assistant_item_aliases.clear()
             self._unheard_assistant_items.clear()
 

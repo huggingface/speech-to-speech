@@ -1,5 +1,6 @@
 """Realtime clients can keep the conversation going while a tool call is running (#760)."""
 
+import pytest
 from openai.types.realtime import (
     ConversationItemCreatedEvent,
     ConversationItemCreateEvent,
@@ -152,3 +153,43 @@ def test_follow_up_is_not_held_back_by_a_call_the_user_has_spoken_after(service,
     assert chat.has_pending_tool_calls()
     shown = chat.to_transformers_chat()
     assert [message["content"] for message in shown if message["role"] == "tool"] == [PENDING_TOOL_OUTPUT, "rain"]
+
+
+@pytest.mark.parametrize("status", ["cancelled", "failed", "incomplete", "completed"])
+def test_old_tool_result_is_not_duplicated_when_the_reply_it_arrived_during_ends(
+    service, conn_id, text_prompt_queue, status
+):
+    from speech_to_speech.pipeline.events import ResponseGenerationDoneEvent
+
+    chat = service._state(conn_id).runtime_config.chat
+    _create_item(service, conn_id, _user_text("Make a report."))
+    _finish_with_calls(service, conn_id, _respond(service, conn_id, text_prompt_queue), _call("call_report"))
+    _create_item(service, conn_id, _user_text("What is the capital of Australia?"))
+    request = _respond(service, conn_id, text_prompt_queue)
+    chat.add_provisional_generation_items(request.response_key, [make_assistant_message("Canberra.")])
+    _create_item(service, conn_id, _tool_output("call_report", "REPORT FINISHED"))
+    service.dispatch_pipeline_event(
+        conn_id, ResponseGenerationDoneEvent(response_key=request.response_key, call_ids=[])
+    )
+    assert len([item for item in chat.buffer if item.type == "function_call_output"]) == 1
+
+    service.finish_response(conn_id, status=status, response_key=request.response_key)
+
+    after = [item for item in chat.buffer if item.type == "function_call_output"]
+    assert len(after) == 1, [(item.id, item.call_id) for item in after]
+
+
+def test_late_result_stays_after_a_separate_progress_reply(service, conn_id, text_prompt_queue):
+    import json
+
+    chat = service._state(conn_id).runtime_config.chat
+    _create_item(service, conn_id, _user_text("Make a report."))
+    _finish_with_calls(service, conn_id, _respond(service, conn_id, text_prompt_queue), _call("call_report"))
+    progress = _respond(service, conn_id, text_prompt_queue)
+    _finish_with_text(service, conn_id, progress, "The report is still running.")
+    _create_item(service, conn_id, _tool_output("call_report", "REPORT FINISHED"))
+    _respond(service, conn_id, text_prompt_queue)
+
+    for view in (chat.to_transformers_chat(), chat.to_responses_api_chat()):
+        rendered = json.dumps(view)
+        assert rendered.index("The report is still running.") < rendered.index("REPORT FINISHED"), view
