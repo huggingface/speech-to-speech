@@ -811,12 +811,19 @@ class TestSendLoop:
 
     def test_audio_output_batches_immediately_available_chunks(self, setup):
         app, _, _, output_queue, *_ = setup
+        chunks = [b"\x01\x00" * 256, b"\x02\x00" * 256]
+
+        async def enqueue_available_chunks():
+            # No await: both chunks must be queued before the send loop resumes.
+            for chunk in chunks:
+                output_queue.put(chunk)
+            output_queue.put(PIPELINE_END)
+
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()  # session.created
-                output_queue.put(_pcm_bytes(256))
-                output_queue.put(_pcm_bytes(256))
-                output_queue.put(PIPELINE_END)
+                assert client.portal is not None
+                client.portal.call(enqueue_available_chunks)
 
                 msg1 = ws.receive_json()
                 assert msg1["type"] == "response.created"
@@ -828,7 +835,7 @@ class TestSendLoop:
                 msg4 = ws.receive_json()
                 assert msg4["type"] == "response.output_audio.delta"
                 decoded = base64.b64decode(msg4["delta"])
-                assert len(decoded) == len(_pcm_bytes(512))
+                assert decoded == b"".join(chunks)
 
                 terminal = [ws.receive_json() for _ in range(4)]
                 assert [event["type"] for event in terminal] == [
@@ -837,6 +844,48 @@ class TestSendLoop:
                     "response.output_item.done",
                     "response.done",
                 ]
+                assert_response_lifecycle_contract(
+                    parse_wire_events([msg1, msg2, msg3, msg4, *terminal]),
+                    wants_audio=True,
+                    expected_status="completed",
+                )
+
+    def test_audio_output_delivers_chunk_before_next_chunk_is_produced(self, setup):
+        app, _, _, output_queue, *_ = setup
+        chunks = [b"\x01\x00" * 256, b"\x02\x00" * 256]
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                output_queue.put(chunks[0])
+
+                opening = [ws.receive_json() for _ in range(4)]
+                assert [event["type"] for event in opening] == [
+                    "response.created",
+                    "response.output_item.added",
+                    "response.content_part.added",
+                    "response.output_audio.delta",
+                ]
+                assert base64.b64decode(opening[-1]["delta"]) == chunks[0]
+
+                # Receiving A establishes delivery before B even exists in the queue.
+                output_queue.put(chunks[1])
+                output_queue.put(PIPELINE_END)
+                second = ws.receive_json()
+                assert second["type"] == "response.output_audio.delta"
+                assert base64.b64decode(second["delta"]) == chunks[1]
+
+                terminal = [ws.receive_json() for _ in range(4)]
+                assert [event["type"] for event in terminal] == [
+                    "response.output_audio.done",
+                    "response.content_part.done",
+                    "response.output_item.done",
+                    "response.done",
+                ]
+                assert_response_lifecycle_contract(
+                    parse_wire_events([*opening, second, *terminal]),
+                    wants_audio=True,
+                    expected_status="completed",
+                )
 
     def test_end_marker_sends_finish_events(self, setup):
         app, _, _, output_queue, *_ = setup
