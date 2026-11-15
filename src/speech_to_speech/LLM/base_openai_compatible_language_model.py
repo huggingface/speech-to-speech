@@ -85,8 +85,6 @@ PREFETCH_STREAM_QUEUE_MAXSIZE = 16
 PREFETCH_WORKER_ACQUIRE_TIMEOUT_S = 0.05
 # A streaming prefetch worker notices cancellation within one 0.05 s poll.
 PREFETCH_WORKER_RELEASE_TIMEOUT_S = 0.5
-PROVIDER_FAILURE_FALLBACK = "I'm having trouble responding right now. Please try again."
-IMAGE_INPUT_UNSUPPORTED_FALLBACK = "Sorry, I can't see images with the current model."
 # Provider wording for a deployment that cannot take image input, e.g. llama.cpp
 # without an mmproj ("image input is not supported"), vLLM ("is not a multimodal
 # model") or OpenAI ("image_url is only supported by certain models").
@@ -99,7 +97,9 @@ _IMAGE_INPUT_UNSUPPORTED_RE = re.compile(
 
 def _is_image_input_rejection(exc: Exception) -> bool:
     """Whether the provider refused the request because it cannot process images."""
-    return isinstance(exc, APIStatusError) and bool(_IMAGE_INPUT_UNSUPPORTED_RE.search(str(exc)))
+    return isinstance(exc, (APIStatusError, _ProviderResponseError)) and bool(
+        _IMAGE_INPUT_UNSUPPORTED_RE.search(str(exc))
+    )
 
 
 # How long an idle provider connection stays open for the next request. The
@@ -130,6 +130,10 @@ def _read_timed_out(exc: Exception) -> bool:
     """Whether a provider read timed out; the SDK raises it as ``APITimeoutError``."""
     cause = exc.__cause__ if isinstance(exc, APITimeoutError) else exc
     return isinstance(cause, httpx2.ReadTimeout)
+
+
+class _ProviderResponseError(RuntimeError):
+    """An error reported inside a provider response rather than by HTTP status."""
 
 
 class TextDelta(BaseModel):
@@ -842,7 +846,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if isinstance(event, ProviderResponseEnd):
                 state.ending = event
                 if event.status == "failed":
-                    raise RuntimeError(event.error or "The language model provider reported a failed response.")
+                    raise _ProviderResponseError(
+                        event.error or "The language model provider reported a failed response."
+                    )
             elif isinstance(event, AssistantMessage):
                 state.history_items.append(event.to_chat_item())
             elif isinstance(event, ResponseReasoningItem):
@@ -933,7 +939,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if isinstance(event, ProviderResponseEnd):
                 state.ending = event
                 if event.status == "failed":
-                    raise RuntimeError(event.error or "The language model provider reported a failed response.")
+                    raise _ProviderResponseError(
+                        event.error or "The language model provider reported a failed response."
+                    )
             elif isinstance(event, AssistantMessage):
                 state.history_items.append(event.to_chat_item())
             elif isinstance(event, ResponseReasoningItem):
@@ -982,6 +990,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         input_history: SupportedItem | None = None,
         audio_history_turns: int | None = None,
         consumed_audio_items: list[RealtimeConversationItemUserMessage] | None = None,
+        generation_started_at_s: float | None = None,
     ) -> Generator[LLMOut, None, bool]:
         api_response: Any = None
         events: Iterator[ProviderEvent] | None = None
@@ -995,7 +1004,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         )
         provider_request_started = False
         consumed_image_ids: set[str] = set()
-        image_input_rejected = False
+        image_input_error: str | None = None
         store = getattr(self, "turn_latency_store", None)
         tracker = store.get_response(turn.response_key) if store else None
         trace_context = HttpRequestContext(
@@ -1007,7 +1016,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         )
 
         try:
-            generation_started_at_s = perf_counter()
+            if generation_started_at_s is None:
+                generation_started_at_s = perf_counter()
             if tracker is not None:
                 tracker.record_llm_start(generation_started_at_s)
             try:
@@ -1083,7 +1093,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     log_exception(logger, "LLM generation failed; ending the current response", exc)
                     if error_message is None:
                         error_message = f"Language model generation failed: {exc}"
-                image_input_rejected = bool(consumed_image_ids) and _is_image_input_rejection(exc)
+                if consumed_image_ids and _is_image_input_rejection(exc):
+                    image_input_error = str(exc)
             finally:
                 self._close_response(events)
                 self._close_response(api_response)
@@ -1093,40 +1104,31 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     tracker.record_llm(perf_counter() - generation_started_at_s)
 
             if (
-                provider_request_started
-                and error_message is not None
-                and not state.output_emitted
+                image_input_error is not None
                 and (turn.prefetch_transaction is None or turn.prefetch_transaction.claimed)
                 and not self._generation_is_stale(turn.gen)
                 and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
             ):
-                state.output_emitted = True
-                if image_input_rejected and not is_out_of_band(turn.response):
-                    # A failed response never cleans up history, so the image would be
-                    # re-sent and rejected on every later turn. Drop only the images
-                    # this request carried, and only for the response the user hears:
-                    # a discarded prefetch must leave them for the real request.
-                    original_chat.strip_images(consumed_image_ids)
-                    logger.warning(
-                        "Language model rejected image input; removed %d image(s) from history", len(consumed_image_ids)
+                active_chat.strip_images(consumed_image_ids, error=image_input_error)
+                if not is_out_of_band(turn.response):
+                    original_chat.strip_images(consumed_image_ids, error=image_input_error)
+                if not state.output_emitted:
+                    # No images remain in this snapshot, so recovery cannot repeat.
+                    # Disable tools for the explanation; generation failure must not replay actions.
+                    generation_completed = yield from self._generate(
+                        active_chat,
+                        original_chat,
+                        turn,
+                        {**optional_kwargs, "tool_choice": "none"},
+                        serialize_fn=serialize_fn,
+                        request_fn=request_fn,
+                        event_iterator_fn=event_iterator_fn,
+                        input_history=input_history,
+                        audio_history_turns=audio_history_turns,
+                        consumed_audio_items=consumed_audio_items,
+                        generation_started_at_s=generation_started_at_s,
                     )
-                yield LLMResponseChunk(
-                    parts=[
-                        *self._take_reasoning(state),
-                        AssistantTextPart(
-                            text=IMAGE_INPUT_UNSUPPORTED_FALLBACK if image_input_rejected else PROVIDER_FAILURE_FALLBACK
-                        ),
-                    ],
-                    selected_language=turn.selected_language,
-                    runtime_config=turn.runtime_config,
-                    response=turn.response,
-                    turn_id=turn.turn_id,
-                    turn_revision=turn.turn_revision,
-                    speech_stopped_at_s=turn.speech_stopped_at_s,
-                    cancel_generation=turn.gen,
-                    response_key=turn.response_key,
-                    prefetch_transaction=turn.prefetch_transaction,
-                )
+                    return generation_completed
 
             proposal_allowed = (
                 error_message is None

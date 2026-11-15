@@ -8,6 +8,7 @@ functions (make_user_message, make_assistant_message, make_system_message).
 
 from __future__ import annotations
 
+import json
 import threading
 
 import pytest
@@ -1103,7 +1104,8 @@ class TestStripImages:
         img_msg = chat.add_item(_user_msg_with_parts(("text", "b"), ("image", "url2")))
         assert chat.image_message_ids() == {img_msg.id}
 
-    def test_strip_images_only_ids_spares_concurrent_image(self):
+    @pytest.mark.parametrize("error", [None, "image input is not supported"])
+    def test_strip_images_only_ids_spares_concurrent_image(self, error):
         """Regression: an image injected for the *next* turn (not in the set the
         finished response consumed) must survive the write-back strip."""
         chat = Chat(size=10)
@@ -1113,12 +1115,16 @@ class TestStripImages:
         # a fast client injects the next turn's image mid-generation
         fresh = chat.add_item(_user_msg_with_parts(("text", "b"), ("image", "new")))
 
-        chat.strip_images(consumed_ids)
+        chat.strip_images(consumed_ids, error=error)
 
         consumed_after = next(i for i in chat.buffer if i.id == consumed.id)
         fresh_after = next(i for i in chat.buffer if i.id == fresh.id)
         assert all(p.type != "input_image" for p in consumed_after.content)  # consumed → stripped
         assert any(p.type == "input_image" for p in fresh_after.content)  # next turn's image → kept
+        if error is not None:
+            assert json.loads(consumed_after.content[-1].text)["input_error"]["message"] == error
+            chat.strip_images(consumed_ids, error=error)
+            assert len(consumed_after.content) == 2
 
 
 # ===================================================================

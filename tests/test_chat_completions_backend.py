@@ -40,14 +40,13 @@ from speech_to_speech.LLM.chat_completions_language_model import (
 )
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.events import AssistantOutputEvent, ResponseFailedEvent
+from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.messages import (
     EndOfResponse,
     GenerateResponseRequest,
     LLMResponseChunk,
     ResponsePrefetchTransaction,
     TokenUsage,
-    TTSInput,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from tests.llm_history import close_llm_runners as close_llm_runners
@@ -990,7 +989,7 @@ def test_generation_error_emits_failed_end_of_response():
     text, tools, usage, chat, end = _drive(h)
     assert end is not None and end.error is not None
     assert "kaboom" in end.error
-    assert text == base_mod.PROVIDER_FAILURE_FALLBACK
+    assert text == ""
 
 
 def _api_error_response(status_code):
@@ -1006,7 +1005,7 @@ def _api_error_response(status_code):
         (InternalServerError("server failed", response=_api_error_response(500), body=None), "server failed"),
     ],
 )
-def test_provider_failure_before_output_speaks_fallback_then_fails_without_history(error, message):
+def test_provider_failure_before_output_fails_without_speech_or_history(error, message):
     h = _make_handler(stream=True)
 
     def fail(**kwargs):
@@ -1028,27 +1027,24 @@ def test_provider_failure_before_output_speaks_fallback_then_fails_without_histo
 
     outputs = list(h.process(request))
 
-    assert [type(output) for output in outputs] == [LLMResponseChunk, EndOfResponse]
-    assert outputs[0].text == base_mod.PROVIDER_FAILURE_FALLBACK
-    assert outputs[0].language_code is None
-    assert outputs[1].error is not None and message in outputs[1].error
+    assert [type(output) for output in outputs] == [EndOfResponse]
+    assert outputs[0].error is not None and message in outputs[0].error
     assert [getattr(item, "role", None) for item in chat.buffer] == ["user"]
 
     processor = LMOutputProcessor.__new__(LMOutputProcessor)
     processor.setup()
     pipeline_outputs = [processed for output in outputs for processed in processor.process(output)]
     assert [type(output) for output in pipeline_outputs] == [
-        AssistantOutputEvent,
-        TTSInput,
         ResponseFailedEvent,
         EndOfResponse,
     ]
 
 
-def test_image_rejected_by_text_only_backend_does_not_break_later_turns():
+@pytest.mark.parametrize("stream", [False, True])
+def test_image_rejected_by_text_only_backend_does_not_break_later_turns(stream):
     """A backend without vision rejects the image once; the image must not stay in
     history, or every later text turn is rejected too."""
-    h = _make_handler(stream=True)
+    h = _make_handler(stream=stream)
     requests = []
 
     def create(**kwargs):
@@ -1059,7 +1055,13 @@ def test_image_rejected_by_text_only_backend_does_not_break_later_turns():
                 response=_api_error_response(500),
                 body=None,
             )
-        return _FakeStream([_chunk(content="Dublin.")])
+        text = "The server could not process the photo." if len(requests) == 2 else "Dublin."
+        if stream:
+            return _FakeStream([_chunk(content=text)])
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=text, tool_calls=[]), finish_reason="stop")],
+            usage=None,
+        )
 
     h.client.chat.completions.create = create
     chat = Chat(10)
@@ -1072,12 +1074,18 @@ def test_image_rejected_by_text_only_backend_does_not_break_later_turns():
         )
     )
     text, _, _, _, end = _drive(h, user="How many fingers?", chat=chat)
-    assert text == base_mod.IMAGE_INPUT_UNSUPPORTED_FALLBACK
-    assert end is not None and end.error is not None and "image input is not supported" in end.error
+    assert text == "The server could not process the photo."
+    assert end is not None and end.error is None
+    assert len(requests) == 2
+    assert "image_url" not in json.dumps(requests[1]["messages"])
+    assert "image input is not supported" in json.dumps(requests[1]["messages"])
+    assert requests[1]["tool_choice"] == "none"
 
     text, _, _, _, end = _drive(h, user="What is the capital of Ireland?", chat=chat)
     assert end is not None and end.error is None
     assert text == "Dublin."
+    assert len(requests) == 3
+    assert "image_url" not in json.dumps(requests[2]["messages"])
     user_texts = [
         p.text for i in chat.buffer if getattr(i, "role", None) == "user" for p in i.content if p.type == "input_text"
     ]
