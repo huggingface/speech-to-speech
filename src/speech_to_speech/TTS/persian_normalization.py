@@ -149,9 +149,17 @@ def _under_thousand(n: int) -> str:
 
 
 def number_to_words(n: int) -> str:
-    """A non-negative integer as Persian words ("1402" -> "هزار و چهارصد و دو")."""
+    """A non-negative integer as Persian words ("1402" -> "هزار و چهارصد و دو").
+
+    Values the scale table cannot represent (>= 1000 * its largest scale, i.e.
+    10**15, where the scale count would exceed _under_thousand's 3 digits) are
+    read one digit at a time, the same way numbers_to_words() handles oversized
+    digit runs, instead of indexing past _HUNDREDS.
+    """
     if n == 0:
         return "صفر"
+    if n >= 1000 * _SCALES[0][0]:
+        return _digits_one_by_one(str(n))
     parts = []
     for value, name in _SCALES:
         if n >= value:
