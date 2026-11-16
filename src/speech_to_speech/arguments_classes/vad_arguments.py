@@ -49,6 +49,40 @@ class VADHandlerArguments:
             "help": "Hysteresis threshold (ms of active speech) for accepting speech that continues a reopenable turn (soft-ended, uncommitted, within the reopen window). Set to 0 to disable the split and use min_speech_ms. Clamped to [100, min_speech_ms]. New turns and barge-ins always require min_speech_ms. Default and recommended: 192 with min_speech_ms 384."
         },
     )
+    confident_thresh: float = field(
+        default=0.9,
+        metadata={
+            "help": "Speech probability at or above which a chunk counts as confident speech. Only used when "
+            "min_confident_speech_ms is set. Silero only."
+        },
+    )
+    min_confident_speech_ms: int = field(
+        default=0,
+        metadata={
+            "help": "When greater than 0, a new turn opens on a score instead of on min_speech_ms alone: "
+            "confident speech divided by this value, plus the remaining active speech divided by "
+            "min_speech_ms, must reach 1. Lets a short, clearly spoken reply open a turn while "
+            "min_speech_ms is raised against low-confidence noise. Default 0 keeps the plain rule."
+        },
+    )
+    idle_after_s: float = field(
+        default=0.0,
+        metadata={
+            "help": "When greater than 0, new turns that start more than this many seconds after the last "
+            "accepted speech or finished assistant response use idle_min_speech_ms and "
+            "idle_min_confident_speech_ms instead. Requires min_confident_speech_ms."
+        },
+    )
+    idle_min_speech_ms: int = field(
+        default=0,
+        metadata={"help": "min_speech_ms to use for a new turn after idle_after_s. 0 keeps min_speech_ms."},
+    )
+    idle_min_confident_speech_ms: int = field(
+        default=0,
+        metadata={
+            "help": "min_confident_speech_ms to use for a new turn after idle_after_s. 0 keeps min_confident_speech_ms."
+        },
+    )
     max_speech_ms: float = field(
         default=float("inf"),
         metadata={
