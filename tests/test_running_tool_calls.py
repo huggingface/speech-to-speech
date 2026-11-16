@@ -621,3 +621,56 @@ def test_delivered_reply_keeps_the_result_late_when_an_overlapping_reply_is_roll
     chat.add_item(_output())
 
     assert _shape(chat)[-2:] == [("assistant", "As I said, still running."), ("user", _late())]
+
+
+def test_restoring_text_of_the_response_that_made_the_call_does_not_make_the_result_late():
+    chat = Chat(10)
+    chat.add_item(make_user_message("make a report"))
+    text = chat.add_provisional_generation_items("first", [_call(), make_assistant_message("I am making it.")])[1]
+    chat.finalize_provisional_generation("first")
+    # Playback first reports nothing heard, then the real position.
+    assert chat.truncate_assistant_message(text.id, "")
+    assert chat.truncate_assistant_message(text.id, "I am making")
+    chat.add_item(_output())
+
+    assert _shape(chat) == [
+        ("user", "make a report"),
+        ("call", "call_report"),
+        ("tool", "call_report", "the report"),
+        ("assistant", "I am making"),
+    ]
+
+
+def test_reply_removed_as_unheard_no_longer_makes_the_result_late():
+    chat = Chat(10)
+    chat.add_item(make_user_message("make a report"))
+    chat.add_provisional_generation_items("first", [_call(), make_assistant_message("On it.")])
+    chat.finalize_provisional_generation("first")
+    chat.add_provisional_generation_items("progress", [make_assistant_message("The report is still running.")])
+    chat.rollback_provisional_generation("progress")
+    chat.add_heard_assistant_message("item_progress", "The report is still")
+    # Playback then reports that none of it was heard after all.
+    assert chat.truncate_assistant_message("item_progress", "")
+    chat.add_item(_output())
+
+    assert _shape(chat) == [
+        ("user", "make a report"),
+        ("call", "call_report"),
+        ("tool", "call_report", "the report"),
+        ("assistant", "On it."),
+    ]
+
+
+def test_shortened_reply_still_makes_the_result_late():
+    chat = Chat(10)
+    chat.add_item(make_user_message("make a report"))
+    chat.add_provisional_generation_items("first", [_call()])
+    chat.finalize_provisional_generation("first")
+    reply = chat.add_provisional_generation_items("progress", [make_assistant_message("The report is still running.")])[
+        0
+    ]
+    chat.finalize_provisional_generation("progress")
+    assert chat.truncate_assistant_message(reply.id, "The report")
+    chat.add_item(_output())
+
+    assert _shape(chat)[-2:] == [("assistant", "The report"), ("user", _late())]

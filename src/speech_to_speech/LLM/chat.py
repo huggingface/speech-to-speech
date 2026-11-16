@@ -4,7 +4,7 @@ import hashlib
 import json
 import logging
 import threading
-from collections.abc import Callable, Container, Sequence
+from collections.abc import Callable, Collection, Container, Iterable, Sequence
 from copy import deepcopy
 from typing import Any, Literal, NamedTuple, Union, cast
 
@@ -87,6 +87,7 @@ class _UnheardReply(NamedTuple):
 
     preceding: list[str | None]  # Items before it that survived its removal.
     turn_id: str | None  # The user message that opened its turn, if any.
+    replied_past: frozenset[str] = frozenset()  # Calls it was said past, see ``Chat._replies_past``.
 
 
 class ChatItemError(Exception):
@@ -180,13 +181,12 @@ class Chat:
         # the buffer at their emitted position, where serializers show them with
         # a stand-in output until the real one arrives.
         self._pending_tool_calls: dict[str, RealtimeConversationItemFunctionCall] = {}
-        # Calls that a later response replied past while they were running. An
-        # assistant message right after a call is otherwise taken for text of
-        # the response that made the call.
-        self._calls_replied_past: set[str] = set()
-        # The same, for replies that can still be rolled back, by response. A
-        # cancelled reply takes its marks with it unless part of it was heard.
-        self._replied_past_by_response: dict[str, set[str]] = {}
+        # Output of a later response, by item id, with the calls from earlier
+        # responses that were running when it was written. An assistant message
+        # right after a call is otherwise taken for text of the response that
+        # made the call. The record lives and dies with its item: a reply that
+        # is rolled back or removed as unheard no longer counts.
+        self._replies_past: dict[str, set[str]] = {}
         # Assistant output is written eagerly when a tool call is exposed to a
         # realtime client. Keep the exact provisional IDs keyed by response so
         # cancellation can roll them back before accepting deferred client items.
@@ -725,20 +725,27 @@ class Chat:
             self._unheard_assistant_items.pop(item_id, None)
             message = self._heard_message_locked(item_id, text)
             self._add_item_locked(message, insert_at=self._turn_insertion_index_locked(after_item_id))
-            self._mark_calls_replied_past_locked(message)
+            # The response was rolled back with its own calls, so every running
+            # call before its heard part is one it was said past.
+            index = next((index for index, item in enumerate(self.buffer) if item is message), 0)
+            self._set_replied_past_locked(
+                message,
+                {
+                    item.call_id
+                    for item in self.buffer[:index]
+                    if isinstance(item, RealtimeConversationItemFunctionCall)
+                    and item.call_id in self._pending_tool_calls
+                },
+            )
 
-    def _mark_calls_replied_past_locked(self, reply: RealtimeConversationItemAssistantMessage) -> None:
-        """Record that *reply*, the heard part of a cancelled response, was said while earlier calls were running.
+    def _set_replied_past_locked(self, reply: SupportedItem, call_ids: Collection[str]) -> None:
+        """Record the earlier calls that were running when *reply* was said; caller holds ``_lock``."""
+        if reply.id is not None and call_ids:
+            self._replies_past[reply.id] = set(call_ids)
 
-        The response was rolled back with its marks and its own calls, so every
-        running call before the reply is one it replied past.
-        """
-        index = next((index for index, item in enumerate(self.buffer) if item is reply), 0)
-        self._calls_replied_past.update(
-            item.call_id
-            for item in self.buffer[:index]
-            if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id in self._pending_tool_calls
-        )
+    def _take_replied_past_locked(self, item_ids: Iterable[str | None]) -> set[str]:
+        """Remove and return the calls recorded for *item_ids*; caller holds ``_lock``."""
+        return set().union(*(self._replies_past.pop(item_id, set()) for item_id in item_ids if item_id is not None))
 
     def truncate_assistant_message(self, item_id: str, text: str) -> bool:
         """Keep only *text*, the heard prefix, of one delivered assistant message.
@@ -765,7 +772,7 @@ class Chat:
                     return False  # Its turn was evicted or compacted.
                 heard = self._heard_message_locked(item_id, text)
                 self.buffer.insert(max(anchors, default=0), heard)
-                self._mark_calls_replied_past_locked(heard)
+                self._set_replied_past_locked(heard, reply.replied_past)
                 self._gen_counter += 1
                 self._compact_in_flight = False
                 return True
@@ -786,11 +793,12 @@ class Chat:
                     (item.id for item in reversed(before) if isinstance(item, RealtimeConversationItemUserMessage)),
                     None,
                 )
+                replied_past = self._take_replied_past_locked(target_ids)
                 self._delete_item_locked(item_id)
                 # Companions deleted with it (native reasoning) cannot anchor it.
                 retained_ids = {item.id for item in self.buffer}
                 self._unheard_assistant_items[item_id] = _UnheardReply(
-                    [item.id for item in before if item.id in retained_ids], turn_id
+                    [item.id for item in before if item.id in retained_ids], turn_id, frozenset(replied_past)
                 )
                 while len(self._unheard_assistant_items) > _UNHEARD_ASSISTANT_ITEM_LIMIT:
                     self._unheard_assistant_items.pop(next(iter(self._unheard_assistant_items)))
@@ -803,12 +811,12 @@ class Chat:
                 self._compact_in_flight = False
                 return True
             preceding_ids = [item.id for item in self.buffer[:index]]
+            replied_past = self._take_replied_past_locked(target_ids)
             self._delete_item_locked(item_id)
             retained_ids = {item.id for item in self.buffer}
-            self.buffer.insert(
-                sum(preceding_id in retained_ids for preceding_id in preceding_ids),
-                self._heard_message_locked(item_id, text),
-            )
+            heard = self._heard_message_locked(item_id, text)
+            self.buffer.insert(sum(preceding_id in retained_ids for preceding_id in preceding_ids), heard)
+            self._set_replied_past_locked(heard, replied_past)
             return True
 
     def bind_assistant_item_ids(self, response_key: str | None, output_items: Sequence[ConversationItem]) -> None:
@@ -860,6 +868,7 @@ class Chat:
                 message = messages[0]
                 old_id = message.id
                 message.id = item_id
+                self._set_replied_past_locked(message, self._take_replied_past_locked([old_id]))
                 tracked_ids.discard(old_id)
                 tracked_ids.add(item_id)
 
@@ -939,16 +948,15 @@ class Chat:
                 self._pending_tool_calls = pending_calls_before
                 self._user_turn_count = user_turn_count_before
                 raise
-            if any(not isinstance(item, RealtimeConversationItemUserMessage) for item in recorded_items):
-                # This response spoke while calls from earlier responses were
-                # still running: their results, when they come, arrive after it.
-                known_call_ids = set(self._pending_tool_calls) | {
-                    item.call_id for item in self.buffer if isinstance(item, RealtimeConversationItemFunctionCall)
-                }
-                self._calls_replied_past &= known_call_ids
-                self._replied_past_by_response.setdefault(response_key, set()).update(
-                    (set(pending_calls_before) - own_call_ids) & known_call_ids
-                )
+            # This response spoke while calls from earlier responses were still
+            # running: their results, when they come, arrive after it.
+            retained_ids = {item.id for item in self.buffer}
+            self._replies_past = {
+                item_id: calls for item_id, calls in self._replies_past.items() if item_id in retained_ids
+            }
+            for item in recorded_items:
+                if not isinstance(item, RealtimeConversationItemUserMessage):
+                    self._set_replied_past_locked(item, set(pending_calls_before) - own_call_ids)
             tracked_item_ids, tracked_call_ids = self._provisional_generations.setdefault(
                 response_key,
                 (set(), set()),
@@ -974,7 +982,6 @@ class Chat:
         with self._lock:
             self._provisional_generations.pop(response_key, None)
             self._provisional_output_items.pop(response_key, None)
-            self._calls_replied_past |= self._replied_past_by_response.pop(response_key, set())
             self._run_deferred_compaction_if_ready()
 
     def rollback_provisional_generation(self, response_key: str | None) -> None:
@@ -985,8 +992,6 @@ class Chat:
         with self._lock:
             tracked = self._provisional_generations.pop(response_key, None)
             self._provisional_output_items.pop(response_key, None)
-            # The reply is gone, so the calls it replied past are running as before.
-            self._replied_past_by_response.pop(response_key, None)
             if tracked is not None:
                 item_ids, call_ids = tracked
                 self._rollback_generation_locked(item_ids, call_ids)
@@ -1073,7 +1078,7 @@ class Chat:
         - An output that arrived after a later reply is shown where it arrived,
           as a message the user did not say, and its call keeps the stand-in.
           A later reply is one to new input, or one from a later response that
-          was requested with no new input (``_calls_replied_past``).
+          was requested with no new input (``_replies_past``).
           Replies given in between stay consistent with what the model saw, and
           the result is the newest thing in the conversation when it lands.
           Showing it as a repeated call instead teaches models to call a running
@@ -1094,22 +1099,18 @@ class Chat:
             if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None
         }
         outputs: dict[str, list[RealtimeConversationItemFunctionCallOutput]] = {}
-        replied_past_calls = self._calls_replied_past.union(*self._replied_past_by_response.values())
+        replied_past: set[str] = set()  # A reply from a later response has followed.
         late: set[str] = set()
         # Running calls, by how far the conversation has moved on since each was issued.
         issued: set[str] = set()
         overtaken: set[str] = set()  # New input has followed: a user message or another result.
         answered: set[str] = set()  # The model has replied to that input.
-        followed: set[str] = set()  # Assistant output has followed, with or without new input.
         for item in items:
             if isinstance(item, RealtimeConversationItemFunctionCallOutput) and item.call_id in calls:
-                replied_past = item.call_id in answered or (
-                    item.call_id in followed and item.call_id in replied_past_calls
-                )
-                if replied_past and item.call_id not in outputs:
+                if (item.call_id in answered or item.call_id in replied_past) and item.call_id not in outputs:
                     late.add(item.call_id)
                 outputs.setdefault(item.call_id, []).append(item)
-                for running in (issued, overtaken, answered, followed):
+                for running in (issued, overtaken, answered):
                     running.discard(item.call_id)
             if isinstance(item, (RealtimeConversationItemUserMessage, RealtimeConversationItemFunctionCallOutput)):
                 overtaken |= issued
@@ -1117,7 +1118,7 @@ class Chat:
             else:
                 answered |= overtaken
                 overtaken.clear()
-                followed |= issued
+                replied_past |= self._replies_past.get(item.id or "", set())
                 if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None:
                     issued.add(item.call_id)
 
@@ -1319,8 +1320,7 @@ class Chat:
                 self._user_turn_count,
             )
             clone._deleted_tool_output_ids = set(self._deleted_tool_output_ids)
-            clone._calls_replied_past = set(self._calls_replied_past)
-            clone._replied_past_by_response = {key: set(ids) for key, ids in self._replied_past_by_response.items()}
+            clone._replies_past = {item_id: set(calls) for item_id, calls in self._replies_past.items()}
             clone._assistant_item_aliases = {wire_id: set(ids) for wire_id, ids in self._assistant_item_aliases.items()}
             if deep:
                 state = deepcopy(state)
@@ -1380,10 +1380,8 @@ class Chat:
                 )
             )
             clone._deleted_tool_output_ids = set(self._deleted_tool_output_ids)
-            clone._calls_replied_past = set(self._calls_replied_past)
-            clone._replied_past_by_response = {key: set(ids) for key, ids in self._replied_past_by_response.items()}
+            clone._replies_past = {item_id: set(calls) for item_id, calls in self._replies_past.items()}
             clone._assistant_item_aliases = {wire_id: set(ids) for wire_id, ids in self._assistant_item_aliases.items()}
-            clone._replied_past_by_response.pop(response_key, None)
             tracked = deepcopy(self._provisional_generations.get(response_key))
         if tracked is not None:
             item_ids, call_ids = tracked
@@ -1403,8 +1401,7 @@ class Chat:
             self._deferred_compactor = None
             self._user_turn_count = 0
             self._deleted_tool_output_ids.clear()
-            self._calls_replied_past.clear()
-            self._replied_past_by_response.clear()
+            self._replies_past.clear()
             self._assistant_item_aliases.clear()
             self._unheard_assistant_items.clear()
 
