@@ -130,6 +130,7 @@ These filesystem fields expand `~` and resolve relative to the YAML file's direc
 
 - `vad_firered_model_dir`, `smart_turn_model_path`
 - `omnivoice_ref_audio`, `omnivoice_voice_clone_prompt`, `omnivoice_ref_voices_dir`
+- `irodori_ref_audio`
 - `qwen3_tts_gguf_talker_path`, `qwen3_tts_gguf_codec_path`, `qwen3_tts_ref_cache_dir`
 - `qwen3_tts_ref_audio`, `qwen3_tts_ref_spk`, `qwen3_tts_ref_rvq`
 

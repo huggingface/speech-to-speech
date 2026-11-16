@@ -47,7 +47,7 @@ are added only to terminal responses.
 | --- | --- | --- |
 | `stt` | `parakeet-tdt`, `openai`, `openai-realtime`, `vllm-realtime`, `whisper`, `whisper-mlx`, `mlx-audio-whisper`, `faster-whisper`, `qwen3-asr`, `parakeet-unified`, `nemotron-streaming`, `orukeet`, `paraformer`, `sense-voice` | None of the built-in STT backends (`--stt none` excluded) |
 | `llm`, `llm_first_tts` | `transformers`, `mlx-lm`, `responses-api`, `chat-completions` | None of the built-in LLM backends |
-| `tts_ttfa`, `e2e` | `qwen3`, `openai`, `pocket`, `kokoro`, `facebookMMS`, `chatTTS`, `omnivoice`, `kitten`, `supertonic` | None |
+| `tts_ttfa`, `e2e` | `qwen3`, `openai`, `pocket`, `kokoro`, `facebookMMS`, `chatTTS`, `omnivoice`, `irodori`, `kitten`, `supertonic` | None |
 
 `--stt none` deliberately has no STT measurement. Any field is also `n/a`
 when its stage did not run, produced no audio, or its measurement was unavailable.
@@ -108,7 +108,7 @@ that lock is not contended, and hold is omitted entirely when nothing held it.
   low TTFA alone therefore does not imply that all delay was upstream of TTS.
   OmniVoice likewise returns a full waveform from a blocking `generate` call:
   its TTFA ends when that waveform is available, before reshape, resampling,
-  and PCM block assembly.
+  and PCM block assembly. Irodori-TTS is measured the same way.
   Kitten synthesizes ONNX waveforms in blocking calls. Its TTFA ends when the
   first nonempty model waveform is available, before synthesis of later internal
   chunks, concatenation, `resample_poly`, and PCM block assembly. The measurement
