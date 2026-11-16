@@ -148,9 +148,8 @@ def test_session_language_then_auto_clears_configured_hint_and_next_session(nati
         replies.append(response("bonjour"))
         output = transcribe(stt, cfg)
         prompt = json.loads(requests[-1].content)["messages"][0]["content"][0]["text"]
-        assert ("Language:" in prompt) == (code != "auto")
-        if code != "auto":
-            assert build_prompt("", (), code) == prompt
+        assert build_prompt("", (), code) == prompt
+        assert ("Do not translate." in prompt) == (code != "auto")
         assert output.language_code == (None if code == "auto" else code)
         stt.on_session_end()
         stt.reset_session_language()
@@ -329,6 +328,16 @@ def test_filler_only_transcripts_become_empty_finals_only_when_enabled(native_se
     assert transcribe(keeping).text == "Uh-huh."
     assert transcribe(dropping).text == ""
     assert transcribe(dropping_again).text == "Uh-huh, yes."
+
+
+def test_default_instruction_is_plain_transcription():
+    expected = (
+        "Audio transcription. Language: as spoken. Wording: verbatim, including fillers and repetitions. "
+        "Formatting: punctuation and capitalization. Output: transcript only."
+    )
+    assert build_prompt("", (), None) == expected
+    assert build_prompt("", (), None, "  ") == expected
+    assert NemotronTranscriptionOperation.__dataclass_fields__["prompt"].default == expected
 
 
 def test_custom_instruction_replaces_only_the_opening_instruction(native_server):
