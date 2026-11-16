@@ -2647,3 +2647,38 @@ async def test_audio_client_keeps_results_queued_when_the_server_holds_the_follo
     assert conn.sent[3]["type"] == "response.create"
     assert json.loads(conn.sent[3]["response"]["metadata"]["s2s_tool_followup_call_ids"]) == ["call_fast", "call_slow"]
     await coordinator.close()
+
+
+async def test_result_sent_before_a_delayed_batch_rejection_still_gets_a_follow_up():
+    gates, executor = _slow_and_fast_tools()
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(conn, RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor))
+
+    def batch_pending(create_id):
+        return SimpleNamespace(
+            type="error",
+            error=SimpleNamespace(
+                type="function_call_output_pending", code=None, event_id=create_id, message="Batch still pending"
+            ),
+        )
+
+    try:
+        _run_tool_response(coordinator, "r1", "call_earlier", 0)
+        _run_tool_response(coordinator, "r2", "call_later", 1)
+        gates[0].set()
+        await wait_until(lambda: len(conn.sent) == 2)
+        rejected_create = conn.sent[1]["event_id"]
+        # The other tool finishes before the server's rejection is processed.
+        gates[1].set()
+        await wait_until(lambda: len(conn.sent) == 3)
+        await wait_until(lambda: not coordinator._background_tasks)
+        coordinator.handle_event(batch_pending(rejected_create))
+        await wait_until(lambda: len(conn.sent) == 4)
+        assert conn.sent[-1]["type"] == "response.create"
+
+        # A rejection with nothing new queued is not asked for again.
+        coordinator.handle_event(batch_pending(conn.sent[-1]["event_id"]))
+        await wait_until(lambda: not coordinator._background_tasks)
+        assert len(conn.sent) == 4
+    finally:
+        await coordinator.close()

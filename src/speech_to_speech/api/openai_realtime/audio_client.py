@@ -1064,6 +1064,7 @@ class _ToolCallCoordinator:
             self._pending_create_saw_response = False
             self._kick_follow_up()
             return
+        rejected_call_ids = set(self._pending_create_call_ids)
         self._pending_create_call_ids.clear()
         self._pending_create_marked_call_ids.clear()
         if TOOL_FOLLOWUP_WAIT in {getattr(error, "type", None), getattr(error, "code", None)}:
@@ -1075,6 +1076,10 @@ class _ToolCallCoordinator:
             # after. The results stay queued and are announced with the next
             # follow-up, when another response's tools finish or the user speaks.
             self._pending_create_saw_response = False
+            # Results queued since that request was sent may complete what the
+            # server was waiting for. An unchanged set is not asked for again.
+            if set().union(*self._queued_tool_results.values()) - rejected_call_ids:
+                self._kick_follow_up()
             return
         if not is_collision:
             self._pending_create_saw_response = False
