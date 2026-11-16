@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Sized
 from queue import Empty
@@ -100,6 +101,20 @@ except ImportError:
     HAS_MLX_VLM = False
 
 logger = logging.getLogger(__name__)
+
+# Matches provider/framework error messages that signal image input is structurally
+# unsupported (e.g. a text-only model loaded without a vision projection layer).
+# Mirrors the regex in base_openai_compatible_language_model for the local path.
+_IMAGE_INPUT_UNSUPPORTED_RE = re.compile(
+    r"image[^.]*\b(?:not supported|unsupported|only supported)\b"
+    r"|does not support (?:image|vision)|not a multimodal model",
+    re.IGNORECASE,
+)
+
+
+def _is_image_input_rejection(exc: Exception) -> bool:
+    """Whether the local model/framework refused the request because it cannot process images."""
+    return bool(_IMAGE_INPUT_UNSUPPORTED_RE.search(str(exc)))
 
 
 @runtime_checkable
@@ -772,14 +787,17 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 # The terminal is queued before this generator resumes into its
                 # finally block, so publish failure before yielding it.
                 request.prefetch_transaction.discard()
-            # Strip any images that were part of this failed turn from the persistent
-            # conversation history. Without this, the image stays in original_chat and
-            # every subsequent turn re-serializes it (causing repeated failures or a
-            # pipeline freeze when the tokenizer tries to process large base64 image
-            # data as plain text). consumed_image_ids was snapshotted before the
-            # request, so only images the model actually saw are removed.
-            if consumed_image_ids:
+            # Strip images from history only when the local model explicitly
+            # rejected them because it cannot process image input (e.g. a
+            # text-only model loaded without a vision projection layer). We do
+            # NOT strip on transient failures (OOM, timeout, etc.) so the
+            # image is preserved for the next attempt.
+            if consumed_image_ids and _is_image_input_rejection(exc):
                 original_chat.strip_images(consumed_image_ids)
+                logger.warning(
+                    "Local model rejected image input; removed %d image(s) from history",
+                    len(consumed_image_ids),
+                )
             yield EndOfResponse(
                 history=history,
                 turn_id=ctx.turn_id,
