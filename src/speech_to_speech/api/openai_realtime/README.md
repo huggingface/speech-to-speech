@@ -397,7 +397,7 @@ The result is accepted whenever it arrives, in any order, and never starts a res
 
 One request is still rejected with `function_call_output_pending`: a `response.create` sent right after a tool result while other calls are running that the user has not spoken after, typically the rest of a parallel batch. A message with only an image does not count as the user speaking. Clients that request a follow-up after every result therefore get one reply for the whole batch.
 
-The packaged Python client (`talk`, `local`) delivers tool results in the order the calls were issued and asks for a follow-up once no tool is executing. The user can talk with the assistant while a tool runs, but the result of a second tool called in the meantime is held until the earlier one returns.
+The packaged Python client (`talk`, `local`) follows the same rule. Results of one response are delivered in call order and get one follow-up. Responses do not wait for each other, so the result of a tool called in a later turn is delivered and announced while an earlier tool is still running. If the server holds the follow-up back, the result stays queued and is announced with the next one.
 
 #### Start-and-notify: the pattern to prefer for work that takes minutes
 
