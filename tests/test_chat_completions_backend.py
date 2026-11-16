@@ -511,6 +511,52 @@ def test_streaming_text_and_usage():
     assert any(getattr(i, "role", None) == "assistant" for i in chat.buffer)
 
 
+def test_streaming_flushes_chinese_sentences_as_they_complete():
+    """NLTK never ends a sentence at '。', so a Chinese reply used to reach TTS as one
+    chunk after the whole stream finished instead of sentence by sentence."""
+    h = _make_handler(stream=True)
+    h.stream_batch_sentences = 1
+    h.client.chat.completions.create = lambda **k: _FakeStream(
+        [
+            _chunk(content="你好。我很"),
+            _chunk(content="好。今天天气"),
+            _chunk(content="不错。"),
+            _chunk(usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1)),
+        ]
+    )
+    chat = Chat(10)
+    chat.add_item(make_user_message("你好"))
+    rc = RuntimeConfig(chat=chat, session=RealtimeSessionCreateRequest(type="realtime", instructions="x"))
+    req = GenerateResponseRequest(
+        runtime_config=rc, response=None, language_code="zh", turn_id="turn_1", turn_revision=0
+    )
+    chunks = [out.text for out in drive_llm(h, req) if isinstance(out, LLMResponseChunk) and out.text]
+    assert chunks == ["你好。", "我很好。", "今天天气不错。"]
+
+
+def test_streaming_flushes_arabic_sentences_as_they_complete():
+    """'؟' is stripped by remove_unspeechable and ignored by NLTK, so an Arabic reply used
+    to reach TTS as one chunk after the whole stream finished."""
+    h = _make_handler(stream=True)
+    h.stream_batch_sentences = 1
+    h.client.chat.completions.create = lambda **k: _FakeStream(
+        [
+            _chunk(content="مرحبا؟ كيف "),
+            _chunk(content="حالك؟ أنا "),
+            _chunk(content="بخير"),
+            _chunk(usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1)),
+        ]
+    )
+    chat = Chat(10)
+    chat.add_item(make_user_message("مرحبا"))
+    rc = RuntimeConfig(chat=chat, session=RealtimeSessionCreateRequest(type="realtime", instructions="x"))
+    req = GenerateResponseRequest(
+        runtime_config=rc, response=None, language_code="ar", turn_id="turn_1", turn_revision=0
+    )
+    chunks = [out.text for out in drive_llm(h, req) if isinstance(out, LLMResponseChunk) and out.text]
+    assert chunks == ["مرحبا؟", "كيف حالك؟", "أنا بخير"]
+
+
 def test_streaming_strips_markdown_delimiters_split_across_deltas():
     """A '*' pair can arrive split across two token deltas (e.g. '*ita' / 'lic*').
     remove_markdown must not run per-delta -- it has to see the reassembled

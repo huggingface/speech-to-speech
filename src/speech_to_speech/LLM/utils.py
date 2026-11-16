@@ -19,7 +19,7 @@ SMART_PUNCT_TRANSLATION = str.maketrans(
 )
 
 SPEECHABLE_PATTERN = re.compile(
-    r"[^\w\s.,!?;:'\"\-()\/\\@#%&*+=$€£¥₹₽¢\[\]{}<>~`^|…—–，。！？；：、\n\r\t]",
+    r"[^\w\s.,!?;:'\"\-()\/\\@#%&*+=$€£¥₹₽¢\[\]{}<>~`^|…—–，。！？；：、｡؟।॥\n\r\t]",
     flags=re.UNICODE,
 )
 
@@ -100,6 +100,26 @@ def _has_unclosed_markdown_fence(text: str) -> bool:
     return opening_ticks is not None
 
 
+# NLTK's Punkt tokenizer only ends a sentence at ASCII ". ? !", so CJK, Arabic
+# and Devanagari replies would otherwise stay one sentence until the stream
+# ends. Closing quotes and brackets stay with the sentence they close.
+_NON_LATIN_SENTENCE_END = re.compile(r"[^。！？｡؟।॥]*[。！？｡؟।॥]+[\"'」』）)”’]*\s*")
+
+
+def _split_after_non_latin_terminators(sentence: str) -> list[str]:
+    parts: list[str] = []
+    end = 0
+    for match in _NON_LATIN_SENTENCE_END.finditer(sentence):
+        parts.append(match.group().strip())
+        end = match.end()
+    if not parts:
+        return [sentence]
+    remainder = sentence[end:].strip()
+    if remainder:
+        parts.append(remainder)
+    return parts
+
+
 def sent_tokenize_preserving_markdown_code(
     text: str,
     tokenizer: Callable[[str], list[str]],
@@ -110,8 +130,9 @@ def sent_tokenize_preserving_markdown_code(
     protected_text, protected_code = _protect_markdown_code(text, keep_delimiters=True)
     protected_text, protected_emphasis = _protect_matched_emphasis(protected_text)
     return [
-        _restore_markdown_code(_restore_matched_emphasis(sentence, protected_emphasis), protected_code)
+        _restore_markdown_code(_restore_matched_emphasis(part, protected_emphasis), protected_code)
         for sentence in tokenizer(protected_text)
+        for part in _split_after_non_latin_terminators(sentence)
     ]
 
 
