@@ -111,9 +111,20 @@ The earlier instruction remains available as an explicit override:
 Known event, style, and speaker tokens are still removed if the model emits
 them. An event-only final closes the transcription item with empty text and
 creates no LLM work. Mixed output such as `<ev:gesture_noise> Uh-huh.` retains
-`Uh-huh.`. Real interjections are never blacklisted. Keep VAD enabled and
-measure speech accuracy and non-speech handling on your own audio; prompt
-selection alone does not prevent hallucinated words.
+`Uh-huh.`. Real interjections are not blacklisted unless
+`--openai_stt_drop_filler_only` is set. Keep VAD enabled and measure speech
+accuracy and non-speech handling on your own audio; prompt selection alone does
+not prevent hallucinated words.
+
+`--openai_stt_drop_filler_only` treats a transcript that is nothing but a short
+interjection of the letters u, o and h ("Uh-huh.", "Uh-oh.", "Oh.", "Huh?") or one or
+two sound labels ("Cough.", "Laughter.") as empty, with the same effect as an
+event-only result. It is off by default because it also drops those words when a
+person really says them. With the default plain instruction the model has no
+annotation to write for non-speech, so a sound that reaches it tends to come back
+as exactly these words. It only matches Latin-script fillers; with a language
+hint the model may write the same sound as "Sí." or "はい。", which no text
+rule can tell from a reply.
 
 The session's `audio.input.transcription.language` selects a language hint,
 for example `fr` adds `Language: French. Do not translate.`. Explicit `auto`

@@ -290,11 +290,14 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         context_terms: list[str] | None = None,
         max_output_tokens: int = 384,
         instruction: str = "",
+        drop_filler_only: bool = False,
     ) -> None:
         if profile not in {"transcription", "nemotron"}:
             raise ValueError("OpenAI-compatible STT profile must be 'transcription' or 'nemotron'")
         if profile == "transcription" and (recognition_context or context_terms or instruction.strip()):
             raise ValueError("STT instruction and recognition context require the nemotron profile")
+        if profile == "transcription" and drop_filler_only:
+            raise ValueError("STT drop_filler_only requires the nemotron profile")
         if context_terms is not None and not isinstance(context_terms, (list, tuple)):
             raise ValueError("STT context_terms must be a list of nonempty strings")
         if profile == "nemotron" and (response_format != "json" or not model or gen_kwargs):
@@ -321,6 +324,7 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         self.context_terms = tuple(context_terms or ())
         self.max_output_tokens = max_output_tokens
         self.instruction = instruction.strip()
+        self.drop_filler_only = drop_filler_only
         if profile == "nemotron":
             from speech_to_speech.STT.nemotron_transcribe import build_prompt
 
@@ -477,6 +481,13 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             message = str(exc) if isinstance(exc, TranscriptionRequestError) else "transcription request failed"
             self._publish_failure(request, message)
             return
+
+        if self.profile == "nemotron" and self.drop_filler_only:
+            from speech_to_speech.STT.nemotron_transcribe import is_filler_only
+
+            # Filter the assembled transcript without changing cached window text.
+            if is_filler_only(result.text):
+                result = replace(result, text="")
 
         output: STTOut
         if source.mode == "progressive":

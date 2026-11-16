@@ -61,6 +61,13 @@ class OpenAICompatibleSTTHandlerArguments:
         default_factory=list,
         metadata={"help": "Optional vocabulary spellings for the nemotron profile, listed once in the prompt."},
     )
+    openai_stt_drop_filler_only: bool = field(
+        default=False,
+        metadata={
+            "help": "For the nemotron profile, treat a transcript that is only a short interjection "
+            "(Uh-huh, Uh-oh, Oh) or sound label (Cough, Laughter) as empty. Also drops those when really said."
+        },
+    )
     openai_stt_max_output_tokens: int = field(
         default=384,
         metadata={"help": "Output token budget for the nemotron profile. Truncated transcripts fail the request."},
