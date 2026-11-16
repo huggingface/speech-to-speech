@@ -65,6 +65,27 @@ def clean_transcript(text: str) -> str:
     return text if any(character.isalnum() for character in text) else ""
 
 
+# What the model writes for a sound it was not asked to annotate: a bare interjection made
+# of these letters, or the name of the sound. Real speech is almost never only this.
+_FILLER_LETTERS = frozenset("uoh-")
+_SOUND_LABELS = frozenset({"cough", "laughter", "laugh", "ugh", "sigh", "sneeze"})
+_FILLER_MAX_CHARS = 7
+_TRAILING_PUNCTUATION = ".!?,"
+
+
+def is_filler_only(text: str) -> bool:
+    """True for a transcript that is only a short interjection ("Uh-huh.") or sound label ("Cough.")."""
+    text = text.strip()
+    core = text.rstrip(_TRAILING_PUNCTUATION).lower()
+    if not core:
+        return False
+    if len(text) <= _FILLER_MAX_CHARS and set(core) <= _FILLER_LETTERS:
+        return True
+    words = re.findall("[a-z]+", core)
+    only_ascii_words = all(character.isascii() and (character.isalpha() or character in " .!?,") for character in core)
+    return only_ascii_words and 0 < len(words) <= 2 and set(words) <= _SOUND_LABELS
+
+
 def build_prompt(context: str, terms: tuple[str, ...], language: str | None, instruction: str = "") -> str:
     if any(not isinstance(term, str) or not term.strip() for term in terms):
         raise ValueError("STT context_terms must contain nonempty strings")
@@ -93,6 +114,7 @@ class NemotronTranscriptionOperation(HttpTranscriptionOperation):
 
     prompt: str = TRANSCRIPTION_INSTRUCTION
     max_output_tokens: int = 384
+    drop_filler_only: bool = False
 
     def _request_kwargs(self) -> dict[str, Any]:
         url = "data:audio/wav;base64," + base64.b64encode(self.wav_bytes).decode("ascii")
@@ -137,4 +159,8 @@ class NemotronTranscriptionOperation(HttpTranscriptionOperation):
         if message.get("tool_calls") or message.get("refusal") or "<think>" in text or "</think>" in text:
             raise TranscriptionRequestError("transcription response contains unexpected assistant output")
         language = None if not self.language or self.language.lower() == "auto" else self.language
-        return HttpTranscriptionResult(text=clean_transcript(text), language=language)
+        text = clean_transcript(text)
+        if self.drop_filler_only and is_filler_only(text):
+            # Same outcome as an annotation-only result: an authoritative empty final.
+            text = ""
+        return HttpTranscriptionResult(text=text, language=language)

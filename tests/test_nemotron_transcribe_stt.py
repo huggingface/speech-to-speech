@@ -21,6 +21,7 @@ from speech_to_speech.STT.nemotron_transcribe import (
     NemotronTranscriptionOperation,
     build_prompt,
     clean_transcript,
+    is_filler_only,
 )
 from speech_to_speech.STT.openai_compatible_handler import (
     OpenAICompatibleSTTHandler,
@@ -304,6 +305,32 @@ def test_native_request_cancellation_interrupts_http_and_allows_reuse(monkeypatc
         worker.join(timeout=2)
 
 
+@pytest.mark.parametrize(
+    "text",
+    ["Uh-huh.", "Uh-oh.", "Uh-uh.", "Oh.", "Ooh.", "Huh?", "Cough.", "Cough cough.", "Laughter.", "Ugh."],
+)
+def test_filler_only_transcripts_are_recognised(text):
+    assert is_filler_only(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["", "Sí.", "No.", "Okay.", "Ajá.", "Mm.", "Oh my god.", "Uh-huh, that's right.", "I have a cough.", "はい。"],
+)
+def test_real_replies_are_not_filler_only(text):
+    assert not is_filler_only(text)
+
+
+def test_filler_only_transcripts_become_empty_finals_only_when_enabled(native_server):
+    _, replies = native_server
+    keeping, dropping, dropping_again = handler(), handler(drop_filler_only=True), handler(drop_filler_only=True)
+    replies.extend([response("<ev:breath> Uh-huh."), response("Uh-huh."), response("Uh-huh, yes.")])
+
+    assert transcribe(keeping).text == "Uh-huh."
+    assert transcribe(dropping).text == ""
+    assert transcribe(dropping_again).text == "Uh-huh, yes."
+
+
 def test_custom_instruction_replaces_only_the_opening_instruction(native_server):
     requests, replies = native_server
     instruction = "Audio transcription. Language: as spoken. Output: transcript only."
@@ -324,6 +351,7 @@ def test_custom_instruction_replaces_only_the_opening_instruction(native_server)
         {"profile": "invalid"},
         {"profile": "transcription", "context_terms": ["example"]},
         {"profile": "transcription", "instruction": "Transcribe."},
+        {"profile": "transcription", "drop_filler_only": True},
         {"context_terms": "example"},
         {"context_terms": [""]},
         {"model": "  "},

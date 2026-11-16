@@ -85,8 +85,9 @@ annotations. Only its known event, style, and speaker tokens are removed before
 text reaches captions, conversation history, or the LLM. An event-only final
 still closes the transcription item with empty text and creates no LLM work.
 Mixed output such as `<ev:gesture_noise> Uh-huh.` retains `Uh-huh.`. Real
-interjections are never blacklisted, so a word hallucination without an event
-token can still pass through. Keep VAD enabled.
+interjections are not blacklisted unless `--openai_stt_drop_filler_only` is set,
+so a word hallucination without an event token can still pass through. Keep VAD
+enabled.
 
 `--openai_stt_instruction` replaces that opening instruction and nothing else:
 recognition context, vocabulary and the language hint are still appended in
@@ -103,6 +104,15 @@ annotation and is dropped. An instruction without that request returns no
 annotations: the same audio comes back as words, and the model never returns
 an empty transcript. Measure both speech accuracy and non-speech handling on
 your own audio before switching.
+
+`--openai_stt_drop_filler_only` treats a transcript that is nothing but a short
+interjection of the letters u, o and h ("Uh-huh.", "Uh-oh.", "Oh.", "Huh?") or one or
+two sound labels ("Cough.", "Laughter.") as empty, with the same effect as an
+event-only result. It is off by default because it also drops those words when a
+person really says them. It is meant for instructions that do not ask for event
+tokens, where non-speech that reaches the model comes back as exactly these words. It
+only matches Latin-script fillers; with a language hint the model may write the same
+sound as "Sí." or "はい。", which no text rule can tell from a reply.
 
 The session's `audio.input.transcription.language` selects a language hint,
 for example `fr` adds `Language: French. Do not translate.`. Explicit `auto`
