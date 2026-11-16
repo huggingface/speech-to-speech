@@ -674,3 +674,117 @@ def test_shortened_reply_still_makes_the_result_late():
     chat.add_item(_output())
 
     assert _shape(chat)[-2:] == [("assistant", "The report"), ("user", _late())]
+
+
+def test_reply_written_before_a_client_created_call_is_placed_does_not_make_the_result_late():
+    chat = Chat(10)
+    chat.add_item(make_user_message("make a report"))
+    chat.add_item(_call())  # Created by the client: placed in history when its result arrives.
+    chat.add_provisional_generation_items("reply", [make_assistant_message("Working on it.")])
+    chat.finalize_provisional_generation("reply")
+    chat.add_item(_output())
+
+    assert _shape(chat) == [
+        ("user", "make a report"),
+        ("assistant", "Working on it."),
+        ("call", "call_report"),
+        ("tool", "call_report", "the report"),
+    ]
+
+
+def test_result_of_a_call_trimmed_from_history_is_not_late_after_earlier_replies():
+    chat = Chat(1)
+    chat.add_item(make_user_message("make a report"))
+    chat.add_provisional_generation_items("first", [_call()])
+    chat.finalize_provisional_generation("first")
+    for turn in range(3):
+        chat.add_item(make_user_message(f"question {turn}"))
+        chat.add_provisional_generation_items(f"reply {turn}", [make_assistant_message(f"answer {turn}")])
+        chat.finalize_provisional_generation(f"reply {turn}")
+        chat.trim_if_needed()
+    assert not any(item.type == "function_call" for item in chat.buffer)
+    chat.add_item(_output())
+
+    assert _shape(chat)[-2:] == [("call", "call_report"), ("tool", "call_report", "the report")]
+
+
+def test_result_that_arrives_during_an_interrupted_reply_is_late_after_its_heard_part():
+    chat = Chat(10)
+    chat.add_item(make_user_message("make a report"))
+    chat.add_provisional_generation_items("first", [_call()])
+    chat.finalize_provisional_generation("first")
+    anchor = chat.history_anchor_id()
+    chat.add_provisional_generation_items(
+        "progress", [make_assistant_message("The report is still running.")], after_item_id=anchor
+    )
+    chat.add_item(_output())  # The tool returns while the reply is being spoken.
+    chat.rollback_provisional_generation("progress")
+    chat.add_heard_assistant_message("item_progress", "The report is still", after_item_id=anchor)
+
+    assert _shape(chat) == [
+        ("user", "make a report"),
+        ("call", "call_report"),
+        ("tool", "call_report", PENDING_TOOL_OUTPUT),
+        ("assistant", "The report is still"),
+        ("user", _late()),
+    ]
+
+
+def test_deleted_reply_leaves_no_record_for_an_item_that_reuses_its_id():
+    chat = Chat(10)
+    chat.add_item(make_user_message("make a report"))
+    chat.add_provisional_generation_items("first", [_call(), make_assistant_message("On it.")])
+    chat.finalize_provisional_generation("first")
+    progress = make_assistant_message("The report is still running.")
+    progress.id = "msg_progress"
+    chat.add_provisional_generation_items("progress", [progress])
+    chat.finalize_provisional_generation("progress")
+    chat.delete_item("msg_progress")
+    assert chat._replies_past == {}
+    recreated = make_assistant_message("Recreated by the client.")
+    recreated.id = "msg_progress"
+    chat.add_item(recreated)
+    chat.add_item(_output())
+
+    assert ("tool", "call_report", "the report") in _shape(chat)
+
+
+def test_rolled_back_reply_leaves_no_record():
+    chat = Chat(10)
+    chat.add_item(make_user_message("make a report"))
+    chat.add_provisional_generation_items("first", [_call()])
+    chat.finalize_provisional_generation("first")
+    chat.add_provisional_generation_items("progress", [make_assistant_message("The report is still running.")])
+    assert chat._replies_past
+    chat.rollback_provisional_generation("progress")
+
+    assert chat._replies_past == {}
+
+
+def test_text_written_after_its_own_call_in_a_second_batch_does_not_make_the_result_late():
+    chat = Chat(10)
+    chat.add_item(make_user_message("make a report"))
+    chat.add_provisional_generation_items("first", [_call()])
+    chat.add_provisional_generation_items("first", [make_assistant_message("I am making it.")])
+    chat.finalize_provisional_generation("first")
+    chat.add_item(_output())
+
+    assert _shape(chat) == [
+        ("user", "make a report"),
+        ("call", "call_report"),
+        ("tool", "call_report", "the report"),
+        ("assistant", "I am making it."),
+    ]
+
+
+def test_call_from_a_later_response_makes_the_earlier_result_late():
+    chat = Chat(10)
+    chat.add_item(make_user_message("make a report"))
+    chat.add_provisional_generation_items("first", [_call()])
+    chat.finalize_provisional_generation("first")
+    chat.add_provisional_generation_items("second", [_call("call_weather", "get_weather", "{}")])
+    chat.finalize_provisional_generation("second")
+    chat.add_item(_output())
+
+    role, content = _shape(chat)[-1]
+    assert role == "user" and content.startswith(_late())
