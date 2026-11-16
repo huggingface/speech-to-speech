@@ -304,11 +304,26 @@ def test_native_request_cancellation_interrupts_http_and_allows_reuse(monkeypatc
         worker.join(timeout=2)
 
 
+def test_custom_instruction_replaces_only_the_opening_instruction(native_server):
+    requests, replies = native_server
+    instruction = "Audio transcription. Language: as spoken. Output: transcript only."
+    stt = handler(instruction=f"  {instruction} ", recognition_context="Robot audio.", context_terms=["Reachy Mini"])
+    replies.append(response("Hello."))
+    transcribe(stt)
+    prompt = json.loads(requests[-1].content)["messages"][0]["content"][0]["text"]
+    assert prompt == (
+        f"{instruction} Robot audio. Context terms: Reachy Mini. Use these spellings only when supported by the audio."
+    )
+    assert build_prompt("", (), "fr", instruction) == f"{instruction} Language: French. Do not translate."
+    assert build_prompt("", (), None, "  ") == build_prompt("", (), None)
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
         {"profile": "invalid"},
         {"profile": "transcription", "context_terms": ["example"]},
+        {"profile": "transcription", "instruction": "Transcribe."},
         {"context_terms": "example"},
         {"context_terms": [""]},
         {"model": "  "},

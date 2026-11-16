@@ -65,10 +65,12 @@ def clean_transcript(text: str) -> str:
     return text if any(character.isalnum() for character in text) else ""
 
 
-def build_prompt(context: str, terms: tuple[str, ...], language: str | None) -> str:
+def build_prompt(context: str, terms: tuple[str, ...], language: str | None, instruction: str = "") -> str:
     if any(not isinstance(term, str) or not term.strip() for term in terms):
         raise ValueError("STT context_terms must contain nonempty strings")
-    parts = [TRANSCRIPTION_INSTRUCTION]
+    # A custom instruction replaces only the opening one. An instruction that does not ask
+    # for <ev:*> tokens gets no annotations back, so non-speech can come back as words.
+    parts = [instruction.strip() or TRANSCRIPTION_INSTRUCTION]
     if context:
         parts.append(context)
     # Deduplicate exact spellings while preserving configured order.

@@ -88,6 +88,22 @@ Mixed output such as `<ev:gesture_noise> Uh-huh.` retains `Uh-huh.`. Real
 interjections are never blacklisted, so a word hallucination without an event
 token can still pass through. Keep VAD enabled.
 
+`--openai_stt_instruction` replaces that opening instruction and nothing else:
+recognition context, vocabulary and the language hint are still appended in
+the same order. For example, the model card's plain transcription prompt,
+which the Open ASR Leaderboard submission uses:
+
+```bash
+  --openai_stt_instruction "Audio transcription. Language: as spoken. Wording: verbatim, including fillers and repetitions. Formatting: punctuation and capitalization. Output: transcript only."
+```
+
+This is a trade-off, not a free upgrade. The default instruction asks for
+`<ev:*>` tokens, so non-speech that reaches the model comes back as an
+annotation and is dropped. An instruction without that request returns no
+annotations: the same audio comes back as words, and the model never returns
+an empty transcript. Measure both speech accuracy and non-speech handling on
+your own audio before switching.
+
 The session's `audio.input.transcription.language` selects a language hint,
 for example `fr` adds `Language: French. Do not translate.`. Explicit `auto`
 removes the hint, including a configured `--openai_stt_language`. Language
