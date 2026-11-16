@@ -320,6 +320,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         if self.idle_after_s > 0 and idle_s > self.idle_after_s:
             min_speech_ms = self.idle_min_speech_ms or min_speech_ms
             min_confident_ms = self.idle_min_confident_speech_ms or min_confident_ms
+        # A zero effective minimum disables duration filtering for VAD-detected speech.
+        if min_speech_ms == 0:
+            return 1.0, idle_s
         confident_ms = min(confident_ms, active_ms)
         return (active_ms - confident_ms) / min_speech_ms + confident_ms / min_confident_ms, idle_s
 

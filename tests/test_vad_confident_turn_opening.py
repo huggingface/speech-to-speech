@@ -179,3 +179,23 @@ def test_confident_new_turn_opens_before_segment_ends(monkeypatch) -> None:
     handler = _handler(monkeypatch, [CONFIDENT] * 4, **SCORED)
     _opened_turns(handler, 4)
     assert handler._speech_started_emitted
+
+
+@pytest.mark.parametrize("probability", [ORDINARY, CONFIDENT])
+@pytest.mark.parametrize("idle_min_ms, opens", [(0, True), (1600, False)])
+def test_zero_minimum_accepts_detected_speech_unless_idle_override_applies(
+    monkeypatch, probability, idle_min_ms, opens
+) -> None:
+    probs = [0.0] * 40 + [probability] + SILENCE
+    handler = _handler(
+        monkeypatch,
+        probs,
+        min_speech_ms=0,
+        min_confident_speech_ms=128,
+        idle_after_s=1.0,
+        idle_min_speech_ms=idle_min_ms,
+    )
+    assert _opened_turns(handler, 40) == 0  # Silence still requires VAD detection.
+    assert _opened_turns(handler, 1) == 0
+    assert handler._speech_started_emitted == opens
+    assert _opened_turns(handler, len(SILENCE)) == int(opens)
