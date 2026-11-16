@@ -482,6 +482,13 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             self._publish_failure(request, message)
             return
 
+        if self.profile == "nemotron" and self.drop_filler_only:
+            from speech_to_speech.STT.nemotron_transcribe import is_filler_only
+
+            # Filter the assembled transcript without changing cached window text.
+            if is_filler_only(result.text):
+                result = replace(result, text="")
+
         output: STTOut
         if source.mode == "progressive":
             output = PartialTranscription(text=result.text, turn_id=source.turn_id, turn_revision=source.turn_revision)
@@ -730,7 +737,6 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
                 timeout_s=self.timeout,
                 prompt=build_prompt(self.recognition_context, self.context_terms, selected_language, self.instruction),
                 max_output_tokens=self.max_output_tokens,
-                drop_filler_only=self.drop_filler_only,
             )
         extra_fields = self.gen_kwargs.copy()
         if not use_setup_language:

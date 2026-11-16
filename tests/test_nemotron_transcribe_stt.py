@@ -330,6 +330,38 @@ def test_filler_only_transcripts_become_empty_finals_only_when_enabled(native_se
     assert transcribe(dropping_again).text == "Uh-huh, yes."
 
 
+@pytest.mark.parametrize(
+    "windows,expected",
+    [
+        (["Uh-huh.", "That's right."], "Uh-huh. That's right."),
+        (["That's right.", "Uh-huh."], "That's right. Uh-huh."),
+        (["<ev:breath>", "Uh-huh."], ""),
+    ],
+)
+def test_filler_filter_applies_to_assembled_turn(native_server, monkeypatch, windows, expected):
+    requests, replies = native_server
+    stt = handler(drop_filler_only=True, max_window_s=1)
+    monkeypatch.setattr(stt, "_window_end", lambda audio, start, maximum: start + maximum)
+    requests.clear()  # Exclude the setup warmup request.
+    replies.extend(response(text) for text in windows)
+    try:
+        assert transcribe(stt, seconds=2).text == expected
+        assert len(requests) == 2
+    finally:
+        stt.cleanup()
+
+
+@pytest.mark.parametrize("max_window_s", [None, 30])
+def test_filler_filter_handles_single_request(native_server, max_window_s):
+    _, replies = native_server
+    stt = handler(drop_filler_only=True, max_window_s=max_window_s)
+    replies.append(response("Uh-huh."))
+    try:
+        assert transcribe(stt).text == ""
+    finally:
+        stt.cleanup()
+
+
 def test_default_instruction_is_plain_transcription():
     expected = (
         "Audio transcription. Language: as spoken. Wording: verbatim, including fillers and repetitions. "

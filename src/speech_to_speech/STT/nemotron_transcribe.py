@@ -112,7 +112,6 @@ class NemotronTranscriptionOperation(HttpTranscriptionOperation):
 
     prompt: str = TRANSCRIPTION_INSTRUCTION
     max_output_tokens: int = 384
-    drop_filler_only: bool = False
 
     def _request_kwargs(self) -> dict[str, Any]:
         url = "data:audio/wav;base64," + base64.b64encode(self.wav_bytes).decode("ascii")
@@ -157,8 +156,4 @@ class NemotronTranscriptionOperation(HttpTranscriptionOperation):
         if message.get("tool_calls") or message.get("refusal") or "<think>" in text or "</think>" in text:
             raise TranscriptionRequestError("transcription response contains unexpected assistant output")
         language = None if not self.language or self.language.lower() == "auto" else self.language
-        text = clean_transcript(text)
-        if self.drop_filler_only and is_filler_only(text):
-            # Same outcome as an annotation-only result: an authoritative empty final.
-            text = ""
-        return HttpTranscriptionResult(text=text, language=language)
+        return HttpTranscriptionResult(text=clean_transcript(text), language=language)
