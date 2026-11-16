@@ -154,3 +154,28 @@ def test_iterator_reports_confident_speech_per_utterance() -> None:
     assert iterator.last_utterance_active_speech_samples == 4 * 512  # 0.5 is above thresh - 0.15
     assert iterator.last_utterance_confident_speech_samples == 2 * 512
     assert iterator.confident_speech_samples == 0
+
+
+@pytest.mark.parametrize("progressive", [False, True])
+def test_idle_noise_cannot_open_early_or_emit_progressive_audio(monkeypatch, progressive) -> None:
+    probs = [0.0] * 40 + [ORDINARY] * 25 + SILENCE
+    handler = _handler(monkeypatch, probs, **IDLE)
+    if progressive:
+        handler.transcription_window_samples = 512
+    outputs = [output for _ in probs for output in handler.process(CHUNK)]
+    assert not any(isinstance(output, VADAudio) for output in outputs)
+    assert handler._log_speech_starts == 0
+
+
+@pytest.mark.parametrize("continuation_ms", [0, 800])
+def test_equal_continuation_thresholds_keep_plain_admission(monkeypatch, continuation_ms) -> None:
+    probs = [CONFIDENT] * 4 + SILENCE + [0.0] * 4 + [CONFIDENT] * 4 + SILENCE
+    handler = _handler(monkeypatch, probs, **SCORED, min_speech_continuation_ms=continuation_ms)
+    assert _opened_turns(handler, 8) == 1
+    assert _opened_turns(handler, 12) == 0
+
+
+def test_confident_new_turn_opens_before_segment_ends(monkeypatch) -> None:
+    handler = _handler(monkeypatch, [CONFIDENT] * 4, **SCORED)
+    _opened_turns(handler, 4)
+    assert handler._speech_started_emitted

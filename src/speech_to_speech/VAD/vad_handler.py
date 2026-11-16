@@ -287,6 +287,15 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             return self.min_speech_continuation_ms
         return self.min_speech_ms
 
+    def _should_score_new_turn(self, start_ms: int, *, stitched: bool = False) -> bool:
+        return (
+            getattr(self, "min_confident_speech_ms", 0) > 0
+            and not self._speech_started_emitted
+            and not stitched
+            and not self.speculative_turns.has_speech_candidate()
+            and not self.speculative_turns.can_reopen(start_ms)
+        )
+
     def _last_utterance_confident_speech_duration_ms(self) -> float:
         confident_speech_samples = getattr(self.iterator, "last_utterance_confident_speech_samples", 0)
         return confident_speech_samples / self.sample_rate * 1000
@@ -667,7 +676,21 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             )
             self.speculative_turns.speech_candidate_started(effective_start_ms)
             active_speech_min_ms = self._active_speech_min_ms(effective_start_ms)
-            if effective_active_speech_duration_ms >= active_speech_min_ms:
+            accepted = effective_active_speech_duration_ms >= active_speech_min_ms
+            stitched = effective_active_speech_duration_ms > active_speech_duration_ms
+            if self._should_score_new_turn(effective_start_ms, stitched=stitched):
+                confident_ms = getattr(self.iterator, "confident_speech_samples", 0) / self.sample_rate * 1000
+                score, idle_s = self._new_turn_score(active_speech_duration_ms, confident_ms, effective_start_ms)
+                accepted = score >= 1.0
+                if accepted:
+                    logger.info(
+                        "VAD: new-turn score=%.2f (active=%.0fms, confident=%.0fms, idle=%.0fs)",
+                        score,
+                        active_speech_duration_ms,
+                        confident_ms,
+                        idle_s,
+                    )
+            if accepted:
                 turn_id, turn_revision, reopened = self._ensure_turn_for_speech_start(effective_start_ms)
                 self._speech_started_emitted = True
                 self._log_speech_starts += 1
@@ -750,7 +773,10 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 active_speech_duration_ms = self._current_active_speech_duration_ms()
                 start_ms = max(0, self._audio_ms - int(duration_ms))
 
-                if active_speech_duration_ms >= self._active_speech_min_ms(start_ms):
+                admitted = active_speech_duration_ms >= self._active_speech_min_ms(start_ms)
+                if getattr(self, "min_confident_speech_ms", 0) > 0:
+                    admitted = self._speech_started_emitted
+                if admitted:
                     self._log_progressive_yields += 1
                     logger.debug(
                         "VAD: yielding progressive audio (segment=%.0fms, active=%.0fms, interval=%.2fs)",
@@ -816,8 +842,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             too_little_speech = active_speech_duration_ms < min_active_ms
             # A new turn can be scored on how confident its speech was instead of on active time
             # alone. Continuations and stitched fragments keep the plain active-time rule.
-            scored = getattr(self, "min_confident_speech_ms", 0) > 0
-            if scored and min_active_ms == self.min_speech_ms and not stitched_short_segment:
+            if self._should_score_new_turn(start_ms, stitched=stitched_short_segment):
                 confident_ms = self._last_utterance_confident_speech_duration_ms()
                 score, idle_s = self._new_turn_score(raw_active_ms, confident_ms, start_ms)
                 too_little_speech = score < 1.0
