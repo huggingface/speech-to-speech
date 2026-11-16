@@ -29,6 +29,46 @@ def test_remove_unspeechable_keeps_chinese_punctuation() -> None:
     assert remove_unspeechable(text) == text
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "नमस्ते दुनिया",  # Hindi: viramas and vowel signs
+        "สวัสดีครับ",  # Thai
+        "வணக்கம்",  # Tamil
+        "বাংলা ভাষা",  # Bengali
+        "مَرْحَبًا",  # Arabic with harakat
+        "می\u200cخواهم",  # Persian: ZWNJ separates the prefix from the stem
+        "cafe\u0301",  # decomposed accent
+    ],
+)
+def test_remove_unspeechable_keeps_combining_marks_and_joiners(text: str) -> None:
+    assert remove_unspeechable(text) == text
+
+
+def test_remove_unspeechable_keeps_marks_that_start_a_streamed_delta() -> None:
+    # Tokens can split between a base letter and its vowel sign.
+    assert "".join(remove_unspeechable(delta) for delta in ["क", "्ष", "म", "ा"]) == "क्षमा"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("☀\ufe0f", ""),
+        ("❤\ufe0f", ""),
+        ("1\ufe0f\u20e3", "1"),
+        ("👨\u200d👩\u200d👧", ""),
+        ("👍\U0001f3fd", ""),
+    ],
+)
+def test_remove_unspeechable_still_drops_emoji_sequences(text: str, expected: str) -> None:
+    assert remove_unspeechable(text) == expected
+
+
+def test_remove_unspeechable_drops_emoji_joiners_streamed_one_per_delta() -> None:
+    deltas = ["👨", "\u200d", "👩", "\u200d", "👧"]
+    assert "".join(remove_unspeechable(delta) for delta in deltas) == ""
+
+
 # --- language name coverage ---------------------------------------------------------------
 #
 # A language code with no entry in WHISPER_LANGUAGE_TO_LLM_LANGUAGE resolves to a `None`
