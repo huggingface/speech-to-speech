@@ -80,29 +80,40 @@ spellings only when supported by the audio. This is recognition biasing, not
 keyword spotting or a guarantee against hallucinations. It does not identify
 the main speaker or whether speech addresses the assistant.
 
-The profile asks for verbatim speech with Nemotron's non-speech and style
-annotations. Only its known event, style, and speaker tokens are removed before
-text reaches captions, conversation history, or the LLM. An event-only final
-still closes the transcription item with empty text and creates no LLM work.
-Mixed output such as `<ev:gesture_noise> Uh-huh.` retains `Uh-huh.`. Real
-interjections are never blacklisted, so a word hallucination without an event
-token can still pass through. Keep VAD enabled.
+The profile defaults to plain verbatim transcription, including fillers and
+repetitions, with punctuation and capitalization:
 
-`--openai_stt_instruction` replaces that opening instruction and nothing else:
-recognition context, vocabulary and the language hint are still appended in
-the same order. For example, the model card's plain transcription prompt,
-which the Open ASR Leaderboard submission uses:
-
-```bash
-  --openai_stt_instruction "Audio transcription. Language: as spoken. Wording: verbatim, including fillers and repetitions. Formatting: punctuation and capitalization. Output: transcript only."
+```text
+Audio transcription. Language: as spoken. Wording: verbatim, including fillers and repetitions. Formatting: punctuation and capitalization. Output: transcript only.
 ```
 
-This is a trade-off, not a free upgrade. The default instruction asks for
-`<ev:*>` tokens, so non-speech that reaches the model comes back as an
-annotation and is dropped. An instruction without that request returns no
-annotations: the same audio comes back as words, and the model never returns
-an empty transcript. Measure both speech accuracy and non-speech handling on
-your own audio before switching.
+`--openai_stt_instruction` replaces only this opening instruction; recognition
+context, vocabulary and the language hint are still appended in the same order.
+A blank instruction uses the default.
+
+### Earlier rich-transcription experiment
+
+We previously used an instruction requesting non-speech and style annotations.
+It helped suppress hallucinated words on tested non-speech clips, but reduced
+speech transcription accuracy in our evaluation. We now use the plain prompt
+and address false turn openings at the VAD layer. [PR #839](https://github.com/huggingface/speech-to-speech/pull/839)
+proposes opt-in confidence-based turn admission and stricter rules after idle
+time; it is separate from this prompt change and leaves VAD defaults unchanged.
+These controls reduce false triggers in the evaluated recordings, but do not
+eliminate all voice-like noise or speech addressed to someone else.
+
+The earlier instruction remains available as an explicit override:
+
+```bash
+  --openai_stt_instruction "Transcribe this audio with punctuation and capitalization. Include all spoken words and verbal fillers. Write numbers in their standard written form. Use <ev:*> and <sty:*> special tokens to recognize all non-speech verbatims and speaking style."
+```
+
+Known event, style, and speaker tokens are still removed if the model emits
+them. An event-only final closes the transcription item with empty text and
+creates no LLM work. Mixed output such as `<ev:gesture_noise> Uh-huh.` retains
+`Uh-huh.`. Real interjections are never blacklisted. Keep VAD enabled and
+measure speech accuracy and non-speech handling on your own audio; prompt
+selection alone does not prevent hallucinated words.
 
 The session's `audio.input.transcription.language` selects a language hint,
 for example `fr` adds `Language: French. Do not translate.`. Explicit `auto`

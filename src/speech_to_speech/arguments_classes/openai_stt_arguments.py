@@ -50,7 +50,7 @@ class OpenAICompatibleSTTHandlerArguments:
         default="",
         metadata={
             "help": "Optional transcription instruction for the nemotron profile, replacing the default "
-            "rich-transcription one. Recognition context, terms and the language hint are still appended."
+            "plain-transcription one. Recognition context, terms and the language hint are still appended."
         },
     )
     openai_stt_recognition_context: str = field(
