@@ -193,3 +193,18 @@ def test_late_result_stays_after_a_separate_progress_reply(service, conn_id, tex
     for view in (chat.to_transformers_chat(), chat.to_responses_api_chat()):
         rendered = json.dumps(view)
         assert rendered.index("The report is still running.") < rendered.index("REPORT FINISHED"), view
+
+
+def test_second_result_for_a_call_is_rejected(service, conn_id, text_prompt_queue):
+    chat = service._state(conn_id).runtime_config.chat
+    _create_item(service, conn_id, _user_text("Make a report."))
+    _finish_with_calls(service, conn_id, _respond(service, conn_id, text_prompt_queue), _call("call_report"))
+    assert isinstance(
+        _create_item(service, conn_id, _tool_output("call_report", "REPORT FINISHED"))[0], ConversationItemCreatedEvent
+    )
+
+    again = _create_item(service, conn_id, _tool_output("call_report", "REPORT FINISHED AGAIN"))
+
+    assert isinstance(again[0], RealtimeErrorEvent), again
+    assert "already has an output" in again[0].error.message
+    assert [item.output for item in chat.buffer if item.type == "function_call_output"] == ["REPORT FINISHED"]

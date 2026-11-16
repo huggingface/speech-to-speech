@@ -17,6 +17,7 @@ from speech_to_speech.LLM.chat import (
     PENDING_TOOL_OUTPUT,
     RUNNING_TOOL_STATUS,
     Chat,
+    ChatItemError,
     make_assistant_message,
     make_user_message,
 )
@@ -526,3 +527,47 @@ def test_reply_from_a_later_response_makes_the_result_late_but_text_of_the_same_
     ]
     assert _shape(later.copy(deep=True)) == _shape(later)
     _assert_every_call_has_an_output(later)
+
+
+def test_second_result_for_a_call_is_rejected():
+    chat = _chat_with_running_call(_output(output="first"))
+    before = _shape(chat)
+
+    with pytest.raises(ChatItemError, match="already has an output"):
+        chat.add_item(
+            RealtimeConversationItemFunctionCallOutput(
+                type="function_call_output", id="fco_again", call_id="call_report", output="second"
+            )
+        )
+
+    assert _shape(chat) == before
+    assert [item.type for item in chat.buffer] == ["message", "function_call", "function_call_output"]
+
+
+def test_reply_that_is_rolled_back_does_not_make_the_result_late():
+    chat = Chat(10)
+    chat.add_item(make_user_message("make a report"))
+    chat.add_provisional_generation_items("first", [_call(), make_assistant_message("One moment.")])
+    chat.finalize_provisional_generation("first")
+    chat.add_provisional_generation_items("progress", [make_assistant_message("Still running.")])
+    chat.rollback_provisional_generation("progress")
+    chat.add_item(_output())
+
+    # The cancelled reply is gone from history, so nothing was said after the call.
+    assert _shape(chat) == [
+        ("user", "make a report"),
+        ("call", "call_report"),
+        ("tool", "call_report", "the report"),
+        ("assistant", "One moment."),
+    ]
+
+    # A reply that was delivered still makes a later result late.
+    chat = Chat(10)
+    chat.add_item(make_user_message("make a report"))
+    chat.add_provisional_generation_items("first", [_call()])
+    chat.finalize_provisional_generation("first")
+    chat.add_provisional_generation_items("progress", [make_assistant_message("Still running.")])
+    chat.add_provisional_generation_items("cancelled", [make_assistant_message("As I said")])
+    chat.rollback_provisional_generation("cancelled")
+    chat.add_item(_output())
+    assert _shape(chat)[-1] == ("user", _late())

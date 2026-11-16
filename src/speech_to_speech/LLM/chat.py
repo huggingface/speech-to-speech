@@ -184,6 +184,9 @@ class Chat:
         # assistant message right after a call is otherwise taken for text of
         # the response that made the call.
         self._calls_replied_past: set[str] = set()
+        # The marks each response that can still be rolled back added, so a
+        # cancelled reply does not leave a call marked as replied past.
+        self._replied_past_by_response: dict[str, set[str]] = {}
         # Assistant output is written eagerly when a tool call is exposed to a
         # realtime client. Keep the exact provisional IDs keyed by response so
         # cancellation can roll them back before accepting deferred client items.
@@ -315,6 +318,13 @@ class Chat:
     def _append_tool_output_locked(self, call_id: str, output_item: RealtimeConversationItemFunctionCallOutput) -> None:
         """Body of :meth:`append_tool_output`. Caller must hold ``_lock``."""
         if self._has_call_id_in_buffer(call_id):
+            if any(
+                isinstance(entry, RealtimeConversationItemFunctionCallOutput) and entry.call_id == call_id
+                for entry in self.buffer
+            ):
+                # Each call takes one result. A second one would be shown to
+                # the model as a second answer to the same call.
+                raise ChatItemError(f"The function_call with call_id '{call_id}' already has an output.")
             self._pending_tool_calls.pop(call_id, None)
             self._mark_call_completed(call_id, output_item.status)
             self.buffer.append(output_item)
@@ -921,9 +931,11 @@ class Chat:
                 known_call_ids = set(self._pending_tool_calls) | {
                     item.call_id for item in self.buffer if isinstance(item, RealtimeConversationItemFunctionCall)
                 }
-                self._calls_replied_past = (
-                    self._calls_replied_past | (set(pending_calls_before) - own_call_ids)
-                ) & known_call_ids
+                replied_past = (set(pending_calls_before) - own_call_ids) & known_call_ids
+                self._replied_past_by_response.setdefault(response_key, set()).update(
+                    replied_past - self._calls_replied_past
+                )
+                self._calls_replied_past = (self._calls_replied_past | replied_past) & known_call_ids
             tracked_item_ids, tracked_call_ids = self._provisional_generations.setdefault(
                 response_key,
                 (set(), set()),
@@ -949,6 +961,7 @@ class Chat:
         with self._lock:
             self._provisional_generations.pop(response_key, None)
             self._provisional_output_items.pop(response_key, None)
+            self._replied_past_by_response.pop(response_key, None)
             self._run_deferred_compaction_if_ready()
 
     def rollback_provisional_generation(self, response_key: str | None) -> None:
@@ -959,6 +972,8 @@ class Chat:
         with self._lock:
             tracked = self._provisional_generations.pop(response_key, None)
             self._provisional_output_items.pop(response_key, None)
+            # The reply is gone, so the calls it replied past are running as before.
+            self._calls_replied_past -= self._replied_past_by_response.pop(response_key, set())
             if tracked is not None:
                 item_ids, call_ids = tracked
                 self._rollback_generation_locked(item_ids, call_ids)
@@ -1291,6 +1306,7 @@ class Chat:
             )
             clone._deleted_tool_output_ids = set(self._deleted_tool_output_ids)
             clone._calls_replied_past = set(self._calls_replied_past)
+            clone._replied_past_by_response = {key: set(ids) for key, ids in self._replied_past_by_response.items()}
             clone._assistant_item_aliases = {wire_id: set(ids) for wire_id, ids in self._assistant_item_aliases.items()}
             if deep:
                 state = deepcopy(state)
@@ -1351,6 +1367,7 @@ class Chat:
             )
             clone._deleted_tool_output_ids = set(self._deleted_tool_output_ids)
             clone._calls_replied_past = set(self._calls_replied_past)
+            clone._replied_past_by_response = {key: set(ids) for key, ids in self._replied_past_by_response.items()}
             clone._assistant_item_aliases = {wire_id: set(ids) for wire_id, ids in self._assistant_item_aliases.items()}
             tracked = deepcopy(self._provisional_generations.get(response_key))
         if tracked is not None:
@@ -1372,6 +1389,7 @@ class Chat:
             self._user_turn_count = 0
             self._deleted_tool_output_ids.clear()
             self._calls_replied_past.clear()
+            self._replied_past_by_response.clear()
             self._assistant_item_aliases.clear()
             self._unheard_assistant_items.clear()
 
