@@ -208,3 +208,31 @@ def test_second_result_for_a_call_is_rejected(service, conn_id, text_prompt_queu
     assert isinstance(again[0], RealtimeErrorEvent), again
     assert "already has an output" in again[0].error.message
     assert [item.output for item in chat.buffer if item.type == "function_call_output"] == ["REPORT FINISHED"]
+
+
+def test_late_result_stays_after_the_heard_part_of_an_interrupted_progress_reply(service, conn_id, text_prompt_queue):
+    from speech_to_speech.pipeline.history import ResponseHistory
+
+    chat = service._state(conn_id).runtime_config.chat
+    _create_item(service, conn_id, _user_text("Make a report."))
+    _finish_with_calls(service, conn_id, _respond(service, conn_id, text_prompt_queue), _call("call_report"))
+    progress = _respond(service, conn_id, text_prompt_queue)
+    text = "The report is still running. It will take a few more minutes to finish."
+    history = ResponseHistory.capture(
+        chat, [make_assistant_message(text)], after_item_id=chat.history_anchor_id(), complete=True
+    )
+    service.dispatch_pipeline_event(
+        conn_id, AssistantOutputEvent(text=text, response_key=progress.response_key, history=history)
+    )
+    for _ in range(20):
+        service.encode_audio_chunk(conn_id, b"\x00\x00" * 1600, progress.response_key)
+
+    # The user barges in: the part that was heard stays in history.
+    service.finish_response(conn_id, status="cancelled", reason="turn_detected", response_key=progress.response_key)
+    assert [(item.type, getattr(item, "status", None)) for item in chat.buffer][-1] == ("message", "incomplete")
+    _create_item(service, conn_id, _tool_output("call_report", "REPORT FINISHED"))
+
+    messages = chat.to_transformers_chat()
+    assert [message["role"] for message in messages] == ["user", "assistant", "tool", "assistant", "user"]
+    assert messages[2]["content"] == PENDING_TOOL_OUTPUT
+    assert "REPORT FINISHED" in messages[4]["content"]
