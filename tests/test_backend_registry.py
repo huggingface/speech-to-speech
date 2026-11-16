@@ -768,10 +768,13 @@ def test_nemotron_stt_profile_and_terms_construct_through_registry(monkeypatch):
             "30",
             "--openai_stt_max_output_tokens",
             "512",
+            "--openai_stt_instruction",
+            "Audio transcription. Output: transcript only.",
         ]
     )
     stt = create_backend_handler(args.stt_backend, _context())
     assert stt.profile == "nemotron"
+    assert stt.instruction == "Audio transcription. Output: transcript only."
     assert stt.endpoint_url.endswith("/v1/chat/completions")
     assert stt.context_terms == ("Reachy Mini", "Pollen Robotics", "Hugging Face")
     assert stt.max_window_s == 30

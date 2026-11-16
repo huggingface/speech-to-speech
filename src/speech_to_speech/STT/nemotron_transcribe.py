@@ -16,9 +16,8 @@ from speech_to_speech.STT.openai_compatible_handler import (
 )
 
 TRANSCRIPTION_INSTRUCTION = (
-    "Transcribe this audio with punctuation and capitalization. Include all spoken words "
-    "and verbal fillers. Write numbers in their standard written form. Use <ev:*> and "
-    "<sty:*> special tokens to recognize all non-speech verbatims and speaking style."
+    "Audio transcription. Language: as spoken. Wording: verbatim, including fillers and repetitions. "
+    "Formatting: punctuation and capitalization. Output: transcript only."
 )
 # Explicit vocabulary from the Nemotron 3.5 Transcribe tokenizer. Do not strip
 # arbitrary angle-bracketed text, or blacklist real fillers such as "Uh-huh".
@@ -65,10 +64,11 @@ def clean_transcript(text: str) -> str:
     return text if any(character.isalnum() for character in text) else ""
 
 
-def build_prompt(context: str, terms: tuple[str, ...], language: str | None) -> str:
+def build_prompt(context: str, terms: tuple[str, ...], language: str | None, instruction: str = "") -> str:
     if any(not isinstance(term, str) or not term.strip() for term in terms):
         raise ValueError("STT context_terms must contain nonempty strings")
-    parts = [TRANSCRIPTION_INSTRUCTION]
+    # A custom instruction replaces only the opening one.
+    parts = [instruction.strip() or TRANSCRIPTION_INSTRUCTION]
     if context:
         parts.append(context)
     # Deduplicate exact spellings while preserving configured order.

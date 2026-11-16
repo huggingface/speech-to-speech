@@ -46,6 +46,13 @@ class OpenAICompatibleSTTHandlerArguments:
         default="transcription",
         metadata={"help": "transcription uses the Audio API; nemotron uses native vLLM audio chat with annotations."},
     )
+    openai_stt_instruction: str = field(
+        default="",
+        metadata={
+            "help": "Optional transcription instruction for the nemotron profile, replacing the default "
+            "plain-transcription one. Recognition context, terms and the language hint are still appended."
+        },
+    )
     openai_stt_recognition_context: str = field(
         default="",
         metadata={"help": "Optional recognition context for the nemotron profile; not assistant instructions."},
