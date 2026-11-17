@@ -447,12 +447,16 @@ class ConversationHandler(RealtimeBaseHandler):
         items = st.pending_item_acks
         st.pending_item_acks = []
         events: list[ServerEvent] = []
+        # A rolled-back response takes its own calls and their outputs with it,
+        # so those outputs are applied again and fail if the call is gone. An
+        # output for a call from an earlier response survives the rollback and
+        # is only acknowledged; applying it again would store it twice.
+        retained_ids = st.runtime_config.chat.item_ids() if revalidate_tool_outputs else set()
         for item in items:
             if (
                 revalidate_tool_outputs
                 and isinstance(item, RealtimeConversationItemFunctionCallOutput)
-                # An output whose call was kept is still in the chat.
-                and st.runtime_config.chat.get_item(item.id or "") is None
+                and item.id not in retained_ids
             ):
                 events.extend(self._apply_item(conn_id, item))
             else:

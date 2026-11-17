@@ -48,6 +48,7 @@ from speech_to_speech.api.openai_realtime.reasoning import SpeechToSpeechReasoni
 from speech_to_speech.api.openai_realtime.runtime_config import validate_reasoning
 from speech_to_speech.api.openai_realtime.tool_followup import (
     TOOL_FOLLOWUP_ACK_LIMIT,
+    TOOL_FOLLOWUP_BATCH_PENDING,
     TOOL_FOLLOWUP_COVERED,
     TOOL_FOLLOWUP_METADATA_KEY,
     TOOL_FOLLOWUP_WAIT,
@@ -916,10 +917,13 @@ class ResponseHandler(RealtimeBaseHandler):
                     add_supported_item(candidate_chat, input_item.model_copy(deep=True))
             except ChatItemError as exc:
                 return self.make_error(message=str(exc), _type="invalid_input_item")
-            if candidate_chat.has_pending_tool_calls():
+            if candidate_chat.has_incomplete_tool_batch():
+                # Clients that request a follow-up after every tool result rely on
+                # this to get one reply for a batch of parallel calls. Any other
+                # response is generated while tools run.
                 return self.make_error(
                     message="Cannot create a response while function call outputs are pending.",
-                    _type="function_call_output_pending",
+                    _type=TOOL_FOLLOWUP_BATCH_PENDING,
                 )
 
         if replacing_prefetch:
@@ -1082,12 +1086,13 @@ class ResponseHandler(RealtimeBaseHandler):
                 messages.append((item_id, text))
         return messages
 
-    def _keep_delivered_calls(self, conn_id: str) -> dict[str, str]:
+    def _keep_delivered_calls(self, conn_id: str) -> dict[str, tuple[list[str], str | None]]:
         """Keep the function calls a cancelled response delivered to the client.
 
         The client is already running them, so their outputs must still attach
         and the model must remember making them. Returns, for each message of
-        the response, the kept call that follows it in output order.
+        the response, the kept calls before it and the next one after it, in
+        output order.
         """
         st = self._state(conn_id)
         if is_out_of_band(st.current_response_params):
@@ -1098,12 +1103,14 @@ class ResponseHandler(RealtimeBaseHandler):
             if call.status == "completed" and call.call_id is not None
         ]
         self._service.history.keep_delivered_calls(conn_id, st.current_response_key, [call_id for _, call_id in kept])
-        next_kept_call: dict[str, str] = {}
+        around: dict[str, tuple[list[str], str | None]] = {}
         for pending in st.pending_text_outputs:
-            following = next((call_id for index, call_id in kept if index > int(pending["output_index"])), None)
-            if following is not None:
-                next_kept_call[str(pending["item_id"])] = following
-        return next_kept_call
+            position = int(pending["output_index"])
+            around[str(pending["item_id"])] = (
+                [call_id for index, call_id in kept if index < position],
+                next((call_id for index, call_id in kept if index > position), None),
+            )
+        return around
 
     def _truncate_audio_item(self, conn_id: str, item_id: str, played_samples: int, source: str) -> None:
         """Cut one ended assistant item's history to its first *played_samples*."""
@@ -1283,18 +1290,20 @@ class ResponseHandler(RealtimeBaseHandler):
                 self._service.history.finalize(conn_id, st.current_response_key)
             heard = self._heard_output(conn_id, open_item_id) if status == "cancelled" else []
             anchor = self._service.history.anchor(conn_id, st.current_response_key)
-            next_kept_call = self._keep_delivered_calls(conn_id) if status == "cancelled" else {}
+            kept_calls = self._keep_delivered_calls(conn_id) if status == "cancelled" else {}
             # Ending the response closes its key, which rolls back unfinalized
             # history before deferred client items are applied below.
             self._end_response(conn_id, status)
             # Speech already delivered stays in history, cut to its audio; a
             # client truncate or WebRTC playback position can cut it further.
             for item_id, text in heard:
+                before, following = kept_calls.get(item_id, ([], None))
                 st.runtime_config.chat.add_heard_assistant_message(
                     item_id,
                     text,
                     after_item_id=anchor,
-                    before_call_id=next_kept_call.get(item_id),
+                    kept_calls_before=before,
+                    kept_call_after=following,
                 )
                 _log_heard(item_id, st.assistant_audio_segments.get(item_id, []), text, "audio sent before cancel")
         # Apply any client items that arrived mid-generation now that in_response

@@ -1,9 +1,10 @@
 """A cancelled response keeps the function calls its client is already running."""
 
 from openai.types.realtime import ConversationItemCreatedEvent, ConversationItemCreateEvent, RealtimeErrorEvent
+from openai.types.realtime.conversation_item import RealtimeConversationItemFunctionCall
 from openai.types.responses import ResponseFunctionToolCall
 
-from speech_to_speech.LLM.chat import make_user_message
+from speech_to_speech.LLM.chat import LATE_TOOL_RESULT, PENDING_TOOL_OUTPUT, make_user_message
 from speech_to_speech.LLM.language_model import BaseLanguageModelHandler
 from speech_to_speech.pipeline.events import AssistantOutputEvent
 from speech_to_speech.pipeline.history import ResponseHistory
@@ -43,18 +44,27 @@ def _call_tool_while_speaking(service, conn_id, *, status=None, text_after_call=
     return chat
 
 
-def _send_output(service, conn_id):
+def _send_output(service, conn_id, call_id="call_dance", output="danced"):
     return service.handle_conversation_item_create(
         conn_id,
         ConversationItemCreateEvent(
             type="conversation.item.create",
-            item={"type": "function_call_output", "call_id": "call_dance", "output": '{"status": "ok"}'},
+            item={"type": "function_call_output", "call_id": call_id, "output": output},
         ),
     )
 
 
 def _model_input(chat):
-    return [(item["type"], item.get("role")) for item in chat.to_responses_api_chat()]
+    """What the model is shown: each message's role and its text, or the tool it calls."""
+    return [
+        (
+            message["role"],
+            message["tool_calls"][0]["function"]["name"]
+            if "tool_calls" in message
+            else message["content"].split("\n[Tool status")[0],
+        )
+        for message in chat.to_transformers_chat()
+    ]
 
 
 def test_barge_in_keeps_a_delivered_call_and_accepts_its_output(service, conn_id):
@@ -65,19 +75,46 @@ def test_barge_in_keeps_a_delivered_call_and_accepts_its_output(service, conn_id
     # The heard speech stays ahead of the call it preceded.
     assert [item.type for item in chat.buffer] == ["message", "message", "function_call"]
     assert (chat.buffer[1].status, chat.buffer[1].content[0].text) == ("incomplete", SPEECH)
-    # The interrupting turn must get a reply even though the tool is still running.
-    assert not chat.has_pending_tool_calls()
-    assert not chat.copy(deep=True).has_pending_tool_calls()
-    assert _model_input(chat) == [("message", "user"), ("message", "assistant")]
+    heard = [("user", "Dance for me"), ("assistant", SPEECH), ("assistant", "dance")]
+    assert _model_input(chat) == [*heard, ("tool", PENDING_TOOL_OUTPUT)]
 
     events = _send_output(service, conn_id)
 
     assert [type(event) for event in events] == [ConversationItemCreatedEvent]
+    assert _model_input(chat) == [*heard, ("tool", "danced")]
+
+
+def test_barge_in_while_an_earlier_call_is_still_running(service, conn_id):
+    """The cancelled reply was said past the earlier call, but not past its own."""
+    chat = service._state(conn_id).runtime_config.chat
+    chat.add_item(make_user_message("Make a report"))
+    report = RealtimeConversationItemFunctionCall(
+        type="function_call", id="fc_report", call_id="call_report", name="report", arguments="{}"
+    )
+    chat.add_provisional_generation_items("response_report", [report])
+    service.dispatch_pipeline_event(
+        conn_id,
+        AssistantOutputEvent(response_key="response_report", parts=[AssistantToolCallPart(tool=report.model_dump())]),
+    )
+    service.finish_response(conn_id, response_key="response_report")
+    _call_tool_while_speaking(service, conn_id, text_after_call="Here I go.")
+
+    service.finish_response(conn_id, status="cancelled", reason="turn_detected")
+    assert [type(event) for event in _send_output(service, conn_id)] == [ConversationItemCreatedEvent]
+    assert [type(event) for event in _send_output(service, conn_id, "call_report", "the report")] == [
+        ConversationItemCreatedEvent
+    ]
+
     assert _model_input(chat) == [
-        ("message", "user"),
-        ("message", "assistant"),
-        ("function_call", None),
-        ("function_call_output", None),
+        ("user", "Make a report"),
+        ("assistant", "report"),
+        ("tool", PENDING_TOOL_OUTPUT),
+        ("user", "Dance for me"),
+        ("assistant", SPEECH),
+        ("assistant", "dance"),
+        ("tool", "danced"),
+        ("assistant", "Here I go."),
+        ("user", LATE_TOOL_RESULT.format(name="report", arguments="{}", output="the report")),
     ]
 
 
@@ -101,6 +138,10 @@ def test_speech_after_a_kept_call_stays_after_it(service, conn_id):
 
     assert [item.type for item in chat.buffer] == ["message", "message", "function_call", "message"]
     assert [chat.buffer[index].content[0].text for index in (1, 3)] == [SPEECH, "Here I go."]
+
+    # Speech after its own call does not make that call's result a late one.
+    _send_output(service, conn_id)
+    assert _model_input(chat)[2:] == [("assistant", "dance"), ("tool", "danced"), ("assistant", "Here I go.")]
 
 
 def test_call_the_client_never_received_complete_is_still_rolled_back(service, conn_id):
