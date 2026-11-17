@@ -885,13 +885,16 @@ class _ToolCallCoordinator:
             self._consume_tool_results(self._answered_tool_call_ids)
             outstanding = set().union(*(batch.call_ids for batch in self._tool_batches.values()))
             self._answered_tool_call_ids.intersection_update(outstanding)
-        if isinstance(response_id, str) and response_id and status == "completed":
-            output = getattr(response, "output", None) or []
-            calls = [
-                (output_index, item)
-                for output_index, item in enumerate(output)
-                if getattr(item, "type", None) == "function_call"
-            ]
+        output = getattr(response, "output", None) or []
+        calls = [
+            (output_index, item)
+            for output_index, item in enumerate(output)
+            if getattr(item, "type", None) == "function_call"
+            # A cancelled response keeps only the calls it delivered complete.
+            # The server still expects their outputs, so they run to the end.
+            and (status == "completed" or (status == "cancelled" and getattr(item, "status", None) == "completed"))
+        ]
+        if isinstance(response_id, str) and response_id and (status == "completed" or calls):
             batch = self._tool_batches.get(response_id)
             if calls and batch is None:
                 batch = self._batch(response_id)
@@ -901,6 +904,8 @@ class _ToolCallCoordinator:
                     self._register_call_order(response_id, call_id, output_index, kick=False)
                 self._schedule_call(response_id, call)
             if batch is not None:
+                if status != "completed":
+                    self._drop_calls(batch, keep={getattr(call, "call_id", None) for _, call in calls})
                 batch.completed = True
                 batch.successful = True
                 self._kick_delivery()
@@ -909,6 +914,16 @@ class _ToolCallCoordinator:
             if batch is not None:
                 self._cancel_batch(response_id, batch)
         self._kick_follow_up()
+
+    @staticmethod
+    def _drop_calls(batch: _ToolResponseBatch, *, keep: set[Any]) -> None:
+        """Stop waiting for the calls of a cancelled response that the server rolled back."""
+        dropped = (batch.call_ids | batch.authoritative_call_ids) - keep - batch.delivered_call_ids
+        batch.pending_deliveries -= len(dropped & batch.call_ids)
+        batch.authoritative_call_ids -= dropped
+        batch.ordered_call_ids = [call_id for call_id in batch.ordered_call_ids if call_id not in dropped]
+        for call_id in dropped:
+            batch.results.pop(call_id, None)
 
     def _batch(self, response_id: str) -> _ToolResponseBatch:
         batch = self._tool_batches.get(response_id)

@@ -2682,3 +2682,55 @@ async def test_result_sent_before_a_delayed_batch_rejection_still_gets_a_follow_
         assert len(conn.sent) == 4
     finally:
         await coordinator.close()
+
+
+def _listed_call(call_id, status):
+    return SimpleNamespace(**vars(function_call(call_id)), status=status)
+
+
+async def test_audio_client_delivers_a_call_kept_by_a_cancelled_response():
+    gates, executor = _slow_and_fast_tools()
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(conn, RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor))
+    try:
+        coordinator.handle_event(response_created("response_1"))
+        coordinator.handle_event(output_item_added("call_kept", output_index=0))
+        coordinator.handle_event(tool_call("call_kept", output_index=0, arguments=json.dumps({"index": 0})))
+        # A second call was announced, but its arguments never finished.
+        coordinator.handle_event(output_item_added("call_unfinished", output_index=1))
+        # The user barges in while the tool is still running.
+        coordinator.handle_event(
+            response_done(
+                status="cancelled",
+                output=[_listed_call("call_kept", "completed"), _listed_call("call_unfinished", "incomplete")],
+            )
+        )
+
+        gates[0].set()
+        await wait_until(lambda: len(conn.sent) == 2)
+        assert conn.sent[0]["item"] == {
+            "type": "function_call_output",
+            "call_id": "call_kept",
+            "output": json.dumps({"result": 0}),
+        }
+        assert conn.sent[1]["type"] == "response.create"
+    finally:
+        await coordinator.close()
+
+
+async def test_audio_client_drops_a_call_the_cancelled_response_did_not_finish():
+    gates, executor = _slow_and_fast_tools()
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(conn, RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor))
+    try:
+        coordinator.handle_event(response_created("response_1"))
+        coordinator.handle_event(output_item_added("call_unfinished", output_index=0))
+        coordinator.handle_event(
+            response_done(status="cancelled", output=[_listed_call("call_unfinished", "incomplete")])
+        )
+        await wait_until(lambda: not coordinator._background_tasks)
+
+        assert conn.sent == []
+        assert coordinator._tool_batches == {}
+    finally:
+        await coordinator.close()

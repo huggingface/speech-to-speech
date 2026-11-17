@@ -399,6 +399,8 @@ One request is still rejected with `function_call_output_pending`: a `response.c
 
 The packaged Python client (`talk`, `local`) follows the same rule. Results of one response are delivered in call order and get one follow-up. Responses do not wait for each other, so the result of a tool called in a later turn is delivered and announced while an earlier tool is still running. If the server holds the follow-up back, the result stays queued and is announced with the next one.
 
+A cancelled response (a barge-in or `response.cancel`) keeps the function calls it delivered complete: they are listed as `completed` in its `response.done`, stay in history, and their outputs are still expected. A client that abandons such a call should still send an output saying so; otherwise the model is told on every turn that the tool is still running. The packaged client lets these calls finish and delivers their results. Calls whose arguments were unfinished at the cancel are listed as `incomplete` and are removed.
+
 #### Start-and-notify: the pattern to prefer for work that takes minutes
 
 When the client controls the tool, make it return at once and report the outcome later:
