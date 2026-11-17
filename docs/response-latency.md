@@ -47,7 +47,7 @@ are added only to terminal responses.
 | --- | --- | --- |
 | `stt` | `parakeet-tdt`, `openai`, `openai-realtime`, `vllm-realtime`, `whisper`, `whisper-mlx`, `mlx-audio-whisper`, `faster-whisper`, `qwen3-asr`, `parakeet-unified`, `nemotron-streaming`, `orukeet`, `paraformer`, `sense-voice` | None of the built-in STT backends (`--stt none` excluded) |
 | `llm`, `llm_first_tts` | `transformers`, `mlx-lm`, `responses-api`, `chat-completions` | None of the built-in LLM backends |
-| `tts_ttfa`, `e2e` | `qwen3`, `openai`, `pocket`, `kokoro`, `facebookMMS`, `chatTTS`, `omnivoice`, `irodori`, `kitten`, `supertonic` | None |
+| `tts_ttfa`, `e2e` | `qwen3`, `openai`, `minimax`, `pocket`, `kokoro`, `facebookMMS`, `chatTTS`, `omnivoice`, `irodori`, `kitten`, `supertonic` | None |
 
 `--stt none` deliberately has no STT measurement. Any field is also `n/a`
 when its stage did not run, produced no audio, or its measurement was unavailable.
@@ -98,6 +98,9 @@ that lock is not contended, and hold is omitted entirely when nothing held it.
 - `tts_ttfa` starts when synthesis of the first text segment begins and ends
   when the first provider audio samples arrive. For HTTP TTS, WAV headers are
   excluded, and resampling and output block assembly happen afterward.
+  MiniMax inherits the HTTP TTS timing path: its TTFA ends when SSE decoding
+  yields the first PCM samples, excluding metadata-only events and the final
+  aggregated-audio packet. E2E ends at the first yielded output block.
   Pocket Farsi captures this timestamp before buffering and validating the
   phrase, including across retries; it publishes the measurement only if
   validation produces usable audio. Generated sentence pauses are excluded
