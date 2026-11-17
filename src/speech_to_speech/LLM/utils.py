@@ -1,6 +1,7 @@
 import base64
 import io
 import re
+import unicodedata
 from collections.abc import Callable
 from typing import Optional
 
@@ -129,7 +130,7 @@ def remove_markdown(text: str) -> str:
 
 
 def remove_unspeechable(text: str) -> str:
-    """Keep only speechable characters: letters, digits, punctuation, whitespace.
+    """Keep letters, digits, linguistic combining marks, punctuation, and whitespace.
     support unicode characters (english, arabic, chinese, japanese, korean, etc.)
 
     Safe to call per streaming delta. Markdown stripping is intentionally not
@@ -137,7 +138,17 @@ def remove_unspeechable(text: str) -> str:
     remove_markdown), so callers apply it separately once a full sentence exists.
     """
     text = text.translate(SMART_PUNCT_TRANSLATION)
-    return SPEECHABLE_PATTERN.sub("", text)
+
+    def keep_linguistic_mark(match: re.Match[str]) -> str:
+        char = match.group()
+        # Keep filtering variation selectors and the enclosing keycap as before.
+        # Preserve other Unicode marks: Python's \w excludes even essential
+        # vowel signs and viramas.
+        if char == "\u20e3" or "\ufe00" <= char <= "\ufe0f" or "\U000e0100" <= char <= "\U000e01ef":
+            return ""
+        return char if unicodedata.category(char).startswith("M") else ""
+
+    return SPEECHABLE_PATTERN.sub(keep_linguistic_mark, text)
 
 
 def format_language_instruction(lang_name: str) -> str:

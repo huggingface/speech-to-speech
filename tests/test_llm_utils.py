@@ -29,6 +29,31 @@ def test_remove_unspeechable_keeps_chinese_punctuation() -> None:
     assert remove_unspeechable(text) == text
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "नमस्ते",  # Devanagari virama and vowel sign.
+        "हिन्दी",
+        "العَرَبِيَّة",  # Arabic vowel marks and shadda.
+        "กำลัง",  # Thai vowel mark.
+        "cafe\u0301",  # Decomposed Latin accent.
+        "за\u0301мок",  # Explicit Russian stress.
+    ],
+)
+def test_remove_unspeechable_preserves_linguistic_marks(text: str) -> None:
+    assert remove_unspeechable(text) == text
+
+
+def test_remove_unspeechable_preserves_marks_across_streaming_deltas() -> None:
+    deltas = ["नमस", "्", "त", "े", " cafe", "\u0301"]
+    assert "".join(remove_unspeechable(delta) for delta in deltas) == "नमस्ते cafe\u0301"
+
+
+@pytest.mark.parametrize("text, expected", [("Hi 👋🏽 ☀️!", "Hi  !"), ("1️⃣ #️⃣ *️⃣", "1 # *")])
+def test_remove_unspeechable_still_strips_emoji_presentation_marks(text: str, expected: str) -> None:
+    assert remove_unspeechable(text) == expected
+
+
 # --- language name coverage ---------------------------------------------------------------
 #
 # A language code with no entry in WHISPER_LANGUAGE_TO_LLM_LANGUAGE resolves to a `None`
