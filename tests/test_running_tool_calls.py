@@ -8,12 +8,14 @@ from openai.types.realtime import RealtimeSessionCreateRequest
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemFunctionCall,
     RealtimeConversationItemFunctionCallOutput,
+    RealtimeConversationItemUserMessage,
 )
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.api.openai_realtime.service import RealtimeService
 from speech_to_speech.LLM.chat import (
     LATE_TOOL_RESULT,
+    LATE_TOOL_RESULT_END,
     PENDING_TOOL_OUTPUT,
     RUNNING_TOOL_STATUS,
     Chat,
@@ -170,7 +172,10 @@ def test_late_result_and_the_next_user_message_form_one_user_turn():
         make_user_message("anything new?"),
     )
 
-    assert _shape(chat)[-1] == ("user", f"{_late()}\nanything new?")
+    # The two are merged for chat templates, so the result is closed before the user's words.
+    merged = f"{_late()}\n{LATE_TOOL_RESULT_END}\nanything new?"
+    assert _shape(chat)[-1] == ("user", merged)
+    assert chat.to_responses_api_chat()[-1]["content"][0]["text"] == merged
     _assert_every_call_has_an_output(chat)
 
 
@@ -269,11 +274,13 @@ def test_newest_user_message_lists_every_call_that_is_still_running():
     chat.add_item(make_assistant_message("It is raining in Paris."))
     chat.add_item(_output("call_fusion", "the fusion report"))
 
-    # A late result is a user message: the status line follows it and lists only what is left, oldest first.
+    # A late result is shown in the user role, but the status line stays with what the user said:
+    # the request ends with the result. The line lists only what is left, oldest first.
     left = _status('research_report({"topic": "batteries"})', 'research_report({"topic": "chips"})')
     late = _late("the fusion report", arguments='{"topic": "fusion"}')
-    assert _shape(chat)[-1] == ("user", f"{late}\n{left}")
-    assert chat.to_responses_api_chat()[-1]["content"][0]["text"] == f"{late}\n{left}"
+    assert _shape(chat)[0] == ("user", f"three reports and the weather\n{left}")
+    assert _shape(chat)[-1] == ("user", late)
+    assert chat.to_responses_api_chat()[-1]["content"][0]["text"] == late
     _assert_every_call_has_an_output(chat)
 
     # The line is rebuilt for each request and never stored.
@@ -788,3 +795,46 @@ def test_call_from_a_later_response_makes_the_earlier_result_late():
 
     role, content = _shape(chat)[-1]
     assert role == "user" and content.startswith(_late())
+
+
+def test_image_sent_after_a_result_does_not_release_the_rest_of_the_batch():
+    chat = Chat(10)
+    chat.add_item(make_user_message("weather in two cities"))
+    chat.add_ordered_function_call(_call("call_paris", "get_weather", '{"city": "Paris"}'))
+    chat.add_ordered_function_call(_call("call_rome", "get_weather", '{"city": "Rome"}'))
+    chat.add_item(_output("call_rome", "sunny"))
+    assert chat.has_incomplete_tool_batch()
+
+    chat.add_item(
+        RealtimeConversationItemUserMessage(
+            type="message",
+            role="user",
+            content=[{"type": "input_image", "image_url": "data:image/png;base64,AAAA"}],
+        )
+    )
+    assert chat.has_incomplete_tool_batch()
+
+    chat.add_item(make_user_message("never mind Paris"))
+    assert not chat.has_incomplete_tool_batch()
+
+
+def test_image_sent_after_a_late_result_does_not_take_the_status_line():
+    chat = Chat(10)
+    chat.add_item(make_user_message("two reports"))
+    chat.add_ordered_function_call(_call())
+    chat.add_ordered_function_call(_call("call_chips", arguments='{"topic": "chips"}'))
+    chat.add_item(make_user_message("how long will they take?"))
+    chat.add_item(make_assistant_message("A few minutes."))
+    chat.add_item(_output())
+    chat.add_item(
+        RealtimeConversationItemUserMessage(
+            type="message",
+            role="user",
+            content=[{"type": "input_image", "image_url": "data:image/png;base64,AAAA"}],
+        )
+    )
+
+    status = _status('research_report({"topic": "chips"})')
+    texts = [row[1] for row in _shape(chat) if row[0] == "user"]
+    assert texts[1] == f"how long will they take?\n{status}"
+    assert "Tool status" not in str(texts[-1]) and LATE_TOOL_RESULT_END not in str(texts[-1])
