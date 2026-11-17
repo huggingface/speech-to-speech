@@ -723,30 +723,60 @@ class Chat:
         self._assistant_item_aliases[item_id] = {message.id}
         return message
 
-    def add_heard_assistant_message(self, item_id: str, text: str, *, after_item_id: str | None = None) -> None:
-        """Add the heard part of an interrupted reply, addressed by its Realtime *item_id*."""
+    def add_heard_assistant_message(
+        self,
+        item_id: str,
+        text: str,
+        *,
+        after_item_id: str | None = None,
+        kept_calls_before: Collection[str] = (),
+        kept_call_after: str | None = None,
+    ) -> None:
+        """Add the heard part of an interrupted reply, addressed by its Realtime *item_id*.
+
+        The response's own calls that :meth:`keep_delivered_calls` kept bound
+        its position: *kept_calls_before* preceded this speech in the response
+        and *kept_call_after* is the next one that followed it.
+        """
         with self._lock:
             self._unheard_assistant_items.pop(item_id, None)
             message = self._heard_message_locked(item_id, text)
+            calls = {
+                item.call_id: index
+                for index, item in enumerate(self.buffer)
+                if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None
+            }
             insert_at = self._turn_insertion_index_locked(after_item_id)
-            if insert_at is not None:
-                # A result that arrived while the response was being said was
-                # not known to it, so the heard part goes before that result.
-                turn_start = next(
-                    (index + 1 for index, item in enumerate(self.buffer) if item.id == after_item_id),
-                    0,
-                )
+            start = max((calls[call_id] + 1 for call_id in kept_calls_before if call_id in calls), default=None)
+            if start is None and insert_at is not None:
+                start = next((index + 1 for index, item in enumerate(self.buffer) if item.id == after_item_id), 0)
+            elif start is not None and insert_at is None:
+                # The reply's position is gone, but its kept call still marks the turn.
                 insert_at = next(
                     (
                         index
-                        for index in range(turn_start, insert_at)
+                        for index in range(start, len(self.buffer))
+                        if isinstance(self.buffer[index], RealtimeConversationItemUserMessage)
+                    ),
+                    len(self.buffer),
+                )
+            if kept_call_after in calls:
+                insert_at = calls[kept_call_after]
+            if start is not None and insert_at is not None:
+                # A result that arrived while the response was being said was
+                # not known to it, so the heard part goes before that result.
+                insert_at = next(
+                    (
+                        index
+                        for index in range(start, insert_at)
                         if isinstance(self.buffer[index], RealtimeConversationItemFunctionCallOutput)
                     ),
                     insert_at,
                 )
             self._add_item_locked(message, insert_at=insert_at)
-            # The response was rolled back with its own calls, so every call
-            # before its heard part that had no result yet is one it was said past.
+            # Apart from the calls it kept, the response was rolled back with its
+            # own calls, so every other call before its heard part that had no
+            # result yet is one it was said past.
             index = next((index for index, item in enumerate(self.buffer) if item is message), 0)
             answered_before = {
                 item.call_id
@@ -761,6 +791,7 @@ class Chat:
                     if isinstance(item, RealtimeConversationItemFunctionCall)
                     and item.call_id is not None
                     and item.call_id not in answered_before
+                    and item.call_id not in kept_calls_before
                 },
             )
 
@@ -1013,6 +1044,29 @@ class Chat:
             self._provisional_generations.pop(response_key, None)
             self._provisional_output_items.pop(response_key, None)
             self._run_deferred_compaction_if_ready()
+
+    def keep_delivered_calls(self, response_key: str | None, call_ids: Iterable[str]) -> set[str]:
+        """Make calls a response already delivered survive its rollback.
+
+        A client acts on a function call as soon as it is exposed, so cancelling
+        the rest of the response must not make the model forget the call or
+        reject its output. Any output that already arrived is kept with it.
+        Returns the calls that were kept: the ones this response wrote.
+        """
+
+        with self._lock:
+            tracked = self._provisional_generations.get(response_key or "")
+            if tracked is None:
+                return set()
+            item_ids, tracked_call_ids = tracked
+            kept = tracked_call_ids.intersection(call_ids)
+            tracked_call_ids.difference_update(kept)
+            item_ids.difference_update(
+                item.id
+                for item in (*self.buffer, *self._pending_tool_calls.values())
+                if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id in kept
+            )
+            return kept
 
     def rollback_provisional_generation(self, response_key: str | None) -> None:
         """Synchronously remove eager output for a cancelled response, if any."""

@@ -1086,6 +1086,38 @@ class ResponseHandler(RealtimeBaseHandler):
                 messages.append((item_id, text))
         return messages
 
+    def _keep_delivered_calls(self, conn_id: str) -> dict[str, tuple[list[str], str | None]]:
+        """Keep the function calls a cancelled response delivered to the client.
+
+        Every call here was sent with its full arguments, so the client is
+        already running it: its output must still attach and the model must
+        remember making it. A call that was still waiting for the response's
+        outcome (one a local model wrote as text) is closed as ``completed``,
+        which is how the client learns it was kept. Returns, for each message
+        of the response, the kept calls before it and the next one after it,
+        in output order.
+        """
+        st = self._state(conn_id)
+        if is_out_of_band(st.current_response_params):
+            return {}
+        calls = {call.call_id: call for call in st.pending_function_calls.values() if call.call_id is not None}
+        kept_ids = self._service.history.keep_delivered_calls(conn_id, st.current_response_key, calls)
+        kept = [
+            (output_index, call.call_id)
+            for output_index, call in sorted(st.pending_function_calls.items())
+            if call.call_id in kept_ids
+        ]
+        for call_id in kept_ids:
+            calls[call_id].status = "completed"
+        around: dict[str, tuple[list[str], str | None]] = {}
+        for pending in st.pending_text_outputs:
+            position = int(pending["output_index"])
+            around[str(pending["item_id"])] = (
+                [call_id for index, call_id in kept if index < position],
+                next((call_id for index, call_id in kept if index > position), None),
+            )
+        return around
+
     def _truncate_audio_item(self, conn_id: str, item_id: str, played_samples: int, source: str) -> None:
         """Cut one ended assistant item's history to its first *played_samples*."""
         st = self._state(conn_id)
@@ -1219,6 +1251,8 @@ class ResponseHandler(RealtimeBaseHandler):
             item_status: Literal["completed", "incomplete"] = "completed" if status == "completed" else "incomplete"
             for pending in st.pending_text_outputs:
                 events.extend(self._finish_message_output(conn_id, pending, item_status, wants_audio, response_key))
+            # Before the terminal response is built: a kept call is listed as completed.
+            kept_calls = self._keep_delivered_calls(conn_id) if status == "cancelled" else {}
             terminal_response = self._build_response(conn_id, status, reason)
             function_outputs = {
                 getattr(item, "call_id", None): item
@@ -1270,7 +1304,14 @@ class ResponseHandler(RealtimeBaseHandler):
             # Speech already delivered stays in history, cut to its audio; a
             # client truncate or WebRTC playback position can cut it further.
             for item_id, text in heard:
-                st.runtime_config.chat.add_heard_assistant_message(item_id, text, after_item_id=anchor)
+                before, following = kept_calls.get(item_id, ([], None))
+                st.runtime_config.chat.add_heard_assistant_message(
+                    item_id,
+                    text,
+                    after_item_id=anchor,
+                    kept_calls_before=before,
+                    kept_call_after=following,
+                )
                 _log_heard(item_id, st.assistant_audio_segments.get(item_id, []), text, "audio sent before cancel")
         # Apply any client items that arrived mid-generation now that in_response
         # is cleared and the generation's own write-back has landed. Done outside
