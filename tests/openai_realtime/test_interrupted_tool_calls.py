@@ -1,7 +1,14 @@
 """A cancelled response keeps the function calls its client is already running."""
 
-from openai.types.realtime import ConversationItemCreatedEvent, ConversationItemCreateEvent, RealtimeErrorEvent
+from openai.types.realtime import (
+    ConversationItemCreatedEvent,
+    ConversationItemCreateEvent,
+    RealtimeErrorEvent,
+    ResponseDoneEvent,
+    ResponseOutputItemDoneEvent,
+)
 from openai.types.realtime.conversation_item import RealtimeConversationItemFunctionCall
+from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.responses import ResponseFunctionToolCall
 
 from speech_to_speech.LLM.chat import LATE_TOOL_RESULT, PENDING_TOOL_OUTPUT, make_user_message
@@ -144,13 +151,46 @@ def test_speech_after_a_kept_call_stays_after_it(service, conn_id):
     assert _model_input(chat)[2:] == [("assistant", "dance"), ("tool", "danced"), ("assistant", "Here I go.")]
 
 
-def test_call_the_client_never_received_complete_is_still_rolled_back(service, conn_id):
+def test_call_from_a_local_model_is_kept_and_listed_as_completed(service, conn_id):
+    """Local models' calls stay in progress until the response ends, but the client already runs them."""
     chat = _call_tool_while_speaking(service, conn_id, status="in_progress")
 
-    service.finish_response(conn_id, status="cancelled", reason="turn_detected")
+    events = service.finish_response(conn_id, status="cancelled", reason="turn_detected")
 
-    assert [item.type for item in chat.buffer] == ["message", "message"]
-    assert [type(event) for event in _send_output(service, conn_id)] == [RealtimeErrorEvent]
+    done = next(event for event in events if isinstance(event, ResponseDoneEvent))
+    closed = next(event for event in events if isinstance(event, ResponseOutputItemDoneEvent))
+    assert [item.status for item in done.response.output if item.type == "function_call"] == ["completed"]
+    assert (closed.item.call_id, closed.item.status) == ("call_dance", "completed")
+    assert [item.type for item in chat.buffer] == ["message", "message", "function_call"]
+    assert [type(event) for event in _send_output(service, conn_id)] == [ConversationItemCreatedEvent]
+
+
+def test_call_of_a_cancelled_out_of_band_response_is_listed_as_incomplete(service, conn_id):
+    """Nothing of an out-of-band response is in the conversation, so no output is expected."""
+    service._state(conn_id).current_response_params = RealtimeResponseCreateParams(conversation="none")
+    service.dispatch_pipeline_event(
+        conn_id,
+        AssistantOutputEvent(
+            response_key=RESPONSE_KEY,
+            parts=[
+                AssistantToolCallPart(
+                    tool=ResponseFunctionToolCall(
+                        type="function_call",
+                        id="fc_dance",
+                        call_id="call_dance",
+                        name="dance",
+                        arguments="{}",
+                        status="in_progress",
+                    )
+                )
+            ],
+        ),
+    )
+
+    events = service.finish_response(conn_id, status="cancelled", reason="client_cancelled")
+
+    done = next(event for event in events if isinstance(event, ResponseDoneEvent))
+    assert [item.status for item in done.response.output] == ["incomplete"]
 
 
 def test_failed_response_still_rolls_back_its_call(service, conn_id):

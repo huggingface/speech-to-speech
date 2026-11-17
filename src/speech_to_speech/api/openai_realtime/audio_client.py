@@ -727,6 +727,7 @@ class _ToolResponseBatch:
 
     call_ids: set[str] = field(default_factory=set)
     execution_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+    call_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     output_indices: dict[str, int] = field(default_factory=dict)
     authoritative_call_ids: set[str] = field(default_factory=set)
     ordered_call_ids: list[str] = field(default_factory=list)
@@ -890,8 +891,8 @@ class _ToolCallCoordinator:
             (output_index, item)
             for output_index, item in enumerate(output)
             if getattr(item, "type", None) == "function_call"
-            # A cancelled response keeps only the calls it delivered complete.
-            # The server still expects their outputs, so they run to the end.
+            # A cancelled response lists the calls it kept as completed. The
+            # server still expects their outputs, so they run to the end.
             and (status == "completed" or (status == "cancelled" and getattr(item, "status", None) == "completed"))
         ]
         if isinstance(response_id, str) and response_id and (status == "completed" or calls):
@@ -917,13 +918,19 @@ class _ToolCallCoordinator:
 
     @staticmethod
     def _drop_calls(batch: _ToolResponseBatch, *, keep: set[Any]) -> None:
-        """Stop waiting for the calls of a cancelled response that the server rolled back."""
+        """Stop the calls of a cancelled response that the server rolled back."""
         dropped = (batch.call_ids | batch.authoritative_call_ids) - keep - batch.delivered_call_ids
         batch.pending_deliveries -= len(dropped & batch.call_ids)
+        # A dropped call is forgotten entirely, so a result that finishes or a
+        # send that resumes afterwards finds nothing left to account for.
+        batch.call_ids -= dropped
         batch.authoritative_call_ids -= dropped
         batch.ordered_call_ids = [call_id for call_id in batch.ordered_call_ids if call_id not in dropped]
         for call_id in dropped:
             batch.results.pop(call_id, None)
+            task = batch.call_tasks.pop(call_id, None)
+            if task is not None:
+                task.cancel()
 
     def _batch(self, response_id: str) -> _ToolResponseBatch:
         batch = self._tool_batches.get(response_id)
@@ -973,12 +980,13 @@ class _ToolCallCoordinator:
                 getattr(call, "name", None),
                 getattr(call, "arguments", None),
             )
-            if not batch.cancelled:
+            if not batch.cancelled and call_id in batch.call_ids:
                 batch.results[call_id] = result
                 self._kick_delivery()
 
         execution = asyncio.create_task(execute())
         batch.execution_tasks.add(execution)
+        batch.call_tasks[call_id] = execution
         execution.add_done_callback(batch.execution_tasks.discard)
         self._track(execution, report_errors=True)
 
@@ -1021,7 +1029,11 @@ class _ToolCallCoordinator:
                     # same delivery a second time when the send resumes.
                     if batch.cancelled:
                         break
-                    batch.ordered_call_ids.pop(0)
+                    # The same response.done can drop just this call. Its
+                    # counters are released too, and the next call is now first.
+                    if call_id not in batch.call_ids:
+                        continue
+                    batch.ordered_call_ids.remove(call_id)
                     batch.authoritative_call_ids.discard(call_id)
                     batch.delivered_call_ids.add(call_id)
                     batch.results.pop(call_id, None)

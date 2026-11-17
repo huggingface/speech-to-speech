@@ -2718,19 +2718,82 @@ async def test_audio_client_delivers_a_call_kept_by_a_cancelled_response():
         await coordinator.close()
 
 
-async def test_audio_client_drops_a_call_the_cancelled_response_did_not_finish():
+async def test_audio_client_stops_a_call_the_cancelled_response_dropped():
+    """Only the kept call of a cancelled response runs on; the dropped one's tool is stopped."""
     gates, executor = _slow_and_fast_tools()
     conn = RecordingConnection()
     coordinator = _ToolCallCoordinator(conn, RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor))
     try:
         coordinator.handle_event(response_created("response_1"))
-        coordinator.handle_event(output_item_added("call_unfinished", output_index=0))
-        coordinator.handle_event(
-            response_done(status="cancelled", output=[_listed_call("call_unfinished", "incomplete")])
-        )
-        await wait_until(lambda: not coordinator._background_tasks)
+        for index, call_id in enumerate(("call_dropped", "call_kept")):
+            coordinator.handle_event(output_item_added(call_id, output_index=index))
+            coordinator.handle_event(tool_call(call_id, output_index=index, arguments=json.dumps({"index": index})))
+        await asyncio.sleep(0)
+        dropped_task = coordinator._tool_batches["response_1"].call_tasks["call_dropped"]
 
-        assert conn.sent == []
+        coordinator.handle_event(
+            response_done(
+                status="cancelled",
+                output=[_listed_call("call_dropped", "incomplete"), _listed_call("call_kept", "completed")],
+            )
+        )
+        gates[1].set()
+        await wait_until(lambda: len(conn.sent) == 2)
+
+        assert dropped_task.cancelled()
+        assert [event["type"] for event in conn.sent] == ["conversation.item.create", "response.create"]
+        assert conn.sent[0]["item"]["call_id"] == "call_kept"
         assert coordinator._tool_batches == {}
+        assert not coordinator._failure.done()
+    finally:
+        await coordinator.close()
+
+
+async def test_audio_client_survives_a_call_dropped_while_its_output_is_being_sent():
+    class BlockingConnection(RecordingConnection):
+        def __init__(self):
+            super().__init__()
+            self.send_started = asyncio.Event()
+            self.release_send = asyncio.Event()
+            self.block_next_output = True
+
+        async def send(self, event):
+            if event["type"] == "conversation.item.create" and self.block_next_output:
+                self.block_next_output = False
+                self.send_started.set()
+                await self.release_send.wait()
+            self.sent.append(event)
+
+    gates, executor = _slow_and_fast_tools()
+    conn = BlockingConnection()
+    coordinator = _ToolCallCoordinator(conn, RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor))
+    try:
+        coordinator.handle_event(response_created("response_1"))
+        for index, call_id in enumerate(("call_dropped", "call_kept")):
+            coordinator.handle_event(output_item_added(call_id, output_index=index))
+            coordinator.handle_event(tool_call(call_id, output_index=index, arguments=json.dumps({"index": index})))
+        gates[0].set()
+        await asyncio.wait_for(conn.send_started.wait(), timeout=1.0)
+        batch = coordinator._tool_batches["response_1"]
+
+        # The first call's output is on its way when the response drops that call.
+        coordinator.handle_event(
+            response_done(
+                status="cancelled",
+                output=[_listed_call("call_dropped", "incomplete"), _listed_call("call_kept", "completed")],
+            )
+        )
+        assert batch.pending_deliveries == 1
+        conn.release_send.set()
+        gates[1].set()
+        await wait_until(lambda: any(event["type"] == "response.create" for event in conn.sent))
+
+        assert [event["item"]["call_id"] for event in conn.sent if event["type"] == "conversation.item.create"] == [
+            "call_dropped",
+            "call_kept",
+        ]
+        assert batch.pending_deliveries == 0
+        assert batch.delivered_call_ids == {"call_kept"}
+        assert not coordinator._failure.done()
     finally:
         await coordinator.close()

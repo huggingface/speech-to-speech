@@ -1089,20 +1089,26 @@ class ResponseHandler(RealtimeBaseHandler):
     def _keep_delivered_calls(self, conn_id: str) -> dict[str, tuple[list[str], str | None]]:
         """Keep the function calls a cancelled response delivered to the client.
 
-        The client is already running them, so their outputs must still attach
-        and the model must remember making them. Returns, for each message of
-        the response, the kept calls before it and the next one after it, in
-        output order.
+        Every call here was sent with its full arguments, so the client is
+        already running it: its output must still attach and the model must
+        remember making it. A call that was still waiting for the response's
+        outcome (one a local model wrote as text) is closed as ``completed``,
+        which is how the client learns it was kept. Returns, for each message
+        of the response, the kept calls before it and the next one after it,
+        in output order.
         """
         st = self._state(conn_id)
         if is_out_of_band(st.current_response_params):
             return {}
+        calls = {call.call_id: call for call in st.pending_function_calls.values() if call.call_id is not None}
+        kept_ids = self._service.history.keep_delivered_calls(conn_id, st.current_response_key, calls)
         kept = [
             (output_index, call.call_id)
             for output_index, call in sorted(st.pending_function_calls.items())
-            if call.status == "completed" and call.call_id is not None
+            if call.call_id in kept_ids
         ]
-        self._service.history.keep_delivered_calls(conn_id, st.current_response_key, [call_id for _, call_id in kept])
+        for call_id in kept_ids:
+            calls[call_id].status = "completed"
         around: dict[str, tuple[list[str], str | None]] = {}
         for pending in st.pending_text_outputs:
             position = int(pending["output_index"])
@@ -1245,6 +1251,8 @@ class ResponseHandler(RealtimeBaseHandler):
             item_status: Literal["completed", "incomplete"] = "completed" if status == "completed" else "incomplete"
             for pending in st.pending_text_outputs:
                 events.extend(self._finish_message_output(conn_id, pending, item_status, wants_audio, response_key))
+            # Before the terminal response is built: a kept call is listed as completed.
+            kept_calls = self._keep_delivered_calls(conn_id) if status == "cancelled" else {}
             terminal_response = self._build_response(conn_id, status, reason)
             function_outputs = {
                 getattr(item, "call_id", None): item
@@ -1290,7 +1298,6 @@ class ResponseHandler(RealtimeBaseHandler):
                 self._service.history.finalize(conn_id, st.current_response_key)
             heard = self._heard_output(conn_id, open_item_id) if status == "cancelled" else []
             anchor = self._service.history.anchor(conn_id, st.current_response_key)
-            kept_calls = self._keep_delivered_calls(conn_id) if status == "cancelled" else {}
             # Ending the response closes its key, which rolls back unfinalized
             # history before deferred client items are applied below.
             self._end_response(conn_id, status)

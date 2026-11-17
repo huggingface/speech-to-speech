@@ -1045,18 +1045,19 @@ class Chat:
             self._provisional_output_items.pop(response_key, None)
             self._run_deferred_compaction_if_ready()
 
-    def keep_delivered_calls(self, response_key: str | None, call_ids: Iterable[str]) -> None:
+    def keep_delivered_calls(self, response_key: str | None, call_ids: Iterable[str]) -> set[str]:
         """Make calls a response already delivered survive its rollback.
 
         A client acts on a function call as soon as it is exposed, so cancelling
         the rest of the response must not make the model forget the call or
         reject its output. Any output that already arrived is kept with it.
+        Returns the calls that were kept: the ones this response wrote.
         """
 
         with self._lock:
             tracked = self._provisional_generations.get(response_key or "")
             if tracked is None:
-                return
+                return set()
             item_ids, tracked_call_ids = tracked
             kept = tracked_call_ids.intersection(call_ids)
             tracked_call_ids.difference_update(kept)
@@ -1065,6 +1066,7 @@ class Chat:
                 for item in (*self.buffer, *self._pending_tool_calls.values())
                 if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id in kept
             )
+            return kept
 
     def rollback_provisional_generation(self, response_key: str | None) -> None:
         """Synchronously remove eager output for a cancelled response, if any."""

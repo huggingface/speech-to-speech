@@ -830,7 +830,7 @@ class TestDeferConversationItemsDuringResponse:
         assert st.last_item_id == created.item.id
         assert [item.type for item in chat.buffer] == ["function_call", "message", "function_call_output"]
 
-    def test_cancel_rolls_back_provisional_call_before_flushing_deferred_output(self, service, conn_id):
+    def test_cancel_keeps_delivered_call_before_flushing_deferred_output(self, service, conn_id):
         st = service._state(conn_id)
         chat = st.runtime_config.chat
         user = chat.add_item(
@@ -873,15 +873,18 @@ class TestDeferConversationItemsDuringResponse:
 
         events = service.finish_response(conn_id, status="cancelled", reason="client_cancelled")
 
+        # The client was already running the call, so its output still attaches.
         assert any(isinstance(event, ResponseDoneEvent) for event in events)
-        assert any(isinstance(event, RealtimeErrorEvent) for event in events), events
-        assert not any(isinstance(event, ConversationItemCreatedEvent) for event in events)
-        assert chat.buffer == [user]
+        assert not any(isinstance(event, RealtimeErrorEvent) for event in events), events
+        created = [event for event in events if isinstance(event, ConversationItemCreatedEvent)]
+        assert [event.item.type for event in created] == ["function_call_output"]
+        assert chat.buffer[0] == user
+        assert [item.type for item in chat.buffer] == ["message", "function_call", "function_call_output"]
         assert not chat.has_pending_tool_calls()
         assert chat._provisional_generations == {}
 
-        # response.done is now a safe boundary: an immediate follow-up does not
-        # see the cancelled call or get rejected as waiting for its output.
+        # response.done is a safe boundary: an immediate follow-up is not
+        # rejected as waiting for an output.
         next_response = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
         assert isinstance(next_response, ResponseCreatedEvent)
 
@@ -1022,7 +1025,9 @@ class TestDeferConversationItemsDuringResponse:
         created = [event for event in events if isinstance(event, ConversationItemCreatedEvent)]
         assert len(created) == 1
         assert created[0].item.content[0].image_url == "data:image/jpeg;base64,user"
-        assert chat.buffer == [user, created[0].item]
+        # The delivered call stays, still waiting for its output.
+        assert chat.buffer == [user, call, created[0].item]
+        assert chat.has_pending_tool_calls()
 
     def test_cancel_keeps_delivered_calls_with_user_image_between_tool_outputs(
         self,

@@ -90,9 +90,9 @@ class HistoryHandler(RealtimeBaseHandler):
         """Make a completed response's history permanent."""
         self._state(conn_id).runtime_config.chat.finalize_provisional_generation(key)
 
-    def keep_delivered_calls(self, conn_id: str, key: str | None, call_ids: Iterable[str]) -> None:
-        """Keep a cancelled response's delivered function calls when it closes."""
-        self._state(conn_id).runtime_config.chat.keep_delivered_calls(key, call_ids)
+    def keep_delivered_calls(self, conn_id: str, key: str | None, call_ids: Iterable[str]) -> set[str]:
+        """Keep a cancelled response's delivered function calls when it closes; return the kept ones."""
+        return self._state(conn_id).runtime_config.chat.keep_delivered_calls(key, call_ids)
 
     def close(self, conn_id: str, key: str | None) -> None:
         """Forget a closed response and undo any history it did not finalize."""
