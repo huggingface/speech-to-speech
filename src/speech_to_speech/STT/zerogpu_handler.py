@@ -11,6 +11,7 @@ from speech_to_speech.pipeline.language_detection import (
     warm_language_detector,
 )
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription, TranscriptionFailure
+from speech_to_speech.pipeline.transcript_logging import log_exception
 from speech_to_speech.speech_languages import SpeechLanguageCapabilities
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 from speech_to_speech.zerogpu import runtime
@@ -40,8 +41,8 @@ class ZeroGPUSTTHandler(BaseSTTHandler):
         started = perf_counter()
         try:
             text = runtime.transcribe(np.asarray(item.audio, dtype=np.float32))
-        except Exception:
-            logger.exception("ZeroGPU transcription failed")
+        except Exception as exc:
+            log_exception(logger, "ZeroGPU transcription failed", exc)
             if item.mode != "progressive":
                 yield TranscriptionFailure(
                     message="ZeroGPU transcription failed",
@@ -64,8 +65,8 @@ class ZeroGPUSTTHandler(BaseSTTHandler):
                     if text
                     else None
                 )
-            except Exception:
-                logger.exception("Parakeet language detection failed; leaving language unset")
+            except Exception as exc:
+                log_exception(logger, "Parakeet language detection failed; leaving language unset", exc)
                 detected = None
             if detected:
                 self.last_language = detected

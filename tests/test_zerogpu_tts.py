@@ -1,5 +1,6 @@
 """One parent proxy supports different providers without importing either model."""
 
+import logging
 from queue import Queue
 from threading import Event, Thread
 from time import perf_counter
@@ -10,6 +11,7 @@ import pytest
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.pipeline import transcript_logging
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
@@ -181,6 +183,33 @@ def test_provider_failure_reported_once_and_remaining_response_suppressed(adapte
     ]
     assert list(handler.process(item)) == []
     assert calls == [1, 1]
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_error_logs_respect_transcript_logging(adapter, monkeypatch, caplog, enabled):
+    handler, worker, scope, _ = adapter
+    marker = "synthetic-private-note-8675309"
+    monkeypatch.setattr(transcript_logging, "_log_transcripts", enabled)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError(marker)
+
+    worker.synthesize_chunks = fail
+    logger = "speech_to_speech.TTS.zerogpu_handler"
+    item = TTSInput(text="Hello.", response_key="response", cancel_generation=scope.generation)
+    with caplog.at_level(logging.ERROR, logger=logger):
+        assert list(handler.process(item)) == []
+
+    failure = handler.queue_out.get_nowait()
+    assert isinstance(failure, ResponseFailedEvent)
+    assert failure.message == "ZeroGPU TTS synthesis failed"
+    assert failure.response_key == item.response_key
+    records = [record for record in caplog.records if record.name == logger]
+    assert len(records) == 1
+    assert records[0].levelno == logging.ERROR
+    assert (marker in caplog.text) is enabled
+    assert (records[0].exc_info is not None) is enabled
+    assert "RuntimeError" in caplog.text
 
 
 def test_stale_speculation_drops_input_but_preserves_response_cleanup(adapter):

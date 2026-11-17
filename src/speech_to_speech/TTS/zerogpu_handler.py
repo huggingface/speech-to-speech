@@ -8,6 +8,7 @@ from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
+from speech_to_speech.pipeline.transcript_logging import log_exception
 from speech_to_speech.pipeline.turn_latency import record_response_e2e, record_response_tts_ttfa
 from speech_to_speech.zerogpu import runtime
 
@@ -125,8 +126,8 @@ class ZeroGPUTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 yield chunk
             if first and not cancelled():
                 raise RuntimeError("ZeroGPU TTS provider returned no audio")
-        except Exception:
-            logger.exception("ZeroGPU TTS synthesis failed")
+        except Exception as exc:
+            log_exception(logger, "ZeroGPU TTS synthesis failed", exc)
             if not cancelled():
                 self._failed_responses.add(identity)
                 self.queue_out.put(
