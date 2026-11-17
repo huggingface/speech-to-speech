@@ -448,7 +448,12 @@ class ConversationHandler(RealtimeBaseHandler):
         st.pending_item_acks = []
         events: list[ServerEvent] = []
         for item in items:
-            if revalidate_tool_outputs and isinstance(item, RealtimeConversationItemFunctionCallOutput):
+            if (
+                revalidate_tool_outputs
+                and isinstance(item, RealtimeConversationItemFunctionCallOutput)
+                # An output whose call was kept is still in the chat.
+                and st.runtime_config.chat.get_item(item.id or "") is None
+            ):
                 events.extend(self._apply_item(conn_id, item))
             else:
                 events.append(self._ack_item(conn_id, item))

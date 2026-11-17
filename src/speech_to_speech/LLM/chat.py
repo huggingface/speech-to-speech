@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from collections.abc import Callable, Container, Sequence
+from collections.abc import Callable, Container, Iterable, Sequence
 from copy import deepcopy
 from typing import Any, Literal, NamedTuple, Union, cast
 
@@ -173,6 +173,10 @@ class Chat:
         # so a later playback report can put it back.
         self._unheard_assistant_items: dict[str, _UnheardReply] = {}
         self._deleted_tool_output_ids: set[str] = set()
+        # Calls a cancelled response had already delivered. The client is
+        # running them, so they stay in history, but the conversation moved on
+        # and no longer waits for their outputs.
+        self._interrupted_call_ids: set[str] = set()
         self._user_turn_count: int = 0
 
         # All state mutations and serializations go through _lock. Public methods
@@ -211,7 +215,7 @@ class Chat:
         return protected
 
     def _protected_responses_context(self, include_provisional: bool) -> set[str]:
-        call_ids = set(self._pending_tool_calls)
+        call_ids = set(self._pending_tool_calls) - self._interrupted_call_ids
         if include_provisional:
             for _, provisional_call_ids in self._provisional_generations.values():
                 call_ids.update(provisional_call_ids)
@@ -481,9 +485,13 @@ class Chat:
             return sorted({item.call_id for item in self.buffer if item.type == "function_call_output"})
 
     def has_pending_tool_calls(self) -> bool:
-        """Whether the conversation is waiting for any function-call output."""
+        """Whether the conversation is waiting for any function-call output.
+
+        Calls kept from a cancelled response do not count: the turn that
+        interrupted them must still get its reply.
+        """
         with self._lock:
-            return bool(self._pending_tool_calls)
+            return any(call_id not in self._interrupted_call_ids for call_id in self._pending_tool_calls)
 
     def trim_if_needed(self, compactor: CompactFn | None = None) -> None:
         """Enforce the size limit after a generation completes. Fires when
@@ -624,6 +632,7 @@ class Chat:
                 )
                 self._pending_tool_calls.pop(removed.call_id, None)
                 self._ordered_pending_calls.pop(removed.call_id, None)
+                self._interrupted_call_ids.discard(removed.call_id)
         elif isinstance(removed, RealtimeConversationItemFunctionCallOutput):
             if not any(item.type == "function_call_output" and item.call_id == removed.call_id for item in self.buffer):
                 call = next(
@@ -674,14 +683,32 @@ class Chat:
         self._assistant_item_aliases[item_id] = {message.id}
         return message
 
-    def add_heard_assistant_message(self, item_id: str, text: str, *, after_item_id: str | None = None) -> None:
-        """Add the heard part of an interrupted reply, addressed by its Realtime *item_id*."""
+    def add_heard_assistant_message(
+        self,
+        item_id: str,
+        text: str,
+        *,
+        after_item_id: str | None = None,
+        before_call_id: str | None = None,
+    ) -> None:
+        """Add the heard part of an interrupted reply, addressed by its Realtime *item_id*.
+
+        *before_call_id* names a kept function call the speech preceded in the
+        response, so it is placed ahead of that call instead of at the turn's end.
+        """
         with self._lock:
             self._unheard_assistant_items.pop(item_id, None)
-            self._add_item_locked(
-                self._heard_message_locked(item_id, text),
-                insert_at=self._turn_insertion_index_locked(after_item_id),
+            insert_at = next(
+                (
+                    index
+                    for index, item in enumerate(self.buffer)
+                    if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id == before_call_id
+                ),
+                None,
             )
+            if before_call_id is None or insert_at is None:
+                insert_at = self._turn_insertion_index_locked(after_item_id)
+            self._add_item_locked(self._heard_message_locked(item_id, text), insert_at=insert_at)
 
     def truncate_assistant_message(self, item_id: str, text: str) -> bool:
         """Keep only *text*, the heard prefix, of one delivered assistant message.
@@ -915,6 +942,32 @@ class Chat:
             self._provisional_generations.pop(response_key, None)
             self._provisional_output_items.pop(response_key, None)
             self._run_deferred_compaction_if_ready()
+
+    def keep_delivered_calls(self, response_key: str | None, call_ids: Iterable[str]) -> None:
+        """Make calls a response already delivered survive its rollback.
+
+        A client acts on a function call as soon as it is exposed, so cancelling
+        the rest of the response must not make the model forget the call or
+        reject its output. Any output that already arrived is kept with it.
+        """
+
+        with self._lock:
+            tracked = self._provisional_generations.get(response_key or "")
+            if tracked is None:
+                return
+            item_ids, tracked_call_ids = tracked
+            kept = tracked_call_ids.intersection(call_ids)
+            if not kept:
+                return
+            tracked_call_ids.difference_update(kept)
+            calls = [*self.buffer, *self._pending_tool_calls.values()]
+            item_ids.difference_update(
+                item.id
+                for item in calls
+                if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id in kept
+            )
+            known = {item.call_id for item in calls if isinstance(item, RealtimeConversationItemFunctionCall)}
+            self._interrupted_call_ids = (self._interrupted_call_ids & known) | kept
 
     def rollback_provisional_generation(self, response_key: str | None) -> None:
         """Synchronously remove eager output for a cancelled response, if any."""
@@ -1239,6 +1292,7 @@ class Chat:
                 self._user_turn_count,
             )
             clone._deleted_tool_output_ids = set(self._deleted_tool_output_ids)
+            clone._interrupted_call_ids = set(self._interrupted_call_ids)
             clone._assistant_item_aliases = {wire_id: set(ids) for wire_id, ids in self._assistant_item_aliases.items()}
             if deep:
                 state = deepcopy(state)
@@ -1304,6 +1358,7 @@ class Chat:
                 )
             )
             clone._deleted_tool_output_ids = set(self._deleted_tool_output_ids)
+            clone._interrupted_call_ids = set(self._interrupted_call_ids)
             clone._assistant_item_aliases = {wire_id: set(ids) for wire_id, ids in self._assistant_item_aliases.items()}
             tracked = deepcopy(self._provisional_generations.get(response_key))
         if tracked is not None:
@@ -1325,6 +1380,7 @@ class Chat:
             self._deferred_compactor = None
             self._user_turn_count = 0
             self._deleted_tool_output_ids.clear()
+            self._interrupted_call_ids.clear()
             self._assistant_item_aliases.clear()
             self._unheard_assistant_items.clear()
 

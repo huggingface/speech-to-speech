@@ -136,10 +136,12 @@ def test_history_acceptance_uses_global_order_and_keeps_committed_work(outcome):
         )
         # A late copy of a closed response cannot write its history again.
         service.dispatch_pipeline_event(conn_id, event)
-    if outcome == "completed":
-        assert [item.type for item in chat.buffer] == ["message", "message", "function_call", "message"]
-    else:
-        assert [item.type for item in chat.buffer] == ["message", "message"]
+    # Cancelling drops undelivered text, but the client already has the call.
+    assert [item.type for item in chat.buffer] == {
+        "superseded": ["message", "message"],
+        "completed": ["message", "message", "function_call", "message"],
+        "cancelled": ["message", "function_call", "message"],
+    }[outcome]
     service.unregister(conn_id)
 
 

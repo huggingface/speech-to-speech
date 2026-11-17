@@ -885,7 +885,7 @@ class TestDeferConversationItemsDuringResponse:
         next_response = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
         assert isinstance(next_response, ResponseCreatedEvent)
 
-    def test_cancel_preserves_image_applied_for_prefetch(
+    def test_cancel_keeps_delivered_call_with_image_applied_for_prefetch(
         self,
         service,
         conn_id,
@@ -954,12 +954,15 @@ class TestDeferConversationItemsDuringResponse:
             response_key=response_key,
         )
 
-        assert any(isinstance(event, RealtimeErrorEvent) for event in events)
+        # The client already ran the call, so its output stays attached.
+        assert not any(isinstance(event, RealtimeErrorEvent) for event in events)
         created = [event for event in events if isinstance(event, ConversationItemCreatedEvent)]
-        assert len(created) == 1
+        assert [event.item.type for event in created] == ["message", "function_call_output"]
         assert created[0].item.id == "msg_client_camera_frame_cancelled"
         assert created[0].item.content[0].image_url == "data:image/jpeg;base64,abc"
-        assert chat.buffer == [user, created[0].item]
+        assert chat.buffer[0] == user
+        assert [item.type for item in chat.buffer] == ["message", "function_call", "message", "function_call_output"]
+        assert not chat.has_pending_tool_calls()
         assert st.pending_item_acks == []
         assert st.tool_followup_prefetch_request is None
         assert prefetch.response_key in st.closed_response_keys
@@ -1021,7 +1024,7 @@ class TestDeferConversationItemsDuringResponse:
         assert created[0].item.content[0].image_url == "data:image/jpeg;base64,user"
         assert chat.buffer == [user, created[0].item]
 
-    def test_cancel_preserves_ordered_user_image_between_tool_outputs(
+    def test_cancel_keeps_delivered_calls_with_user_image_between_tool_outputs(
         self,
         service,
         conn_id,
@@ -1112,12 +1115,19 @@ class TestDeferConversationItemsDuringResponse:
         )
 
         created = [event for event in events if isinstance(event, ConversationItemCreatedEvent)]
-        errors = [event for event in events if isinstance(event, RealtimeErrorEvent)]
-        assert len(created) == 1
-        assert len(errors) == 2
-        assert created[0].item.id == "msg_ordinary_user_image"
-        assert created[0].item.content[0].image_url == "data:image/jpeg;base64,user"
-        assert chat.buffer == [user, created[0].item]
+        assert not any(isinstance(event, RealtimeErrorEvent) for event in events)
+        assert [event.item.type for event in created] == ["function_call_output", "message", "function_call_output"]
+        assert created[1].item.id == "msg_ordinary_user_image"
+        assert created[1].item.content[0].image_url == "data:image/jpeg;base64,user"
+        assert chat.buffer[0] == user
+        assert [item.type for item in chat.buffer] == [
+            "message",
+            "function_call",
+            "function_call",
+            "function_call_output",
+            "message",
+            "function_call_output",
+        ]
 
     def test_cancel_rolls_back_generated_call_not_yet_delivered_after_tts(self, service, conn_id):
         st = service._state(conn_id)
