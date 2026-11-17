@@ -257,6 +257,16 @@ def test_sentence_tokenization_preserves_complete_emphasis_pairs() -> None:
         ("مرحبا؟ كيف حالك؟ أنا بخير.", ["مرحبا؟", "كيف حالك؟", "أنا بخير."]),
         ("他说：「你好。」然后走了。", ["他说：「你好。」", "然后走了。"]),
         ("Hello. How are you? 你好。再见。", ["Hello.", "How are you?", "你好。", "再见。"]),
+        ("「こんにちは。」と彼は言った。", ["「こんにちは。」と彼は言った。"]),
+        ("「そう。」って言った。次へ。", ["「そう。」って言った。", "次へ。"]),
+        ("彼は「今日は晴れ。明日は雨。」と言った。", ["彼は「今日は晴れ。明日は雨。」と言った。"]),
+        ("本当ですか！？すごいですね。", ["本当ですか！？", "すごいですね。"]),
+        ("（注：これは例です。）次に進みます。", ["（注：これは例です。）", "次に進みます。"]),
+        ("他说：“今天很好。”然后走了。", ["他说：“今天很好。”", "然后走了。"]),
+        ("他说：“今天很好。明天也好。”然后走了。", ["他说：“今天很好。明天也好。”", "然后走了。"]),
+        ("こんにちは。今日はいい天気ですね。", ["こんにちは。", "今日はいい天気ですね。"]),
+        ("你好。(see note) 再见。", ["你好。", "(see note) 再见。"]),
+        ("(unclosed note 你好。再见。", ["(unclosed note 你好。", "再见。"]),
     ],
 )
 def test_sentence_tokenization_splits_after_non_latin_terminators(text: str, expected: list[str]) -> None:
@@ -279,4 +289,15 @@ def test_remove_unspeechable_keeps_arabic_devanagari_and_halfwidth_terminators(t
 
 def test_sentence_tokenization_is_unchanged_for_latin_text() -> None:
     text = "  Hello there. How are you?"
+    assert sent_tokenize_preserving_markdown_code(text, sent_tokenize) == sent_tokenize(text)
+
+
+def test_sentence_tokenization_holds_cjk_sentence_inside_open_bracket() -> None:
+    assert sent_tokenize_preserving_markdown_code("「こんにちは。", sent_tokenize) == ["「こんにちは。"]
+    assert sent_tokenize_preserving_markdown_code("彼は「今日は晴れ。明日は", sent_tokenize) == ["彼は「今日は晴れ。明日は"]
+    assert sent_tokenize_preserving_markdown_code("「こんにちは。」", sent_tokenize) == ["「こんにちは。」"]
+
+
+def test_sentence_tokenization_open_bracket_does_not_change_latin_text() -> None:
+    text = "He said (hello. Then left. Bye."
     assert sent_tokenize_preserving_markdown_code(text, sent_tokenize) == sent_tokenize(text)
