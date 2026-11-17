@@ -18,6 +18,7 @@ from speech_to_speech.arguments_classes.facebookmms_tts_arguments import Faceboo
 from speech_to_speech.arguments_classes.faster_whisper_stt_arguments import (
     FasterWhisperSTTHandlerArguments,
 )
+from speech_to_speech.arguments_classes.irodori_tts_arguments import IrodoriTTSHandlerArguments
 from speech_to_speech.arguments_classes.kitten_tts_arguments import KittenTTSHandlerArguments
 from speech_to_speech.arguments_classes.kokoro_tts_arguments import KokoroTTSHandlerArguments
 from speech_to_speech.arguments_classes.language_model_arguments import (
@@ -720,6 +721,18 @@ TTS_BACKENDS = build_backend_registry(
                 context_kwargs=True,
             ),
             config_prefix="drama3",
+        ),
+        BackendSpec(
+            "irodori",
+            "tts",
+            IrodoriTTSHandlerArguments,
+            _simple_handler_factory(
+                "speech_to_speech.TTS.irodori_tts_handler",
+                "IrodoriTTSHandler",
+                setup_should_listen=True,
+                context_kwargs=True,
+            ),
+            config_prefix="irodori",
         ),
         BackendSpec(
             "minimax",
