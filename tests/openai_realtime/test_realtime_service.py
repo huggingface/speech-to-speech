@@ -2122,7 +2122,7 @@ class TestHandleResponseCreate:
         assert "call_bogus" in result.error.message
         assert service._state(conn_id).in_response is False
 
-    def test_response_create_rejects_unresolved_function_call(self, service, conn_id, text_prompt_queue):
+    def test_response_create_proceeds_while_a_function_call_is_running(self, service, conn_id, text_prompt_queue):
         chat = service._state(conn_id).runtime_config.chat
         chat.add_ordered_function_call(
             RealtimeConversationItemFunctionCall(
@@ -2135,12 +2135,13 @@ class TestHandleResponseCreate:
 
         result = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
 
-        assert isinstance(result, RealtimeErrorEvent)
-        assert result.error.type == "function_call_output_pending"
-        assert service._state(conn_id).in_response is False
-        assert text_prompt_queue.empty()
+        assert isinstance(result, ResponseCreatedEvent)
+        assert chat.has_pending_tool_calls()
+        assert isinstance(text_prompt_queue.get_nowait(), GenerateResponseRequest)
 
-    def test_rejected_response_input_does_not_mutate_chat(self, service, conn_id, text_prompt_queue):
+    def test_response_create_accepts_user_input_while_a_function_call_is_running(
+        self, service, conn_id, text_prompt_queue
+    ):
         chat = service._state(conn_id).runtime_config.chat
         chat.add_ordered_function_call(
             RealtimeConversationItemFunctionCall(
@@ -2152,16 +2153,15 @@ class TestHandleResponseCreate:
         )
         event = ResponseCreateEvent(
             type="response.create",
-            response={"input": [self._user_input("must not survive rejection")]},
+            response={"input": [self._user_input("an unrelated question")]},
         )
 
         result = service.handle_response_create(conn_id, event)
 
-        assert isinstance(result, RealtimeErrorEvent)
-        assert result.error.type == "function_call_output_pending"
-        assert [item.type for item in chat.buffer] == ["function_call"]
+        assert isinstance(result, ResponseCreatedEvent)
+        assert [item.type for item in chat.buffer] == ["function_call", "message"]
         assert chat.has_pending_tool_calls()
-        assert text_prompt_queue.empty()
+        assert isinstance(text_prompt_queue.get_nowait(), GenerateResponseRequest)
 
     def test_partially_resolved_response_input_does_not_mutate_chat(self, service, conn_id, text_prompt_queue):
         chat = service._state(conn_id).runtime_config.chat
@@ -2886,7 +2886,6 @@ class TestResponseDoneOutputItems:
         assert len(tool.call_id) <= 32
         assert chat.buffer[-1].call_id == tool.call_id
         assert not chat.has_pending_tool_calls()
-        assert not chat._ordered_pending_calls
 
         result = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
         assert isinstance(result, ResponseCreatedEvent)

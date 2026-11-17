@@ -48,6 +48,7 @@ from speech_to_speech.api.openai_realtime.reasoning import SpeechToSpeechReasoni
 from speech_to_speech.api.openai_realtime.runtime_config import validate_reasoning
 from speech_to_speech.api.openai_realtime.tool_followup import (
     TOOL_FOLLOWUP_ACK_LIMIT,
+    TOOL_FOLLOWUP_BATCH_PENDING,
     TOOL_FOLLOWUP_COVERED,
     TOOL_FOLLOWUP_METADATA_KEY,
     TOOL_FOLLOWUP_WAIT,
@@ -916,10 +917,13 @@ class ResponseHandler(RealtimeBaseHandler):
                     add_supported_item(candidate_chat, input_item.model_copy(deep=True))
             except ChatItemError as exc:
                 return self.make_error(message=str(exc), _type="invalid_input_item")
-            if candidate_chat.has_pending_tool_calls():
+            if candidate_chat.has_incomplete_tool_batch():
+                # Clients that request a follow-up after every tool result rely on
+                # this to get one reply for a batch of parallel calls. Any other
+                # response is generated while tools run.
                 return self.make_error(
                     message="Cannot create a response while function call outputs are pending.",
-                    _type="function_call_output_pending",
+                    _type=TOOL_FOLLOWUP_BATCH_PENDING,
                 )
 
         if replacing_prefetch:

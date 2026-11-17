@@ -36,6 +36,7 @@ from websockets.exceptions import ConnectionClosed
 
 from speech_to_speech.api.openai_realtime.echo_canceller import EchoCanceller
 from speech_to_speech.api.openai_realtime.tool_followup import (
+    TOOL_FOLLOWUP_BATCH_PENDING,
     TOOL_FOLLOWUP_COVERED,
     TOOL_FOLLOWUP_METADATA_KEY,
     TOOL_FOLLOWUP_WAIT,
@@ -757,7 +758,6 @@ class _ToolCallCoordinator:
         self._tool_validators = _validate_tool_config(config.tools, self._executor)
         self._default_create_response = config.tool_response_create
         self._active_response_id: str | None = None
-        self._pending_tool_flushes = 0
         self._pending_create_id: str | None = None
         self._pending_create_saw_response = False
         self._waiting_for_response_after_collision = False
@@ -951,7 +951,6 @@ class _ToolCallCoordinator:
         if isinstance(output_index, int):
             batch.output_indices.setdefault(call_id, output_index)
         batch.pending_deliveries += 1
-        self._pending_tool_flushes += 1
 
         async def execute() -> None:
             result = await self._execute_tool(
@@ -973,18 +972,24 @@ class _ToolCallCoordinator:
         self._track(task, report_errors=True)
 
     async def _deliver_ready_results(self) -> None:
+        """Send every result that is ready, in call order within each response.
+
+        Responses do not wait for each other: a tool that is still running holds
+        back only the later calls of its own response, so the result of a tool
+        called in a later turn is delivered while it runs.
+        """
         async with self._delivery_lock:
-            while self._tool_batch_order:
-                response_id = self._tool_batch_order[0]
+            for response_id in tuple(self._tool_batch_order):
                 batch = self._tool_batches.get(response_id)
                 if batch is None or batch.cancelled:
-                    self._tool_batch_order.pop(0)
+                    if response_id in self._tool_batch_order:
+                        self._tool_batch_order.remove(response_id)
                     continue
-                if batch.ordered_call_ids:
+                while batch.ordered_call_ids:
                     call_id = batch.ordered_call_ids[0]
                     result = batch.results.get(call_id)
                     if result is None:
-                        return
+                        break
                     await self._conn.send(
                         {
                             "type": "conversation.item.create",
@@ -1000,19 +1005,15 @@ class _ToolCallCoordinator:
                     # already releases its counters, so do not account for the
                     # same delivery a second time when the send resumes.
                     if batch.cancelled:
-                        return
+                        break
                     batch.ordered_call_ids.pop(0)
                     batch.authoritative_call_ids.discard(call_id)
                     batch.delivered_call_ids.add(call_id)
                     batch.results.pop(call_id, None)
                     batch.pending_deliveries -= 1
-                    self._pending_tool_flushes -= 1
                     batch.create_response = batch.create_response or result.create_response
-                    continue
-                if batch.completed and batch.pending_deliveries == 0:
+                if not batch.cancelled and not batch.ordered_call_ids:
                     self._finalize_batch_if_ready(response_id, batch)
-                    continue
-                return
 
     def _finalize_batch_if_ready(self, response_id: str, batch: _ToolResponseBatch) -> None:
         if not batch.completed or batch.pending_deliveries > 0:
@@ -1036,7 +1037,6 @@ class _ToolCallCoordinator:
 
     def _cancel_batch(self, response_id: str, batch: _ToolResponseBatch) -> None:
         batch.cancelled = True
-        self._pending_tool_flushes -= batch.pending_deliveries
         batch.pending_deliveries = 0
         self._tool_batches.pop(response_id, None)
         if response_id in self._tool_batch_order:
@@ -1064,11 +1064,22 @@ class _ToolCallCoordinator:
             self._pending_create_saw_response = False
             self._kick_follow_up()
             return
+        rejected_call_ids = set(self._pending_create_call_ids)
         self._pending_create_call_ids.clear()
         self._pending_create_marked_call_ids.clear()
         if TOOL_FOLLOWUP_WAIT in {getattr(error, "type", None), getattr(error, "code", None)}:
             self._pending_create_saw_response = False
             self._user_turn_open = True
+            return
+        if TOOL_FOLLOWUP_BATCH_PENDING in {getattr(error, "type", None), getattr(error, "code", None)}:
+            # The server holds one reply for calls the user has not spoken
+            # after. The results stay queued and are announced with the next
+            # follow-up, when another response's tools finish or the user speaks.
+            self._pending_create_saw_response = False
+            # Results queued since that request was sent may complete what the
+            # server was waiting for. An unchanged set is not asked for again.
+            if set().union(*self._queued_tool_results.values()) - rejected_call_ids:
+                self._kick_follow_up()
             return
         if not is_collision:
             self._pending_create_saw_response = False
@@ -1099,7 +1110,8 @@ class _ToolCallCoordinator:
         async with self._follow_up_lock:
             if (
                 self._closing
-                or self._pending_tool_flushes > 0
+                # Results are queued once every tool of their response has been
+                # delivered. Tools of other responses may still be running.
                 or not self._queued_tool_results
                 or self._active_response_id is not None
                 or self._pending_create_id is not None
