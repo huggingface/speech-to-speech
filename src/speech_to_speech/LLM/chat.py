@@ -64,6 +64,8 @@ PENDING_TOOL_OUTPUT = (
 )
 # How a model is shown a result that arrived after the conversation had moved on.
 LATE_TOOL_RESULT = "[Tool result, not said by the user] {name}({arguments}) has finished. Result: {output}"
+# Closes a late result when the user's own words follow it in the same message.
+LATE_TOOL_RESULT_END = "[End of tool result]"
 # Added to the newest user message of every request made while calls are
 # running. The stand-ins sit next to their calls, which can be many turns back;
 # with several calls in flight, models lose track of the ones still running and
@@ -514,22 +516,23 @@ class Chat:
             return bool(self._pending_tool_calls)
 
     def has_incomplete_tool_batch(self) -> bool:
-        """Whether the newest item is a tool result whose sibling calls are still running.
+        """Whether the newest thing said or returned is a tool result whose sibling calls are still running.
 
         A follow-up requested at that point would answer only part of what the
         user asked for. Once the user has said something after a running call,
         that call no longer holds back a reply.
         """
         with self._lock:
-            if not self.buffer or not isinstance(self.buffer[-1], RealtimeConversationItemFunctionCallOutput):
+            # A message the user did not speak, such as a camera frame sent
+            # after the result, neither answers the batch nor ends the wait.
+            newest = next((item for item in reversed(self.buffer) if not _is_unspoken_user_message(item)), None)
+            if not isinstance(newest, RealtimeConversationItemFunctionCallOutput):
                 return False
             unanswered: set[str] = set()
             for item in self.buffer:
                 if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id in self._pending_tool_calls:
                     unanswered.add(item.call_id)
-                elif isinstance(item, RealtimeConversationItemUserMessage) and any(
-                    part.type in {"input_text", "input_audio"} for part in item.content
-                ):
+                elif isinstance(item, RealtimeConversationItemUserMessage) and not _is_unspoken_user_message(item):
                     unanswered.clear()
             return bool(unanswered)
 
@@ -1164,9 +1167,10 @@ class Chat:
           Showing it as a repeated call instead teaches models to call a running
           tool again to fetch its result.
         - While any call is running, :data:`RUNNING_TOOL_STATUS` follows the
-          newest user message (*running_status*; history that is being summarized
-          is not a request). It is not put after a fresh tool result, where small
-          models answer it instead of relaying the result. It also lists running
+          newest thing the user said (*running_status*; history that is being
+          summarized is not a request). A request then does not end with the
+          line after a fresh tool result, late or not, where small models answer
+          it instead of relaying the result. It also lists running
           calls that are not among *items*: ones the client created itself, and
           ones whose turn was trimmed away.
         """
@@ -1205,11 +1209,25 @@ class Chat:
                     seen.add(item.call_id)
 
         history: list[SupportedItem] = []
+        late_result: RealtimeConversationItemUserMessage | None = None
+        # Where the status line goes: after the newest thing the user said. A late
+        # result is not the user, and an image on its own counts only until they speak.
+        newest_user: int | None = None
+        user_spoke = False
         for item in items:
             if isinstance(item, RealtimeConversationItemFunctionCallOutput) and item.call_id in calls:
                 if item.call_id in late:
-                    history.append(_late_tool_result(calls[item.call_id], item))
+                    late_result = _late_tool_result(calls[item.call_id], item)
+                    history.append(late_result)
                 continue
+            if isinstance(item, RealtimeConversationItemUserMessage):
+                spoken = not _is_unspoken_user_message(item)
+                if spoken and late_result is not None and history[-1] is late_result:
+                    # Serializers merge the two, so mark where the result ends.
+                    late_result.content[0].text = f"{late_result.content[0].text}\n{LATE_TOOL_RESULT_END}"
+                if spoken or not user_spoke:
+                    newest_user = len(history)
+                user_spoke = user_spoke or spoken
             history.append(item)
             if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None:
                 if item.call_id in late or item.call_id not in outputs:
@@ -1223,11 +1241,9 @@ class Chat:
                 *still_running,
             ]
         if still_running and running_status:
-            newest_user = max(
-                (index for index, item in enumerate(history) if isinstance(item, RealtimeConversationItemUserMessage)),
-                default=len(history) - 1,
+            history.insert(
+                len(history) if newest_user is None else newest_user + 1, _running_tool_status(still_running)
             )
-            history.insert(newest_user + 1, _running_tool_status(still_running))
         return history
 
     def to_responses_api_chat(self, items: list[SupportedItem] | None = None) -> ResponseInputParam:
@@ -1874,6 +1890,13 @@ def _pending_tool_output(call: RealtimeConversationItemFunctionCall) -> Realtime
         id=_derived_id("fco", call.id),
         call_id=call.call_id,
         output=PENDING_TOOL_OUTPUT,
+    )
+
+
+def _is_unspoken_user_message(item: SupportedItem) -> bool:
+    """Whether *item* is a user message with no text or audio, such as an image on its own."""
+    return isinstance(item, RealtimeConversationItemUserMessage) and not any(
+        part.type in {"input_text", "input_audio"} for part in item.content
     )
 
 
