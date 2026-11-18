@@ -294,7 +294,9 @@ def test_sentence_tokenization_is_unchanged_for_latin_text() -> None:
 
 def test_sentence_tokenization_holds_cjk_sentence_inside_open_bracket() -> None:
     assert sent_tokenize_preserving_markdown_code("「こんにちは。", sent_tokenize) == ["「こんにちは。"]
-    assert sent_tokenize_preserving_markdown_code("彼は「今日は晴れ。明日は", sent_tokenize) == ["彼は「今日は晴れ。明日は"]
+    assert sent_tokenize_preserving_markdown_code("彼は「今日は晴れ。明日は", sent_tokenize) == [
+        "彼は「今日は晴れ。明日は"
+    ]
     assert sent_tokenize_preserving_markdown_code("「こんにちは。」", sent_tokenize) == ["「こんにちは。」"]
 
 
