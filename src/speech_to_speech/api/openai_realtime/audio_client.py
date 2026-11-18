@@ -48,6 +48,8 @@ from speech_to_speech.pipeline.transcript_logging import log_exception
 
 logger = logging.getLogger(__name__)
 
+_TTS_STATUS_IDLE_DELAY_SECONDS = 0.5
+
 _AssistantTranscriptStream = tuple[str | None, str | None, int | None, int | None]
 ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[Any]]
 _TOOL_CREATE_ID_METADATA_KEY = "s2s_local_tool_create_id"
@@ -410,6 +412,11 @@ class _FriendlyEventRenderer:
         self.streamed_assistant_transcripts: set[_AssistantTranscriptStream] = set()
         self.status = ""
         self.status_visible = False
+        self._tts_status_handle: asyncio.TimerHandle | None = None
+        self._tts_status_response_id: str | None = None
+        self._tts_status_audio_started = False
+        self._tts_status_closed_stream: _AssistantTranscriptStream | None = None
+        self._tts_status_closed_text = ""
         self.live_assistant_text = ""
         self.assistant_text_by_item: dict[str, str] = {}
         # (item id, terminal rows) of an assistant line when it is the last output.
@@ -452,6 +459,60 @@ class _FriendlyEventRenderer:
         self.console.print(self.status, style="cyan", end="", markup=False, highlight=False, soft_wrap=True)
         self.status_visible = True
 
+    def begin_assistant_response(self, response_id: str | None) -> None:
+        self._cancel_tts_status_timer()
+        self.clear_status()
+        self._tts_status_response_id = response_id
+        self._tts_status_audio_started = False
+
+    def schedule_tts_status(self, response_id: str | None) -> None:
+        """Show status after transcript output goes quiet, if audio has not begun."""
+        if not (self.conversation_only and self.console.is_terminal) or self._tts_status_audio_started:
+            return
+        active_response_id = self._tts_status_response_id
+        if response_id is not None and active_response_id not in (None, response_id):
+            return
+        if active_response_id is None:
+            active_response_id = response_id
+            self._tts_status_response_id = response_id
+        self._cancel_tts_status_timer()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._tts_status_handle = loop.call_later(
+            _TTS_STATUS_IDLE_DELAY_SECONDS,
+            self._show_tts_status_if_waiting,
+            active_response_id or response_id,
+        )
+
+    def _show_tts_status_if_waiting(self, response_id: str | None) -> None:
+        self._tts_status_handle = None
+        if self._tts_status_audio_started or response_id != self._tts_status_response_id:
+            return
+        self._tts_status_closed_stream = self.live_assistant_stream
+        self._tts_status_closed_text = self.live_assistant_text
+        self.finish_live_assistant_text()
+        self.show_status("Generating audio…")
+
+    def assistant_audio_started(self) -> None:
+        self._tts_status_audio_started = True
+        self._cancel_tts_status_timer()
+        self.clear_status()
+
+    def finish_tts_status_response(self) -> None:
+        self._cancel_tts_status_timer()
+        self.clear_status()
+        self._tts_status_response_id = None
+        self._tts_status_audio_started = False
+        self._tts_status_closed_stream = None
+        self._tts_status_closed_text = ""
+
+    def _cancel_tts_status_timer(self) -> None:
+        if self._tts_status_handle is not None:
+            self._tts_status_handle.cancel()
+            self._tts_status_handle = None
+
     def announce_ready(self) -> None:
         if self.conversation_only and not self.ready_announced:
             self.print_conversation("Ready — start speaking.", style="cyan")
@@ -492,6 +553,17 @@ class _FriendlyEventRenderer:
             return
         self.clear_live_user_text()
         stream_key = self._assistant_stream_key(event)
+        if stream_key == self._tts_status_closed_stream:
+            self.clear_status()
+            self.live_assistant_stream = stream_key
+            self.live_assistant_text = self._tts_status_closed_text
+            self._tts_status_closed_stream = None
+            self._tts_status_closed_text = ""
+            self.print_conversation(delta, style="green", end="")
+            self.live_assistant_text += delta
+            self.streamed_assistant_transcripts.add(stream_key)
+            self.schedule_tts_status(getattr(event, "response_id", None))
+            return
         if self.live_assistant_stream != stream_key:
             self.finish_live_assistant_text()
             delta = delta.lstrip()
@@ -503,19 +575,39 @@ class _FriendlyEventRenderer:
         self.streamed_assistant_transcripts.add(stream_key)
         self.print_conversation(delta, style="green", end="")
         self.live_assistant_text += delta
+        self.schedule_tts_status(getattr(event, "response_id", None))
 
     def render_assistant_text_done(self, event: Any) -> None:
         stream_key = self._assistant_stream_key(event)
-        if self.live_assistant_stream == stream_key:
+        live_stream = self.live_assistant_stream
+        if live_stream is not None and all(
+            event_value is None or stream_value is None or event_value == stream_value
+            for event_value, stream_value in zip(stream_key, live_stream, strict=True)
+        ):
             self.finish_live_assistant_text()
-        if stream_key in self.streamed_assistant_transcripts:
-            self.streamed_assistant_transcripts.remove(stream_key)
+        elif self.live_assistant_stream is None:
+            self._draw_status()
+        streamed_key = next(
+            (
+                key
+                for key in self.streamed_assistant_transcripts
+                if all(
+                    event_value is None or stream_value is None or event_value == stream_value
+                    for event_value, stream_value in zip(stream_key, key, strict=True)
+                )
+            ),
+            None,
+        )
+        if streamed_key is not None:
+            self.streamed_assistant_transcripts.remove(streamed_key)
+            self.schedule_tts_status(getattr(event, "response_id", None))
             return
         self.clear_live_user_text()
         self.finish_live_assistant_text()
         transcript = event.transcript or ""
         self.print_conversation(f"ASSISTANT: {transcript}", style="green")
         self._remember_assistant_line(getattr(event, "item_id", None), transcript)
+        self.schedule_tts_status(getattr(event, "response_id", None))
 
     def finish_live_assistant_text(self) -> None:
         if self.live_assistant_stream is not None:
@@ -607,6 +699,7 @@ def handle_server_event(
         renderer.finish_live_assistant_text()
         # Without barge-in the server keeps the response, so its queued audio must keep playing.
         if interrupt_response:
+            renderer.finish_tts_status_response()
             playback.clear()
         if renderer.saw_user_speech and not renderer.conversation_only:
             print("", flush=True)
@@ -652,13 +745,14 @@ def handle_server_event(
         )
         renderer.print_conversation(f"ERROR: {err_type}: {err_msg}", style="red")
     elif event.type == "response.created":
+        response = getattr(event, "response", None)
+        renderer.begin_assistant_response(getattr(response, "id", None))
         renderer.clear_live_user_text()
         renderer.finish_live_assistant_text()
-        if not renderer.conversation_only:
-            print("ASSISTANT: <response started>", flush=True)
     elif event.type in {"response.output_item.added", "response.output_item.done"}:
         return
     elif event.type == "response.output_audio.delta":
+        renderer.assistant_audio_started()
         item_id = getattr(event, "item_id", None)
         item = (item_id, getattr(event, "content_index", 0)) if item_id is not None else None
         playback.append(base64.b64decode(event.delta), item)
@@ -679,6 +773,7 @@ def handle_server_event(
                 flush=True,
             )
     elif event.type == "response.done":
+        renderer.finish_tts_status_response()
         renderer.finish_assistant_response(getattr(event.response, "id", None))
         if event.response.status == "cancelled":
             playback.clear()
@@ -704,6 +799,7 @@ def handle_server_event(
         # The interrupted reply was removed from history: none of it was heard.
         renderer.render_heard_assistant_text(event.error.event_id.removeprefix(_HEARD_TEXT_EVENT_PREFIX), "")
     elif event.type == "error":
+        renderer.finish_tts_status_response()
         renderer.clear_live_user_text()
         renderer.finish_live_assistant_text()
         renderer.print_conversation(f"ERROR: {event.error.type}: {event.error.message}", style="red")
