@@ -1034,6 +1034,11 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             self.tokenizer = self.processor.tokenizer  # type: ignore[assignment]
             self.gen_kwargs = gen_kwargs
         else:
+            # Unlike the text handler, this one has no warmup, so an invalid
+            # sampling setting would otherwise first fail inside a turn.
+            temperature = gen_kwargs.get("temperature")
+            if gen_kwargs.get("do_sample") and temperature is not None and temperature <= 0:
+                raise ValueError("Sampling requires a temperature above 0; set --llm_gen_temperature.")
             self.torch_dtype = getattr(torch, torch_dtype)
             self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)  # type: ignore[assignment]
             self.tokenizer = self.processor.tokenizer  # type: ignore[assignment]

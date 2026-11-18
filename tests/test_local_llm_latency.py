@@ -159,3 +159,28 @@ def test_transformers_generation_honors_settings_and_reuses_streamer(monkeypatch
             assert tracker.llm_s is not None
         assert handler.streamer.text_queue.empty()
     assert not reads_after_end
+
+
+@pytest.mark.parametrize("temperature", [None, 0.7])
+def test_vision_sampling_requires_positive_temperature_before_loading(monkeypatch, temperature):
+    from speech_to_speech.arguments_classes.language_model_arguments import LanguageModelHandlerArguments
+    from speech_to_speech.backend_registry import normalize_dataclass_config
+
+    args = LanguageModelHandlerArguments(llm_gen_do_sample=True)
+    if temperature is not None:
+        args.llm_gen_temperature = temperature
+    gen_kwargs = normalize_dataclass_config(args, "llm")["gen_kwargs"]
+
+    class Loaded(Exception):
+        pass
+
+    def from_pretrained(*args, **kwargs):
+        raise Loaded
+
+    monkeypatch.setattr(language_model.AutoProcessor, "from_pretrained", from_pretrained)
+    handler = object.__new__(VisionLanguageModelHandler)
+    handler.backend = "transformers"
+
+    expected = Loaded if temperature else ValueError
+    with pytest.raises(expected):
+        handler._load_model("model", "cpu", "float32", gen_kwargs)
