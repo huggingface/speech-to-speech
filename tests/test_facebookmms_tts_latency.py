@@ -295,3 +295,16 @@ def test_cancelled_or_discarded_audio_cannot_record_another_response(
         assert tracker.tts_ttfa_s == (None if cancel_at == "generation" else pytest.approx(0.12))
     assert other.tts_ttfa_s is None
     assert other.e2e_s is None
+
+
+def test_clips_pcm_instead_of_wrapping(monkeypatch: pytest.MonkeyPatch) -> None:
+    # librosa.resample can overshoot a peak near full scale; int16 must saturate, not wrap.
+    resampled = np.array([1.0, 1.2, -1.2, 0.5], dtype=np.float32)
+    monkeypatch.setattr(facebookmms_handler, "librosa", SimpleNamespace(resample=lambda *_a, **_k: resampled))
+    handler = _handler(waveform=_waveform(6))
+
+    blocks = list(handler.process(TTSInput(text="hello")))
+
+    assert len(blocks) == 1
+    np.testing.assert_array_equal(blocks[0][:4], np.array([32767, 32767, -32768, 16384], dtype=np.int16))
+    assert not np.any(blocks[0][4:])

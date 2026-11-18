@@ -131,7 +131,7 @@ class ChatTTSHandler(BaseTTSHandler):
             # Full utterance is available before local resample / block assembly.
             timer.first_provider_audio()
             audio_chunk = librosa.resample(wavs[0], orig_sr=24000, target_sr=16000)
-            audio_chunk = (audio_chunk * 32768).astype(np.int16)
+            audio_chunk = np.clip(audio_chunk * 32768, -32768, 32767).astype(np.int16)
             for i in range(0, len(audio_chunk), self.chunk_size):
                 yield from emit(
                     np.pad(

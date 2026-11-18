@@ -202,7 +202,7 @@ class FacebookMMSTTSHandler(BaseTTSHandler):
         audio_resampled = librosa.resample(audio_numpy, orig_sr=self.model.config.sampling_rate, target_sr=16000)
         logger.debug(f"Resampled audio shape: {audio_resampled.shape}, dtype: {audio_resampled.dtype}")
 
-        audio_int16 = (audio_resampled * 32768).astype(np.int16)
+        audio_int16 = np.clip(audio_resampled * 32768, -32768, 32767).astype(np.int16)
         logger.debug(f"Final audio shape: {audio_int16.shape}, dtype: {audio_int16.dtype}")
 
         for i in range(0, len(audio_int16), self.chunk_size):
