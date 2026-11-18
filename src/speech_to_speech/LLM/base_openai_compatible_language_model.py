@@ -1203,7 +1203,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             else runtime_config.session.instructions
         ) or ""
         req_tools = (
-            response.tools if response is not None and response.tools is not None else runtime_config.session.tools
+            response.tools if response is not None and response.tools else runtime_config.session.tools
         )
         req_tool_choice = (
             response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
@@ -1313,7 +1313,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             else runtime_config.session.instructions
         ) or ""
         req_tools = (
-            response.tools if response is not None and response.tools is not None else runtime_config.session.tools
+            response.tools if response is not None and response.tools else runtime_config.session.tools
         )
         req_tool_choice = (
             response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
