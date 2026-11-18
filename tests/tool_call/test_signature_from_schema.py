@@ -189,6 +189,74 @@ class TestSignatureFromSchema:
         sig = signature_from_schema(schema)
         assert str(sig) == "(x: float = None, y: float = None)"
 
+    def test_invalid_identifier_hyphen(self):
+        """Property name with hyphen should be sanitized to underscore."""
+        schema = {
+            "type": "object",
+            "properties": {"user-name": {"type": "string"}},
+            "required": ["user-name"],
+        }
+        sig = signature_from_schema(schema)
+        # Hyphen replaced with underscore
+        assert str(sig) == "(user_name: str)"
+
+    def test_invalid_identifier_space(self):
+        """Property name with space should be sanitized to underscore."""
+        schema = {
+            "type": "object",
+            "properties": {"first name": {"type": "string"}},
+            "required": ["first name"],
+        }
+        sig = signature_from_schema(schema)
+        assert str(sig) == "(first_name: str)"
+
+    def test_python_keyword(self):
+        """Python keyword as property name should get trailing underscore."""
+        schema = {
+            "type": "object",
+            "properties": {"class": {"type": "string"}},
+            "required": ["class"],
+        }
+        sig = signature_from_schema(schema)
+        assert str(sig) == "(class_: str)"
+
+    def test_starts_with_digit(self):
+        """Property name starting with digit should get leading underscore."""
+        schema = {
+            "type": "object",
+            "properties": {"123abc": {"type": "string"}},
+            "required": ["123abc"],
+        }
+        sig = signature_from_schema(schema)
+        assert str(sig) == "(_123abc: str)"
+
+    def test_collision_handling(self):
+        """Multiple properties sanitizing to same name should be disambiguated."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "user-name": {"type": "string"},
+                "user.name": {"type": "integer"},
+            },
+            "required": ["user-name", "user.name"],
+        }
+        sig = signature_from_schema(schema)
+        # Both sanitize to user_name, second gets _2 suffix
+        params = list(sig.parameters.keys())
+        assert params == ["user_name", "user_name_2"]
+        assert sig.parameters["user_name"].annotation is str
+        assert sig.parameters["user_name_2"].annotation is int
+
+    def test_empty_property_name(self):
+        """Empty property name should become underscore."""
+        schema = {
+            "type": "object",
+            "properties": {"": {"type": "string"}},
+            "required": [""],
+        }
+        sig = signature_from_schema(schema)
+        assert str(sig) == "(_: str)"
+
 
 # --- Tool.to_code_prompt tests ---
 
