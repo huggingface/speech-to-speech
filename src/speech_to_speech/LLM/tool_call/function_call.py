@@ -15,8 +15,12 @@ import tokenize
 from collections import OrderedDict
 from typing import Any, Dict, List, Tuple
 
+from jsonschema import SchemaError, ValidationError
+from jsonschema.validators import validator_for
 from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel
+from referencing import Registry
+from referencing.exceptions import Unresolvable
 
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.LLM.tool_call.signature_from_schema import signature_from_schema
@@ -291,6 +295,76 @@ def find_json_tool_call_end(block: str) -> int | None:
         elif block.startswith(JSON_TOOL_CALL_END, index):
             return index + len(JSON_TOOL_CALL_END)
     return None
+
+
+def find_tool_call_end(block: str) -> int | None:
+    """Find a native block's end without treating parameter text as markup."""
+    inner = block.removeprefix(JSON_TOOL_CALL_ENTER).lstrip()
+    if not inner.startswith("<function="):
+        return find_json_tool_call_end(block)
+    # Qwen parameters are raw text, not XML-escaped or JSON-quoted strings.
+    index = 0
+    while index < len(block):
+        if block.startswith("<parameter=", index):
+            end = block.find("</parameter>", index)
+            if end < 0:
+                return None
+            index = end + len("</parameter>")
+        elif block.startswith(JSON_TOOL_CALL_END, index):
+            return index + len(JSON_TOOL_CALL_END)
+        else:
+            index += 1
+    return None
+
+
+def parse_tool_call_block(block: str, function_tools: list[FunctionTool]) -> List[FunctionToolCall]:
+    """Decode native JSON or Qwen function/parameter tags into a common call."""
+    inner = block.removeprefix(JSON_TOOL_CALL_ENTER).removesuffix(JSON_TOOL_CALL_END).strip()
+    if not inner.startswith("<function="):
+        return parse_json_tool_call_block(block)
+    try:
+        match = re.fullmatch(r"<function=([^<>\s]+)>\s*(.*?)\s*</function>", inner, re.DOTALL)
+        if match is None:
+            raise ValueError("incomplete function block")
+        name, body = match.groups()
+        tool = next((tool for tool in function_tools if tool.name == name), None)
+        if tool is None:
+            raise ValueError(f"undeclared function {name!r}")
+        schema = tool.parameters if isinstance(tool.parameters, dict) else {}
+        properties = schema.get("properties", {})
+        if not isinstance(properties, dict):
+            raise ValueError("invalid parameter schema")
+        validator_type = validator_for(schema)
+        validator_type.check_schema(schema)
+        # Client schemas may resolve local definitions but must never fetch URLs.
+        validator = validator_type(schema, registry=Registry())
+        arguments: dict[str, Any] = {}
+        while body.strip():
+            parameter = re.match(r"\s*<parameter=([^<>\s]+)>(.*?)</parameter>", body, re.DOTALL)
+            if parameter is None:
+                raise ValueError("invalid parameter block")
+            key, value = parameter.groups()
+            if key in arguments or key not in properties:
+                raise ValueError(f"duplicate or undeclared parameter {key!r}")
+            # The native template puts one newline around each value. Preserve
+            # the value itself, including quotes and significant whitespace.
+            value = value.removeprefix("\n").removesuffix("\n")
+            # Prefer raw text when the schema accepts it: native string values
+            # have no quotes or escaping to distinguish them from JSON literals.
+            parameter_validator = validator.evolve(schema=properties[key])
+            if parameter_validator.is_valid(value):
+                arguments[key] = value
+            else:
+                # Jinja stringifies scalar booleans/null as Python literals;
+                # containers use JSON. Accept both without evaluating code.
+                scalar = {"True": "true", "False": "false", "None": "null"}.get(value.strip(), value)
+                arguments[key] = json.loads(scalar)
+            body = body[parameter.end() :]
+        validator.validate(arguments)
+        return [FunctionToolCall(function_name=name, parameters=arguments, original_string=block)]
+    except (ValueError, TypeError, ValidationError, SchemaError, Unresolvable) as exc:
+        logger.warning("Ignoring invalid Qwen tool call: %s", exc)
+        return []
 
 
 def parse_json_tool_call_block(block: str) -> List[FunctionToolCall]:

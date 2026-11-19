@@ -358,11 +358,9 @@ Without it, aiortc defaults apply (host candidates + Google STUN). Deployments w
 
 Tool calling works through two distinct paths depending on the LLM backend, but both converge to the same wire protocol for the client.
 
-### Local LLM path (`LanguageModelHandler` -- transformers / mlx-lm)
+### Local model path (Transformers / MLX text and vision models)
 
-Tools defined in `session.update` are converted to `FunctionTool` objects. Each tool's JSON Schema `parameters` are turned into a Python `inspect.Signature` (via `signature_from_schema`), and `to_code_prompt()` renders a human-readable `def name(...): """docstring"""` block.
-
-These tool signatures are injected into the system prompt using a Jinja2 template (`tool_prompt.py`) that instructs the model to wrap tool calls in `<code>...</code>` delimiters:
+Tools from `session.update` become `FunctionTool` objects. Qwen function/parameter templates receive the schemas through `tools=`, matching the format used for earlier calls in history. Other templates receive Python-style signatures from `to_code_prompt()` and instructions to wrap named-argument calls in `<code>...</code>`:
 
 ```
 <code>
@@ -370,7 +368,11 @@ function_name(arg_name_1=value1, arg_name_2='string_value')
 </code>
 ```
 
-After generation, `_extract_tools` uses a regex to find `<code>` blocks, then `extract_function_calls_from_text` parses each `name(kwargs)` call and validates it against registered tools. Valid calls become `ResponseFunctionToolCall` dicts with generated `call_id`s.
+The streaming parser recognizes Python `<code>` calls and native JSON or Qwen function/parameter `<tool_call>` blocks. Valid calls become `ResponseFunctionToolCall` objects with generated `call_id`s. Qwen parameter decoding uses the declared JSON Schema, including local references, and accepts JSON literals and the template's scalar `True`, `False`, and `None`. Invalid schemas or unresolved references reject the call; schema validation never fetches remote references. Raw strings retain quotes and whitespace; when a schema accepts both string and non-string values, valid raw text takes precedence because the native format does not distinguish them.
+
+Transformers generation stops at both the model's configured EOS and the tokenizer's EOS. Explicit generation overrides take precedence in the text handler.
+
+Native tool templates include the full schemas and their own format instructions, which can increase prompt size and latency. Spoken acknowledgements before calls depend on the model and prompt; the parser preserves preceding text when the model emits it.
 
 ### OpenAI API path (`ResponsesApiModelHandler`)
 
