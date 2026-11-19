@@ -28,3 +28,26 @@ def test_provider_segments_preserve_pcm_without_padding(backend, lengths):
     expected = np.concatenate([(resample_poly(audio, up=2, down=3) * 32768).astype(np.int16) for audio in segments])
     assert all(chunk.dtype == np.int16 and 0 < len(chunk) <= 512 for chunk in chunks)
     np.testing.assert_array_equal(np.concatenate(chunks), expected)
+
+
+@pytest.mark.parametrize("backend", ["kokoro", "mlx"])
+def test_clips_pcm_instead_of_wrapping(backend, monkeypatch):
+    # resample_poly can overshoot a peak near full scale; int16 must saturate, not wrap.
+    monkeypatch.setattr(
+        "scipy.signal.resample_poly", lambda *_args, **_kwargs: np.array([1.0, 1.2, -1.2, 0.5], dtype=np.float32)
+    )
+    handler = object.__new__(KokoroTTSHandler)
+    handler.cancel_scope = None
+    handler.voice = "bm_fable"
+    handler.lang_code = "b"
+    handler.speed = 1.0
+    handler.blocksize = 512
+    audio = np.full(600, 0.5, dtype=np.float32)
+    if backend == "kokoro":
+        handler.pipeline = lambda *args, **kwargs: iter([("", "", audio)])
+    else:
+        handler._pipeline = lambda **kwargs: iter([SimpleNamespace(audio=audio[np.newaxis, :])])
+
+    chunks = list(getattr(handler, f"_process_{backend}")("Test."))
+
+    np.testing.assert_array_equal(np.concatenate(chunks), np.array([32767, 32767, -32768, 16384], dtype=np.int16))

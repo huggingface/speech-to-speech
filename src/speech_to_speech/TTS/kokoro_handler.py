@@ -400,7 +400,7 @@ class KokoroTTSHandler(BaseTTSHandler):
                 audio = resample_poly(audio, up=2, down=3)
 
                 # Convert to int16 format
-                audio = (audio * 32768).astype(np.int16)
+                audio = np.clip(audio * 32768, -32768, 32767).astype(np.int16)
 
                 # Preserve short tails without inserting silence between provider segments.
                 for i in range(0, len(audio), self.blocksize):
@@ -465,7 +465,7 @@ class KokoroTTSHandler(BaseTTSHandler):
             audio = resample_poly(audio, up=2, down=3)
 
             # Convert to int16 format
-            audio = (audio * 32768).astype(np.int16)
+            audio = np.clip(audio * 32768, -32768, 32767).astype(np.int16)
 
             # Preserve short tails without inserting silence between provider segments.
             for i in range(0, len(audio), self.blocksize):
