@@ -31,7 +31,7 @@ aiortc = pytest.importorskip("aiortc")
 av = pytest.importorskip("av")
 
 import httpx2  # noqa: E402  (ships with the openai dependency)
-from aioice.ice import Connection  # noqa: E402
+from aioice.ice import Connection, StunProtocol  # noqa: E402
 from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription, clock  # noqa: E402
 from aiortc.codecs.opus import OpusDecoder, OpusEncoder  # noqa: E402
 from aiortc.jitterbuffer import JitterFrame  # noqa: E402
@@ -1064,8 +1064,19 @@ class TestWebRTCLoopback:
         first_close = None
         second_close = None
         release_sweep = asyncio.Event()
+        release_checks = asyncio.Event()
         closed_calls = []
         close_server_pc = server_pc.close
+        send_request = StunProtocol.request
+
+        # Both peers share one host, so a check normally finishes in a few
+        # milliseconds, before the polling below can see it pending. Hold each
+        # STUN request so close() always has an unfinished check to cancel and await.
+        async def _hold_request(self, *args, **kwargs):
+            await release_checks.wait()
+            return await send_request(self, *args, **kwargs)
+
+        monkeypatch.setattr(StunProtocol, "request", _hold_request)
 
         def _pending_ice_checks():
             return {
@@ -1152,6 +1163,7 @@ class TestWebRTCLoopback:
             assert len(closed_calls) == 1
         finally:
             release_sweep.set()
+            release_checks.set()
             close_tasks = [task for task in (first_close, second_close) if task is not None]
             if close_tasks:
                 await asyncio.gather(*close_tasks, return_exceptions=True)
