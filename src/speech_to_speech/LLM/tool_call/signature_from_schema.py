@@ -1,4 +1,6 @@
 import inspect
+import keyword
+import re
 from typing import Any, Literal, Union
 
 JSON_TYPE_TO_PYTHON_TYPE = {
@@ -76,6 +78,33 @@ def _annotation_from_spec(spec: dict[str, Any]) -> Any:
     return JSON_TYPE_TO_PYTHON_TYPE.get(json_type, Any)
 
 
+def _sanitize_identifier(name: str, existing: set[str] | None = None) -> str:
+    """Convert an arbitrary string to a valid Python identifier, avoiding collisions."""
+    if not name:
+        sanitized = '_'
+    else:
+        # Replace any non-identifier character with underscore
+        sanitized = re.sub(r'[^0-9a-zA-Z_]', '_', name)
+        
+        # Ensure it doesn't start with a digit
+        if sanitized and sanitized[0].isdigit():
+            sanitized = '_' + sanitized
+        
+        # Avoid Python keywords
+        if keyword.iskeyword(sanitized):
+            sanitized = sanitized + '_'
+        
+        # Avoid collisions with existing identifiers
+        if existing is not None:
+            original = sanitized
+            suffix = 1
+            while sanitized in existing:
+                suffix += 1
+                sanitized = original + '_' + str(suffix)
+    
+    return sanitized
+
+
 def signature_from_schema(schema: object | None) -> inspect.Signature:
     if not schema or not isinstance(schema, dict):
         return inspect.Signature()
@@ -100,6 +129,7 @@ def signature_from_schema(schema: object | None) -> inspect.Signature:
         if not (name in required and not (isinstance(spec, dict) and "default" in spec))
     ]
 
+    used_names: set[str] = set()
     for name, spec in [*required_without_default, *defaulted_or_optional]:
         annotation = _annotation_from_spec(spec)
 
@@ -112,9 +142,13 @@ def signature_from_schema(schema: object | None) -> inspect.Signature:
         else:
             default = None
 
+        # Sanitize parameter name to be a valid Python identifier
+        safe_name = _sanitize_identifier(name, used_names)
+        used_names.add(safe_name)
+
         params.append(
             inspect.Parameter(
-                name,
+                safe_name,
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
                 default=default,
                 annotation=annotation,
