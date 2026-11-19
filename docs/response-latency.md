@@ -125,11 +125,11 @@ that lock is not contended, and hold is omitted entirely when nothing held it.
   is no fallback to the old handoff boundary. Later synthesis segments cannot
   overwrite first audio. This is generated audio, not browser playback.
 - `vad_settle` is the whole wait at the final STT input gate before a settled
-  revision is accepted. It is not the same as `hold`: `hold` counts only the
-  client-requested processing delay, while `vad_settle` covers every cause of
-  gate wait. It is recorded only past a 0.05s threshold, so an immediately
-  returning gate does not add a permanent `vad_settle=0.00s` to every line. It
-  is log-only and is never part of response metadata.
+  revision is accepted, including revision stability and any remaining Smart
+  Turn processing delay. It can overlap the processing portion of `hold`.
+  It is recorded only past a 0.05s threshold, so an immediately returning gate
+  does not add a permanent `vad_settle=0.00s` to every line. It is log-only and
+  is never part of response metadata.
 - `vad_decision_s` starts at an **estimated end of voiced audio** and ends
   immediately when the VAD iterator returns the final segment, before Smart
   Turn analysis. Silero uses the first low-confidence chunk's start; FireRed
@@ -142,10 +142,11 @@ that lock is not contended, and hold is omitted entirely when nothing held it.
 - `smart_status` is the Smart Turn decision: `complete`, `incomplete`, `failed`,
   or `disabled`. Failure still falls back to the ordinary short reopen grace
   without an extra processing delay; no inference or speculation policy changes.
-- `hold_s` (Hold time before response) is actual elapsed time blocked at processing
-  or response-release gates. Overlapping worker waits count once. Time spent
-  doing useful work during a configured grace window is not hold time. Disabled
-  Smart Turn has `null`; an enabled decision without a blocked gate has zero.
+- `hold` in logs (`hold_s` in metadata) is the elapsed time workers actually
+  spend blocked by the Smart Turn processing delay or output grace. Overlapping
+  waits count once. A grace window with no blocked worker adds no hold time.
+  Disabled Smart Turn has `null` (`n/a` in logs). An enabled decision without a
+  blocked gate has zero.
 - `mlx_lock_wait` / `mlx_lock_hold` (macOS terminal logs only) are time spent
   waiting for and holding the global MLX/Metal lock. Totals are attributed per
   handler name in brackets (`handler:0.88s`, with an `xN` suffix when the same
@@ -193,6 +194,30 @@ and clears them on session teardown.
 Remote timings are measured by this server. They include network transfer and
 provider waits within the operation, so they are not provider-only inference
 times. Stages can overlap; these fields are not an additive breakdown.
+
+## Smart Turn timing
+
+For a speculative speech turn, both timers start when the pipeline records the
+finalized segment, after Smart Turn analysis and any audio enhancement. The
+output grace sets the earliest time the first assistant text can be sent to TTS
+for that uncommitted revision.
+
+| Smart Turn result | Extra delay at the final speech input gate | Output grace before first text to TTS |
+| --- | --- | --- |
+| Complete, disabled, or failed | 0 ms | `--speculative_reopen_ms` (800 ms) |
+| Incomplete | `--smart_turn_incomplete_delay_ms` (600 ms), capped by `--smart_turn_max_wait_ms` | `--smart_turn_max_wait_ms` (2000 ms) |
+
+With the incomplete defaults, the processing delay expires at 600 ms and the
+output grace expires at 2000 ms from finalization. Processing can run during
+the grace. If the first text is ready early, it waits at the output gate.
+Shortening the processing delay gives STT and the LLM more time within the
+same grace. TTS synthesis and output buffering add time before the first audio
+block, and `e2e` also includes the time from estimated speech end to finalization.
+
+Resumed speech can invalidate the revision before it produces a response.
+`--unanswered_reopen_ms` limits reopening by streamed audio time while the
+turn remains uncommitted. This separate limit can extend past the output grace
+and is at least as long as either configured grace when Smart Turn is enabled.
 
 ## Correlating remote requests with workers
 
