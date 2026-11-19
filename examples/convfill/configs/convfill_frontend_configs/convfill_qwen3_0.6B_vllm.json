@@ -1,0 +1,27 @@
+{
+  "model_name": "Qwen/Qwen3-0.6B",
+  "backend": "vllm",
+  "convfill_hf_pretrained_path": "vysri/Qwen-0.6B-ConvFill",
+  "boundary_tokens": {
+    "USER_START": "<|im_start|>user\n",
+    "KNOWLEDGE_START": "<|im_start|>knowledge\n",
+    "ASSN_START": "<|im_start|>assistant\n",
+    "END": "<|im_end|>\n"
+  },
+  "remote": {
+    "base_url": "http://127.0.0.1:8002/v1",
+    "base_url_env": "CONVFILL_TALKER_URL",
+    "api_key_env": "CONVFILL_TALKER_API_KEY",
+    "max_tokens": 160,
+    "temperature": 0,
+    "connect_timeout_s": 10,
+    "read_timeout_s": 15,
+    "request_timeout_s": 30
+  },
+  "revision": "9195fc16f0ba56743d956f0fab5eed2386665aff",
+  "expected_token_ids": {
+    "<sil>": 151669,
+    "<|im_start|>": 151644,
+    "<|im_end|>": 151645
+  }
+}
