@@ -1528,7 +1528,7 @@ class Chat:
                 and any(p.type == "input_image" for p in item.content)
             }
 
-    def strip_images(self, only_ids: set[str] | None = None) -> None:
+    def strip_images(self, only_ids: set[str] | None = None, *, error: str | None = None) -> None:
         """Remove image content parts from user messages in the buffer.
 
         Called after appending the assistant response so images don't persist
@@ -1537,13 +1537,31 @@ class Chat:
         request was sent). This leaves intact an image a fast client injected
         mid-generation for the *next* turn, which the current response never saw.
         Without *only_ids*, every image is stripped.
+        With *error*, replace rejected images with model-readable provider feedback.
         """
         with self._lock:
             for item in self.buffer:
                 if isinstance(item, RealtimeConversationItemUserMessage):
                     if only_ids is not None and item.id not in only_ids:
                         continue
+                    had_images = any(p.type == "input_image" for p in item.content)
                     item.content = [p for p in item.content if p.type != "input_image"]
+                    if had_images and error is not None:
+                        item.content.append(
+                            UserContent(
+                                type="input_text",
+                                text=json.dumps(
+                                    {
+                                        "input_error": {
+                                            "stage": "model_request",
+                                            "content_type": "image",
+                                            "input_received": True,
+                                            "message": error,
+                                        }
+                                    }
+                                ),
+                            )
+                        )
 
     # ── Compaction internals ──────────────────────────────────
 
