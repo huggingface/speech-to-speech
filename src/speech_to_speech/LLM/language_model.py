@@ -899,16 +899,26 @@ class LanguageModelHandler(BaseLanguageModelHandler):
             lock = self._transformers_lock
             tracker = active_turn_latency_tracker()
 
+            worker_error: list[Exception] = []
+
             def _locked_pipe() -> None:
                 with lock:
                     if tracker is not None:
                         tracker.start_llm()
-                    self.pipe(chat_prompt, **self.gen_kwargs)
+                    try:
+                        self.pipe(chat_prompt, **self.gen_kwargs)
+                    except Exception as exc:
+                        worker_error.append(exc)
+                        # The reader is waiting on the streamer, not on this
+                        # thread. Without an end marker it would loop forever.
+                        self.streamer.end()
 
             thread = Thread(target=_locked_pipe)
             thread.start()
             yield from self._stream_tokens(self.streamer, gen, language_code, ctx, runtime_config, response)
             self._finish_transformers_generation(thread, ctx)
+            if worker_error:
+                raise worker_error[0]
             if self.device == "mps":
                 torch.mps.empty_cache()
 
@@ -1106,16 +1116,24 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             lock = self._transformers_lock
             tracker = active_turn_latency_tracker()
 
+            worker_error: list[Exception] = []
+
             def _locked_generate() -> None:
                 with lock:
                     if tracker is not None:
                         tracker.start_llm()
-                    self.model.generate(**generate_kwargs)  # type: ignore[union-attr,operator]
+                    try:
+                        self.model.generate(**generate_kwargs)  # type: ignore[union-attr,operator]
+                    except Exception as exc:
+                        worker_error.append(exc)
+                        self.streamer.end()
 
             thread = Thread(target=_locked_generate)
             thread.start()
             yield from self._stream_tokens(self.streamer, gen, language_code, ctx, runtime_config, response)
             self._finish_transformers_generation(thread, ctx)
+            if worker_error:
+                raise worker_error[0]
             if self.device == "mps":
                 torch.mps.empty_cache()
 
