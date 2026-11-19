@@ -130,7 +130,7 @@ def int2float(sound: np.ndarray) -> np.ndarray:
     Taken from https://github.com/snakers4/silero-vad
     """
 
-    abs_max = np.abs(sound).max()
+    abs_max = np.abs(sound).max(initial=0)
     sound = sound.astype("float32")
     if abs_max > 0:
         sound *= 1 / 32768
