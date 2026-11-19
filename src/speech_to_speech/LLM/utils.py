@@ -102,49 +102,22 @@ def _has_unclosed_markdown_fence(text: str) -> bool:
 
 # NLTK's Punkt tokenizer only ends a sentence at ASCII ". ? !", so CJK, Arabic
 # and Devanagari replies would otherwise stay one sentence until the stream
-# ends. Closing quotes and brackets stay with the sentence they close, a
-# terminator inside an open CJK bracket or quote is not a sentence end, and a
-# closing bracket followed by hiragana (と, って, という ...) continues the clause.
-# ASCII "(" and quotes are not tracked as openers: they are common in Latin text
-# and an unmatched one would otherwise hold back every later sentence.
-_NON_LATIN_TERMINATORS = "。！？｡؟।॥"
-_OPENERS = "「『（“‘"
-_CLOSING = "」』）”’"
-_CLOSERS = _CLOSING + "\"')"
-
-
-def _is_hiragana(ch: str) -> bool:
-    return "\u3041" <= ch <= "\u309f"
+# ends. Split again after those terminators, keeping closing quotes and brackets
+# with the sentence they close.
+_NON_LATIN_SENTENCE_END_PATTERN = re.compile(r"[。！？｡؟।॥]+[」』）”’\"')]*")
 
 
 def _split_after_non_latin_terminators(sentence: str) -> list[str]:
+    # Complete Markdown code and emphasis are already masked. A delimiter left
+    # here may open a span that is still streaming, so leave the sentence whole,
+    # as Punkt alone would, rather than send half a span to TTS.
+    if "`" in sentence or "*" in sentence:
+        return [sentence]
     parts: list[str] = []
-    start = depth = i = 0
-    n = len(sentence)
-    while i < n:
-        ch = sentence[i]
-        if ch in _OPENERS:
-            depth += 1
-        elif ch in _CLOSING and depth:
-            depth -= 1
-        elif ch in _NON_LATIN_TERMINATORS:
-            j = i
-            while j < n and sentence[j] in _NON_LATIN_TERMINATORS:
-                j += 1
-            k, open_depth = j, depth
-            while k < n and sentence[k] in _CLOSERS:
-                if sentence[k] in _CLOSING and open_depth:
-                    open_depth -= 1
-                k += 1
-            following = sentence[k:].lstrip()[:1]
-            continues_clause = k > j and following != "" and _is_hiragana(following)
-            if open_depth == 0 and not continues_clause:
-                parts.append(sentence[start:k].strip())
-                start, depth, i = k, 0, k
-            else:
-                depth, i = open_depth, k
-            continue
-        i += 1
+    start = 0
+    for match in _NON_LATIN_SENTENCE_END_PATTERN.finditer(sentence):
+        parts.append(sentence[start : match.end()].strip())
+        start = match.end()
     if not parts:
         return [sentence]
     remainder = sentence[start:].strip()
