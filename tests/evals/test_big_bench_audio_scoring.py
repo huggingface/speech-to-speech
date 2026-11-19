@@ -38,10 +38,17 @@ def test_scan_without_a_marker_takes_the_concluding_claim():
 
 @pytest.mark.parametrize(
     "reply",
-    ["The argument is not valid.", "That is not deductively valid.", "This isn't valid."],
+    [
+        "The argument is not valid.",
+        "That is not deductively valid.",
+        "This isn't valid.",
+        # Double negation: "not invalid" means valid.
+        "not invalid",
+    ],
 )
 def test_negated_valid_reads_as_invalid(reply):
-    assert extract_answer("formal_fallacies", reply)[0] == "invalid"
+    expected = "valid" if reply == "not invalid" else "invalid"
+    assert extract_answer("formal_fallacies", reply)[0] == expected
 
 
 def test_hedging_without_a_negation_keeps_the_stated_answer():

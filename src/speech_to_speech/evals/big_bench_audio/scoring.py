@@ -135,8 +135,8 @@ def _extract_valid(text: str, *, first: bool) -> Optional[str]:
         return None
     match = matches[0] if first else matches[-1]
     label = "valid" if match.group(0).lower().replace("-", "").replace(" ", "") == "valid" else "invalid"
-    if label == "valid" and _negated(text, match.start()):
-        return "invalid"
+    if _negated(text, match.start()):
+        return "invalid" if label == "valid" else "valid"
     return label
 
 
