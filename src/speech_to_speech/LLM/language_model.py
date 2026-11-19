@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Iterator, Sized
+from collections.abc import Callable, Iterable, Iterator, Sized
 from queue import Empty
 from threading import Lock, Thread
 from time import perf_counter
@@ -135,6 +135,14 @@ class _CancelCriteria(StoppingCriteria):
         return self._cancelled
 
 
+class _GenerationWorker:
+    """A Transformers generation thread and the error it raised, if any."""
+
+    def __init__(self) -> None:
+        self.thread: Thread | None = None
+        self.error: Exception | None = None
+
+
 class StreamContext(BaseModel):
     """Mutable accumulator passed through ``_stream_tokens`` so the caller
     can read back generation state after the iterator is exhausted."""
@@ -264,8 +272,40 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         """Close the MLX generator to release resources immediately."""
         token_iter.close()
 
-    def _finish_transformers_generation(self, thread: Thread, ctx: StreamContext) -> None:
-        """Stop generation, drain unfinished output, and join the thread."""
+    def _start_transformers_generation(
+        self, streamer: TextIteratorStreamer, generate: Callable[[], object]
+    ) -> _GenerationWorker:
+        """Run *generate* on a thread under the Transformers lock.
+
+        ``generate()`` feeds *streamer*, which only ends when generation finishes. If it
+        raises, the streamer would never end and the reader would wait forever, so the
+        error is stored and the streamer is ended here.
+        """
+        lock = self._transformers_lock
+        tracker = active_turn_latency_tracker()
+        worker = _GenerationWorker()
+
+        def run() -> None:
+            try:
+                with lock:
+                    if tracker is not None:
+                        tracker.start_llm()
+                    generate()
+            except Exception as exc:
+                worker.error = exc
+                try:
+                    streamer.end()
+                except Exception:
+                    # end() decodes the cached tokens, which can be what failed.
+                    # Queue the stop marker directly so the reader still wakes up.
+                    streamer.on_finalized_text("", stream_end=True)
+
+        worker.thread = Thread(target=run)
+        worker.thread.start()
+        return worker
+
+    def _finish_transformers_generation(self, worker: _GenerationWorker, ctx: StreamContext) -> None:
+        """Stop generation, drain unfinished output, join the thread, and surface its error."""
         self._cancel_criteria.cancel()
         # TextIteratorStreamer consumes its end marker once; reading again waits
         # for its queue timeout even though generation has already finished.
@@ -275,7 +315,15 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     pass
             except Empty:
                 pass
-        thread.join(timeout=5.0)
+        if worker.thread is not None:
+            worker.thread.join(timeout=5.0)
+        if worker.error is None:
+            return
+        if ctx.interrupted:
+            # The response is ending anyway, so the error is only logged.
+            log_exception(logger, "Transformers generation failed after the response was interrupted", worker.error)
+            return
+        raise RuntimeError(f"Transformers generation failed: {worker.error}") from worker.error
 
     # ------------------------------------------------------------------
     # Shared helpers
@@ -896,19 +944,11 @@ class LanguageModelHandler(BaseLanguageModelHandler):
             self._cancel_criteria.reset()
             if ctx.prefetch_transaction is not None:
                 ctx.prefetch_transaction.register_abort(self._cancel_criteria.cancel)
-            lock = self._transformers_lock
-            tracker = active_turn_latency_tracker()
-
-            def _locked_pipe() -> None:
-                with lock:
-                    if tracker is not None:
-                        tracker.start_llm()
-                    self.pipe(chat_prompt, **self.gen_kwargs)
-
-            thread = Thread(target=_locked_pipe)
-            thread.start()
+            worker = self._start_transformers_generation(
+                self.streamer, lambda: self.pipe(chat_prompt, **self.gen_kwargs)
+            )
             yield from self._stream_tokens(self.streamer, gen, language_code, ctx, runtime_config, response)
-            self._finish_transformers_generation(thread, ctx)
+            self._finish_transformers_generation(worker, ctx)
             if self.device == "mps":
                 torch.mps.empty_cache()
 
@@ -1103,19 +1143,12 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
                 "streamer": self.streamer,
                 "stopping_criteria": StoppingCriteriaList([self._cancel_criteria]),
             }
-            lock = self._transformers_lock
-            tracker = active_turn_latency_tracker()
-
-            def _locked_generate() -> None:
-                with lock:
-                    if tracker is not None:
-                        tracker.start_llm()
-                    self.model.generate(**generate_kwargs)  # type: ignore[union-attr,operator]
-
-            thread = Thread(target=_locked_generate)
-            thread.start()
+            worker = self._start_transformers_generation(
+                self.streamer,
+                lambda: self.model.generate(**generate_kwargs),  # type: ignore[union-attr,operator]
+            )
             yield from self._stream_tokens(self.streamer, gen, language_code, ctx, runtime_config, response)
-            self._finish_transformers_generation(thread, ctx)
+            self._finish_transformers_generation(worker, ctx)
             if self.device == "mps":
                 torch.mps.empty_cache()
 
