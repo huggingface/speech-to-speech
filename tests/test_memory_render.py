@@ -88,6 +88,18 @@ def test_a_late_recall_is_dropped_and_its_job_is_told_to_stop():
     assert late.stop.is_set()
 
 
+def test_a_late_recall_reports_where_its_time_went_when_it_ends(caplog):
+    late = preparation("item_1", "Where do I work?", done=False, deadline_s=0.01)
+    with caplog.at_level("INFO", logger="speech_to_speech.memory.provider"):
+        assert render_memory(chat_with(user_item("item_1", "Where do I work?")), late) == 0
+        late.future.set_result(dict(RESULT, timing={"queuedMs": 3, "runMs": 512}))
+    lines = [r.getMessage() for r in caplog.records]
+    assert any("missed its deadline (checked" in line for line in lines)
+    ended = next(line for line in lines if "late recall for item_1 ended ok" in line)
+    assert "queued 3 ms, ran 512 ms" in ended
+    assert "Zurich" not in " ".join(lines) and "concise" not in " ".join(lines), "times and status only, never content"
+
+
 def test_a_failed_recall_and_an_empty_one_add_nothing():
     failed = dict(RESULT, status="unavailable", facts=[], preferences=[],
                   error={"code": "store_unavailable", "message": "down"})

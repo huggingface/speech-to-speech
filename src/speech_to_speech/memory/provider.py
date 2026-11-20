@@ -202,7 +202,9 @@ class MemoryPreparation:
             result = ContextResult.from_json(document)
         except FutureTimeout:
             self.stop.set()
-            logger.info("memory: recall for %s missed its deadline; answering without memory", self.anchor_item_id)
+            logger.info("memory: recall for %s missed its deadline (checked %.0f ms after it started); answering "
+                        "without memory", self.anchor_item_id, (time.monotonic() - self.started) * 1000)
+            self.future.add_done_callback(self._report_late)
             self._trouble()
             return None
         except Exception as error:  # noqa: BLE001 - memory never fails a voice turn
@@ -250,6 +252,20 @@ class MemoryPreparation:
     def _trouble(self) -> None:
         if self.on_trouble is not None:
             self.on_trouble()
+
+    def _report_late(self, future: Future) -> None:
+        """Where a missed recall's time went, once its job ends: waiting for the library (queued), inside it (ran:
+        embedding and store), or neither (this process was slow to hand the result over). Times and status only."""
+        ended_ms = (time.monotonic() - self.started) * 1000
+        try:
+            from agentmemory_native import ContextResult
+
+            result = ContextResult.from_json(future.result())
+            logger.info("memory: late recall for %s ended %s %.0f ms after it started (library queued %s ms, ran %s ms)",
+                        self.anchor_item_id, result.status, ended_ms, result.queued_ms, result.run_ms)
+        except Exception as error:  # noqa: BLE001 - diagnostics only
+            logger.info("memory: late recall for %s ended %.0f ms after it started (%s)", self.anchor_item_id, ended_ms,
+                        type(error).__name__)
 
 
 class AgentMemoryProvider:
