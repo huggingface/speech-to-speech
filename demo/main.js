@@ -17,7 +17,7 @@
  * @typedef {S2sRealtimeClient} RealtimeClient
  */
 
-import { S2sRealtimeClient, normalizePlaybackBufferMs } from "./s2s-realtime-client.js?v=reasoning-language-20261110";
+import { S2sRealtimeClient, discoverCapabilities, normalizePlaybackBufferMs } from "./s2s-realtime-client.js?v=voices-20261120";
 import { ReasoningControl } from "./ui/reasoning.js";
 import { $, truncateError, errorMessage, DEBUG } from "./ui/dom.js";
 import { ChatView } from "./ui/chat.js?v=reasoning-language-20261110";
@@ -953,6 +953,52 @@ async function fetchConfig() {
   void account.refresh();
   syncToolsUi();
   syncConnectionUi();
+  void refreshVoiceMenu();
+}
+
+/**
+ * Show the voices of the server's speech engine in Settings (Kokoro and Qwen3-TTS name different voices). The page's
+ * own list stays when the server does not list its voices.
+ * @param {{ id: string, name: string, group: string | null }[] | null} voices @param {string} selected
+ */
+function fillVoiceMenu(voices, selected) {
+  if (!Array.isArray(voices) || voices.length === 0) return;
+  const groups = new Map();
+  inputVoice.replaceChildren();
+  for (const voice of voices) {
+    const option = new Option(voice.name, voice.id);
+    if (!voice.group) {
+      inputVoice.append(option);
+      continue;
+    }
+    if (!groups.has(voice.group)) {
+      const group = document.createElement("optgroup");
+      group.label = voice.group;
+      groups.set(voice.group, group);
+      inputVoice.append(group);
+    }
+    groups.get(voice.group).append(option);
+  }
+  inputVoice.value = selected;
+}
+
+/** Keep the chosen voice when the server's engine has it, else take the server's own voice, and remember it. */
+function adoptVoice(voices, voice) {
+  fillVoiceMenu(voices, voice);
+  if (voices && voice && settings.voice !== voice) {
+    settings.voice = voice;
+    saveSettings(settings);
+  }
+}
+
+/** Learn the server's voices before a conversation starts (direct connections; LB mode learns them on connect). */
+async function refreshVoiceMenu() {
+  if (!allowDirect) return;
+  const target = buildDirectWsUrl(pinnedUrl || settings.directUrl);
+  if (!target) return;
+  const { voices, defaultVoice } = await discoverCapabilities(target);
+  if (!voices) return;
+  adoptVoice(voices, voices.some(voice => voice.id === settings.voice) ? settings.voice : defaultVoice);
 }
 
 /**
@@ -1592,7 +1638,8 @@ async function doStart(audioContext = null) {
     }
   });
   c.addEventListener("language-capabilities", (event) => {
-    const { autoSupported } = event.detail;
+    const { autoSupported, voices, voice } = event.detail;
+    if (voices) adoptVoice(voices, voice);
     for (const picker of [mainLanguage, inputLanguage]) {
       const option = picker.querySelector('option[value="auto"]');
       option.disabled = !autoSupported;

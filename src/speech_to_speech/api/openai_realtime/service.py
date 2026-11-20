@@ -411,6 +411,9 @@ class RealtimeService:
         self.stt_language_capabilities = SpeechLanguageCapabilities()
         self.tts_language_capabilities = SpeechLanguageCapabilities()
         self.stt_auto_reset_supported: bool = True
+        # The speech engine's voices and its default ({"voices": [...], "default_voice": ...}); None when it does not
+        # list them.
+        self.tts_voice_capabilities: dict[str, Any] | None = None
         self._conns: dict[str, ConnState] = {}
         self.total_usage = GlobalUsageMetrics()
         # Optional memory opens its native context here, at startup, never on the event loop of a first turn;

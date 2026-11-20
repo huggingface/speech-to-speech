@@ -2189,3 +2189,47 @@ def test_cancellation_while_visemes_send_does_not_restart_audio(setup, monkeypat
             time.sleep(0.1)
             assert audio_sends == []
             assert not service._state(conn_id).in_response
+
+
+def test_capabilities_list_the_speech_engine_voices_and_only_named_origins_may_read_them(monkeypatch):
+    """The browser page fills its voice menu from here: Kokoro and Qwen3-TTS name different voices, and a voice the
+    engine lacks falls back silently. A page on another port may read this only when its origin is named."""
+    monkeypatch.setenv("S2S_CAPABILITIES_ALLOWED_ORIGINS", "http://localhost:7860, http://127.0.0.1:7860")
+    unit = _make_unit(0)
+    unit.service.tts_voice_capabilities = {
+        "voices": [{"id": "af_heart", "name": "Heart (female)", "group": "American English"}],
+        "default_voice": "af_heart",
+    }
+    app = create_app(pool=[unit, _make_unit(1)], stop_event=ThreadingEvent())
+    with TestClient(app) as client:
+        named = client.get("/v1/realtime/capabilities", headers={"Origin": "http://127.0.0.1:7860"})
+        tts = named.json()["pipelines"][0]["tts"]
+        assert tts["voices"] == [{"id": "af_heart", "name": "Heart (female)", "group": "American English"}]
+        assert tts["default_voice"] == "af_heart"
+        assert named.headers["access-control-allow-origin"] == "http://127.0.0.1:7860"
+        assert named.json()["pipelines"][1]["tts"]["voices"] is None, "an engine that does not list voices says so"
+
+        other = client.get("/v1/realtime/capabilities", headers={"Origin": "https://elsewhere.example"})
+        assert "access-control-allow-origin" not in other.headers
+        assert other.json() == named.json()
+
+
+def test_with_no_origins_named_no_page_on_another_origin_may_read_the_capabilities(monkeypatch):
+    monkeypatch.delenv("S2S_CAPABILITIES_ALLOWED_ORIGINS", raising=False)
+    app = create_app(pool=[_make_unit(0)], stop_event=ThreadingEvent())
+    with TestClient(app) as client:
+        response = client.get("/v1/realtime/capabilities", headers={"Origin": "http://localhost:7860"})
+        assert response.status_code == 200
+        assert "access-control-allow-origin" not in response.headers
+
+
+def test_qwen3_lists_its_preset_speakers_and_no_voices_for_a_clone_model():
+    handler = object.__new__(Qwen3TTSHandler)
+    handler._initial_speaker = "Aiden"
+    handler.model = SimpleNamespace(get_supported_speakers=lambda: ["Vivian", "aiden", "Uncle_Fu"])
+    handler._model_type = lambda: "custom_voice"
+    described = handler.voice_capabilities()
+    assert [voice["id"] for voice in described["voices"]] == ["aiden", "Uncle_Fu", "Vivian"]
+    assert described["voices"][1]["name"] == "Uncle Fu" and described["default_voice"] == "Aiden"
+    handler._model_type = lambda: "base"
+    assert handler.voice_capabilities() is None

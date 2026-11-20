@@ -49,17 +49,7 @@ WHISPER_LANGUAGE_TO_KOKORO_LANG = {
 # Default voices for each Kokoro language code
 # These are native voices that sound natural for each language
 # Voice naming: first letter = language, second letter = gender (f=female, m=male)
-# Available voices per language:
-#   a (American): af_alloy, af_aoede, af_bella, af_heart, af_jessica, af_kore, af_nicole, af_nova, af_river, af_sarah, af_sky
-#                 am_adam, am_echo, am_eric, am_fenrir, am_liam, am_michael, am_onyx, am_puck, am_santa
-#   b (British):  bf_alice, bf_emma, bf_isabella, bf_lily, bm_daniel, bm_fable, bm_george, bm_lewis
-#   e (Spanish):  ef_dora, em_alex, em_santa
-#   f (French):   ff_siwis
-#   h (Hindi):    hf_alpha, hf_beta, hm_omega, hm_psi
-#   i (Italian):  if_sara, im_nicola
-#   j (Japanese): jf_alpha, jf_gongitsune, jf_nezumi, jf_tebukuro, jm_kumo
-#   p (Portuguese): pf_dora, pm_alex, pm_santa
-#   z (Chinese):  zf_xiaobei, zf_xiaoni, zf_xiaoxiao, zf_xiaoyi, zm_yunjian, zm_yunxi, zm_yunxia, zm_yunyang
+# Available voices per language: KOKORO_VOICES below.
 KOKORO_LANG_DEFAULT_VOICES = {
     "a": "af_heart",  # American English female
     "b": "bm_fable",  # British English male
@@ -74,6 +64,31 @@ KOKORO_LANG_DEFAULT_VOICES = {
 
 # Codes with a native Kokoro voice; the other map entries fall back to English.
 KOKORO_NATIVE_LANGUAGES = frozenset({"en", "ja", "zh", "fr", "es", "it", "pt", "hi"})
+
+# Every Kokoro-82M voice, by Kokoro language code (a voice's first letter). Clients choose from these.
+KOKORO_VOICES = {
+    "a": ("af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica", "af_kore", "af_nicole", "af_nova", "af_river",
+          "af_sarah", "af_sky", "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael", "am_onyx",
+          "am_puck", "am_santa"),
+    "b": ("bf_alice", "bf_emma", "bf_isabella", "bf_lily", "bm_daniel", "bm_fable", "bm_george", "bm_lewis"),
+    "e": ("ef_dora", "em_alex", "em_santa"),
+    "f": ("ff_siwis",),
+    "h": ("hf_alpha", "hf_beta", "hm_omega", "hm_psi"),
+    "i": ("if_sara", "im_nicola"),
+    "j": ("jf_alpha", "jf_gongitsune", "jf_nezumi", "jf_tebukuro", "jm_kumo"),
+    "p": ("pf_dora", "pm_alex", "pm_santa"),
+    "z": ("zf_xiaobei", "zf_xiaoni", "zf_xiaoxiao", "zf_xiaoyi", "zm_yunjian", "zm_yunxi", "zm_yunxia", "zm_yunyang"),
+}
+KOKORO_LANGUAGE_NAMES = {"a": "American English", "b": "British English", "e": "Spanish", "f": "French",
+                         "h": "Hindi", "i": "Italian", "j": "Japanese", "p": "Portuguese", "z": "Chinese"}
+
+
+def kokoro_voice_choices() -> list[dict[str, str]]:
+    """Every voice a client may choose, grouped by the language it was made for. A reply in another language
+    is spoken with that language's default voice, unless the chosen voice belongs to it."""
+    return [{"id": voice, "name": f"{voice[3:].capitalize()} ({'female' if voice[1] == 'f' else 'male'})",
+             "group": KOKORO_LANGUAGE_NAMES[code]}
+            for code, voices in KOKORO_VOICES.items() for voice in voices]
 
 
 class KokoroTTSHandler(BaseTTSHandler):
@@ -296,6 +311,10 @@ class KokoroTTSHandler(BaseTTSHandler):
         if voice is None:
             return None
         return self._OPENAI_VOICE_ALIASES.get(voice, voice)
+
+    def voice_capabilities(self) -> dict[str, Any]:
+        """The voices a client may choose (the session's audio.output.voice) and the one this server speaks with."""
+        return {"voices": kokoro_voice_choices(), "default_voice": self._initial_voice}
 
     def _load_requested_voice(self, pipeline: Any, voice: str) -> str:
         """Load a client voice, retrying a failed load with the setup voice."""

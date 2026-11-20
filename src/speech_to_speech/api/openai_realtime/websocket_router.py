@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -705,12 +706,34 @@ def create_app(
             # can be skipped/cancelled by Starlette's runner and never resume.
             _release_session(unit, session_id)
 
-    @app.get("/v1/realtime/capabilities")
-    async def capabilities_endpoint() -> dict[str, Any]:
-        return {
-            "pipelines": [{"index": unit.index, **unit.service.get_language_capabilities()} for unit in pool],
-            "memory": memory_status(),
+    # A page served from another origin (the demo voice UI on its own port) may read the capabilities only when its
+    # origin is named here: comma-separated, none by default.
+    capability_origins = frozenset(
+        origin.strip()
+        for origin in os.environ.get("S2S_CAPABILITIES_ALLOWED_ORIGINS", "").split(",")
+        if origin.strip()
+    )
+
+    def describe_pipeline(unit: PipelineUnit) -> dict[str, Any]:
+        described = {"index": unit.index, **unit.service.get_language_capabilities()}
+        voices = unit.service.tts_voice_capabilities or {}
+        described["tts"] = {
+            **described["tts"],
+            "voices": voices.get("voices"),
+            "default_voice": voices.get("default_voice"),
         }
+        return described
+
+    @app.get("/v1/realtime/capabilities")
+    async def capabilities_endpoint(request: Request) -> JSONResponse:
+        headers = {"Vary": "Origin"}
+        origin = request.headers.get("origin")
+        if origin and origin in capability_origins:
+            headers["Access-Control-Allow-Origin"] = origin
+        return JSONResponse(
+            {"pipelines": [describe_pipeline(unit) for unit in pool], "memory": memory_status()},
+            headers=headers,
+        )
 
     @app.post("/v1/memory/erase")
     async def memory_erase_endpoint(request: Request) -> Response:

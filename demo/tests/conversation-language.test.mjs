@@ -144,3 +144,35 @@ test("queued language choices update options before the SDK session exists", asy
     assert.equal(client._sessionConfig().audio.input.transcription.language, "es");
   }
 });
+
+const ENGINE_VOICES = [
+  { id: "af_heart", name: "Heart (female)", group: "American English" },
+  { id: "bm_fable", name: "Fable (male)", group: "British English" },
+];
+
+test("a voice the server's speech engine does not have is replaced by the server's own before the session starts", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => ({
+    ok: true, json: async () => ({ pipelines: [{ tts: { voices: ENGINE_VOICES, default_voice: "bm_fable" } }] }),
+  }));
+  const kept = new S2sRealtimeClient({ transport: "websocket", voice: "af_heart", instructions: "" });
+  const seen = [];
+  kept.addEventListener("language-capabilities", event => seen.push(event.detail));
+  await kept._loadLanguageCapabilities("ws://backend.test/v1/realtime");
+  assert.equal(kept.options.voice, "af_heart");
+  assert.deepEqual(seen[0].voices.map(voice => voice.id), ["af_heart", "bm_fable"]);
+  assert.equal(seen[0].voice, "af_heart");
+
+  const replaced = new S2sRealtimeClient({ transport: "websocket", voice: "Vivian", instructions: "" });
+  await replaced._loadLanguageCapabilities("ws://backend.test/v1/realtime");
+  assert.equal(replaced.options.voice, "bm_fable", "a Qwen3-TTS speaker sent to Kokoro would fall back silently");
+});
+
+test("a server that does not list its voices leaves the chosen voice and the menu alone", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => ({ ok: true, json: async () => ({ pipelines: [{ tts: {} }] }) }));
+  const client = new S2sRealtimeClient({ transport: "websocket", voice: "Vivian", instructions: "" });
+  const seen = [];
+  client.addEventListener("language-capabilities", event => seen.push(event.detail));
+  await client._loadLanguageCapabilities("ws://backend.test/v1/realtime");
+  assert.equal(client.options.voice, "Vivian");
+  assert.equal(seen[0].voices, null);
+});
