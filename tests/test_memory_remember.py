@@ -11,7 +11,7 @@ from openai.types.realtime.conversation_item import RealtimeConversationItemUser
 from openai.types.realtime.realtime_conversation_item_user_message import Content as UserContent
 
 from speech_to_speech.LLM.chat import Chat
-from speech_to_speech.memory.provider import AgentMemoryProvider, remember_intent, render_memory
+from speech_to_speech.memory.provider import AgentMemoryProvider, forget_intent, remember_intent, render_memory
 
 TEXT = "Please remember that I prefer tea."
 
@@ -59,6 +59,9 @@ class FakeClient:
             return self.recall
         if operation == "memory_remember":
             return self.remember_answers.pop(0)
+        if operation == "memory_forget":
+            return write_result(dict(receipt("applied", operation="op-forget"), kind="forget",
+                                     targetOperationId=request["operationId"]))
         if operation == "memory_operation_get":
             return write_result(self.final) if self.final is not None else write_result(receipt("running"))
         raise AssertionError(operation)
@@ -211,3 +214,46 @@ def test_status_says_saving_and_needing_attention_without_any_content(provider):
     assert wait_until(lambda: provider.status()["writes"] == {"voiceRemember": True, "saving": 0,
                                                                "needsAttention": True})
     assert "tea" not in str(provider.status())
+
+
+@pytest.mark.parametrize("text", [
+    "Forget what I just told you.", "Please forget that.", "Could you forget what I said?", "OK, forget that last one.",
+])
+def test_a_spoken_request_to_forget_is_recognised(text):
+    assert forget_intent(text) and not remember_intent(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Forget it.", "Forget that, let's talk about cars.", "I forgot my keys.", "Did you forget what I said?", "", None,
+])
+def test_anything_else_is_not_a_request_to_forget(text):
+    assert not forget_intent(text)
+
+
+def test_forget_names_the_last_remember_of_this_connection_and_says_it_will_no_longer_be_used(provider):
+    provider._client.remember_answers.append(write_result(receipt("applied", searchable=True, operation="op-tea")))
+    remembered = provider.admit("conn", "item_1", 1, TEXT)
+    assert wait_until(lambda: remembered.final is not None)
+    ticket = provider.admit("conn", "item_2", 1, "Forget what I just told you.")
+    assert ticket is not None and ticket.kind == "forget"
+    parts = rendered("item_2", "Forget what I just told you.",
+                     provider.prepare("conn", "item_2", "Forget what I just told you.", write=ticket))
+    sent = next(r for r in provider._client.requests if r["operation"] == "memory_forget")
+    assert sent["operationId"] == "op-tea"
+    assert "It will no longer be used." in parts[0]
+    assert "deleted" not in parts[0], "a forget closes memories; it never claims they are deleted"
+
+
+def test_forget_with_nothing_remembered_here_says_so_and_asks_nothing_of_the_library(provider):
+    ticket = provider.admit("conn", "item_1", 1, "Please forget that.")
+    parts = rendered("item_1", "Please forget that.", provider.prepare("conn", "item_1", "Please forget that.", write=ticket))
+    assert "nothing to forget" in parts[0]
+    assert all(r["operation"] != "memory_forget" for r in provider._client.requests)
+
+
+def test_forget_never_reaches_another_connections_remember(provider):
+    provider._client.remember_answers.append(write_result(receipt("applied", searchable=True, operation="op-a")))
+    remembered = provider.admit("conn-a", "item_1", 1, TEXT)
+    assert wait_until(lambda: remembered.final is not None)
+    ticket = provider.admit("conn-b", "item_9", 1, "Forget what I just told you.")
+    assert ticket.refused == "nothing_to_forget"

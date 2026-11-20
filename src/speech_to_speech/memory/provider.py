@@ -49,6 +49,14 @@ REMEMBER_POLITE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# A spoken request to forget what was last remembered in this conversation: "forget what I just told you", "please
+# forget that". Deliberately narrow: a bare "forget it" in conversation usually means "never mind".
+FORGET_INTENT = re.compile(
+    r"^\s*(?:(?:please|okay|ok)[\s,]+)?(?:(?:can|could|would)\s+you\s+(?:please\s+)?)?forget\s+"
+    r"(?:what\s+i\s+(?:just\s+)?(?:said|told\s+you)|that\s+last\s+(?:one|thing))\W*$|^\s*please\s+forget\s+(?:that|it)\W*$",
+    re.IGNORECASE,
+)
+
 #: How long the remember job waits for the write before it returns its receipt (the write goes on without it).
 REMEMBER_JOB_MS = 3000
 #: How long a write that is still running is followed, after its job returned.
@@ -72,13 +80,19 @@ def remember_intent(text: str | None) -> bool:
     return REMEMBER_INTENT.match(text) is not None and not text.rstrip().endswith("?")
 
 
+def forget_intent(text: str | None) -> bool:
+    """True when the utterance asks to forget what was last remembered in this conversation."""
+    return bool(text) and FORGET_INTENT.match(text) is not None
+
+
 @dataclass
 class WriteTicket:
-    """One spoken remember, from admission to its final receipt. Updated from bridge threads; read anywhere."""
+    """One spoken remember or forget, from admission to its final receipt. Updated from bridge threads; read anywhere."""
 
     source_id: str
     item_id: str
     future: Future
+    kind: str = "remember"
     started: float = field(default_factory=time.monotonic)
     final: Any = None  # the final Receipt once the write has ended
     refused: str | None = None  # why nothing was accepted (the job ended without a receipt)
@@ -101,8 +115,10 @@ class WriteTicket:
         return ("ended", receipt) if receipt.ended else ("pending", receipt)
 
 
-def status_line(receipt: Any, *, current: bool) -> str:
-    """What the model may say about one remember, by its receipt; never more than the receipt supports."""
+def status_line(receipt: Any, *, current: bool, kind: str = "remember") -> str:
+    """What the model may say about one remember or forget, by its receipt; never more than the receipt supports."""
+    if kind == "forget":
+        return forget_line(receipt, current=current)
     lead = "The user just asked to remember this." if current else "Update on something the user asked to remember earlier:"
     if receipt is None or not receipt.ended:
         return (f"{lead} Saving it has started but is not confirmed yet: say you are saving it, never that it is saved."
@@ -117,6 +133,24 @@ def status_line(receipt: Any, *, current: bool) -> str:
             f"{lead} it could not be saved; tell the user."
     return (f"{lead} It may be only partly saved and needs checking; tell the user it is not confirmed." if current
             else f"{lead} it may be only partly saved and needs checking; tell the user.")
+
+
+def forget_line(receipt: Any, *, current: bool) -> str:
+    lead = ("The user just asked to forget what they last asked to remember." if current
+            else "Update on something the user asked to forget earlier:")
+    if receipt == "nothing_to_forget":
+        return f"{lead} Nothing was remembered in this conversation, so there is nothing to forget; say so."
+    if receipt is None or isinstance(receipt, str) or not receipt.ended:
+        if isinstance(receipt, str):
+            return (f"{lead} It could not be forgotten; tell the user it may still be used." if current
+                    else f"{lead} it could not be forgotten; tell the user it may still be used.")
+        return (f"{lead} Forgetting it has started but is not confirmed yet: say you are doing it, never that it is done."
+                if current else f"{lead} it is still being forgotten.")
+    if receipt.state == "applied":
+        # Closed, not deleted: say what is true.
+        return f"{lead} It will no longer be used." if current else f"{lead} it will no longer be used."
+    return (f"{lead} It could not be confirmed; tell the user it may still be used." if current
+            else f"{lead} it could not be confirmed; tell the user it may still be used.")
 
 
 @dataclass
@@ -175,11 +209,13 @@ class MemoryPreparation:
         lines: list[str] = []
         if self.write is not None:
             state, value = self.write.current(wait_s=self.deadline - time.monotonic())
-            if state == "refused":
+            if state == "refused" and self.write.kind == "forget":
+                lines.append(forget_line(value, current=True))
+            elif state == "refused":
                 lines.append("The user just asked to remember this, but it could not be saved; tell the user it was "
                              "not saved.")
             else:
-                lines.append(status_line(value, current=True))
+                lines.append(status_line(value, current=True, kind=self.write.kind))
             if state != "pending":
                 self.write.told = True
         if self.notices is not None:
@@ -211,6 +247,7 @@ class AgentMemoryProvider:
         self.min_score = min_score
         self._last: dict[str, MemoryPreparation] = {}
         self._writes: dict[str, list[WriteTicket]] = {}
+        self._last_remember: dict[str, WriteTicket] = {}
         self._flags: int | None = None
         self._lock = threading.Lock()
         self._rewarming = False
@@ -277,7 +314,11 @@ class AgentMemoryProvider:
         The source is the microphone's final transcript of this item and revision, nothing a model produced. The
         library's journal makes the write durable before it is called accepted; the ticket follows it to its end.
         """
-        if not self.voice_remember or not item_id or not remember_intent(text):
+        if not self.voice_remember or not item_id:
+            return None
+        if forget_intent(text):
+            return self._admit_forget(conn_id, item_id)
+        if not remember_intent(text):
             return None
         from agentmemory_native import remember_request
 
@@ -289,12 +330,45 @@ class AgentMemoryProvider:
         ticket = WriteTicket(source_id, item_id, future)
         with self._lock:
             self._writes.setdefault(conn_id, []).append(ticket)
+            self._last_remember[conn_id] = ticket
         self._bridge.submit(self._follow, ticket, request)
         logger.info("memory: remember requested for %s", item_id)
         return ticket
 
+    def _admit_forget(self, conn_id: str, item_id: str) -> WriteTicket:
+        """Starts forgetting what was last remembered on this connection (closed, not deleted)."""
+        with self._lock:
+            target = self._last_remember.pop(conn_id, None)
+        ticket = WriteTicket(f"forget/{conn_id}/{item_id}", item_id, Future(), kind="forget")
+        with self._lock:
+            self._writes.setdefault(conn_id, []).append(ticket)
+        if target is None:
+            ticket.refused = "nothing_to_forget"
+            ticket.future.set_result(None)
+        else:
+            self._bridge.submit(self._follow_forget, ticket, target)
+        logger.info("memory: forget requested for %s", item_id)
+        return ticket
+
+    def _follow_forget(self, ticket: WriteTicket, target: WriteTicket) -> None:
+        """Waits for the remember to be accepted (its receipt names the operation), then forgets it and follows."""
+        from agentmemory_native import forget_request
+
+        try:
+            receipt = target.future.result(timeout=REMEMBER_JOB_MS / 1000 + 5)
+        except Exception:  # noqa: BLE001 - nothing to name
+            receipt = None
+        if receipt is None:
+            ticket.refused = "nothing_to_forget" if target.refused is not None else "remember_not_accepted"
+            ticket.future.set_result(None)
+            return
+        self._run_and_follow(ticket, forget_request(operation_id=receipt.operation_id, request_id=ticket.item_id))
+
     def _follow(self, ticket: WriteTicket, request: dict[str, Any]) -> None:
-        """Runs the remember job, then follows a still-running write by its operation id until it ends."""
+        self._run_and_follow(ticket, request)
+
+    def _run_and_follow(self, ticket: WriteTicket, request: dict[str, Any]) -> None:
+        """Runs the job, then follows a still-running operation by its id until it ends."""
         from agentmemory_native import WriteResult, operation_get_request
 
         try:
@@ -310,7 +384,7 @@ class AgentMemoryProvider:
         ticket.future.set_result(receipt)
         self._refresh_flags()
         if ticket.refused is not None:
-            logger.warning("memory: remember for %s was not accepted (%s)", ticket.item_id, ticket.refused)
+            logger.warning("memory: %s for %s was not accepted (%s)", ticket.kind, ticket.item_id, ticket.refused)
             return
         deadline = time.monotonic() + FOLLOW_WRITE_S
         while ticket.final is None and not self._closed.wait(0.5) and time.monotonic() < deadline:
@@ -323,7 +397,7 @@ class AgentMemoryProvider:
                 ticket.final = followed.receipt
         self._refresh_flags()
         if ticket.final is not None:
-            logger.info("memory: remember for %s ended %s%s", ticket.item_id, ticket.final.state,
+            logger.info("memory: %s for %s ended %s%s", ticket.kind, ticket.item_id, ticket.final.state,
                         f" ({ticket.final.reason})" if ticket.final.reason else "")
 
     def take_notices(self, conn_id: str) -> list[str]:
@@ -334,12 +408,15 @@ class AgentMemoryProvider:
         for ticket in tickets:
             if ticket.told:
                 continue
-            if ticket.refused is not None:
+            if ticket.refused is not None and ticket.kind == "forget":
+                lines.append(forget_line(ticket.refused, current=False))
+                ticket.told = True
+            elif ticket.refused is not None:
                 lines.append("Update on something the user asked to remember earlier: it could not be saved; tell the "
                              "user.")
                 ticket.told = True
             elif ticket.final is not None:
-                lines.append(status_line(ticket.final, current=False))
+                lines.append(status_line(ticket.final, current=False, kind=ticket.kind))
                 ticket.told = True
         with self._lock:
             kept = [t for t in self._writes.get(conn_id, ()) if not t.told]
@@ -400,6 +477,7 @@ class AgentMemoryProvider:
             self._last.pop(conn_id, None)
             # The writes themselves go on (they are durable); only the outcome notices for this connection are dropped.
             self._writes.pop(conn_id, None)
+            self._last_remember.pop(conn_id, None)
 
     def close(self) -> None:
         self._closed.set()
