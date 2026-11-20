@@ -36,6 +36,7 @@ from speech_to_speech.LLM.base_openai_compatible_language_model import (
 )
 from speech_to_speech.LLM.chat import Chat
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn
+from speech_to_speech.LLM.tool_call.function_call import JSON_TOOL_CALL_END, JSON_TOOL_CALL_ENTER
 from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
@@ -234,20 +235,112 @@ def _chat_response_end(finish_reason: str) -> ProviderResponseEnd:
     return ProviderResponseEnd()
 
 
+_TOOL_CALL_TAGS = (JSON_TOOL_CALL_ENTER, JSON_TOOL_CALL_END)
+
+
+class _ToolCallMarkupFilter:
+    """Remove bare ``<tool_call>``/``</tool_call>`` tags that a provider streams as content.
+
+    Some servers (e.g. vLLM with a Qwen XML tool parser) return structured
+    ``tool_calls`` and also leak the opening tag as text. Tags may be split
+    across chunks, so a tail that could still become a tag is held back, as is
+    whitespace before any real text (it is dropped if a tag follows it).
+    Whitespace after a tag is dropped; whitespace after real text is kept.
+    """
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._after_tag = False
+        self._spoke = False
+        self.stripped = False
+
+    @property
+    def pending(self) -> bool:
+        return bool(self._pending)
+
+    def feed(self, text: str) -> tuple[str, str]:
+        """Return ``(held, new)``: cleaned output from previously held text and from ``text``."""
+        buf = self._pending + text
+        boundary = len(self._pending)
+        self._pending = ""
+        held: list[str] = []
+        new: list[str] = []
+
+        def emit(start: int, end: int) -> None:
+            if start < boundary:
+                held.append(buf[start : min(end, boundary)])
+            if end > boundary:
+                new.append(buf[max(start, boundary) : end])
+
+        n = len(buf)
+        i = 0
+        while i < n:
+            lead = i
+            while i < n and buf[i].isspace():
+                i += 1
+            if self._spoke and not self._after_tag:
+                emit(lead, i)
+                lead = i
+            if self._after_tag:
+                lead = i
+            if i == n:
+                self._pending = buf[lead:]
+                break
+            rest = buf[i:]
+            tag = next((t for t in _TOOL_CALL_TAGS if rest.startswith(t)), None)
+            if tag is not None:
+                i += len(tag)
+                self._after_tag = True
+                self.stripped = True
+                continue
+            if any(t.startswith(rest) for t in _TOOL_CALL_TAGS):
+                self._pending = buf[lead:]
+                break
+            end = buf.find("<", i + 1)
+            if end == -1:
+                end = n
+            emit(lead, end)
+            i = end
+            self._after_tag = False
+            self._spoke = True
+        return "".join(held), "".join(new)
+
+    def flush(self) -> str:
+        pending, self._pending = self._pending, ""
+        return pending
+
+    def keeps(self, segment: str) -> bool:
+        """Whether a cleaned text segment is worth storing as an assistant message."""
+        return bool(segment.strip()) if self.stripped else bool(segment)
+
+
 def _iter_chat_stream_events(api_response: Stream[ChatCompletionChunk]) -> Iterator[ProviderEvent]:
     """Normalize a streaming Chat Completions response."""
     tool_accum: dict[int, dict[str, str]] = {}
     usage: Usage | None = None
     text_segment = ""
     ending: ProviderResponseEnd | None = None
+    markup = _ToolCallMarkupFilter()
+
+    def flush_text_segment() -> Iterator[ProviderEvent]:
+        nonlocal text_segment
+        if markup.keeps(text_segment):
+            yield AssistantMessage(content=[AssistantContent(type="output_text", text=text_segment)])
+        text_segment = ""
 
     def flush_tools() -> Iterator[ProviderEvent]:
-        nonlocal text_segment
-        if text_segment:
-            yield AssistantMessage(content=[AssistantContent(type="output_text", text=text_segment)])
-            text_segment = ""
+        yield from flush_text_segment()
         yield from _tool_calls_from_accum(tool_accum)
         tool_accum.clear()
+
+    def emit_text(text: str) -> Iterator[ProviderEvent]:
+        nonlocal text_segment
+        if not text:
+            return
+        if tool_accum:
+            yield from flush_tools()
+        text_segment += text
+        yield TextDelta(text=text)
 
     def accumulate_tools(tool_calls: Any) -> None:
         for tool_call in tool_calls or []:
@@ -259,6 +352,26 @@ def _iter_chat_stream_events(api_response: Stream[ChatCompletionChunk]) -> Itera
                     entry["name"] = tool_call.function.name
                 if tool_call.function.arguments:
                     entry["args"] += tool_call.function.arguments
+
+    deferred_tools: list[Any] = []
+
+    def handle_tools(tool_calls: Any) -> None:
+        if not tool_calls:
+            return
+        if markup.pending or deferred_tools:
+            deferred_tools.extend(tool_calls)
+        else:
+            accumulate_tools(tool_calls)
+
+    def release_deferred_tools() -> None:
+        accumulate_tools(deferred_tools)
+        deferred_tools.clear()
+
+    def handle_text(text: str) -> Iterator[ProviderEvent]:
+        held, new = markup.feed(text)
+        yield from emit_text(held)
+        release_deferred_tools()
+        yield from emit_text(new)
 
     for chunk in api_response:
         if chunk.usage is not None:
@@ -279,21 +392,19 @@ def _iter_chat_stream_events(api_response: Stream[ChatCompletionChunk]) -> Itera
         text_piece = delta.content or getattr(delta, "refusal", None)
         continuing_tool = bool(tool_accum)
         if continuing_tool:
-            accumulate_tools(delta.tool_calls)
+            handle_tools(delta.tool_calls)
         if text_piece:
-            if continuing_tool:
-                yield from flush_tools()
-            text_segment += text_piece
-            yield TextDelta(text=text_piece)
+            yield from handle_text(text_piece)
         if not continuing_tool:
-            accumulate_tools(delta.tool_calls)
+            handle_tools(delta.tool_calls)
 
+    yield from emit_text(markup.flush())
+    release_deferred_tools()
     if ending is None:
         logger.warning("Chat Completions stream ended without a finish_reason")
     if tool_accum and (ending is None or ending.status == "completed"):
         yield from flush_tools()
-    if text_segment:
-        yield AssistantMessage(content=[AssistantContent(type="output_text", text=text_segment)])
+    yield from flush_text_segment()
     if usage is not None:
         yield usage
 
@@ -315,8 +426,11 @@ def _iter_chat_response_events(api_response: Any) -> Iterator[ProviderEvent]:
         yield ReasoningDelta(text=reasoning)
     raw_content = message.content or getattr(message, "refusal", None)
     if raw_content:
-        yield AssistantMessage(content=[AssistantContent(type="output_text", text=raw_content)])
-        yield TextDelta(text=raw_content)
+        markup = _ToolCallMarkupFilter()
+        content = "".join(markup.feed(raw_content)) + markup.flush()
+        if markup.keeps(content):
+            yield AssistantMessage(content=[AssistantContent(type="output_text", text=content)])
+            yield TextDelta(text=content)
     tool_accum: dict[int, dict[str, str]] = {}
     for tool_call in message.tool_calls or []:
         tool_accum[len(tool_accum)] = {
