@@ -10,6 +10,6 @@ What it does when on (read-only, "R0"):
   preferences into the anchored user item of its own deep copy of the conversation, never into the stored chat;
 - a late result, a superseded turn (the item's text changed) or a missing anchor means the request goes without memory.
 """
-from .provider import MemoryPreparation, memory_provider, render_memory, reset_memory_provider
+from .provider import MemoryPreparation, memory_provider, memory_status, render_memory, reset_memory_provider
 
-__all__ = ["MemoryPreparation", "memory_provider", "render_memory", "reset_memory_provider"]
+__all__ = ["MemoryPreparation", "memory_provider", "memory_status", "render_memory", "reset_memory_provider"]

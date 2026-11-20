@@ -34,6 +34,7 @@ from speech_to_speech.api.openai_realtime.transports import (
     send_ws_event,
 )
 from speech_to_speech.api.openai_realtime.visemes import SpeechToSpeechVisemesEvent
+from speech_to_speech.memory import memory_status
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
@@ -703,6 +704,7 @@ def create_app(
     async def capabilities_endpoint() -> dict[str, Any]:
         return {
             "pipelines": [{"index": unit.index, **unit.service.get_language_capabilities()} for unit in pool],
+            "memory": memory_status(),
         }
 
     @app.get("/v1/usage")

@@ -971,7 +971,8 @@ class ResponseHandler(RealtimeBaseHandler):
             last = cfg.chat.buffer[-1] if cfg.chat.buffer else None
             if isinstance(last, RealtimeConversationItemUserMessage):
                 text = " ".join(getattr(p, "text", None) or "" for p in last.content if getattr(p, "type", "") == "input_text")
-                request.memory = provider.prepare(conn_id, last.id, text)
+                # A user item with no text (a camera image after a tool call) keeps the turn's recall.
+                request.memory = provider.prepare(conn_id, last.id, text) or provider.for_followup(conn_id)
             elif isinstance(last, RealtimeConversationItemFunctionCallOutput):
                 request.memory = provider.for_followup(conn_id)
         if not out_of_band:

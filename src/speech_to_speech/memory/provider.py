@@ -164,6 +164,14 @@ class AgentMemoryProvider:
             self._last[conn_id] = preparation
         return preparation
 
+    def status(self) -> dict[str, Any]:
+        """What a client may know: on, read-only, ready or recovering (re-warming after trouble), the deadline.
+        Never the owner, the store or the configuration."""
+        with self._lock:
+            recovering = self._rewarming
+        return {"enabled": True, "profile": "read_only", "state": "recovering" if recovering else "ready",
+                "deadlineMs": self.deadline_ms}
+
     def for_followup(self, conn_id: str) -> MemoryPreparation | None:
         """A tool follow-up keeps its root turn's packet (rendering drops it if that turn's item is gone)."""
         with self._lock:
@@ -227,6 +235,12 @@ def _installed_manifest() -> str:
     abi = info["abi"]
     return (f"agentmemory-native {info['version']}, ABI {abi['major']}.{abi['minor']}, {info['platformTag']}, "
             f"commit {info['build']['commit'][:8]}, library sha256 {info['library']['sha256'][:12]}")
+
+
+def memory_status() -> dict[str, Any]:
+    """The memory section of the server's capabilities."""
+    provider = memory_provider()
+    return provider.status() if provider is not None else {"enabled": False}
 
 
 def reset_memory_provider(provider: AgentMemoryProvider | None = None) -> None:

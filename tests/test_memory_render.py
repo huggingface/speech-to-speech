@@ -128,6 +128,13 @@ def test_a_late_failed_or_refused_recall_reports_trouble_and_a_good_one_does_not
         assert len(calls) == expected
 
 
+def test_memory_status_with_memory_off_says_only_that():
+    from speech_to_speech.memory import memory_status
+
+    reset_memory_provider(None)
+    assert memory_status() == {"enabled": False}
+
+
 def test_with_memory_off_the_server_never_imports_the_memory_library():
     """A fresh interpreter, as a real server: build the realtime service with S2S_MEMORY_CONFIG unset."""
     import os
