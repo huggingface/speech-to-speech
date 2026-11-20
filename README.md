@@ -501,7 +501,7 @@ Works with any provider or server that implements the OpenAI Responses API. Poin
 # OpenAI
 speech-to-speech local \
     --llm_backend responses-api \
-    --model_name "gpt-4o-mini" \
+    --model_name "gpt-6-luna" \
     --responses_api_api_key "$OPENAI_API_KEY" \
     --responses_api_stream \
     --enable_live_transcription
