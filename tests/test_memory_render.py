@@ -98,6 +98,20 @@ def test_a_failed_recall_and_an_empty_one_add_nothing():
         assert texts(copy, "item_1") == ["Where do I work?"]
 
 
+def test_a_follow_up_of_a_late_turn_gets_no_memory_even_if_the_result_arrives_later():
+    late = preparation("item_1", "Where do I work?", done=False, deadline_s=0.01)
+    assert render_memory(chat_with(user_item("item_1", "Where do I work?")), late) == 0
+    late.future.set_result(RESULT)
+    copy = chat_with(user_item("item_1", "Where do I work?"))
+    assert render_memory(copy, late) == 0
+    assert texts(copy, "item_1") == ["Where do I work?"]
+
+
+def test_an_undecodable_result_adds_nothing_and_does_not_raise():
+    copy = chat_with(user_item("item_1", "Where do I work?"))
+    assert render_memory(copy, preparation("item_1", "Where do I work?", {"no": "status"})) == 0
+
+
 def test_no_preparation_renders_nothing():
     copy = chat_with(user_item("item_1", "Where do I work?"))
     assert render_memory(copy, None) == 0

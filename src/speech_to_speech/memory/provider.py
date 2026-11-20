@@ -49,10 +49,17 @@ class MemoryPreparation:
     started: float = field(default_factory=time.monotonic)
 
     def wait(self) -> Any | None:
-        """The recall result if it arrived in time and succeeded, else None (the request goes without memory)."""
+        """The recall result if it arrived in time and succeeded, else None (the request goes without memory).
+        Once a wait has missed the deadline the job is told to stop, and every later wait (a tool follow-up of the
+        same turn) gets None as well."""
+        if self.stop.is_set():
+            return None
         remaining = self.deadline - time.monotonic()
         try:
             document = self.future.result(timeout=max(0.0, remaining))
+            from agentmemory_native import ContextResult
+
+            result = ContextResult.from_json(document)
         except FutureTimeout:
             self.stop.set()
             logger.info("memory: recall for %s missed its deadline; answering without memory", self.anchor_item_id)
@@ -60,9 +67,6 @@ class MemoryPreparation:
         except Exception as error:  # noqa: BLE001 - memory never fails a voice turn
             logger.warning("memory: recall for %s failed (%s); answering without memory", self.anchor_item_id, error)
             return None
-        from agentmemory_native import ContextResult
-
-        result = ContextResult.from_json(document)
         if not result.ok:
             code = result.error.code if result.error else ""
             logger.warning("memory: recall for %s ended %s %s; answering without memory", self.anchor_item_id,

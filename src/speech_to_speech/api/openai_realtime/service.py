@@ -413,6 +413,9 @@ class RealtimeService:
         self.stt_auto_reset_supported: bool = True
         self._conns: dict[str, ConnState] = {}
         self.total_usage = GlobalUsageMetrics()
+        # Optional memory opens its native context here, at startup, never on the event loop of a first turn;
+        # a configuration it refuses stops the server instead of leaving memory silently off.
+        memory_provider()
 
         self.history = HistoryHandler(self)
         self.audio = AudioHandler(self)
@@ -495,6 +498,9 @@ class RealtimeService:
 
     def unregister(self, conn_id: str) -> None:
         self.history.close_session(conn_id)
+        provider = memory_provider()
+        if provider is not None:
+            provider.forget_connection(conn_id)
         st = self._conns.pop(conn_id, None)
         if st is not None:
             # Suppress any in-flight compaction splice so a daemon worker can't
