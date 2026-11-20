@@ -218,6 +218,9 @@ class MemoryPreparation:
                 lines.append(status_line(value, current=True, kind=self.write.kind))
             if state != "pending":
                 self.write.told = True
+            # What the model was told, without any content: pending, or the receipt's state, or why it was refused.
+            told = value if state == "refused" else (value.state if value is not None and state == "ended" else state)
+            logger.info("memory: %s status for %s: %s", self.write.kind, self.anchor_item_id, told)
         if self.notices is not None:
             lines.extend(self.notices())
         return lines
