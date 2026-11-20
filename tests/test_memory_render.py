@@ -189,3 +189,21 @@ def test_with_memory_off_the_server_never_imports_the_memory_library():
 def test_no_preparation_renders_nothing():
     copy = chat_with(user_item("item_1", "Where do I work?"))
     assert render_memory(copy, None) == 0
+
+
+def test_the_memories_come_with_todays_date():
+    """Remembered facts carry dates; without today's date the model turned an event of that day into "yesterday"."""
+    import datetime as dt
+
+    from speech_to_speech.memory.provider import evidence_block
+
+    block = evidence_block(["- user went to a dinner on 19 November 2026"], today=dt.date(2026, 11, 20))
+    assert "Today is Friday, 20 November 2026." in block.split("[memory]")[0]
+    rendered = texts_after_render()
+    assert f"Today is {dt.datetime.now().astimezone().date():%A}" in rendered[0]
+
+
+def texts_after_render() -> list[str]:
+    copy = chat_with(user_item("item_1", "Where do I work?"))
+    render_memory(copy, preparation("item_1", "Where do I work?"))
+    return texts(copy, "item_1")

@@ -793,8 +793,13 @@ def evidence_text(result: Any) -> str:
     return evidence_block(evidence_lines(result))
 
 
-def evidence_block(lines: list[str]) -> str:
-    return EVIDENCE_HEADER + "\n[memory]\n" + "\n".join(lines) + "\n[/memory]"
+def evidence_block(lines: list[str], today: dt.date | None = None) -> str:
+    """The memories as the model sees them, with today's date: remembered facts carry dates ("on 20 November 2026"),
+    and without the date the model guessed (browser trial, 20 November 2026: an event of that day became "yesterday").
+    The server's local date (its TZ)."""
+    day = today or dt.datetime.now().astimezone().date()
+    return (f"{EVIDENCE_HEADER} Today is {day:%A}, {day.day} {day:%B %Y}.\n[memory]\n" + "\n".join(lines)
+            + "\n[/memory]")
 
 
 def status_text(lines: list[str]) -> str:
