@@ -368,6 +368,7 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
         api_key: str | None = None,
         model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
         voice: str = "aiden",
+        voice_override: str | None = None,
         language: str | None = None,
         task_type: str | None = None,
         instructions: str | None = None,
@@ -399,6 +400,12 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
         self.api_key = api_key if api_key is not None else os.getenv("OPENAI_API_KEY")
         self.model = model
         self.voice = voice
+        self.voice_override = voice_override.strip() if voice_override and voice_override.strip() else None
+        if self.voice_override:
+            logger.info(
+                "OpenAI-compatible TTS voice override active: %s (client-requested voices are ignored)",
+                self.voice_override,
+            )
         self.language = language
         self.task_type = task_type
         self.instructions = instructions
@@ -423,7 +430,7 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
         started_at_s = perf_counter()
         operation = self._make_operation(
             text="Warmup",
-            voice=self.voice,
+            voice=self.voice_override or self.voice,
         )
 
         source_chunks = operation.iter_bytes(self.stop_event.is_set)
@@ -658,6 +665,8 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
         runtime_config: RuntimeConfig | None,
         response: Any,
     ) -> str | dict[str, str]:
+        if self.voice_override:
+            return self.voice_override
         if response and response.audio and response.audio.output and response.audio.output.voice:
             return self._serialize_voice(response.audio.output.voice)
         if runtime_config is not None:
