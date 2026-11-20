@@ -7,6 +7,7 @@ Environment:
   S2S_MEMORY_MAX_FACTS, S2S_MEMORY_MAX_PREFERENCES, S2S_MEMORY_MIN_SCORE   recall bounds (defaults 5, 3, 0.75)
   S2S_MEMORY_VOICE_REMEMBER  "0" turns off remembering on a spoken "remember that ..." (default on with explicit_write)
   S2S_MEMORY_DEPLOYMENT   the deployment's name in source ids (default "s2s")
+  S2S_MEMORY_OBSERVE      "1" with profile "learning": also remember, unasked, what the owner tells (default off)
 """
 from __future__ import annotations
 
@@ -80,6 +81,22 @@ def remember_intent(text: str | None) -> bool:
     return REMEMBER_INTENT.match(text) is not None and not text.rstrip().endswith("?")
 
 
+# Turns that cannot teach anything: bare assent, greetings, thanks, goodbyes (the whole utterance).
+_NOTHING_TO_LEARN = re.compile(
+    r"^\s*(?:yes|yeah|yep|no|nope|sure|ok|okay|right|that'?s right|exactly|thanks|thank you(?: very much)?|hello|hi|"
+    r"hey|good (?:morning|afternoon|evening|night)|bye|goodbye|see you)(?:[\s,]+(?:robot|reachy|thanks|please))*\W*$",
+    re.IGNORECASE,
+)
+
+
+def observable(text: str | None) -> bool:
+    """With automatic learning on: a final utterance worth giving to the writer. Not a question, not bare assent or a
+    greeting, at least three words. The writer still decides what, if anything, it keeps."""
+    if not text or text.rstrip().endswith("?") or _NOTHING_TO_LEARN.match(text):
+        return False
+    return len(re.findall(r"[^\W\d_]+", text)) >= 3
+
+
 def forget_intent(text: str | None) -> bool:
     """True when the utterance asks to forget what was last remembered in this conversation."""
     return bool(text) and FORGET_INTENT.match(text) is not None
@@ -119,6 +136,8 @@ def status_line(receipt: Any, *, current: bool, kind: str = "remember") -> str:
     """What the model may say about one remember or forget, by its receipt; never more than the receipt supports."""
     if kind == "forget":
         return forget_line(receipt, current=current)
+    if kind == "observe":
+        return ""
     lead = "The user just asked to remember this." if current else "Update on something the user asked to remember earlier:"
     if receipt is None or not receipt.ended:
         return (f"{lead} Saving it has started but is not confirmed yet: say you are saving it, never that it is saved."
@@ -207,7 +226,10 @@ class MemoryPreparation:
         """The memory-status lines for this turn: this utterance's remember (waited for until the deadline), then the
         outcomes of earlier ones that ended since the last turn."""
         lines: list[str] = []
-        if self.write is not None:
+        if self.write is not None and self.write.kind == "observe":
+            # Learned unasked: nothing to tell; the turn is answered as usual.
+            self.write.told = True
+        elif self.write is not None:
             state, value = self.write.current(wait_s=self.deadline - time.monotonic())
             if state == "refused" and self.write.kind == "forget":
                 lines.append(forget_line(value, current=True))
@@ -234,15 +256,17 @@ class AgentMemoryProvider:
     """One native context for the whole server process (the library allows one per store), shared by every unit."""
 
     def __init__(self, config: dict[str, Any], *, deadline_ms: int, max_facts: int, max_preferences: int,
-                 min_score: float, voice_remember: bool = True, deployment: str = "s2s") -> None:
+                 min_score: float, voice_remember: bool = True, deployment: str = "s2s", observe: bool = False) -> None:
         from agentmemory_native import MemoryClient
 
         self._client = MemoryClient(config)
         self._bridge = ThreadPoolExecutor(max_workers=self._client.max_pending_jobs + 2,
                                           thread_name_prefix="s2s-memory")
         self.profile = config.get("profile", "read_only")
-        self.writable = self.profile == "explicit_write"
+        self.writable = self.profile in ("explicit_write", "learning")
         self.voice_remember = self.writable and voice_remember
+        # R2: automatic learning needs the learning profile (every write applied once, recall never paused by it).
+        self.observe = self.profile == "learning" and observe
         self.deployment = deployment
         self.deadline_ms = deadline_ms
         self.max_facts = max_facts
@@ -321,21 +345,23 @@ class AgentMemoryProvider:
             return None
         if forget_intent(text):
             return self._admit_forget(conn_id, item_id)
-        if not remember_intent(text):
+        explicit = remember_intent(text)
+        if not explicit and not (self.observe and observable(text)):
             return None
         from agentmemory_native import remember_request
 
         source_id = f"{self.deployment}/{conn_id}/{item_id}/rev-{revision if revision is not None else 0}"
         said = dt.datetime.now(dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         request = remember_request(source_id=source_id, session_id=conn_id, text=text.strip(), occurred_at=said,
-                                   request_id=item_id)
+                                   origin=None if explicit else "observed", request_id=item_id)
         future: Future = Future()
-        ticket = WriteTicket(source_id, item_id, future)
+        ticket = WriteTicket(source_id, item_id, future, kind="remember" if explicit else "observe")
         with self._lock:
             self._writes.setdefault(conn_id, []).append(ticket)
+            # "Forget what I just told you" also reaches what was learned unasked.
             self._last_remember[conn_id] = ticket
         self._bridge.submit(self._follow, ticket, request)
-        logger.info("memory: remember requested for %s", item_id)
+        logger.info("memory: %s requested for %s", "remember" if explicit else "observe", item_id)
         return ticket
 
     def _admit_forget(self, conn_id: str, item_id: str) -> WriteTicket:
@@ -434,6 +460,11 @@ class AgentMemoryProvider:
         for ticket in tickets:
             if ticket.told:
                 continue
+            if ticket.kind == "observe":
+                # Learned unasked: its outcome is never told.
+                if ticket.final is not None or ticket.refused is not None:
+                    ticket.told = True
+                continue
             if ticket.refused is not None and ticket.kind == "forget":
                 lines.append(forget_line(ticket.refused, current=False))
                 ticket.told = True
@@ -487,6 +518,7 @@ class AgentMemoryProvider:
             readable = flags is None or bool(flags & 1)
             status["writes"] = {
                 "voiceRemember": self.voice_remember,
+                "observing": self.observe,
                 "saving": saving or (0 if quiescent else 1),
                 # A write that ended partial or unknown pauses recall until an operator resolves it.
                 "needsAttention": quiescent and not readable,
@@ -537,6 +569,7 @@ def memory_provider() -> AgentMemoryProvider | None:
                         min_score=float(os.environ.get("S2S_MEMORY_MIN_SCORE", "0.75")),
                         voice_remember=os.environ.get("S2S_MEMORY_VOICE_REMEMBER", "1") != "0",
                         deployment=os.environ.get("S2S_MEMORY_DEPLOYMENT", "s2s"),
+                        observe=os.environ.get("S2S_MEMORY_OBSERVE", "0") == "1",
                     )
                 except Exception as error:
                     # The server's startup reports only that it failed; say why here. The error text never holds the
@@ -546,9 +579,9 @@ def memory_provider() -> AgentMemoryProvider | None:
                                  "S2S_MEMORY_CONFIG to run without memory.", type(error).__name__, error)
                     raise
                 manifest = _installed_manifest()
-                logger.info("memory: AgentMemory native library enabled (%s; deadline %s ms; voice remember %s; %s)",
-                            _provider.profile, _provider.deadline_ms, "on" if _provider.voice_remember else "off",
-                            manifest)
+                logger.info("memory: AgentMemory native library enabled (%s; deadline %s ms; voice remember %s; "
+                            "learning unasked %s; %s)", _provider.profile, _provider.deadline_ms,
+                            "on" if _provider.voice_remember else "off", "on" if _provider.observe else "off", manifest)
             _provider_loaded = True
     return _provider
 

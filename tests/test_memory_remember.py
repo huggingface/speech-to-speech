@@ -15,6 +15,7 @@ from speech_to_speech.memory.provider import (
     AgentMemoryProvider,
     forget_intent,
     memory_erase,
+    observable,
     remember_intent,
     render_memory,
     reset_memory_provider,
@@ -221,7 +222,7 @@ def test_status_says_saving_and_needing_attention_without_any_content(provider):
     assert status["profile"] == "explicit_write" and status["writes"]["voiceRemember"] is True
     provider._client.flags = 2 | 4  # quiescent, recall paused: an uncertain write waits for a decision
     provider._client.final = receipt("unknown", reason="store_failed_while_writing: X")
-    assert wait_until(lambda: provider.status()["writes"] == {"voiceRemember": True, "saving": 0,
+    assert wait_until(lambda: provider.status()["writes"] == {"voiceRemember": True, "observing": False, "saving": 0,
                                                                "needsAttention": True})
     assert "tea" not in str(provider.status())
 
@@ -303,3 +304,67 @@ def test_a_read_only_server_offers_no_erase(monkeypatch, tmp_path):
     finally:
         reset_memory_provider(None)
         reader.close()
+
+
+@pytest.mark.parametrize("text", [
+    "My sister lives in Bern.", "I started a new job at the library last week.", "We adopted a puppy called Nala.",
+])
+def test_what_the_owner_tells_is_worth_learning(text):
+    assert observable(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Yes.", "Thanks, robot!", "Good morning.", "What time is it?", "Okay sure.", "Sounds good", "", None,
+])
+def test_questions_assent_and_greetings_are_not(text):
+    assert not observable(text)
+
+
+def learning(monkeypatch, observe: bool) -> AgentMemoryProvider:
+    monkeypatch.setattr(agentmemory_native, "MemoryClient", FakeClient)
+    return AgentMemoryProvider({"profile": "learning"}, deadline_ms=300, max_facts=5, max_preferences=3,
+                               min_score=0.75, observe=observe)
+
+
+def test_with_learning_on_a_told_fact_is_remembered_unasked_and_silently(monkeypatch):
+    provider = learning(monkeypatch, observe=True)
+    try:
+        provider._client.remember_answers.append(write_result(receipt("applied", searchable=True, operation="op-nala")))
+        ticket = provider.admit("conn", "item_1", 1, "We adopted a puppy called Nala.")
+        assert ticket is not None and ticket.kind == "observe"
+        assert wait_until(lambda: any(r["operation"] == "memory_remember" for r in provider._client.requests))
+        sent = next(r for r in provider._client.requests if r["operation"] == "memory_remember")
+        assert sent["origin"] == "observed"
+        parts = rendered("item_1", "We adopted a puppy called Nala.",
+                         provider.prepare("conn", "item_1", "We adopted a puppy called Nala.", write=ticket))
+        assert parts == ["We adopted a puppy called Nala."], "an unasked write is never mentioned to the model"
+        assert wait_until(lambda: ticket.final is not None)
+        later = rendered("item_2", "How are you?", provider.prepare("conn", "item_2", "How are you?"))
+        assert later == ["How are you?"]
+        provider.admit("conn", "item_3", 1, "Forget what I just told you.")
+        assert wait_until(lambda: any(r["operation"] == "memory_forget" for r in provider._client.requests))
+        forget = next(r for r in provider._client.requests if r["operation"] == "memory_forget")
+        assert forget["operationId"] == "op-nala"
+        assert provider.status()["writes"]["observing"] is True
+    finally:
+        provider.close()
+
+
+def test_with_learning_off_only_explicit_requests_are_remembered(monkeypatch):
+    provider = learning(monkeypatch, observe=False)
+    try:
+        assert provider.admit("conn", "item_1", 1, "We adopted a puppy called Nala.") is None
+        assert provider.status()["writes"]["observing"] is False
+    finally:
+        provider.close()
+
+
+def test_the_explicit_profile_never_learns_unasked(monkeypatch):
+    monkeypatch.setattr(agentmemory_native, "MemoryClient", FakeClient)
+    explicit = AgentMemoryProvider({"profile": "explicit_write"}, deadline_ms=300, max_facts=5, max_preferences=3,
+                                   min_score=0.75, observe=True)
+    try:
+        assert explicit.observe is False
+        assert explicit.admit("conn", "item_1", 1, "We adopted a puppy called Nala.") is None
+    finally:
+        explicit.close()
