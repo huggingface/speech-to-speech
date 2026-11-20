@@ -507,6 +507,10 @@ class AgentMemoryProvider:
     def status(self) -> dict[str, Any]:
         """What a client may know: on, the profile, ready or recovering, saving or needing attention, the deadline.
         Never the owner, the store, the configuration or anything remembered."""
+        if self.writable and not self._closed.is_set():
+            # Read the library's state now: a write whose client hung up is no longer one of this server's tickets, and
+            # a flag cached before it was accepted would report nothing saving while it still runs.
+            self._refresh_flags()
         with self._lock:
             recovering = self._rewarming
             flags = self._flags

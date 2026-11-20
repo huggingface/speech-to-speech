@@ -368,3 +368,21 @@ def test_the_explicit_profile_never_learns_unasked(monkeypatch):
         assert explicit.admit("conn", "item_1", 1, "We adopted a puppy called Nala.") is None
     finally:
         explicit.close()
+
+
+def test_a_write_still_running_after_its_client_hung_up_is_still_saving(monkeypatch):
+    provider = learning(monkeypatch, observe=True)
+    try:
+        provider._client.remember_answers.append(write_result(receipt("running", operation="op-tea")))
+        ticket = provider.admit("conn", "item_1", 1, "My favourite tea is Earl Grey.")
+        assert wait_until(lambda: ticket.future.done())
+        provider._client.flags = 7  # a flag read before the write was accepted: quiescent
+        provider._refresh_flags()
+        provider._client.flags = 1 | 2  # the library now: a write pending, recall open (learning)
+        provider.forget_connection("conn")
+        assert provider.status()["writes"]["saving"] == 1
+        provider._client.flags = 7
+        provider._client.final = receipt("applied", searchable=True, operation="op-tea")
+        assert wait_until(lambda: provider.status()["writes"]["saving"] == 0)
+    finally:
+        provider.close()
