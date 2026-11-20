@@ -91,6 +91,22 @@ class AgentMemoryProvider:
         self.min_score = min_score
         self._last: dict[str, MemoryPreparation] = {}
         self._lock = threading.Lock()
+        # The first recall of a process pays for the first embedding call and the first store query (about 100 ms
+        # measured, against under 10 ms after); one read-only recall at startup keeps that off the first turn.
+        self._bridge.submit(self._warm_up)
+
+    def _warm_up(self) -> None:
+        from agentmemory_native import ContextResult, get_context_request
+
+        started = time.monotonic()
+        try:
+            request = get_context_request(session_id="s2s-warm-up", query="warm-up", max_facts=1, max_preferences=1,
+                                          min_score=self.min_score, request_id="s2s-warm-up")
+            result = ContextResult.from_json(self._client.run_job(request, 5000))
+            outcome = result.status if result.ok or result.error is None else f"{result.status} {result.error.code}"
+        except Exception as error:  # noqa: BLE001 - a failed warm-up only means a slower first turn
+            outcome = f"failed ({error})"
+        logger.info("memory: warm-up recall %s after %.0f ms", outcome, (time.monotonic() - started) * 1000)
 
     def prepare(self, conn_id: str, item_id: str | None, text: str | None) -> MemoryPreparation | None:
         """Starts the recall for one user item and returns at once."""
