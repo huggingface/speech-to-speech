@@ -386,3 +386,36 @@ def test_a_write_still_running_after_its_client_hung_up_is_still_saving(monkeypa
         assert wait_until(lambda: provider.status()["writes"]["saving"] == 0)
     finally:
         provider.close()
+
+
+def test_startup_warms_the_store_with_a_series_of_read_only_recalls(monkeypatch):
+    monkeypatch.setattr(agentmemory_native, "MemoryClient", FakeClient)
+    provider = AgentMemoryProvider({"profile": "learning"}, deadline_ms=300, max_facts=5, max_preferences=3,
+                                   min_score=0.75)
+    try:
+        expected = len(AgentMemoryProvider.WARM_UP_WORDS)
+        assert wait_until(lambda: sum(r["operation"] == "memory_get_context" for r in provider._client.requests) == expected)
+        warm = [r for r in provider._client.requests if r["operation"] == "memory_get_context"]
+        assert len({r["query"] for r in warm}) == expected, "different words each time"
+        assert all(r["maxFacts"] == 5 and r["maxPreferences"] == 3 for r in warm), "the size a turn asks for"
+        assert not any(r["operation"] in ("memory_remember", "memory_forget") for r in provider._client.requests)
+    finally:
+        provider.close()
+
+
+def test_a_failed_first_warm_up_does_not_run_the_rest(monkeypatch):
+    class StoreDown(FakeClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.recall = {"schemaVersion": 1, "operation": "memory_get_context", "requestId": "x",
+                           "status": "unavailable", "error": {"code": "store_unavailable", "message": "down"},
+                           "timing": {"queuedMs": 0, "runMs": 1}}
+
+    monkeypatch.setattr(agentmemory_native, "MemoryClient", StoreDown)
+    provider = AgentMemoryProvider({"profile": "learning"}, deadline_ms=300, max_facts=5, max_preferences=3,
+                                   min_score=0.75)
+    try:
+        time.sleep(0.3)
+        assert sum(r["operation"] == "memory_get_context" for r in provider._client.requests) == 1
+    finally:
+        provider.close()

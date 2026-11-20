@@ -295,20 +295,26 @@ class AgentMemoryProvider:
         self._lock = threading.Lock()
         self._rewarming = False
         self._closed = threading.Event()
-        # The first recall of a process pays for the first embedding call and the first store query (about 100 ms
-        # measured, against under 10 ms after); one read-only recall at startup keeps that off the first turn.
+        # The first recalls of a process, and of a store that has just started, are slow; a short series of read-only
+        # recalls at startup keeps that off the first turns (WARM_UP_WORDS).
         self._bridge.submit(self._warm_up)
 
     REWARM_INTERVAL_S = 2.0
+    #: A store that has just started answers slowly for a while (its runtime still compiling): measured on the recipe,
+    #: after one warm-up recall the first turns took 280-520 ms against 100-150 ms warm, sometimes past the deadline;
+    #: after six warm-up recalls with different words the first turn took 150 ms. Read-only; off the user's path.
+    WARM_UP_WORDS = ("warm-up", "what do you remember about me", "my family and friends", "where I live and work",
+                     "what I like", "my plans this week")
 
-    def _warm_up_once(self) -> tuple[bool, str]:
+    def _warm_up_once(self, words: str = "warm-up") -> tuple[bool, str]:
         """One read-only recall that pays a cold store's first-query cost; (succeeded, outcome with its time)."""
         from agentmemory_native import ContextResult, get_context_request
 
         started = time.monotonic()
         try:
-            request = get_context_request(session_id="s2s-warm-up", query="warm-up", max_facts=1, max_preferences=1,
-                                          min_score=self.min_score, request_id="s2s-warm-up")
+            request = get_context_request(session_id="s2s-warm-up", query=words, max_facts=self.max_facts,
+                                          max_preferences=self.max_preferences, min_score=self.min_score,
+                                          request_id="s2s-warm-up")
             result = ContextResult.from_json(self._client.run_job(request, 5000))
             # A paused recall (a write is being saved) means the store answered.
             ok = result.ok or (result.error is not None and result.error.code == "reads_paused")
@@ -317,8 +323,23 @@ class AgentMemoryProvider:
             ok, outcome = False, f"failed ({error})"
         return ok, f"{outcome} after {(time.monotonic() - started) * 1000:.0f} ms"
 
+    def _warm_up_rest(self) -> str:
+        """The rest of the warm-up series, after a first recall that succeeded; stops at the first failure."""
+        outcome = ""
+        for words in self.WARM_UP_WORDS[1:]:
+            if self._closed.is_set():
+                break
+            ok, outcome = self._warm_up_once(words)
+            if not ok:
+                break
+        return outcome
+
     def _warm_up(self) -> None:
-        logger.info("memory: warm-up recall %s", self._warm_up_once()[1])
+        ok, first = self._warm_up_once()
+        if ok:
+            logger.info("memory: warm-up recalls: the first %s, the last %s", first, self._warm_up_rest())
+        else:
+            logger.info("memory: warm-up recall %s", first)
         self._refresh_flags()
 
     def _refresh_flags(self) -> None:
@@ -344,7 +365,8 @@ class AgentMemoryProvider:
             while not self._closed.wait(self.REWARM_INTERVAL_S):
                 ok, outcome = self._warm_up_once()
                 if ok:
-                    logger.info("memory: store answers again; re-warmed (%s)", outcome)
+                    logger.info("memory: store answers again; re-warmed (the first %s, the last %s)", outcome,
+                                self._warm_up_rest())
                     return
         finally:
             with self._lock:
