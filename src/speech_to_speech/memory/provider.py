@@ -16,7 +16,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from openai.types.realtime.conversation_item import RealtimeConversationItemUserMessage
 from openai.types.realtime.realtime_conversation_item_user_message import Content as UserContent
@@ -47,6 +47,8 @@ class MemoryPreparation:
     stop: threading.Event
     deadline: float
     started: float = field(default_factory=time.monotonic)
+    # Told when this recall failed or came too late, so the provider can warm the store up again in the background.
+    on_trouble: Callable[[], None] | None = None
 
     def wait(self) -> Any | None:
         """The recall result if it arrived in time and succeeded, else None (the request goes without memory).
@@ -63,16 +65,23 @@ class MemoryPreparation:
         except FutureTimeout:
             self.stop.set()
             logger.info("memory: recall for %s missed its deadline; answering without memory", self.anchor_item_id)
+            self._trouble()
             return None
         except Exception as error:  # noqa: BLE001 - memory never fails a voice turn
             logger.warning("memory: recall for %s failed (%s); answering without memory", self.anchor_item_id, error)
+            self._trouble()
             return None
         if not result.ok:
             code = result.error.code if result.error else ""
             logger.warning("memory: recall for %s ended %s %s; answering without memory", self.anchor_item_id,
                            result.status, code)
+            self._trouble()
             return None
         return result
+
+    def _trouble(self) -> None:
+        if self.on_trouble is not None:
+            self.on_trouble()
 
 
 class AgentMemoryProvider:
@@ -91,11 +100,16 @@ class AgentMemoryProvider:
         self.min_score = min_score
         self._last: dict[str, MemoryPreparation] = {}
         self._lock = threading.Lock()
+        self._rewarming = False
+        self._closed = threading.Event()
         # The first recall of a process pays for the first embedding call and the first store query (about 100 ms
         # measured, against under 10 ms after); one read-only recall at startup keeps that off the first turn.
         self._bridge.submit(self._warm_up)
 
-    def _warm_up(self) -> None:
+    REWARM_INTERVAL_S = 2.0
+
+    def _warm_up_once(self) -> tuple[bool, str]:
+        """One read-only recall that pays a cold store's first-query cost; (succeeded, outcome with its time)."""
         from agentmemory_native import ContextResult, get_context_request
 
         started = time.monotonic()
@@ -103,10 +117,35 @@ class AgentMemoryProvider:
             request = get_context_request(session_id="s2s-warm-up", query="warm-up", max_facts=1, max_preferences=1,
                                           min_score=self.min_score, request_id="s2s-warm-up")
             result = ContextResult.from_json(self._client.run_job(request, 5000))
-            outcome = result.status if result.ok or result.error is None else f"{result.status} {result.error.code}"
-        except Exception as error:  # noqa: BLE001 - a failed warm-up only means a slower first turn
-            outcome = f"failed ({error})"
-        logger.info("memory: warm-up recall %s after %.0f ms", outcome, (time.monotonic() - started) * 1000)
+            ok = result.ok
+            outcome = result.status if ok or result.error is None else f"{result.status} {result.error.code}"
+        except Exception as error:  # noqa: BLE001 - a failed warm-up only means a slower turn
+            ok, outcome = False, f"failed ({error})"
+        return ok, f"{outcome} after {(time.monotonic() - started) * 1000:.0f} ms"
+
+    def _warm_up(self) -> None:
+        logger.info("memory: warm-up recall %s", self._warm_up_once()[1])
+
+    def _note_trouble(self) -> None:
+        """A recall failed or was late (store down, restarted, slow). A restarted store answers its first queries
+        cold (about 300 ms measured, past a turn's deadline), so one background loop warms it up again every
+        REWARM_INTERVAL_S until it answers, and the user's next turn finds it warm. At most one loop runs."""
+        with self._lock:
+            if self._rewarming or self._closed.is_set():
+                return
+            self._rewarming = True
+        threading.Thread(target=self._rewarm, name="s2s-memory-rewarm", daemon=True).start()
+
+    def _rewarm(self) -> None:
+        try:
+            while not self._closed.wait(self.REWARM_INTERVAL_S):
+                ok, outcome = self._warm_up_once()
+                if ok:
+                    logger.info("memory: store answers again; re-warmed (%s)", outcome)
+                    return
+        finally:
+            with self._lock:
+                self._rewarming = False
 
     def prepare(self, conn_id: str, item_id: str | None, text: str | None) -> MemoryPreparation | None:
         """Starts the recall for one user item and returns at once."""
@@ -120,7 +159,7 @@ class AgentMemoryProvider:
         stop = threading.Event()
         future = self._bridge.submit(self._client.run_job, request, self.deadline_ms, stop)
         preparation = MemoryPreparation(item_id, _sha256(text), future, stop,
-                                        time.monotonic() + self.deadline_ms / 1000)
+                                        time.monotonic() + self.deadline_ms / 1000, on_trouble=self._note_trouble)
         with self._lock:
             self._last[conn_id] = preparation
         return preparation
@@ -135,6 +174,7 @@ class AgentMemoryProvider:
             self._last.pop(conn_id, None)
 
     def close(self) -> None:
+        self._closed.set()
         self._bridge.shutdown(wait=False, cancel_futures=True)
         self._client.close()
 

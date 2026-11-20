@@ -112,6 +112,22 @@ def test_an_undecodable_result_adds_nothing_and_does_not_raise():
     assert render_memory(copy, preparation("item_1", "Where do I work?", {"no": "status"})) == 0
 
 
+def test_a_late_failed_or_refused_recall_reports_trouble_and_a_good_one_does_not():
+    failed = dict(RESULT, status="unavailable", facts=[], preferences=[],
+                  error={"code": "store_unavailable", "message": "down"})
+    cases = [
+        (preparation("item_1", "Where do I work?", done=False, deadline_s=0.01), 1),
+        (preparation("item_1", "Where do I work?", failed), 1),
+        (preparation("item_1", "Where do I work?", {"no": "status"}), 1),
+        (preparation("item_1", "Where do I work?"), 0),
+    ]
+    for prepared, expected in cases:
+        calls = []
+        prepared.on_trouble = lambda: calls.append(1)
+        render_memory(chat_with(user_item("item_1", "Where do I work?")), prepared)
+        assert len(calls) == expected
+
+
 def test_with_memory_off_the_server_never_imports_the_memory_library():
     """A fresh interpreter, as a real server: build the realtime service with S2S_MEMORY_CONFIG unset."""
     import os
