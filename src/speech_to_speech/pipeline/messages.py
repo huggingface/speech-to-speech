@@ -407,6 +407,8 @@ class GenerateResponseRequest(PipelineMessage):
     turn_revision: int | None = None
     speech_stopped_at_s: float | None = None
     prefetch_transaction: ResponsePrefetchTransaction | None = Field(default=None, exclude=True, repr=False)
+    # Optional long-term memory prepared for this request (speech_to_speech.memory); None when memory is off.
+    memory: Any = Field(default=None, exclude=True, repr=False)
 
     @model_validator(mode="before")
     @classmethod

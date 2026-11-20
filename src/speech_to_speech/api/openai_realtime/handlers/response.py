@@ -10,6 +10,7 @@ from openai.types.realtime import (
     ConversationItemTruncateEvent,
     RealtimeConversationItemFunctionCall,
     RealtimeConversationItemFunctionCallOutput,
+    RealtimeConversationItemUserMessage,
     RealtimeResponse,
     ResponseAudioDeltaEvent,
     ResponseAudioDoneEvent,
@@ -44,6 +45,7 @@ from openai.types.realtime.response_content_part_done_event import Part as DoneC
 
 from speech_to_speech.api.openai_realtime.handlers.audio import PIPELINE_SAMPLE_RATE
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
+from speech_to_speech.memory import memory_provider
 from speech_to_speech.api.openai_realtime.reasoning import SpeechToSpeechReasoningDeltaEvent
 from speech_to_speech.api.openai_realtime.runtime_config import validate_reasoning
 from speech_to_speech.api.openai_realtime.tool_followup import (
@@ -276,6 +278,10 @@ class ResponseHandler(RealtimeBaseHandler):
 
     def maybe_start_tool_followup_prefetch(self, conn_id: str) -> bool:
         """Speculatively generate after every tool output, without opening a response."""
+        if memory_provider() is not None:
+            # A speculative follow-up would be generated before its memory could be checked against the turn it
+            # continues; with memory on, follow-ups are generated on request only.
+            return False
         st = self._state(conn_id)
         if (
             st.tool_followup_prefetch_request is not None
@@ -960,6 +966,14 @@ class ResponseHandler(RealtimeBaseHandler):
             turn_revision=None if out_of_band else turn_revision,
             speech_stopped_at_s=None if out_of_band else speech_stopped_at_s,
         )
+        provider = memory_provider()
+        if provider is not None and not out_of_band:
+            last = cfg.chat.buffer[-1] if cfg.chat.buffer else None
+            if isinstance(last, RealtimeConversationItemUserMessage):
+                text = " ".join(getattr(p, "text", None) or "" for p in last.content if getattr(p, "type", "") == "input_text")
+                request.memory = provider.prepare(conn_id, last.id, text)
+            elif isinstance(last, RealtimeConversationItemFunctionCallOutput):
+                request.memory = provider.for_followup(conn_id)
         if not out_of_band:
             parent_call_id = next(
                 (

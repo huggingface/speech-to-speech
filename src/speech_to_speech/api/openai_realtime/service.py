@@ -52,6 +52,7 @@ from openai.types.realtime.realtime_response_create_params import RealtimeRespon
 from openai.types.realtime.realtime_server_event import ConversationItemRetrieved
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from speech_to_speech.memory import memory_provider
 from speech_to_speech.api.openai_realtime.handlers import (
     AudioHandler,
     ConversationHandler,
@@ -952,6 +953,9 @@ class RealtimeService:
                 turn_revision=event.turn_revision,
             )
             st.mark_response_pending(request.response_key)
+            provider = memory_provider()
+            if provider is not None:
+                request.memory = provider.prepare(conn_id, supplied_item_id, transcript)
             queue.put(request)
         else:
             self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)

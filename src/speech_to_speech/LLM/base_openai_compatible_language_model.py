@@ -36,6 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from speech_to_speech.api.openai_realtime.runtime_config import resolve_reasoning_effort
 from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.memory import render_memory
 from speech_to_speech.LLM.chat import (
     Chat,
     ChatItemError,
@@ -197,6 +198,8 @@ class _Turn(BaseModel):
     # End of the conversation when this turn started; keeps its output ahead of
     # user messages appended while the model was still running.
     history_anchor_id: str | None = None
+    # Long-term memory prepared before this turn was queued (speech_to_speech.memory); None when memory is off.
+    memory: Any = None
 
 
 class _GenState(BaseModel):
@@ -992,6 +995,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if tracker is not None:
                 tracker.record_llm_start(generation_started_at_s)
             try:
+                # Recalled memory goes into this request's own deep copy of the conversation, never the stored chat.
+                render_memory(active_chat, turn.memory)
                 api_input = (serialize_fn or self._serialize)(active_chat)
                 # Images the model actually sees this turn; only these are stripped on
                 # write-back, so an image a fast client injects mid-generation for the
@@ -1246,6 +1251,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             response_key=request.response_key,
             prefetch_transaction=request.prefetch_transaction,
             history_anchor_id=history_anchor_id,
+            memory=request.memory,
         )
         yield from self._generate(
             active_chat,
@@ -1340,6 +1346,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             response_key=request.response_key,
             prefetch_transaction=request.prefetch_transaction,
             history_anchor_id=history_anchor_id,
+            memory=request.memory,
         )
         yield from self._generate(active_chat, original_chat, turn, optional_kwargs)
 
