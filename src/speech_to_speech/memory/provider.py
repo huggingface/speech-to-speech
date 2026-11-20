@@ -263,7 +263,12 @@ def render_memory(active_chat: Any, preparation: MemoryPreparation | None) -> in
     if preparation is None:
         return 0
     result = preparation.wait()
-    if result is None or not (result.facts or result.preferences):
+    if result is None:
+        return 0
+    waited_ms = (time.monotonic() - preparation.started) * 1000
+    if not (result.facts or result.preferences):
+        logger.info("memory: nothing recalled for %s after %.0f ms (library queued %d ms, ran %d ms)",
+                    preparation.anchor_item_id, waited_ms, result.queued_ms, result.run_ms)
         return 0
     for item in active_chat.buffer:
         if isinstance(item, RealtimeConversationItemUserMessage) and item.id == preparation.anchor_item_id:
@@ -272,8 +277,8 @@ def render_memory(active_chat: Any, preparation: MemoryPreparation | None) -> in
                 return 0
             item.content = [UserContent(type="input_text", text=evidence_text(result)), *item.content]
             count = len(result.facts) + len(result.preferences)
-            logger.info("memory: %d items for %s after %.0f ms", count, item.id,
-                        (time.monotonic() - preparation.started) * 1000)
+            logger.info("memory: %d items for %s after %.0f ms (library queued %d ms, ran %d ms)", count, item.id,
+                        waited_ms, result.queued_ms, result.run_ms)
             return count
     logger.info("memory: anchor %s is not in this request; answering without memory", preparation.anchor_item_id)
     return 0

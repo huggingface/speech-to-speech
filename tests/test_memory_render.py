@@ -135,6 +135,26 @@ def test_memory_status_with_memory_off_says_only_that():
     assert memory_status() == {"enabled": False}
 
 
+def test_a_closed_session_leaves_no_recall_behind():
+    """No hidden old conversation: closing a connection drops the recall its tool follow-ups would have reused."""
+    from speech_to_speech.api.openai_realtime.service import RealtimeService
+
+    class Provider:
+        def __init__(self):
+            self.forgotten = []
+
+        def forget_connection(self, conn_id):
+            self.forgotten.append(conn_id)
+
+    provider = Provider()
+    reset_memory_provider(provider)
+    try:
+        RealtimeService().unregister("conn-1")
+    finally:
+        reset_memory_provider(None)
+    assert provider.forgotten == ["conn-1"]
+
+
 def test_with_memory_off_the_server_never_imports_the_memory_library():
     """A fresh interpreter, as a real server: build the realtime service with S2S_MEMORY_CONFIG unset."""
     import os
