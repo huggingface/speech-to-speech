@@ -112,6 +112,25 @@ def test_an_undecodable_result_adds_nothing_and_does_not_raise():
     assert render_memory(copy, preparation("item_1", "Where do I work?", {"no": "status"})) == 0
 
 
+def test_with_memory_off_the_server_never_imports_the_memory_library():
+    """A fresh interpreter, as a real server: build the realtime service with S2S_MEMORY_CONFIG unset."""
+    import os
+    import subprocess
+    import sys
+
+    probe = (
+        "import sys\n"
+        "from speech_to_speech.api.openai_realtime.service import RealtimeService\n"
+        "RealtimeService()\n"
+        "print('agentmemory_native' in sys.modules)\n"
+    )
+    environment = {k: v for k, v in os.environ.items() if k != "S2S_MEMORY_CONFIG"}
+    completed = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, env=environment,
+                               timeout=120)
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    assert completed.stdout.strip().splitlines()[-1] == "False"
+
+
 def test_no_preparation_renders_nothing():
     copy = chat_with(user_item("item_1", "Where do I work?"))
     assert render_memory(copy, None) == 0

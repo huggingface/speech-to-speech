@@ -153,18 +153,40 @@ def memory_provider() -> AgentMemoryProvider | None:
         if not _provider_loaded:
             path = os.environ.get("S2S_MEMORY_CONFIG")
             if path:
-                with open(path, encoding="utf-8") as source:
-                    config = json.load(source)
-                _provider = AgentMemoryProvider(
-                    config,
-                    deadline_ms=int(os.environ.get("S2S_MEMORY_DEADLINE_MS", "450")),
-                    max_facts=int(os.environ.get("S2S_MEMORY_MAX_FACTS", "5")),
-                    max_preferences=int(os.environ.get("S2S_MEMORY_MAX_PREFERENCES", "3")),
-                    min_score=float(os.environ.get("S2S_MEMORY_MIN_SCORE", "0.75")),
-                )
-                logger.info("memory: AgentMemory native library enabled (deadline %s ms)", _provider.deadline_ms)
+                try:
+                    with open(path, encoding="utf-8") as source:
+                        config = json.load(source)
+                    _provider = AgentMemoryProvider(
+                        config,
+                        deadline_ms=int(os.environ.get("S2S_MEMORY_DEADLINE_MS", "450")),
+                        max_facts=int(os.environ.get("S2S_MEMORY_MAX_FACTS", "5")),
+                        max_preferences=int(os.environ.get("S2S_MEMORY_MAX_PREFERENCES", "3")),
+                        min_score=float(os.environ.get("S2S_MEMORY_MIN_SCORE", "0.75")),
+                    )
+                except Exception as error:
+                    # The server's startup reports only that it failed; say why here. The error text never holds the
+                    # configuration's secrets (the library's errors name fields, not values).
+                    logger.error("memory: S2S_MEMORY_CONFIG is set but AgentMemory cannot start, so the server stops: "
+                                 "%s: %s. Fix the configuration or the installed agentmemory-native wheel, or unset "
+                                 "S2S_MEMORY_CONFIG to run without memory.", type(error).__name__, error)
+                    raise
+                manifest = _installed_manifest()
+                logger.info("memory: AgentMemory native library enabled (deadline %s ms; %s)", _provider.deadline_ms,
+                            manifest)
             _provider_loaded = True
     return _provider
+
+
+def _installed_manifest() -> str:
+    """One line on which library is loaded: the wheel's version, ABI, platform, commit and library hash prefix."""
+    from agentmemory_native import __version__, manifest
+
+    info = manifest()
+    if info is None:
+        return f"agentmemory-native {__version__}, library from AGENTMEMORY_NATIVE_LIBRARY or a source checkout"
+    abi = info["abi"]
+    return (f"agentmemory-native {info['version']}, ABI {abi['major']}.{abi['minor']}, {info['platformTag']}, "
+            f"commit {info['build']['commit'][:8]}, library sha256 {info['library']['sha256'][:12]}")
 
 
 def reset_memory_provider(provider: AgentMemoryProvider | None = None) -> None:
