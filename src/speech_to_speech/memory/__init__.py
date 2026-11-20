@@ -21,6 +21,7 @@ With the library's "explicit_write" profile ("R1") it also remembers on request:
 from .provider import (
     MemoryPreparation,
     WriteTicket,
+    memory_erase,
     memory_provider,
     memory_status,
     remember_intent,
@@ -28,5 +29,5 @@ from .provider import (
     reset_memory_provider,
 )
 
-__all__ = ["MemoryPreparation", "WriteTicket", "memory_provider", "memory_status", "remember_intent", "render_memory",
-           "reset_memory_provider"]
+__all__ = ["MemoryPreparation", "WriteTicket", "memory_erase", "memory_provider", "memory_status", "remember_intent",
+           "render_memory", "reset_memory_provider"]

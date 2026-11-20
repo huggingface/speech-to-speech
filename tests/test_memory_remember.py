@@ -11,7 +11,14 @@ from openai.types.realtime.conversation_item import RealtimeConversationItemUser
 from openai.types.realtime.realtime_conversation_item_user_message import Content as UserContent
 
 from speech_to_speech.LLM.chat import Chat
-from speech_to_speech.memory.provider import AgentMemoryProvider, forget_intent, remember_intent, render_memory
+from speech_to_speech.memory.provider import (
+    AgentMemoryProvider,
+    forget_intent,
+    memory_erase,
+    remember_intent,
+    render_memory,
+    reset_memory_provider,
+)
 
 TEXT = "Please remember that I prefer tea."
 
@@ -51,6 +58,7 @@ class FakeClient:
         self.final: dict | None = None
         self.recall = EMPTY
         self.flags = 7
+        self.erase_answer = write_result(dict(receipt("applied", operation="op-erase"), kind="erase", deleted=7))
 
     def run_job(self, request, timeout_ms=0, stop=None):
         self.requests.append(request)
@@ -62,6 +70,8 @@ class FakeClient:
         if operation == "memory_forget":
             return write_result(dict(receipt("applied", operation="op-forget"), kind="forget",
                                      targetOperationId=request["operationId"]))
+        if operation == "memory_erase_owner":
+            return self.erase_answer
         if operation == "memory_operation_get":
             return write_result(self.final) if self.final is not None else write_result(receipt("running"))
         raise AssertionError(operation)
@@ -257,3 +267,39 @@ def test_forget_never_reaches_another_connections_remember(provider):
     assert wait_until(lambda: remembered.final is not None)
     ticket = provider.admit("conn-b", "item_9", 1, "Forget what I just told you.")
     assert ticket.refused == "nothing_to_forget"
+
+
+def test_owner_erase_needs_the_control_token_and_a_confirmation(provider, monkeypatch, tmp_path):
+    reset_memory_provider(provider)
+    try:
+        monkeypatch.delenv("S2S_MEMORY_CONTROL_TOKEN_FILE", raising=False)
+        assert memory_erase("Bearer x", {"confirm": True})[0] == 404, "no token file: the control is off"
+        token = tmp_path / "token"
+        token.write_text("s3cret-token\n")
+        monkeypatch.setenv("S2S_MEMORY_CONTROL_TOKEN_FILE", str(token))
+        assert memory_erase(None, {"confirm": True})[0] == 401
+        assert memory_erase("Bearer wrong", {"confirm": True})[0] == 401
+        assert memory_erase("Bearer s3cret-token", {"confirm": "yes"})[0] == 400
+        assert all(r["operation"] != "memory_erase_owner" for r in provider._client.requests)
+        status, document = memory_erase("Bearer s3cret-token", {"confirm": True})
+        assert (status, document["state"], document["deleted"]) == (200, "applied", 7)
+        assert "s3cret" not in str(document)
+        provider._client.erase_answer = write_result(None, status="unavailable", code="writes_pending")
+        assert memory_erase("Bearer s3cret-token", {"confirm": True}) == (409, {"error": "writes_pending"})
+    finally:
+        reset_memory_provider(None)
+
+
+def test_a_read_only_server_offers_no_erase(monkeypatch, tmp_path):
+    monkeypatch.setattr(agentmemory_native, "MemoryClient", FakeClient)
+    reader = AgentMemoryProvider({"profile": "read_only"}, deadline_ms=300, max_facts=5, max_preferences=3,
+                                 min_score=0.75)
+    token = tmp_path / "token"
+    token.write_text("t")
+    monkeypatch.setenv("S2S_MEMORY_CONTROL_TOKEN_FILE", str(token))
+    reset_memory_provider(reader)
+    try:
+        assert memory_erase("Bearer t", {"confirm": True})[0] == 404
+    finally:
+        reset_memory_provider(None)
+        reader.close()

@@ -9,6 +9,7 @@ from typing import Any, Callable, TypeVar
 
 import numpy as np
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from openai.types.realtime import (
     ConversationItemCreateEvent,
     ConversationItemDeleteEvent,
@@ -34,7 +35,7 @@ from speech_to_speech.api.openai_realtime.transports import (
     send_ws_event,
 )
 from speech_to_speech.api.openai_realtime.visemes import SpeechToSpeechVisemesEvent
-from speech_to_speech.memory import memory_status
+from speech_to_speech.memory import memory_erase, memory_status
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
@@ -706,6 +707,16 @@ def create_app(
             "pipelines": [{"index": unit.index, **unit.service.get_language_capabilities()} for unit in pool],
             "memory": memory_status(),
         }
+
+    @app.post("/v1/memory/erase")
+    async def memory_erase_endpoint(request: Request) -> Response:
+        """The operator's owner erase (memory writes on, control token configured); see speech_to_speech.memory."""
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        status, document = await asyncio.to_thread(memory_erase, request.headers.get("authorization"), body)
+        return JSONResponse(document, status_code=status)
 
     @app.get("/v1/usage")
     async def usage_endpoint() -> dict[str, Any]:

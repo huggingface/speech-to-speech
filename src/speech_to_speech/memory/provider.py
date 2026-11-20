@@ -400,6 +400,29 @@ class AgentMemoryProvider:
             logger.info("memory: %s for %s ended %s%s", ticket.kind, ticket.item_id, ticket.final.state,
                         f" ({ticket.final.reason})" if ticket.final.reason else "")
 
+    def erase_owner(self, timeout_s: float = 120.0) -> dict[str, Any]:
+        """Deletes everything of the configured owner through the library (refused while a write is pending). Returns
+        what a control may report: the outcome, how many nodes went, and why not, never any content."""
+        from agentmemory_native import WriteResult, erase_owner_request
+
+        result = WriteResult.from_json(self._client.run_job(erase_owner_request(confirm=True, request_id="s2s-erase"),
+                                                            int(timeout_s * 1000)))
+        self._refresh_flags()
+        if not result.ok or result.receipt is None:
+            code = result.error.code if result.error else result.status
+            logger.warning("memory: owner erase not accepted (%s)", code)
+            return {"accepted": False, "error": code}
+        receipt = result.receipt
+        if receipt.state == "applied":
+            # Nothing earlier can be told or forgotten any more: its memories are gone.
+            with self._lock:
+                self._writes.clear()
+                self._last_remember.clear()
+                self._last.clear()
+        logger.info("memory: owner erase %s (%s nodes deleted%s)", receipt.state, receipt.deleted,
+                    f"; {receipt.reason}" if receipt.reason else "")
+        return {"accepted": True, "state": receipt.state, "deleted": receipt.deleted, "reason": receipt.reason}
+
     def take_notices(self, conn_id: str) -> list[str]:
         """Status lines for this connection's earlier remembers that ended and were not told yet; each is told once."""
         lines: list[str] = []
@@ -543,6 +566,32 @@ def memory_status() -> dict[str, Any]:
     """The memory section of the server's capabilities."""
     provider = memory_provider()
     return provider.status() if provider is not None else {"enabled": False}
+
+
+def memory_erase(authorization: str | None, body: Any) -> tuple[int, dict[str, Any]]:
+    """The operator's owner erase: (HTTP status, document). Off (404) unless memory writes are on and
+    S2S_MEMORY_CONTROL_TOKEN_FILE names a file holding the control token; the token is compared in constant time and
+    never logged. The body must say {"confirm": true}."""
+    provider = memory_provider()
+    path = os.environ.get("S2S_MEMORY_CONTROL_TOKEN_FILE")
+    if provider is None or not provider.writable or not path:
+        return 404, {"error": "memory_control_off"}
+    try:
+        with open(path, encoding="utf-8") as source:
+            token = source.read().strip()
+    except OSError:
+        logger.error("memory: S2S_MEMORY_CONTROL_TOKEN_FILE cannot be read; the control stays closed")
+        return 503, {"error": "memory_control_unavailable"}
+    import hmac
+
+    if not token or not hmac.compare_digest((authorization or "").encode(), f"Bearer {token}".encode()):
+        return 401, {"error": "unauthorized"}
+    if not isinstance(body, dict) or body.get("confirm") is not True:
+        return 400, {"error": "confirmation_required", "message": 'Send {"confirm": true}: erasing cannot be undone.'}
+    outcome = provider.erase_owner()
+    if not outcome["accepted"]:
+        return 409, {"error": outcome["error"]}
+    return 200, outcome
 
 
 def reset_memory_provider(provider: AgentMemoryProvider | None = None) -> None:
