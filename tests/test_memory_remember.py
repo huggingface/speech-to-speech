@@ -308,6 +308,10 @@ def test_a_read_only_server_offers_no_erase(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("text", [
     "My sister lives in Bern.", "I started a new job at the library last week.", "We adopted a puppy called Nala.",
+    # Told, then asked: the question at the end must not hide what was told (tried by voice, 20 November 2026).
+    "Hey, yesterday I had dinner with the conference speakers and I met your maker. So today I built it. "
+    "What do you think?",
+    "His name is Sam. Do you remember now?",
 ])
 def test_what_the_owner_tells_is_worth_learning(text):
     assert observable(text)
@@ -315,6 +319,7 @@ def test_what_the_owner_tells_is_worth_learning(text):
 
 @pytest.mark.parametrize("text", [
     "Yes.", "Thanks, robot!", "Good morning.", "What time is it?", "Okay sure.", "Sounds good", "", None,
+    "You know, I told you, right?", "Hey. How are you?", "Yes. Thanks. What did I do yesterday?", "Okay. Bye!",
 ])
 def test_questions_assent_and_greetings_are_not(text):
     assert not observable(text)

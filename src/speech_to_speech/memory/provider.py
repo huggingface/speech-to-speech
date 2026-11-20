@@ -89,12 +89,25 @@ _NOTHING_TO_LEARN = re.compile(
 )
 
 
+#: The sentences of an utterance: text up to and including its end marks, or the rest.
+_SENTENCE = re.compile(r"[^.!?]+[.!?]*")
+
+
 def observable(text: str | None) -> bool:
-    """With automatic learning on: a final utterance worth giving to the writer. Not a question, not bare assent or a
-    greeting, at least three words. The writer still decides what, if anything, it keeps."""
-    if not text or text.rstrip().endswith("?") or _NOTHING_TO_LEARN.match(text):
+    """With automatic learning on: a final utterance worth giving to the writer, because at least one of its sentences
+    tells something: not a question, not bare assent or a greeting, at least three words. People tell, then ask ("I
+    met him at dinner yesterday. What do you think?"); the question must not hide what was told. Tried by voice on 20
+    November 2026, a long account of a dinner ended in "What do you think?" and none of it was learned. The writer
+    still decides what, if anything, it keeps."""
+    if not text:
         return False
-    return len(re.findall(r"[^\W\d_]+", text)) >= 3
+    for sentence in _SENTENCE.findall(text):
+        sentence = sentence.strip()
+        if not sentence or sentence.endswith("?") or _NOTHING_TO_LEARN.match(sentence):
+            continue
+        if len(re.findall(r"[^\W\d_]+", sentence)) >= 3:
+            return True
+    return False
 
 
 def forget_intent(text: str | None) -> bool:
