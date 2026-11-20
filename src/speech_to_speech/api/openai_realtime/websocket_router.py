@@ -35,7 +35,7 @@ from speech_to_speech.api.openai_realtime.transports import (
     send_ws_event,
 )
 from speech_to_speech.api.openai_realtime.visemes import SpeechToSpeechVisemesEvent
-from speech_to_speech.memory import memory_erase, memory_status
+from speech_to_speech.memory import memory_erase, memory_provider, memory_status
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
@@ -671,6 +671,10 @@ def create_app(
             session_id = unit.service.register()
             unit.session.session_id = session_id
             logger.info(f"Client connected to pipeline {unit.index} (session {session_id})")
+            # Optional memory: a store left idle answers its first recall slowly; warm it before the person speaks.
+            provider = memory_provider()
+            if provider is not None:
+                provider.warm_if_idle()
 
             # Defensive: drain edge queues and reset events so stale data from a
             # previous session that survived SESSION_END propagation doesn't leak.

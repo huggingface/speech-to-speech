@@ -187,6 +187,8 @@ class MemoryPreparation:
     # The remember this utterance asked for, if any, and the outcomes of earlier ones still to be told.
     write: WriteTicket | None = None
     notices: Callable[[], list[str]] | None = None
+    # What to render for this turn: this recall's memories first, then those recalled earlier in the session.
+    carry: Callable[[Any], list[str]] | None = None
 
     def wait(self) -> Any | None:
         """The recall result if it arrived in time and succeeded, else None (the request goes without memory).
@@ -295,6 +297,9 @@ class AgentMemoryProvider:
         self._lock = threading.Lock()
         self._rewarming = False
         self._closed = threading.Event()
+        # Per connection: the memories recalled so far in this session (id -> rendered line), most recent first.
+        self._carried: dict[str, dict[str, str]] = {}
+        self._last_used = time.monotonic()
         # The first recalls of a process, and of a store that has just started, are slow; a short series of read-only
         # recalls at startup keeps that off the first turns (WARM_UP_WORDS).
         self._bridge.submit(self._warm_up)
@@ -305,6 +310,26 @@ class AgentMemoryProvider:
     #: after six warm-up recalls with different words the first turn took 150 ms. Read-only; off the user's path.
     WARM_UP_WORDS = ("warm-up", "what do you remember about me", "my family and friends", "where I live and work",
                      "what I like", "my plans this week")
+    #: A store and an embedding endpoint left idle answer their first recall slowly: in the browser trial (20 November
+    #: 2026) the first turn after a pause missed the 450 ms deadline (702 ms) while warm turns took 100-250 ms. A client
+    #: that connects after this long without a recall gets one read-only recall in the background before it speaks.
+    IDLE_REWARM_S = 60.0
+    #: At most this many memories go with a turn: this turn's recall first, then the session's earlier ones.
+    CARRY_MAX = 12
+
+    def warm_if_idle(self) -> None:
+        """Called when a client connects: after IDLE_REWARM_S without a recall, warm the store and the embedding
+        endpoint up in the background, so the person's first turn does not pay for the idle time."""
+        with self._lock:
+            idle = time.monotonic() - self._last_used
+            if idle < self.IDLE_REWARM_S or self._rewarming or self._closed.is_set():
+                return
+            self._last_used = time.monotonic()
+        self._bridge.submit(self._warm_on_connect, idle)
+
+    def _warm_on_connect(self, idle_s: float) -> None:
+        ok, outcome = self._warm_up_once(self.WARM_UP_WORDS[1])
+        logger.info("memory: a client connected after %.0f s without a recall; warm-up recall %s", idle_s, outcome)
 
     def _warm_up_once(self, words: str = "warm-up") -> tuple[bool, str]:
         """One read-only recall that pays a cold store's first-query cost; (succeeded, outcome with its time)."""
@@ -448,6 +473,7 @@ class AgentMemoryProvider:
         receipt = result.receipt if result is not None and result.ok else None
         if receipt is not None and receipt.ended:
             ticket.final = receipt
+            self._drop_closed(receipt.closed)
         ticket.future.set_result(receipt)
         self._refresh_flags()
         if ticket.refused is not None:
@@ -462,6 +488,7 @@ class AgentMemoryProvider:
                 continue
             if followed.ok and followed.receipt is not None and followed.receipt.ended:
                 ticket.final = followed.receipt
+                self._drop_closed(followed.receipt.closed)
         self._refresh_flags()
         if ticket.final is not None:
             logger.info("memory: %s for %s ended %s%s", ticket.kind, ticket.item_id, ticket.final.state,
@@ -486,6 +513,7 @@ class AgentMemoryProvider:
                 self._writes.clear()
                 self._last_remember.clear()
                 self._last.clear()
+                self._carried.clear()
         logger.info("memory: owner erase %s (%s nodes deleted%s)", receipt.state, receipt.deleted,
                     f"; {receipt.reason}" if receipt.reason else "")
         return {"accepted": True, "state": receipt.state, "deleted": receipt.deleted, "reason": receipt.reason}
@@ -537,7 +565,10 @@ class AgentMemoryProvider:
         preparation = MemoryPreparation(item_id, _sha256(text), future, stop,
                                         time.monotonic() + self.deadline_ms / 1000, on_trouble=self._note_trouble,
                                         write=write,
-                                        notices=(lambda: self.take_notices(conn_id)) if self.writable else None)
+                                        notices=(lambda: self.take_notices(conn_id)) if self.writable else None,
+                                        carry=lambda result: self._carry(conn_id, result))
+        with self._lock:
+            self._last_used = time.monotonic()
         with self._lock:
             self._last[conn_id] = preparation
         return preparation
@@ -572,9 +603,35 @@ class AgentMemoryProvider:
         with self._lock:
             return self._last.get(conn_id)
 
+    def _carry(self, conn_id: str, result: Any | None) -> list[str]:
+        """The memories to render for a turn of this session: what this turn recalled, then what earlier turns
+        recalled and is still in force, at most CARRY_MAX. A memory stays true after the turn that recalled it, and a
+        model that sees its earlier answer without the evidence takes the answer back (observed in the trial)."""
+        current: dict[str, str] = {}
+        if result is not None:
+            current.update((fact.id, f"- {fact.subject} {fact.predicate.replace('_', ' ')} {fact.object}")
+                           for fact in result.facts)
+            current.update((preference.id, f"- {preference.text}") for preference in result.preferences)
+        with self._lock:
+            earlier = self._carried.get(conn_id, {})
+            merged = dict(list({**current, **{k: v for k, v in earlier.items() if k not in current}}.items())
+                          [: self.CARRY_MAX])
+            self._carried[conn_id] = merged
+            return list(merged.values())
+
+    def _drop_closed(self, memory_ids: tuple[str, ...] | list[str]) -> None:
+        """A write closed these memories (a correction replaced them, or a forget): no session carries them on."""
+        if not memory_ids:
+            return
+        with self._lock:
+            for carried in self._carried.values():
+                for memory_id in memory_ids:
+                    carried.pop(memory_id, None)
+
     def forget_connection(self, conn_id: str) -> None:
         with self._lock:
             self._last.pop(conn_id, None)
+            self._carried.pop(conn_id, None)
             # The writes themselves go on (they are durable); only the outcome notices for this connection are dropped.
             self._writes.pop(conn_id, None)
             self._last_remember.pop(conn_id, None)
@@ -680,9 +737,16 @@ def reset_memory_provider(provider: AgentMemoryProvider | None = None) -> None:
         _provider_loaded = True
 
 
-def evidence_text(result: Any) -> str:
+def evidence_lines(result: Any) -> list[str]:
     lines = [f"- {fact.subject} {fact.predicate.replace('_', ' ')} {fact.object}" for fact in result.facts]
-    lines += [f"- {preference.text}" for preference in result.preferences]
+    return lines + [f"- {preference.text}" for preference in result.preferences]
+
+
+def evidence_text(result: Any) -> str:
+    return evidence_block(evidence_lines(result))
+
+
+def evidence_block(lines: list[str]) -> str:
     return EVIDENCE_HEADER + "\n[memory]\n" + "\n".join(lines) + "\n[/memory]"
 
 
@@ -699,10 +763,13 @@ def render_memory(active_chat: Any, preparation: MemoryPreparation | None) -> in
     result = preparation.wait()
     waited_ms = (time.monotonic() - preparation.started) * 1000
     status = preparation.status_lines()
-    count = len(result.facts) + len(result.preferences) if result is not None else 0
-    if result is not None and count == 0:
+    recalled = len(result.facts) + len(result.preferences) if result is not None else 0
+    if result is not None and recalled == 0:
         logger.info("memory: nothing recalled for %s after %.0f ms (library queued %d ms, ran %d ms)",
                     preparation.anchor_item_id, waited_ms, result.queued_ms, result.run_ms)
+    lines = preparation.carry(result) if preparation.carry is not None else (
+        evidence_lines(result) if result is not None else [])
+    count = len(lines)
     if count == 0 and not status:
         return 0
     for item in active_chat.buffer:
@@ -714,11 +781,15 @@ def render_memory(active_chat: Any, preparation: MemoryPreparation | None) -> in
             if status:
                 parts.append(UserContent(type="input_text", text=status_text(status)))
             if count:
-                parts.append(UserContent(type="input_text", text=evidence_text(result)))
+                parts.append(UserContent(type="input_text", text=evidence_block(lines)))
             item.content = [*parts, *item.content]
-            if count:
-                logger.info("memory: %d items for %s after %.0f ms (library queued %d ms, ran %d ms)", count, item.id,
-                            waited_ms, result.queued_ms, result.run_ms)
+            if count and result is not None:
+                logger.info("memory: %d items for %s after %.0f ms (%d recalled now, %d from earlier in the session; "
+                            "library queued %d ms, ran %d ms)", count, item.id, waited_ms, recalled, count - recalled,
+                            result.queued_ms, result.run_ms)
+            elif count:
+                logger.info("memory: %d items for %s from earlier in the session (this turn's recall was late or "
+                            "failed)", count, item.id)
             if status:
                 logger.info("memory: %d status line(s) for %s", len(status), item.id)
             return count

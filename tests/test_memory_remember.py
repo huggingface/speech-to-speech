@@ -419,3 +419,87 @@ def test_a_failed_first_warm_up_does_not_run_the_rest(monkeypatch):
         assert sum(r["operation"] == "memory_get_context" for r in provider._client.requests) == 1
     finally:
         provider.close()
+
+
+RECALLED = {"schemaVersion": 1, "operation": "memory_get_context", "requestId": "x", "status": "ok",
+            "facts": [{"id": "f1", "subject": "user", "predicate": "is_named", "object": "Jose", "confidence": 0.9,
+                       "category": None, "validFrom": None, "validUntil": None,
+                       "createdAt": "2026-11-20T00:00:00+00:00", "metadata": {}}],
+            "preferences": [{"id": "p1", "category": "likes", "text": "Likes robots", "context": None,
+                             "confidence": 0.9, "createdAt": "2026-11-20T00:00:00+00:00", "metadata": {}}],
+            "truncated": False, "timing": {"queuedMs": 0, "runMs": 2}}
+
+
+def memory_lines(parts: list[str]) -> list[str]:
+    block = next((p for p in parts if "[memory]" in p), "")
+    return [line for line in block.split("\n") if line.startswith("- ")]
+
+
+def test_a_later_turn_keeps_what_was_recalled_earlier_in_the_session(provider):
+    """Browser trial, 20 Nov 2026: a turn recalled the name, the next recalled nothing, and the model took back what it
+    had said. A memory stays true after the turn that recalled it, so later turns of the session carry it."""
+    provider._client.recall = RECALLED
+    first = rendered("item_1", "I am Jose, what do you know about me?",
+                     provider.prepare("conn", "item_1", "I am Jose, what do you know about me?"))
+    assert memory_lines(first) == ["- user is named Jose", "- Likes robots"]
+
+    provider._client.recall = EMPTY
+    later = rendered("item_2", "How am I today?", provider.prepare("conn", "item_2", "How am I today?"))
+    assert memory_lines(later) == ["- user is named Jose", "- Likes robots"]
+
+    other = rendered("item_3", "How am I today?", provider.prepare("other-conn", "item_3", "How am I today?"))
+    assert memory_lines(other) == [], "another session starts with nothing carried"
+
+
+def test_a_memory_a_later_write_closes_is_no_longer_carried(provider):
+    provider._client.recall = RECALLED
+    rendered("item_1", "What do you know about me?", provider.prepare("conn", "item_1", "What do you know about me?"))
+    replaced = dict(receipt("applied", searchable=True, operation="op-2"), closed=["p1"])
+    provider._client.remember_answers.append(write_result(replaced))
+    ticket = provider.admit("conn", "item_2", 1, "Please remember that I do not like robots any more.")
+    assert wait_until(lambda: ticket.final is not None)
+
+    provider._client.recall = EMPTY
+    later = rendered("item_3", "And what else?", provider.prepare("conn", "item_3", "And what else?"))
+    assert memory_lines(later) == ["- user is named Jose"], "a replaced or forgotten memory is never carried on"
+
+
+def test_closing_the_session_or_erasing_drops_carried_memories(provider):
+    provider._client.recall = RECALLED
+    rendered("item_1", "Hello", provider.prepare("conn", "item_1", "Hello"))
+    provider.forget_connection("conn")
+    provider._client.recall = EMPTY
+    assert memory_lines(rendered("item_2", "Hi", provider.prepare("conn", "item_2", "Hi"))) == []
+
+    provider._client.recall = RECALLED
+    rendered("item_3", "Hello", provider.prepare("conn-2", "item_3", "Hello"))
+    assert provider.erase_owner()["accepted"]
+    provider._client.recall = EMPTY
+    assert memory_lines(rendered("item_4", "Hi", provider.prepare("conn-2", "item_4", "Hi"))) == []
+
+
+def test_at_most_the_cap_of_memories_goes_with_a_turn(provider):
+    many = dict(RECALLED, facts=[dict(RECALLED["facts"][0], id=f"f{i}", object=f"N{i}") for i in range(10)])
+    provider._client.recall = many
+    rendered("item_1", "a", provider.prepare("conn", "item_1", "a"))
+    more = dict(RECALLED, facts=[dict(RECALLED["facts"][0], id=f"g{i}", object=f"M{i}") for i in range(5)])
+    provider._client.recall = more
+    lines = memory_lines(rendered("item_2", "b", provider.prepare("conn", "item_2", "b")))
+    assert len(lines) == provider.CARRY_MAX
+    assert lines[:6] == [f"- user is named M{i}" for i in range(5)] + ["- Likes robots"], "this turn's recall first"
+
+
+def test_a_client_connecting_after_idle_warms_memory_up_once(provider):
+    assert wait_until(lambda: sum(r.get("requestId") == "s2s-warm-up" for r in provider._client.requests) >= 6)
+    before = sum(r.get("requestId") == "s2s-warm-up" for r in provider._client.requests)
+
+    provider.warm_if_idle()   # just warmed up at startup: nothing to do
+    time.sleep(0.2)
+    assert sum(r.get("requestId") == "s2s-warm-up" for r in provider._client.requests) == before
+
+    provider._last_used = time.monotonic() - provider.IDLE_REWARM_S - 1
+    provider.warm_if_idle()
+    provider.warm_if_idle()   # the second connection right after finds it warm
+    assert wait_until(lambda: sum(r.get("requestId") == "s2s-warm-up" for r in provider._client.requests) == before + 1)
+    time.sleep(0.2)
+    assert sum(r.get("requestId") == "s2s-warm-up" for r in provider._client.requests) == before + 1
