@@ -484,7 +484,7 @@ def test_closing_the_session_or_erasing_drops_carried_memories(provider):
 
 
 def test_at_most_the_cap_of_memories_goes_with_a_turn(provider):
-    many = dict(RECALLED, facts=[dict(RECALLED["facts"][0], id=f"f{i}", object=f"N{i}") for i in range(10)])
+    many = dict(RECALLED, facts=[dict(RECALLED["facts"][0], id=f"f{i}", object=f"N{i}") for i in range(50)])
     provider._client.recall = many
     rendered("item_1", "a", provider.prepare("conn", "item_1", "a"))
     more = dict(RECALLED, facts=[dict(RECALLED["facts"][0], id=f"g{i}", object=f"M{i}") for i in range(5)])
@@ -522,3 +522,44 @@ def test_a_conversation_closed_or_erased_before_its_start_recall_ends_starts_wit
     assert provider.erase_owner()["accepted"]
     provider._start_conversation("erased", erasures)
     assert "erased" not in provider._carried, "memories recalled before an erase are not carried after it"
+
+
+SECTIONS = {"max_messages": 5, "max_entities": 10, "max_relationships": 10, "time_windows": True, "details": True}
+FULL = dict(RECALLED,
+            windowFacts=[{"id": "w1", "subject": "user", "predicate": "had_dinner_with", "object": "the speakers on 19 November 2026",
+                          "confidence": 0.9, "category": None, "validFrom": None, "validUntil": None,
+                          "createdAt": "2026-11-20T00:00:00+00:00", "metadata": {}}],
+            relationships=[{"id": "r1", "source": "Sam", "type": "BUILT", "target": "the robot", "description": None}],
+            entities=[{"id": "e1", "name": "Sam", "type": "PERSON", "description": "the robot's maker"}],
+            messages=[{"id": "m1", "role": "user", "text": "Yesterday I had dinner with  the speakers.", "at": "2026-11-19T20:00:00Z"},
+                      {"id": "m2", "role": "user", "text": "Who is Sam?", "at": "2026-11-20T20:00:00Z"}])
+
+
+def test_every_recall_asks_for_the_same_sections(monkeypatch):
+    """A turn's recall, a conversation's start and the warm-up ask the same way (one helper, no second copy)."""
+    monkeypatch.setattr(agentmemory_native, "MemoryClient", FakeClient)
+    made = AgentMemoryProvider({"profile": "read_only"}, deadline_ms=300, max_facts=10, max_preferences=5,
+                               min_score=0.7, sections=SECTIONS)
+    try:
+        made.connected("conn")
+        made.prepare("conn", "item_1", "Who is Sam?")
+        assert wait_until(lambda: {r["requestId"] for r in made._client.requests} >= {"s2s-warm-up", "s2s-start", "item_1"})
+        for request in made._client.requests:
+            assert (request["maxFacts"], request["maxPreferences"], request["minScore"]) == (10, 5, 0.7)
+            assert (request["maxMessages"], request["maxEntities"], request["maxRelationships"]) == (5, 10, 10)
+            assert request["timeWindows"] is True and request["details"] is True
+    finally:
+        made.close()
+
+
+def test_people_relations_dated_facts_and_past_words_reach_the_model(provider):
+    provider._client.recall = FULL
+    lines = memory_lines(rendered("item_1", "Who is Sam?", provider.prepare("conn", "item_1", "Who is Sam?")))
+    assert lines == [
+        "- user is named Jose",
+        "- user had dinner with the speakers on 19 November 2026",
+        "- Likes robots",
+        "- Sam built the robot",
+        "- Sam (person): the robot's maker",
+        "- earlier (19 November 2026) the user said: \"Yesterday I had dinner with the speakers.\"",
+    ], "the turn's own words, already saved, do not come back as a past word"

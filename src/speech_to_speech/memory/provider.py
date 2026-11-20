@@ -4,7 +4,12 @@ Environment:
   S2S_MEMORY_CONFIG       path to an AgentMemory native configuration JSON (store, fixed owner, embedding endpoint;
                           with profile "explicit_write" also the writer model and the journal's state directory)
   S2S_MEMORY_DEADLINE_MS  how long a request may wait for its recall, counted from preparation (default 450)
-  S2S_MEMORY_MAX_FACTS, S2S_MEMORY_MAX_PREFERENCES, S2S_MEMORY_MIN_SCORE   recall bounds (defaults 5, 3, 0.75)
+  S2S_MEMORY_MAX_FACTS, S2S_MEMORY_MAX_PREFERENCES, S2S_MEMORY_MIN_SCORE   recall bounds (defaults 10, 5, 0.70, the
+                          library's recommended conversational recall)
+  S2S_MEMORY_MAX_MESSAGES, S2S_MEMORY_MAX_ENTITIES, S2S_MEMORY_MAX_RELATIONSHIPS   the owner's past words, the people
+                          and things, and how they relate (defaults 5, 10, 10; 0 turns a section off)
+  S2S_MEMORY_TIME_WINDOWS, S2S_MEMORY_DETAILS   "0" turns off the facts of a time the question names ("yesterday")
+                          and the facts of a person or event it names (default on)
   S2S_MEMORY_VOICE_REMEMBER  "0" turns off remembering on a spoken "remember that ..." (default on with explicit_write)
   S2S_MEMORY_DEPLOYMENT   the deployment's name in source ids (default "s2s")
   S2S_MEMORY_OBSERVE      "1" with profile "learning": also remember, unasked, what the owner tells (default off)
@@ -287,7 +292,8 @@ class AgentMemoryProvider:
     """One native context for the whole server process (the library allows one per store), shared by every unit."""
 
     def __init__(self, config: dict[str, Any], *, deadline_ms: int, max_facts: int, max_preferences: int,
-                 min_score: float, voice_remember: bool = True, deployment: str = "s2s", observe: bool = False) -> None:
+                 min_score: float, voice_remember: bool = True, deployment: str = "s2s", observe: bool = False,
+                 sections: dict[str, Any] | None = None) -> None:
         from agentmemory_native import MemoryClient
 
         self._client = MemoryClient(config)
@@ -299,6 +305,8 @@ class AgentMemoryProvider:
         # R2: automatic learning needs the learning profile (every write applied once, recall never paused by it).
         self.observe = self.profile == "learning" and observe
         self.deployment = deployment
+        # The recall sections beyond facts and preferences (get_context_request's keyword arguments).
+        self.sections = dict(sections or {})
         self.deadline_ms = deadline_ms
         self.max_facts = max_facts
         self.max_preferences = max_preferences
@@ -326,8 +334,9 @@ class AgentMemoryProvider:
     #: after six warm-up recalls with different words the first turn took 150 ms. Read-only; off the user's path.
     WARM_UP_WORDS = ("warm-up", "what do you remember about me", "my family and friends", "where I live and work",
                      "what I like", "my plans this week")
-    #: At most this many memories go with a turn: this turn's recall first, then the session's earlier ones.
-    CARRY_MAX = 12
+    #: At most this many memories go with a turn: this turn's recall first (its facts, preferences, people and
+    #: things, relations and past words), then the session's earlier ones.
+    CARRY_MAX = 40
     #: What a new conversation starts with: one quiet recall for each, at connect, merged into the memories the
     #: conversation carries, so its first turns know who is speaking. Browser trial, 20 November 2026: a new
     #: conversation's "Who am I and who are you?" recalled nothing (under the cut-off), and its next two recalls missed
@@ -363,14 +372,20 @@ class AgentMemoryProvider:
         logger.info("memory: conversation %s starts with %d memories, recalled at connect in %.0f ms", conn_id,
                     len(recalled), (time.monotonic() - started) * 1000)
 
+    def _recall_request(self, session_id: str, query: str, request_id: str | None) -> dict[str, Any]:
+        """Every recall this server makes (a turn's, a conversation's start, the warm-up) asks the same way."""
+        from agentmemory_native import get_context_request
+
+        return get_context_request(session_id=session_id, query=query, max_facts=self.max_facts,
+                                   max_preferences=self.max_preferences, min_score=self.min_score,
+                                   request_id=request_id, **self.sections)
+
     def _recall_quietly(self, words: str) -> Any | None:
         """One read-only recall off the user's path; None when it failed or the store is paused."""
-        from agentmemory_native import ContextResult, get_context_request
+        from agentmemory_native import ContextResult
 
         try:
-            request = get_context_request(session_id="s2s-start", query=words, max_facts=self.max_facts,
-                                          max_preferences=self.max_preferences, min_score=self.min_score,
-                                          request_id="s2s-start")
+            request = self._recall_request("s2s-start", words, "s2s-start")
             result = ContextResult.from_json(self._client.run_job(request, 5000))
         except Exception:  # noqa: BLE001 - a conversation that starts without memories is still a conversation
             return None
@@ -378,13 +393,11 @@ class AgentMemoryProvider:
 
     def _warm_up_once(self, words: str = "warm-up") -> tuple[bool, str]:
         """One read-only recall that pays a cold store's first-query cost; (succeeded, outcome with its time)."""
-        from agentmemory_native import ContextResult, get_context_request
+        from agentmemory_native import ContextResult
 
         started = time.monotonic()
         try:
-            request = get_context_request(session_id="s2s-warm-up", query=words, max_facts=self.max_facts,
-                                          max_preferences=self.max_preferences, min_score=self.min_score,
-                                          request_id="s2s-warm-up")
+            request = self._recall_request("s2s-warm-up", words, "s2s-warm-up")
             result = ContextResult.from_json(self._client.run_job(request, 5000))
             # A paused recall (a write is being saved) means the store answered.
             ok = result.ok or (result.error is not None and result.error.code == "reads_paused")
@@ -601,18 +614,14 @@ class AgentMemoryProvider:
         """Starts the recall for one user item and returns at once."""
         if not item_id or not text or not text.strip():
             return None
-        from agentmemory_native import get_context_request
-
-        request = get_context_request(session_id=conn_id, query=text, max_facts=self.max_facts,
-                                      max_preferences=self.max_preferences, min_score=self.min_score,
-                                      request_id=item_id)
+        request = self._recall_request(conn_id, text, item_id)
         stop = threading.Event()
         future = self._bridge.submit(self._client.run_job, request, self.deadline_ms, stop)
         preparation = MemoryPreparation(item_id, _sha256(text), future, stop,
                                         time.monotonic() + self.deadline_ms / 1000, on_trouble=self._note_trouble,
                                         write=write,
                                         notices=(lambda: self.take_notices(conn_id)) if self.writable else None,
-                                        carry=lambda result: self._carry(conn_id, result))
+                                        carry=lambda result: self._carry(conn_id, result, text))
         with self._lock:
             self._last[conn_id] = preparation
         return preparation
@@ -647,11 +656,11 @@ class AgentMemoryProvider:
         with self._lock:
             return self._last.get(conn_id)
 
-    def _carry(self, conn_id: str, result: Any | None) -> list[str]:
+    def _carry(self, conn_id: str, result: Any | None, text: str | None = None) -> list[str]:
         """The memories to render for a turn of this session: what this turn recalled, then what earlier turns
         recalled and is still in force, at most CARRY_MAX. A memory stays true after the turn that recalled it, and a
         model that sees its earlier answer without the evidence takes the answer back (observed in the trial)."""
-        current = evidence_by_id(result) if result is not None else {}
+        current = evidence_by_id(result, said_now=text) if result is not None else {}
         with self._lock:
             earlier = self._carried.get(conn_id, {})
             merged = dict(list({**current, **{k: v for k, v in earlier.items() if k not in current}}.items())
@@ -703,13 +712,20 @@ def memory_provider() -> AgentMemoryProvider | None:
                         config = json.load(source)
                     _provider = AgentMemoryProvider(
                         config,
-                        deadline_ms=int(os.environ.get("S2S_MEMORY_DEADLINE_MS", "450")),
-                        max_facts=int(os.environ.get("S2S_MEMORY_MAX_FACTS", "5")),
-                        max_preferences=int(os.environ.get("S2S_MEMORY_MAX_PREFERENCES", "3")),
-                        min_score=float(os.environ.get("S2S_MEMORY_MIN_SCORE", "0.75")),
+                        deadline_ms=int((os.environ.get("S2S_MEMORY_DEADLINE_MS") or "450")),
+                        max_facts=int((os.environ.get("S2S_MEMORY_MAX_FACTS") or "10")),
+                        max_preferences=int((os.environ.get("S2S_MEMORY_MAX_PREFERENCES") or "5")),
+                        min_score=float((os.environ.get("S2S_MEMORY_MIN_SCORE") or "0.70")),
                         voice_remember=os.environ.get("S2S_MEMORY_VOICE_REMEMBER", "1") != "0",
                         deployment=os.environ.get("S2S_MEMORY_DEPLOYMENT", "s2s"),
                         observe=os.environ.get("S2S_MEMORY_OBSERVE", "0") == "1",
+                        sections={
+                            "max_messages": int(os.environ.get("S2S_MEMORY_MAX_MESSAGES") or "5"),
+                            "max_entities": int(os.environ.get("S2S_MEMORY_MAX_ENTITIES") or "10"),
+                            "max_relationships": int(os.environ.get("S2S_MEMORY_MAX_RELATIONSHIPS") or "10"),
+                            "time_windows": os.environ.get("S2S_MEMORY_TIME_WINDOWS", "1") != "0",
+                            "details": os.environ.get("S2S_MEMORY_DETAILS", "1") != "0",
+                        },
                     )
                 except Exception as error:
                     # The server's startup reports only that it failed; say why here. The error text never holds the
@@ -778,11 +794,38 @@ def reset_memory_provider(provider: AgentMemoryProvider | None = None) -> None:
         _provider_loaded = True
 
 
-def evidence_by_id(result: Any) -> dict[str, str]:
-    """A recall's memories as rendered lines, by memory id: facts, then preferences."""
-    lines = {fact.id: f"- {fact.subject} {fact.predicate.replace('_', ' ')} {fact.object}" for fact in result.facts}
+def evidence_by_id(result: Any, said_now: str | None = None) -> dict[str, str]:
+    """A recall's memories as rendered lines, by id: facts (those of a time the question names too), preferences,
+    how people and things relate, the people and things, then the owner's own earlier words. ``said_now`` is the
+    turn's own text: once saved, it can come back as a past word, and is left out."""
+    def fact_line(fact: Any) -> str:
+        return f"- {fact.subject} {fact.predicate.replace('_', ' ')} {fact.object}"
+
+    lines = {fact.id: fact_line(fact) for fact in result.facts}
+    lines.update((fact.id, fact_line(fact)) for fact in getattr(result, "window_facts", ()) if fact.id not in lines)
     lines.update((preference.id, f"- {preference.text}") for preference in result.preferences)
+    for relation in getattr(result, "relationships", ()):
+        detail = f": {relation.description}" if relation.description else ""
+        lines[relation.id] = f"- {relation.source} {relation.type.lower().replace('_', ' ')} {relation.target}{detail}"
+    for entity in getattr(result, "entities", ()):
+        detail = f": {entity.description}" if entity.description else ""
+        lines[entity.id] = f"- {entity.name} ({entity.type.lower()}){detail}"
+    now = " ".join((said_now or "").split()).lower()
+    for message in getattr(result, "messages", ()):
+        words = " ".join(message.text.split())
+        if message.role != "user" or (now and words.lower() == now):
+            continue
+        when = _day(message.at)
+        lines[message.id] = f"- earlier{' (' + when + ')' if when else ''} the user said: \"{words[:240]}\""
     return lines
+
+
+def _day(instant: str | None) -> str:
+    try:
+        day = dt.datetime.fromisoformat((instant or "").replace("Z", "+00:00")).date()
+    except ValueError:
+        return ""
+    return f"{day.day} {day:%B %Y}"
 
 
 def evidence_lines(result: Any) -> list[str]:
