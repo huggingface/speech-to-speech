@@ -9,7 +9,24 @@ What it does when on (read-only, "R0"):
 - at generation: the model handler waits for the recall at most until its deadline, then writes the recalled facts and
   preferences into the anchored user item of its own deep copy of the conversation, never into the stored chat;
 - a late result, a superseded turn (the item's text changed) or a missing anchor means the request goes without memory.
-"""
-from .provider import MemoryPreparation, memory_provider, memory_status, render_memory, reset_memory_provider
 
-__all__ = ["MemoryPreparation", "memory_provider", "memory_status", "render_memory", "reset_memory_provider"]
+With the library's "explicit_write" profile ("R1") it also remembers on request:
+- a final spoken utterance that starts by asking ("remember that ...", "please remember ...", "don't forget ...") is
+  remembered from the microphone's own words through the library's durable journal, under a stable source id (this
+  connection, item and revision), whether or not the turn gets a response;
+- that turn's request carries a memory-status line saying only what the write's receipt supports: saving (not
+  confirmed), saved, not saved, or not confirmed; an outcome that arrives later is told once, on the next turn;
+- while a write is pending or uncertain the library pauses recall, and turns go without memory (not an error).
+"""
+from .provider import (
+    MemoryPreparation,
+    WriteTicket,
+    memory_provider,
+    memory_status,
+    remember_intent,
+    render_memory,
+    reset_memory_provider,
+)
+
+__all__ = ["MemoryPreparation", "WriteTicket", "memory_provider", "memory_status", "remember_intent", "render_memory",
+           "reset_memory_provider"]

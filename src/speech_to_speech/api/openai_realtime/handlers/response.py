@@ -45,7 +45,6 @@ from openai.types.realtime.response_content_part_done_event import Part as DoneC
 
 from speech_to_speech.api.openai_realtime.handlers.audio import PIPELINE_SAMPLE_RATE
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
-from speech_to_speech.memory import memory_provider
 from speech_to_speech.api.openai_realtime.reasoning import SpeechToSpeechReasoningDeltaEvent
 from speech_to_speech.api.openai_realtime.runtime_config import validate_reasoning
 from speech_to_speech.api.openai_realtime.tool_followup import (
@@ -58,6 +57,7 @@ from speech_to_speech.api.openai_realtime.tool_followup import (
     tool_call_ids,
 )
 from speech_to_speech.LLM.chat import ChatItemError, add_supported_item
+from speech_to_speech.memory import memory_provider
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,

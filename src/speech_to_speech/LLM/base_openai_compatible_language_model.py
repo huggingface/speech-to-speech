@@ -36,7 +36,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from speech_to_speech.api.openai_realtime.runtime_config import resolve_reasoning_effort
 from speech_to_speech.baseHandler import BaseHandler
-from speech_to_speech.memory import render_memory
 from speech_to_speech.LLM.chat import (
     Chat,
     ChatItemError,
@@ -56,6 +55,7 @@ from speech_to_speech.LLM.utils import (
     sent_tokenize_preserving_markdown_code,
 )
 from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
+from speech_to_speech.memory import render_memory
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
 from speech_to_speech.pipeline.history import ResponseHistory

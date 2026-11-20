@@ -52,7 +52,6 @@ from openai.types.realtime.realtime_response_create_params import RealtimeRespon
 from openai.types.realtime.realtime_server_event import ConversationItemRetrieved
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from speech_to_speech.memory import memory_provider
 from speech_to_speech.api.openai_realtime.handlers import (
     AudioHandler,
     ConversationHandler,
@@ -76,6 +75,7 @@ from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.api.openai_realtime.visemes import SpeechToSpeechVisemesEvent
 from speech_to_speech.LLM.chat import Chat, make_user_audio_message, make_user_message
 from speech_to_speech.LLM.utils import WHISPER_LANGUAGE_TO_LLM_LANGUAGE
+from speech_to_speech.memory import memory_provider
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
@@ -943,6 +943,12 @@ class RealtimeService:
             cfg.chat.remove_user_message(user_item_id)
             accounting.user_item_id = None
 
+        # A final spoken "remember that ..." is remembered from the microphone's own words (never the model's), whether
+        # or not this turn gets a response; the turn's request then carries what the write's receipt supports saying.
+        provider = memory_provider()
+        write = (provider.admit(conn_id, supplied_item_id, event.turn_revision, event.transcript)
+                 if provider is not None and transcript else None)
+
         queue = self.text_prompt_queue
         if queue and transcript and cfg.create_response_enabled:
             request = GenerateResponseRequest(
@@ -959,9 +965,8 @@ class RealtimeService:
                 turn_revision=event.turn_revision,
             )
             st.mark_response_pending(request.response_key)
-            provider = memory_provider()
             if provider is not None:
-                request.memory = provider.prepare(conn_id, supplied_item_id, transcript)
+                request.memory = provider.prepare(conn_id, supplied_item_id, transcript, write=write)
             queue.put(request)
         else:
             self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
