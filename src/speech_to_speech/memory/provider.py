@@ -312,7 +312,10 @@ class AgentMemoryProvider:
         self._closed = threading.Event()
         # Per connection: the memories recalled so far in this session (id -> rendered line), most recent first.
         self._carried: dict[str, dict[str, str]] = {}
-        self._last_used = time.monotonic()
+        # Connections still open, and how many erases have applied: a recall at connect that ends after either
+        # changed adds nothing.
+        self._open: set[str] = set()
+        self._erasures = 0
         # The first recalls of a process, and of a store that has just started, are slow; a short series of read-only
         # recalls at startup keeps that off the first turns (WARM_UP_WORDS).
         self._bridge.submit(self._warm_up)
@@ -323,26 +326,55 @@ class AgentMemoryProvider:
     #: after six warm-up recalls with different words the first turn took 150 ms. Read-only; off the user's path.
     WARM_UP_WORDS = ("warm-up", "what do you remember about me", "my family and friends", "where I live and work",
                      "what I like", "my plans this week")
-    #: A store and an embedding endpoint left idle answer their first recall slowly: in the browser trial (20 November
-    #: 2026) the first turn after a pause missed the 450 ms deadline (702 ms) while warm turns took 100-250 ms. A client
-    #: that connects after this long without a recall gets one read-only recall in the background before it speaks.
-    IDLE_REWARM_S = 60.0
     #: At most this many memories go with a turn: this turn's recall first, then the session's earlier ones.
     CARRY_MAX = 12
+    #: What a new conversation starts with: one quiet recall for each, at connect, merged into the memories the
+    #: conversation carries, so its first turns know who is speaking. Browser trial, 20 November 2026: a new
+    #: conversation's "Who am I and who are you?" recalled nothing (under the cut-off), and its next two recalls missed
+    #: the deadline while speech recognition loaded the CPU. At connect nobody speaks yet. The recalls also warm a store
+    #: and an embedding endpoint left idle (the first recall after a pause took 702 ms against 100-250 ms warm).
+    SESSION_START_WORDS = ("who I am: my name and what I do", "what do you remember about me", "what I like",
+                           "my family and friends", "what I did recently")
 
-    def warm_if_idle(self) -> None:
-        """Called when a client connects: after IDLE_REWARM_S without a recall, warm the store and the embedding
-        endpoint up in the background, so the person's first turn does not pay for the idle time."""
+    def connected(self, conn_id: str) -> None:
+        """Called when a client connects: recall in the background what its conversation starts with."""
         with self._lock:
-            idle = time.monotonic() - self._last_used
-            if idle < self.IDLE_REWARM_S or self._rewarming or self._closed.is_set():
+            if self._closed.is_set():
                 return
-            self._last_used = time.monotonic()
-        self._bridge.submit(self._warm_on_connect, idle)
+            self._open.add(conn_id)
+            erasures = self._erasures
+        self._bridge.submit(self._start_conversation, conn_id, erasures)
 
-    def _warm_on_connect(self, idle_s: float) -> None:
-        ok, outcome = self._warm_up_once(self.WARM_UP_WORDS[1])
-        logger.info("memory: a client connected after %.0f s without a recall; warm-up recall %s", idle_s, outcome)
+    def _start_conversation(self, conn_id: str, erasures: int) -> None:
+        started = time.monotonic()
+        recalled: dict[str, str] = {}
+        for words in self.SESSION_START_WORDS:
+            if self._closed.is_set():
+                return
+            result = self._recall_quietly(words)
+            if result is not None:
+                recalled.update((k, v) for k, v in evidence_by_id(result).items() if k not in recalled)
+        with self._lock:
+            if conn_id not in self._open or erasures != self._erasures:
+                return  # closed meanwhile, or the owner's memory was erased: nothing to start with
+            earlier = self._carried.get(conn_id, {})
+            merged = {**earlier, **{k: v for k, v in recalled.items() if k not in earlier}}
+            self._carried[conn_id] = dict(list(merged.items())[: self.CARRY_MAX])
+        logger.info("memory: conversation %s starts with %d memories, recalled at connect in %.0f ms", conn_id,
+                    len(recalled), (time.monotonic() - started) * 1000)
+
+    def _recall_quietly(self, words: str) -> Any | None:
+        """One read-only recall off the user's path; None when it failed or the store is paused."""
+        from agentmemory_native import ContextResult, get_context_request
+
+        try:
+            request = get_context_request(session_id="s2s-start", query=words, max_facts=self.max_facts,
+                                          max_preferences=self.max_preferences, min_score=self.min_score,
+                                          request_id="s2s-start")
+            result = ContextResult.from_json(self._client.run_job(request, 5000))
+        except Exception:  # noqa: BLE001 - a conversation that starts without memories is still a conversation
+            return None
+        return result if result.ok else None
 
     def _warm_up_once(self, words: str = "warm-up") -> tuple[bool, str]:
         """One read-only recall that pays a cold store's first-query cost; (succeeded, outcome with its time)."""
@@ -527,6 +559,7 @@ class AgentMemoryProvider:
                 self._last_remember.clear()
                 self._last.clear()
                 self._carried.clear()
+                self._erasures += 1
         logger.info("memory: owner erase %s (%s nodes deleted%s)", receipt.state, receipt.deleted,
                     f"; {receipt.reason}" if receipt.reason else "")
         return {"accepted": True, "state": receipt.state, "deleted": receipt.deleted, "reason": receipt.reason}
@@ -581,8 +614,6 @@ class AgentMemoryProvider:
                                         notices=(lambda: self.take_notices(conn_id)) if self.writable else None,
                                         carry=lambda result: self._carry(conn_id, result))
         with self._lock:
-            self._last_used = time.monotonic()
-        with self._lock:
             self._last[conn_id] = preparation
         return preparation
 
@@ -620,11 +651,7 @@ class AgentMemoryProvider:
         """The memories to render for a turn of this session: what this turn recalled, then what earlier turns
         recalled and is still in force, at most CARRY_MAX. A memory stays true after the turn that recalled it, and a
         model that sees its earlier answer without the evidence takes the answer back (observed in the trial)."""
-        current: dict[str, str] = {}
-        if result is not None:
-            current.update((fact.id, f"- {fact.subject} {fact.predicate.replace('_', ' ')} {fact.object}")
-                           for fact in result.facts)
-            current.update((preference.id, f"- {preference.text}") for preference in result.preferences)
+        current = evidence_by_id(result) if result is not None else {}
         with self._lock:
             earlier = self._carried.get(conn_id, {})
             merged = dict(list({**current, **{k: v for k, v in earlier.items() if k not in current}}.items())
@@ -645,6 +672,7 @@ class AgentMemoryProvider:
         with self._lock:
             self._last.pop(conn_id, None)
             self._carried.pop(conn_id, None)
+            self._open.discard(conn_id)
             # The writes themselves go on (they are durable); only the outcome notices for this connection are dropped.
             self._writes.pop(conn_id, None)
             self._last_remember.pop(conn_id, None)
@@ -750,9 +778,15 @@ def reset_memory_provider(provider: AgentMemoryProvider | None = None) -> None:
         _provider_loaded = True
 
 
+def evidence_by_id(result: Any) -> dict[str, str]:
+    """A recall's memories as rendered lines, by memory id: facts, then preferences."""
+    lines = {fact.id: f"- {fact.subject} {fact.predicate.replace('_', ' ')} {fact.object}" for fact in result.facts}
+    lines.update((preference.id, f"- {preference.text}") for preference in result.preferences)
+    return lines
+
+
 def evidence_lines(result: Any) -> list[str]:
-    lines = [f"- {fact.subject} {fact.predicate.replace('_', ' ')} {fact.object}" for fact in result.facts]
-    return lines + [f"- {preference.text}" for preference in result.preferences]
+    return list(evidence_by_id(result).values())
 
 
 def evidence_text(result: Any) -> str:

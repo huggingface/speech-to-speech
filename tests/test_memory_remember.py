@@ -494,17 +494,31 @@ def test_at_most_the_cap_of_memories_goes_with_a_turn(provider):
     assert lines[:6] == [f"- user is named M{i}" for i in range(5)] + ["- Likes robots"], "this turn's recall first"
 
 
-def test_a_client_connecting_after_idle_warms_memory_up_once(provider):
-    assert wait_until(lambda: sum(r.get("requestId") == "s2s-warm-up" for r in provider._client.requests) >= 6)
-    before = sum(r.get("requestId") == "s2s-warm-up" for r in provider._client.requests)
+def test_a_new_conversation_starts_with_what_is_remembered_about_the_owner(provider):
+    """Browser trial, 20 November 2026: a new conversation's first questions recalled nothing (one under the cut-off,
+    two past the deadline while speech recognition loaded the CPU), and the robot said it knew nothing."""
+    provider._client.recall = RECALLED
+    provider.connected("conn")
+    assert wait_until(lambda: len(provider._carried.get("conn", {})) == 2)
+    assert sum(r.get("requestId") == "s2s-start" for r in provider._client.requests) == len(provider.SESSION_START_WORDS)
 
-    provider.warm_if_idle()   # just warmed up at startup: nothing to do
-    time.sleep(0.2)
-    assert sum(r.get("requestId") == "s2s-warm-up" for r in provider._client.requests) == before
+    provider._client.recall = EMPTY
+    first = rendered("item_1", "How are you? Who am I?", provider.prepare("conn", "item_1", "How are you? Who am I?"))
+    assert memory_lines(first) == ["- user is named Jose", "- Likes robots"]
+    other = rendered("item_2", "Who am I?", provider.prepare("never-connected", "item_2", "Who am I?"))
+    assert memory_lines(other) == []
 
-    provider._last_used = time.monotonic() - provider.IDLE_REWARM_S - 1
-    provider.warm_if_idle()
-    provider.warm_if_idle()   # the second connection right after finds it warm
-    assert wait_until(lambda: sum(r.get("requestId") == "s2s-warm-up" for r in provider._client.requests) == before + 1)
-    time.sleep(0.2)
-    assert sum(r.get("requestId") == "s2s-warm-up" for r in provider._client.requests) == before + 1
+
+def test_a_conversation_closed_or_erased_before_its_start_recall_ends_starts_with_nothing(provider):
+    provider._client.recall = RECALLED
+    with provider._lock:
+        provider._open.add("closed")
+        provider._open.add("erased")
+        erasures = provider._erasures
+    provider.forget_connection("closed")
+    provider._start_conversation("closed", erasures)
+    assert "closed" not in provider._carried, "a closed connection keeps nothing behind"
+
+    assert provider.erase_owner()["accepted"]
+    provider._start_conversation("erased", erasures)
+    assert "erased" not in provider._carried, "memories recalled before an erase are not carried after it"

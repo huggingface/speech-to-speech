@@ -672,10 +672,11 @@ def create_app(
             session_id = unit.service.register()
             unit.session.session_id = session_id
             logger.info(f"Client connected to pipeline {unit.index} (session {session_id})")
-            # Optional memory: a store left idle answers its first recall slowly; warm it before the person speaks.
+            # Optional memory: the conversation starts with what is remembered about the owner, recalled now, before
+            # anyone speaks (it also warms a store left idle).
             provider = memory_provider()
             if provider is not None:
-                provider.warm_if_idle()
+                provider.connected(session_id)
 
             # Defensive: drain edge queues and reset events so stale data from a
             # previous session that survived SESSION_END propagation doesn't leak.
