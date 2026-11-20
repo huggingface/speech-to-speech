@@ -44,6 +44,16 @@ def test_negated_valid_reads_as_invalid(reply):
     assert extract_answer("formal_fallacies", reply)[0] == "invalid"
 
 
+@pytest.mark.parametrize("apostrophe", ["'", "’"])
+@pytest.mark.parametrize("subject, contraction", [("The argument", "isn"), ("The arguments", "aren")])
+@pytest.mark.parametrize("prefix, method", [("Final answer: ", "marker"), ("", "scan")])
+def test_contracted_negation_accepts_straight_and_curly_apostrophes(apostrophe, subject, contraction, prefix, method):
+    reply = f"{prefix}{subject} {contraction}{apostrophe}t valid."
+    assert extract_answer("formal_fallacies", reply) == ("invalid", method)
+    assert grade("formal_fallacies", "invalid", reply).correct is True
+    assert grade("formal_fallacies", "valid", reply).correct is False
+
+
 def test_hedging_without_a_negation_keeps_the_stated_answer():
     assert extract_answer("formal_fallacies", "I am not sure, but the argument is valid.")[0] == "valid"
 
