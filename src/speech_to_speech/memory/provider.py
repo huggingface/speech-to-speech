@@ -6,10 +6,10 @@ Environment:
   S2S_MEMORY_DEADLINE_MS  how long a request may wait for its recall, counted from preparation (default 450)
   S2S_MEMORY_MAX_FACTS, S2S_MEMORY_MAX_PREFERENCES, S2S_MEMORY_MIN_SCORE   recall bounds (defaults 10, 5, 0.70, the
                           library's recommended conversational recall)
-  S2S_MEMORY_MAX_MESSAGES, S2S_MEMORY_MAX_ENTITIES, S2S_MEMORY_MAX_RELATIONSHIPS   the owner's past words, the people
-                          and things, and how they relate (defaults 5, 10, 10; 0 turns a section off)
-  S2S_MEMORY_TIME_WINDOWS, S2S_MEMORY_DETAILS   "0" turns off the facts of a time the question names ("yesterday")
-                          and the facts of a person or event it names (default on)
+  S2S_MEMORY_MAX_ENTITIES, S2S_MEMORY_MAX_RELATIONSHIPS   the people and things, and how they relate (defaults 10, 10)
+  S2S_MEMORY_MAX_MESSAGES  the conversation's own earlier words most like the question (default 0: the model already
+                          has this conversation; the library searches no other)
+  S2S_MEMORY_TIME_WINDOWS "0" turns off the facts of a time the question names ("yesterday"), by their dates
   S2S_MEMORY_VOICE_REMEMBER  "0" turns off remembering on a spoken "remember that ..." (default on with explicit_write)
   S2S_MEMORY_DEPLOYMENT   the deployment's name in source ids (default "s2s")
   S2S_MEMORY_OBSERVE      "1" with profile "learning": also remember, unasked, what the owner tells (default off)
@@ -720,11 +720,10 @@ def memory_provider() -> AgentMemoryProvider | None:
                         deployment=os.environ.get("S2S_MEMORY_DEPLOYMENT", "s2s"),
                         observe=os.environ.get("S2S_MEMORY_OBSERVE", "0") == "1",
                         sections={
-                            "max_messages": int(os.environ.get("S2S_MEMORY_MAX_MESSAGES") or "5"),
+                            "max_messages": int(os.environ.get("S2S_MEMORY_MAX_MESSAGES") or "0"),
                             "max_entities": int(os.environ.get("S2S_MEMORY_MAX_ENTITIES") or "10"),
                             "max_relationships": int(os.environ.get("S2S_MEMORY_MAX_RELATIONSHIPS") or "10"),
                             "time_windows": os.environ.get("S2S_MEMORY_TIME_WINDOWS", "1") != "0",
-                            "details": os.environ.get("S2S_MEMORY_DETAILS", "1") != "0",
                         },
                     )
                 except Exception as error:

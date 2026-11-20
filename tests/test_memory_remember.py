@@ -524,7 +524,7 @@ def test_a_conversation_closed_or_erased_before_its_start_recall_ends_starts_wit
     assert "erased" not in provider._carried, "memories recalled before an erase are not carried after it"
 
 
-SECTIONS = {"max_messages": 5, "max_entities": 10, "max_relationships": 10, "time_windows": True, "details": True}
+SECTIONS = {"max_messages": 5, "max_entities": 10, "max_relationships": 10, "time_windows": True}
 FULL = dict(RECALLED,
             windowFacts=[{"id": "w1", "subject": "user", "predicate": "had_dinner_with", "object": "the speakers on 19 November 2026",
                           "confidence": 0.9, "category": None, "validFrom": None, "validUntil": None,
@@ -547,7 +547,7 @@ def test_every_recall_asks_for_the_same_sections(monkeypatch):
         for request in made._client.requests:
             assert (request["maxFacts"], request["maxPreferences"], request["minScore"]) == (10, 5, 0.7)
             assert (request["maxMessages"], request["maxEntities"], request["maxRelationships"]) == (5, 10, 10)
-            assert request["timeWindows"] is True and request["details"] is True
+            assert request["timeWindows"] is True and "details" not in request
     finally:
         made.close()
 
