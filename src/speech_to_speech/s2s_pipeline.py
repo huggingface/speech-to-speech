@@ -710,6 +710,9 @@ def _build_pipeline_unit(
         language = tts_handler.language
         service.tts_supported_languages = {language} if language != "none" else set()
 
+    describe_voices = getattr(tts_handler, "voice_capabilities", None)
+    service.tts_voice_capabilities = describe_voices() if callable(describe_voices) else None
+
     for selection, handler in ((stt_selection, stt_handler), (tts_selection, tts_handler)):
         kind = selection.kind
         capabilities = backend_language_capabilities(kind, selection.name, selection.config, handler)

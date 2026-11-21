@@ -587,6 +587,18 @@ class Qwen3TTSHandler(BaseTTSHandler):
         inner = getattr(getattr(self.model, "model", None), "model", None)
         return getattr(inner, "tts_model_type", None) or self._infer_model_type_from_name()
 
+    def voice_capabilities(self) -> dict[str, Any] | None:
+        """The CustomVoice speakers a client may choose, and the one this server speaks with; None when the model
+        has no preset speakers (a voice-clone or voice-design model)."""
+        if self._model_type() != "custom_voice":
+            return None
+        speakers = self._supported_speakers()
+        if not speakers:
+            return None
+        return {"voices": [{"id": speaker, "name": speaker.replace("_", " "), "group": None}
+                           for speaker in sorted(speakers, key=str.lower)],
+                "default_voice": self._initial_speaker}
+
     def _supported_speakers(self) -> list[str] | None:
         for candidate in (
             self.model,

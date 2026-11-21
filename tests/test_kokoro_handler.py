@@ -28,3 +28,29 @@ def test_provider_segments_preserve_pcm_without_padding(backend, lengths):
     expected = np.concatenate([(resample_poly(audio, up=2, down=3) * 32768).astype(np.int16) for audio in segments])
     assert all(chunk.dtype == np.int16 and 0 < len(chunk) <= 512 for chunk in chunks)
     np.testing.assert_array_equal(np.concatenate(chunks), expected)
+
+
+def test_every_kokoro_voice_is_offered_once_under_the_language_it_was_made_for():
+    from speech_to_speech.TTS.kokoro_handler import (
+        KOKORO_LANG_DEFAULT_VOICES,
+        KOKORO_LANGUAGE_NAMES,
+        KOKORO_VOICES,
+        kokoro_voice_choices,
+    )
+
+    choices = kokoro_voice_choices()
+    ids = [choice["id"] for choice in choices]
+    assert len(ids) == len(set(ids)) == 54
+    assert set(KOKORO_LANG_DEFAULT_VOICES.values()) <= set(ids), "each language's default voice can be chosen"
+    for code, voices in KOKORO_VOICES.items():
+        assert all(voice[0] == code and voice[1] in "fm" for voice in voices)
+    heart = next(choice for choice in choices if choice["id"] == "af_heart")
+    assert heart == {"id": "af_heart", "name": "Heart (female)", "group": KOKORO_LANGUAGE_NAMES["a"]}
+
+
+def test_kokoro_reports_the_voice_it_speaks_with_by_default():
+    handler = object.__new__(KokoroTTSHandler)
+    handler._initial_voice = "bm_fable"
+    described = handler.voice_capabilities()
+    assert described["default_voice"] == "bm_fable"
+    assert any(voice["id"] == "bm_fable" for voice in described["voices"])

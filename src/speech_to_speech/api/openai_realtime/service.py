@@ -75,6 +75,7 @@ from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.api.openai_realtime.visemes import SpeechToSpeechVisemesEvent
 from speech_to_speech.LLM.chat import Chat, make_user_audio_message, make_user_message
 from speech_to_speech.LLM.utils import WHISPER_LANGUAGE_TO_LLM_LANGUAGE
+from speech_to_speech.memory import memory_provider
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
@@ -410,8 +411,14 @@ class RealtimeService:
         self.stt_language_capabilities = SpeechLanguageCapabilities()
         self.tts_language_capabilities = SpeechLanguageCapabilities()
         self.stt_auto_reset_supported: bool = True
+        # The speech engine's voices and its default ({"voices": [...], "default_voice": ...}); None when it does not
+        # list them.
+        self.tts_voice_capabilities: dict[str, Any] | None = None
         self._conns: dict[str, ConnState] = {}
         self.total_usage = GlobalUsageMetrics()
+        # Optional memory opens its native context here, at startup, never on the event loop of a first turn;
+        # a configuration it refuses stops the server instead of leaving memory silently off.
+        memory_provider()
 
         self.history = HistoryHandler(self)
         self.audio = AudioHandler(self)
@@ -494,6 +501,9 @@ class RealtimeService:
 
     def unregister(self, conn_id: str) -> None:
         self.history.close_session(conn_id)
+        provider = memory_provider()
+        if provider is not None:
+            provider.forget_connection(conn_id)
         st = self._conns.pop(conn_id, None)
         if st is not None:
             # Suppress any in-flight compaction splice so a daemon worker can't
@@ -936,6 +946,12 @@ class RealtimeService:
             cfg.chat.remove_user_message(user_item_id)
             accounting.user_item_id = None
 
+        # A final spoken "remember that ..." is remembered from the microphone's own words (never the model's), whether
+        # or not this turn gets a response; the turn's request then carries what the write's receipt supports saying.
+        provider = memory_provider()
+        write = (provider.admit(conn_id, supplied_item_id, event.turn_revision, event.transcript)
+                 if provider is not None and transcript else None)
+
         queue = self.text_prompt_queue
         if queue and transcript and cfg.create_response_enabled:
             request = GenerateResponseRequest(
@@ -952,6 +968,8 @@ class RealtimeService:
                 turn_revision=event.turn_revision,
             )
             st.mark_response_pending(request.response_key)
+            if provider is not None:
+                request.memory = provider.prepare(conn_id, supplied_item_id, transcript, write=write)
             queue.put(request)
         else:
             self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)

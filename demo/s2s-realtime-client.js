@@ -56,6 +56,47 @@ import { SentAudioRecorder } from "./ws/user-audio-recorder.js";
 import { LocalVad } from "./ws/local-vad.js";
 import { normalizeReasoningEffort } from "./ui/reasoning.js";
 
+/**
+ * Ask the speech server what it supports: whether "auto" language works, and which voices its speech engine has
+ * (Kokoro and Qwen3-TTS name different voices). Never throws: an older server or an unreachable endpoint gives
+ * `{ autoSupported: false, voices: null }`, and the page keeps its own defaults.
+ * @param {string} connectUrl The realtime URL (ws, wss, http or https).
+ * @param {string} [capabilitiesUrl] The backend realtime URL, when connectUrl is a same-origin proxy.
+ * @returns {Promise<{ autoSupported: boolean, voices: { id: string, name: string, group: string | null }[] | null,
+ *   defaultVoice: string | null }>}
+ */
+export async function discoverCapabilities(connectUrl, capabilitiesUrl) {
+  const found = { autoSupported: false, voices: null, defaultVoice: null };
+  try {
+    const url = new URL(capabilitiesUrl || connectUrl, globalThis.location?.href);
+    url.protocol = url.protocol === "wss:" ? "https:" : url.protocol === "ws:" ? "http:" : url.protocol;
+    url.pathname = url.pathname.replace(/\/v1\/realtime(?:\/calls)?\/?$/, "/v1/realtime/capabilities");
+    // A same-origin WebRTC proxy cannot provide the backend capability URL.
+    if (!url.pathname.endsWith("/v1/realtime/capabilities")) return found;
+    const response = await fetch(url, { signal: AbortSignal.timeout(2000) });
+    if (!response.ok) return found;
+    const data = await response.json();
+    const pipelines = Array.isArray(data.pipelines) ? data.pipelines : [];
+    found.autoSupported = pipelines.length > 0
+      && pipelines.every(pipeline => pipeline.conversation?.session_auto_supported === true);
+    const tts = pipelines[0]?.tts;
+    const voices = (Array.isArray(tts?.voices) ? tts.voices : [])
+      .filter(voice => typeof voice?.id === "string" && voice.id)
+      .map(voice => ({
+        id: voice.id,
+        name: typeof voice.name === "string" && voice.name ? voice.name : voice.id,
+        group: typeof voice.group === "string" && voice.group ? voice.group : null,
+      }));
+    if (voices.length > 0) {
+      found.voices = voices;
+      found.defaultVoice = voices.some(voice => voice.id === tts.default_voice) ? tts.default_voice : voices[0].id;
+    }
+  } catch {
+    // Older servers and inaccessible discovery endpoints keep backend defaults.
+  }
+  return found;
+}
+
 export const AUDIO_SAMPLE_RATE = 24_000;
 export const AUDIO_WORKLET_VERSION = "reasoning-language-20261110";
 export const DEFAULT_PLAYBACK_BUFFER_MS = 0;
@@ -321,24 +362,15 @@ export class S2sRealtimeClient extends EventTarget {
 
   async _loadLanguageCapabilities(connectUrl) {
     this._autoLanguageSupported = false;
-    try {
-      const url = new URL(this.options.capabilitiesUrl || connectUrl, globalThis.location?.href);
-      url.protocol = url.protocol === "wss:" ? "https:" : url.protocol === "ws:" ? "http:" : url.protocol;
-      url.pathname = url.pathname.replace(/\/v1\/realtime(?:\/calls)?\/?$/, "/v1/realtime/capabilities");
-      // A same-origin WebRTC proxy cannot provide the backend capability URL.
-      if (!url.pathname.endsWith("/v1/realtime/capabilities")) return;
-      const response = await fetch(url, { signal: AbortSignal.timeout(2000) });
-      if (!response.ok) return;
-      const data = await response.json();
-      this._autoLanguageSupported = Array.isArray(data.pipelines) && data.pipelines.length > 0
-        && data.pipelines.every(pipeline => pipeline.conversation?.session_auto_supported === true);
-    } catch {
-      // Older servers and inaccessible discovery endpoints keep backend defaults.
-    } finally {
-      this.dispatchEvent(new CustomEvent("language-capabilities", {
-        detail: { autoSupported: this._autoLanguageSupported },
-      }));
+    const found = await discoverCapabilities(connectUrl, this.options.capabilitiesUrl);
+    this._autoLanguageSupported = found.autoSupported;
+    // A voice the server's speech engine does not have falls back silently there: use the server's own instead.
+    if (found.voices && !found.voices.some(voice => voice.id === this.options.voice)) {
+      this.options.voice = found.defaultVoice;
     }
+    this.dispatchEvent(new CustomEvent("language-capabilities", {
+      detail: { autoSupported: found.autoSupported, voices: found.voices, voice: this.options.voice },
+    }));
   }
 
   _languageConfig(language) {

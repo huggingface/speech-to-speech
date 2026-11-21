@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -9,6 +10,7 @@ from typing import Any, Callable, TypeVar
 
 import numpy as np
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from openai.types.realtime import (
     ConversationItemCreateEvent,
     ConversationItemDeleteEvent,
@@ -34,6 +36,7 @@ from speech_to_speech.api.openai_realtime.transports import (
     send_ws_event,
 )
 from speech_to_speech.api.openai_realtime.visemes import SpeechToSpeechVisemesEvent
+from speech_to_speech.memory import memory_erase, memory_provider, memory_status
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
@@ -669,6 +672,11 @@ def create_app(
             session_id = unit.service.register()
             unit.session.session_id = session_id
             logger.info(f"Client connected to pipeline {unit.index} (session {session_id})")
+            # Optional memory: the conversation starts with what is remembered about the owner, recalled now, before
+            # anyone speaks (it also warms a store left idle).
+            provider = memory_provider()
+            if provider is not None:
+                provider.connected(session_id)
 
             # Defensive: drain edge queues and reset events so stale data from a
             # previous session that survived SESSION_END propagation doesn't leak.
@@ -699,11 +707,44 @@ def create_app(
             # can be skipped/cancelled by Starlette's runner and never resume.
             _release_session(unit, session_id)
 
-    @app.get("/v1/realtime/capabilities")
-    async def capabilities_endpoint() -> dict[str, Any]:
-        return {
-            "pipelines": [{"index": unit.index, **unit.service.get_language_capabilities()} for unit in pool],
+    # A page served from another origin (the demo voice UI on its own port) may read the capabilities only when its
+    # origin is named here: comma-separated, none by default.
+    capability_origins = frozenset(
+        origin.strip()
+        for origin in os.environ.get("S2S_CAPABILITIES_ALLOWED_ORIGINS", "").split(",")
+        if origin.strip()
+    )
+
+    def describe_pipeline(unit: PipelineUnit) -> dict[str, Any]:
+        described = {"index": unit.index, **unit.service.get_language_capabilities()}
+        voices = unit.service.tts_voice_capabilities or {}
+        described["tts"] = {
+            **described["tts"],
+            "voices": voices.get("voices"),
+            "default_voice": voices.get("default_voice"),
         }
+        return described
+
+    @app.get("/v1/realtime/capabilities")
+    async def capabilities_endpoint(request: Request) -> JSONResponse:
+        headers = {"Vary": "Origin"}
+        origin = request.headers.get("origin")
+        if origin and origin in capability_origins:
+            headers["Access-Control-Allow-Origin"] = origin
+        return JSONResponse(
+            {"pipelines": [describe_pipeline(unit) for unit in pool], "memory": memory_status()},
+            headers=headers,
+        )
+
+    @app.post("/v1/memory/erase")
+    async def memory_erase_endpoint(request: Request) -> Response:
+        """The operator's owner erase (memory writes on, control token configured); see speech_to_speech.memory."""
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        status, document = await asyncio.to_thread(memory_erase, request.headers.get("authorization"), body)
+        return JSONResponse(document, status_code=status)
 
     @app.get("/v1/usage")
     async def usage_endpoint() -> dict[str, Any]:

@@ -279,6 +279,8 @@
             <div class="field-row">
               <label class="field">
                 <span>Voice</span>
+                <!-- Qwen3-TTS speakers (the hosted demo's engine). A server that lists its engine's voices in
+                     /v1/realtime/capabilities replaces them (main.js, refreshVoiceMenu). -->
                 <select id="voice">
                   <option value="Aiden" selected>Aiden</option>
                   <option value="Ryan">Ryan</option>
@@ -470,6 +472,6 @@
     </dialog>
 
     <script src="vendor/openai-realtime-agents.umd.js"></script>
-    <script type="module" src="main.js?v=reasoning-language-20261110"></script>
+    <script type="module" src="main.js?v=voices-20261120"></script>
   </body>
 </html>
