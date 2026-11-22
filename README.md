@@ -216,6 +216,7 @@ pip install "speech-to-speech[paraformer]"      # Paraformer STT through FunASR
 pip install "speech-to-speech[fireredvad]"      # FireRed streaming VAD
 pip install "speech-to-speech[nemo]"            # Parakeet Unified, Nemotron, and Orukeet STT through NeMo
 pip install "speech-to-speech[mlx-lm]"          # mlx-vlm support for vision models on macOS
+pip install "speech-to-speech[memory]"          # Long-term memory for the Realtime server (AgentMemory)
 ```
 
 Deprecated implementations, including MeloTTS, live in [`archive/`](./archive) and are no longer wired into the CLI.
@@ -416,6 +417,17 @@ completion = llm.chat.completions.create(
 ```
 
 Requests are stateless (send the full message list each time) and are proxied to the configured upstream with the key held by the server, which never reaches clients. The `model` field is always overwritten with the server configured `--model_name`. The proxy is off by default, requires a remote backend (`chat-completions` or `responses-api`), and answers 501 with the reason otherwise.
+
+### Long-term memory
+
+The Realtime server can recall what it knows about the user before each reply, through the [AgentMemory](https://github.com/joslat/agent-memory-dotnet) native library. It is off by default. Install the `memory` extra and point `S2S_MEMORY_CONFIG` at an AgentMemory configuration file:
+
+```bash
+pip install "speech-to-speech[memory]"
+S2S_MEMORY_CONFIG=/path/to/memory.json speech-to-speech serve --llm_backend chat-completions ...
+```
+
+Recalled facts and preferences go into the current user message of that request only, never into the stored conversation. A recall that misses its deadline (450 ms by default) is dropped and the turn is answered without memory. With a writing profile, a spoken "remember that ..." is saved from the user's own words. Memory applies to the `chat-completions` and `responses-api` backends. See the [memory README](./src/speech_to_speech/memory/README.md) for the settings.
 
 ## LLM Backends
 

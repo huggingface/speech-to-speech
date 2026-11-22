@@ -1,0 +1,271 @@
+"""The optional long-term memory: what is rendered into a request, where, and when nothing is."""
+
+from __future__ import annotations
+
+import importlib.util
+import threading
+import time
+from concurrent.futures import Future
+
+import pytest
+from openai.types.realtime.conversation_item import RealtimeConversationItemUserMessage
+from openai.types.realtime.realtime_conversation_item_user_message import Content as UserContent
+
+from speech_to_speech.LLM.chat import Chat
+from speech_to_speech.memory import MemoryPreparation, memory_provider, render_memory, reset_memory_provider
+from speech_to_speech.memory.provider import _sha256
+
+# Decoding a recall result needs the optional "memory" extra; the tests of memory being off do not.
+needs_native = pytest.mark.skipif(
+    importlib.util.find_spec("agentmemory_native") is None,
+    reason='needs the optional "memory" extra (agentmemory-native)',
+)
+
+RESULT = {
+    "schemaVersion": 1,
+    "operation": "memory_get_context",
+    "requestId": "item_1",
+    "status": "ok",
+    "facts": [
+        {
+            "id": "f1",
+            "subject": "user",
+            "predicate": "works_in",
+            "object": "Lisbon",
+            "confidence": 0.9,
+            "category": None,
+            "validFrom": None,
+            "validUntil": None,
+            "createdAt": "2026-11-20T00:00:00+00:00",
+            "metadata": {},
+        }
+    ],
+    "preferences": [
+        {
+            "id": "p1",
+            "category": "style",
+            "text": "Prefers concise answers",
+            "context": None,
+            "confidence": 0.9,
+            "createdAt": "2026-11-20T00:00:00+00:00",
+            "metadata": {},
+        }
+    ],
+    "truncated": False,
+    "timing": {"queuedMs": 0, "runMs": 2},
+}
+
+
+def user_item(item_id: str, text: str) -> RealtimeConversationItemUserMessage:
+    return RealtimeConversationItemUserMessage(
+        id=item_id, type="message", role="user", content=[UserContent(type="input_text", text=text)]
+    )
+
+
+def chat_with(*items: RealtimeConversationItemUserMessage) -> Chat:
+    chat = Chat(size=10)
+    for item in items:
+        chat.add_item(item)
+    return chat
+
+
+def preparation(
+    item_id: str, text: str, result=RESULT, *, deadline_s: float = 1.0, done: bool = True
+) -> MemoryPreparation:
+    future: Future = Future()
+    if done:
+        future.set_result(result)
+    return MemoryPreparation(item_id, _sha256(text), future, threading.Event(), time.monotonic() + deadline_s)
+
+
+def texts(chat: Chat, item_id: str) -> list[str]:
+    item = next(i for i in chat.buffer if getattr(i, "id", None) == item_id)
+    return [part.text for part in item.content]
+
+
+def test_memory_is_off_without_configuration(monkeypatch):
+    monkeypatch.delenv("S2S_MEMORY_CONFIG", raising=False)
+    reset_memory_provider(None)
+    assert memory_provider() is None
+
+
+@needs_native
+def test_evidence_goes_into_the_anchored_item_of_the_copy_only():
+    canonical = chat_with(user_item("item_0", "Hello"), user_item("item_1", "Where do I work?"))
+    copy = canonical.copy(deep=True)
+
+    assert render_memory(copy, preparation("item_1", "Where do I work?")) == 2
+
+    rendered = texts(copy, "item_1")
+    assert len(rendered) == 2 and rendered[1] == "Where do I work?"
+    assert "[memory]\n- user works in Lisbon\n- Prefers concise answers\n[/memory]" in rendered[0]
+    assert texts(copy, "item_0") == ["Hello"], "only the anchored item gets evidence"
+    assert texts(canonical, "item_1") == ["Where do I work?"], "the stored conversation never does"
+
+
+@needs_native
+def test_a_turn_whose_text_changed_gets_no_memory():
+    copy = chat_with(user_item("item_1", "Where do I work now?"))
+    assert render_memory(copy, preparation("item_1", "Where do I work?")) == 0
+    assert texts(copy, "item_1") == ["Where do I work now?"]
+
+
+@needs_native
+def test_a_missing_anchor_gets_no_memory_and_no_other_item_is_used():
+    copy = chat_with(user_item("item_9", "Where do I work?"))
+    assert render_memory(copy, preparation("item_1", "Where do I work?")) == 0
+    assert texts(copy, "item_9") == ["Where do I work?"]
+
+
+def test_a_late_recall_is_dropped_and_its_job_is_told_to_stop():
+    late = preparation("item_1", "Where do I work?", done=False, deadline_s=0.05)
+    copy = chat_with(user_item("item_1", "Where do I work?"))
+    started = time.monotonic()
+    assert render_memory(copy, late) == 0
+    assert time.monotonic() - started < 0.5, "never waits past the deadline"
+    assert late.stop.is_set()
+
+
+@needs_native
+def test_a_late_recall_reports_where_its_time_went_when_it_ends(caplog):
+    late = preparation("item_1", "Where do I work?", done=False, deadline_s=0.01)
+    with caplog.at_level("INFO", logger="speech_to_speech.memory.provider"):
+        assert render_memory(chat_with(user_item("item_1", "Where do I work?")), late) == 0
+        late.future.set_result(dict(RESULT, timing={"queuedMs": 3, "runMs": 512}))
+    lines = [r.getMessage() for r in caplog.records]
+    assert any("missed its deadline (checked" in line for line in lines)
+    ended = next(line for line in lines if "late recall for item_1 ended ok" in line)
+    assert "queued 3 ms, ran 512 ms" in ended
+    assert "Lisbon" not in " ".join(lines) and "concise" not in " ".join(lines), "times and status only, never content"
+
+
+@needs_native
+def test_a_failed_recall_and_an_empty_one_add_nothing():
+    failed = dict(
+        RESULT, status="unavailable", facts=[], preferences=[], error={"code": "store_unavailable", "message": "down"}
+    )
+    empty = dict(RESULT, facts=[], preferences=[])
+    for result in (failed, empty):
+        copy = chat_with(user_item("item_1", "Where do I work?"))
+        assert render_memory(copy, preparation("item_1", "Where do I work?", result)) == 0
+        assert texts(copy, "item_1") == ["Where do I work?"]
+
+
+def test_a_follow_up_of_a_late_turn_gets_no_memory_even_if_the_result_arrives_later():
+    late = preparation("item_1", "Where do I work?", done=False, deadline_s=0.01)
+    assert render_memory(chat_with(user_item("item_1", "Where do I work?")), late) == 0
+    late.future.set_result(RESULT)
+    copy = chat_with(user_item("item_1", "Where do I work?"))
+    assert render_memory(copy, late) == 0
+    assert texts(copy, "item_1") == ["Where do I work?"]
+
+
+@needs_native
+def test_an_undecodable_result_adds_nothing_and_does_not_raise():
+    copy = chat_with(user_item("item_1", "Where do I work?"))
+    assert render_memory(copy, preparation("item_1", "Where do I work?", {"no": "status"})) == 0
+
+
+@needs_native
+def test_a_late_failed_or_refused_recall_reports_trouble_and_a_good_one_does_not():
+    failed = dict(
+        RESULT, status="unavailable", facts=[], preferences=[], error={"code": "store_unavailable", "message": "down"}
+    )
+    cases = [
+        (preparation("item_1", "Where do I work?", done=False, deadline_s=0.01), 1),
+        (preparation("item_1", "Where do I work?", failed), 1),
+        (preparation("item_1", "Where do I work?", {"no": "status"}), 1),
+        (preparation("item_1", "Where do I work?"), 0),
+    ]
+    for prepared, expected in cases:
+        calls = []
+        prepared.on_trouble = lambda: calls.append(1)
+        render_memory(chat_with(user_item("item_1", "Where do I work?")), prepared)
+        assert len(calls) == expected
+
+
+def test_memory_status_with_memory_off_says_only_that():
+    from speech_to_speech.memory import memory_status
+
+    reset_memory_provider(None)
+    assert memory_status() == {"enabled": False}
+
+
+def test_a_closed_session_leaves_no_recall_behind():
+    """No hidden old conversation: closing a connection drops the recall its tool follow-ups would have reused."""
+    from speech_to_speech.api.openai_realtime.service import RealtimeService
+
+    class Provider:
+        def __init__(self):
+            self.forgotten = []
+
+        def forget_connection(self, conn_id):
+            self.forgotten.append(conn_id)
+
+    provider = Provider()
+    reset_memory_provider(provider)
+    try:
+        RealtimeService().unregister("conn-1")
+    finally:
+        reset_memory_provider(None)
+    assert provider.forgotten == ["conn-1"]
+
+
+def test_with_memory_off_the_server_never_imports_the_memory_library():
+    """A fresh interpreter, as a real server: build the realtime service with S2S_MEMORY_CONFIG unset."""
+    import os
+    import subprocess
+    import sys
+
+    probe = (
+        "import sys\n"
+        "from speech_to_speech.api.openai_realtime.service import RealtimeService\n"
+        "RealtimeService()\n"
+        "print('agentmemory_native' in sys.modules)\n"
+    )
+    environment = {k: v for k, v in os.environ.items() if k != "S2S_MEMORY_CONFIG"}
+    completed = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, env=environment, timeout=120
+    )
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    assert completed.stdout.strip().splitlines()[-1] == "False"
+
+
+def test_no_preparation_renders_nothing():
+    copy = chat_with(user_item("item_1", "Where do I work?"))
+    assert render_memory(copy, None) == 0
+
+
+@needs_native
+def test_the_memories_come_with_todays_date():
+    """Remembered facts carry dates; without today's date the model turned an event of that day into "yesterday"."""
+    import datetime as dt
+
+    from speech_to_speech.memory.provider import evidence_block
+
+    block = evidence_block(["- user went to a dinner on 19 November 2026"], today=dt.date(2026, 11, 20))
+    assert "Today is Friday, 20 November 2026." in block.split("[memory]")[0]
+    rendered = texts_after_render()
+    assert f"Today is {dt.datetime.now().astimezone().date():%A}" in rendered[0]
+
+
+def texts_after_render() -> list[str]:
+    copy = chat_with(user_item("item_1", "Where do I work?"))
+    render_memory(copy, preparation("item_1", "Where do I work?"))
+    return texts(copy, "item_1")
+
+
+def test_memory_on_without_the_package_stops_with_an_error_naming_the_extra(monkeypatch, tmp_path):
+    """S2S_MEMORY_CONFIG set but agentmemory-native missing: the server must not start silently without memory."""
+    import sys
+
+    import speech_to_speech.memory.provider as provider_module
+
+    config = tmp_path / "memory.json"
+    config.write_text('{"profile": "read_only"}', encoding="utf-8")
+    monkeypatch.setenv("S2S_MEMORY_CONFIG", str(config))
+    monkeypatch.setitem(sys.modules, "agentmemory_native", None)  # import fails as if not installed
+    monkeypatch.setattr(provider_module, "_provider", None)
+    monkeypatch.setattr(provider_module, "_provider_loaded", False)
+    with pytest.raises(ImportError, match=r"speech-to-speech\[memory\]"):
+        memory_provider()
