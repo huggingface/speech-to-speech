@@ -93,9 +93,10 @@ speech-to-speech local --stt whisper --language auto --stt_device cuda
 
 - Handler: `Qwen3ASRSTTHandler`
 - Model flag: `--qwen3_asr_model_name` (default `Qwen/Qwen3-ASR-0.6B-hf`; `Qwen/Qwen3-ASR-1.7B-hf` is more accurate)
+- Revision flag: `--qwen3_asr_revision` (Hub branch, tag, or commit). Pin a full commit hash to load the same processor and weights in repeat runs.
 - Language flag: `--qwen3_asr_language` (ISO code or name, default `auto`)
 - Context flag: `--qwen3_asr_prompt` (optional hotwords or domain context)
-- Supported languages: the 30 in the checkpoint's language table
+- The default checkpoint supports 30 languages. Fine-tunes may support a subset.
   - `ar`, `yue`, `zh`, `cs`, `da`, `nl`, `en`, `fil`, `fi`, `fr`, `de`, `el`, `hi`, `hu`, `id`, `it`, `ja`, `ko`, `mk`, `ms`, `fa`, `pl`, `pt`, `ro`, `ru`, `es`, `sv`, `th`, `tr`, `vi`
 - Behavior:
   - With `auto`, the model identifies the language of each final turn and reports it with the `-auto` suffix
@@ -244,6 +245,32 @@ speech-to-speech serve --stt qwen3-asr \
   --qwen3_asr_model_name Qwen/Qwen3-ASR-1.7B-hf \
   --qwen3_asr_prompt "Vocabulary: Quilter, apostle."
 ```
+
+For a local, noncommercial research comparison, the same handler can transcribe a single English clip with [Oruk Fourier 2B](https://huggingface.co/oruk/oruk-fourier-2b) in process. This example reads a 16 kHz mono file and pins the Hub revision. It does not start a server or upload the audio.
+
+```python
+from queue import Queue
+from threading import Event
+
+import soundfile as sf
+
+from speech_to_speech.pipeline.messages import VADAudio
+from speech_to_speech.STT.qwen3_asr_handler import Qwen3ASRSTTHandler
+
+audio, sample_rate = sf.read("english.wav", dtype="float32")
+if sample_rate != 16_000 or audio.ndim != 1:
+    raise ValueError("Use a mono, 16 kHz recording")
+
+handler = Qwen3ASRSTTHandler(Event(), Queue(), Queue(), setup_kwargs={
+    "model_name": "oruk/oruk-fourier-2b",
+    "revision": "8c2a8871f1304aa2f634da4fb95e24438c4945b9",
+    "language": "en",
+})
+result = next(handler.process(VADAudio(audio=audio, mode="final")))
+print(result.text)
+```
+
+The Fourier weights are [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) and require attribution to Oruk. Its [model card](https://huggingface.co/oruk/oruk-fourier-2b#license) requires a separate license for commercial use, commercial integration, or hosted/API serving.
 
 ### Parakeet Unified
 
