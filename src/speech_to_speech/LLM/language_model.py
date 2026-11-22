@@ -854,7 +854,10 @@ class LanguageModelHandler(BaseLanguageModelHandler):
         response: RealtimeResponseCreateParams | None = None,
     ) -> Iterator[LLMResponseChunk]:
         chat_messages = chat.to_transformers_chat()
-        chat_input = self.tokenizer.apply_chat_template(chat_messages, tokenize=True)
+        # Count the same prompt the model receives, generation prompt included.
+        chat_input = self.tokenizer.apply_chat_template(
+            chat_messages, tokenize=True, add_generation_prompt=True, enable_thinking=False
+        )
         ctx.input_tokens += len(chat_input if isinstance(chat_input, list) else chat_input["input_ids"])  # type: ignore[index]
         logger.debug("Prompt token count: %d", ctx.input_tokens)
 
