@@ -319,10 +319,10 @@ def check_mac_settings(module_kwargs: ModuleArguments) -> None:
             logger.warning(
                 "For macOS users, it is recommended to use mlx-lm. You can activate it by passing --llm_backend mlx-lm."
             )
-        if module_kwargs.tts not in ("pocket", "phonon", "kokoro", "omnivoice", "qwen3"):
+        if module_kwargs.tts not in ("pocket", "phonon", "kokoro", "omnivoice", "irodori", "qwen3"):
             logger.warning(
                 "For macOS users, it is recommended to use qwen3 for TTS "
-                "(pocket, phonon, kokoro, and omnivoice are also valid options)."
+                "(pocket, phonon, kokoro, omnivoice, and irodori are also valid options)."
             )
 
 
@@ -573,6 +573,8 @@ def _build_handlers(
 
 
 def _stt_session_languages(selection: BackendSelection, handler: Any) -> set[str] | None:
+    if selection.name == "zerogpu":
+        return set(handler.language_capabilities.languages)
     if selection.name == "nemotron-streaming" and getattr(handler, "_is_farsi", False):
         return {"fa"}
     if selection.name == "faster-whisper":
@@ -584,7 +586,13 @@ def _stt_session_languages(selection: BackendSelection, handler: Any) -> set[str
         return set() if getattr(generation_config, "is_multilingual", None) is False else None
     if selection.name == "qwen3-asr":
         return set(modules[type(handler).__module__].SUPPORTED_LANGUAGES)
-    if selection.name in {"parakeet-tdt", "parakeet-unified", "paraformer", "openai-realtime", "vllm-realtime"}:
+    if selection.name in {
+        "parakeet-tdt",
+        "parakeet-unified",
+        "paraformer",
+        "openai-realtime",
+        "vllm-realtime",
+    }:
         return set()
     return None
 
@@ -684,7 +692,9 @@ def _build_pipeline_unit(
 
     tts_handler = handlers[tts_index]
     tts_module = modules[type(tts_handler).__module__]
-    if tts_selection.name == "kokoro":
+    if tts_selection.name == "zerogpu":
+        service.tts_supported_languages = set(tts_handler.supported_languages)
+    elif tts_selection.name == "kokoro":
         service.tts_supported_languages = {"en", "ja", "zh", "fr", "es", "it", "pt", "hi"}
     elif tts_selection.name == "facebookMMS":
         service.tts_supported_languages = set(tts_module.WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE)

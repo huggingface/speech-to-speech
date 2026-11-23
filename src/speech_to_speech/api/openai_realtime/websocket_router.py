@@ -478,7 +478,7 @@ async def _dispatch_client_event(
             and not _keep_non_audio_output(session.pending_output_item)
         ):
             session.pending_output_item = None
-        transport.discard_pending_audio()
+        service.truncate_unplayed_audio(session_id, transport.discard_pending_audio())
 
     elif isinstance(event, SessionUpdateEvent):
         err = service.handle_session_update(session_id, event)
@@ -503,12 +503,9 @@ async def _dispatch_client_event(
         await send_correlated(service.handle_conversation_item_retrieve(session_id, event))
 
     elif isinstance(event, ConversationItemTruncateEvent):
-        # The stock Agents SDK sends this after an audible WebSocket
-        # interruption. An explicit response.cancel or automatic server-VAD
-        # cancellation has already discarded provisional generation, and
-        # client-side playback owns the unheard tail, so there is no additional
-        # server state to mutate.
-        logger.debug("Accepted conversation.item.truncate for %s", event.item_id)
+        # The client's playback position replaces the server's estimate. No
+        # conversation.item.truncated acknowledgement is sent.
+        service.handle_conversation_item_truncate(session_id, event)
 
     elif isinstance(event, ResponseCreateEvent):
         result = service.handle_response_create(session_id, event)
@@ -529,8 +526,9 @@ async def _dispatch_client_event(
             _flush_queue(unit.text_prompt_queue, preserve=_keep_pipeline_control)
         _flush_queue(unit.output_queue, preserve=_keep_cancel_bookkeeping)
         _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
-        transport.discard_pending_audio()
+        unplayed_ms = transport.discard_pending_audio()
         events = service.handle_response_cancel(session_id)
+        service.truncate_unplayed_audio(session_id, unplayed_ms)
         if events:
             await send_correlated(events)
         unit.response_playing.clear()
@@ -977,6 +975,7 @@ def create_app(
                         was_in_response = st.in_response
                         was_response_pending = st.response_pending
 
+                    events: list[Any] = []
                     if (
                         transport is not None
                         and isinstance(text_msg, PipelineEvent)
@@ -991,21 +990,31 @@ def create_app(
                             pending_items = session.pending_text_output_items
                             pending_items.insert(len(pending_items) if parked_index is None else parked_index, text_msg)
                             events = []
-                        if events:
-                            await transport.send_events(events)
 
+                    interrupt_enabled = False
                     if isinstance(text_msg, SpeechStartedEvent) and session_id:
                         active_cfg = unit.service._state(session_id).runtime_config
                         interrupt_enabled = text_msg.interrupt_response and (
                             active_cfg is None or active_cfg.interrupt_response_enabled
                         )
                         if interrupt_enabled and transport is not None:
-                            # Flush even when no response is active: the WebRTC
-                            # track can still hold unplayed audio from a response
-                            # whose done-sentinel was already observed —
+                            # Flush even when no response is active: the client
+                            # can still hold unplayed audio from a response whose
+                            # done-sentinel was already observed —
                             # finish_response() runs on the sentinel, not when
-                            # playback completes. No-op over WebSocket.
-                            transport.discard_pending_audio()
+                            # playback completes. WebSocket only estimates it.
+                            # Cut history before speech_started goes out, so a
+                            # client that retrieves the reply sees the cut. An
+                            # interrupted reply has already ended: dispatching
+                            # SpeechStartedEvent ran on_speech_started, which
+                            # finished it as cancelled, so the cut is not
+                            # skipped as in-progress output.
+                            unit.service.truncate_unplayed_audio(session_id, transport.discard_pending_audio())
+
+                    if events and transport is not None:
+                        await transport.send_events(events)
+
+                    if isinstance(text_msg, SpeechStartedEvent) and session_id:
                         if was_in_response or was_response_pending:
                             if interrupt_enabled:
                                 unit.cancel_scope.cancel()

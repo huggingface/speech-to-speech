@@ -225,6 +225,44 @@ class TestConnectionLifecycle:
             assert updated.session.audio.input.transcription.language == expected
             assert runtime_config.selected_language == expected
 
+    def test_demo_default_language_preserves_fixed_backend_session_config(self, service, conn_id):
+        import json
+        import shutil
+        import subprocess
+        from pathlib import Path
+
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("Node.js is required for demo client tests")
+        service.stt_auto_reset_supported = False
+        supported = service.get_language_capabilities()["conversation"]["session_auto_supported"]
+        script = f"""
+const {{ S2sRealtimeClient }} = await import("./demo/s2s-realtime-client.js");
+const client = new S2sRealtimeClient({{ transport: "websocket", language: "auto" }});
+client._autoLanguageSupported = {json.dumps(supported)};
+console.log(JSON.stringify(client._sessionConfig().audio.input.transcription));
+"""
+        transcription = json.loads(
+            subprocess.check_output(
+                [node, "--input-type=module", "-e", script],
+                cwd=Path(__file__).resolve().parents[2],
+                text=True,
+            )
+        )
+        assert "language" not in transcription
+        update = SessionUpdateEvent.model_validate(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "realtime",
+                    "instructions": "Keep these instructions",
+                    "audio": {"input": {"transcription": transcription}},
+                },
+            }
+        )
+        assert service.handle_session_update(conn_id, update) is None
+        assert service.build_session_updated(conn_id).session.instructions == "Keep these instructions"
+
     def test_unsupported_session_language_is_rejected_without_changing_effective_config(
         self, service, conn_id, runtime_config
     ):
@@ -792,7 +830,7 @@ class TestDeferConversationItemsDuringResponse:
         assert st.last_item_id == created.item.id
         assert [item.type for item in chat.buffer] == ["function_call", "message", "function_call_output"]
 
-    def test_cancel_rolls_back_provisional_call_before_flushing_deferred_output(self, service, conn_id):
+    def test_cancel_keeps_delivered_call_before_flushing_deferred_output(self, service, conn_id):
         st = service._state(conn_id)
         chat = st.runtime_config.chat
         user = chat.add_item(
@@ -835,19 +873,22 @@ class TestDeferConversationItemsDuringResponse:
 
         events = service.finish_response(conn_id, status="cancelled", reason="client_cancelled")
 
+        # The client was already running the call, so its output still attaches.
         assert any(isinstance(event, ResponseDoneEvent) for event in events)
-        assert any(isinstance(event, RealtimeErrorEvent) for event in events), events
-        assert not any(isinstance(event, ConversationItemCreatedEvent) for event in events)
-        assert chat.buffer == [user]
+        assert not any(isinstance(event, RealtimeErrorEvent) for event in events), events
+        created = [event for event in events if isinstance(event, ConversationItemCreatedEvent)]
+        assert [event.item.type for event in created] == ["function_call_output"]
+        assert chat.buffer[0] == user
+        assert [item.type for item in chat.buffer] == ["message", "function_call", "function_call_output"]
         assert not chat.has_pending_tool_calls()
         assert chat._provisional_generations == {}
 
-        # response.done is now a safe boundary: an immediate follow-up does not
-        # see the cancelled call or get rejected as waiting for its output.
+        # response.done is a safe boundary: an immediate follow-up is not
+        # rejected as waiting for an output.
         next_response = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
         assert isinstance(next_response, ResponseCreatedEvent)
 
-    def test_cancel_preserves_image_applied_for_prefetch(
+    def test_cancel_keeps_delivered_call_with_image_applied_for_prefetch(
         self,
         service,
         conn_id,
@@ -916,12 +957,15 @@ class TestDeferConversationItemsDuringResponse:
             response_key=response_key,
         )
 
-        assert any(isinstance(event, RealtimeErrorEvent) for event in events)
+        # The client already ran the call, so its output stays attached.
+        assert not any(isinstance(event, RealtimeErrorEvent) for event in events)
         created = [event for event in events if isinstance(event, ConversationItemCreatedEvent)]
-        assert len(created) == 1
+        assert [event.item.type for event in created] == ["message", "function_call_output"]
         assert created[0].item.id == "msg_client_camera_frame_cancelled"
         assert created[0].item.content[0].image_url == "data:image/jpeg;base64,abc"
-        assert chat.buffer == [user, created[0].item]
+        assert chat.buffer[0] == user
+        assert [item.type for item in chat.buffer] == ["message", "function_call", "message", "function_call_output"]
+        assert not chat.has_pending_tool_calls()
         assert st.pending_item_acks == []
         assert st.tool_followup_prefetch_request is None
         assert prefetch.response_key in st.closed_response_keys
@@ -981,9 +1025,11 @@ class TestDeferConversationItemsDuringResponse:
         created = [event for event in events if isinstance(event, ConversationItemCreatedEvent)]
         assert len(created) == 1
         assert created[0].item.content[0].image_url == "data:image/jpeg;base64,user"
-        assert chat.buffer == [user, created[0].item]
+        # The delivered call stays, still waiting for its output.
+        assert chat.buffer == [user, call, created[0].item]
+        assert chat.has_pending_tool_calls()
 
-    def test_cancel_preserves_ordered_user_image_between_tool_outputs(
+    def test_cancel_keeps_delivered_calls_with_user_image_between_tool_outputs(
         self,
         service,
         conn_id,
@@ -1074,12 +1120,19 @@ class TestDeferConversationItemsDuringResponse:
         )
 
         created = [event for event in events if isinstance(event, ConversationItemCreatedEvent)]
-        errors = [event for event in events if isinstance(event, RealtimeErrorEvent)]
-        assert len(created) == 1
-        assert len(errors) == 2
-        assert created[0].item.id == "msg_ordinary_user_image"
-        assert created[0].item.content[0].image_url == "data:image/jpeg;base64,user"
-        assert chat.buffer == [user, created[0].item]
+        assert not any(isinstance(event, RealtimeErrorEvent) for event in events)
+        assert [event.item.type for event in created] == ["function_call_output", "message", "function_call_output"]
+        assert created[1].item.id == "msg_ordinary_user_image"
+        assert created[1].item.content[0].image_url == "data:image/jpeg;base64,user"
+        assert chat.buffer[0] == user
+        assert [item.type for item in chat.buffer] == [
+            "message",
+            "function_call",
+            "function_call",
+            "function_call_output",
+            "message",
+            "function_call_output",
+        ]
 
     def test_cancel_rolls_back_generated_call_not_yet_delivered_after_tts(self, service, conn_id):
         st = service._state(conn_id)
@@ -2084,7 +2137,7 @@ class TestHandleResponseCreate:
         assert "call_bogus" in result.error.message
         assert service._state(conn_id).in_response is False
 
-    def test_response_create_rejects_unresolved_function_call(self, service, conn_id, text_prompt_queue):
+    def test_response_create_proceeds_while_a_function_call_is_running(self, service, conn_id, text_prompt_queue):
         chat = service._state(conn_id).runtime_config.chat
         chat.add_ordered_function_call(
             RealtimeConversationItemFunctionCall(
@@ -2097,12 +2150,13 @@ class TestHandleResponseCreate:
 
         result = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
 
-        assert isinstance(result, RealtimeErrorEvent)
-        assert result.error.type == "function_call_output_pending"
-        assert service._state(conn_id).in_response is False
-        assert text_prompt_queue.empty()
+        assert isinstance(result, ResponseCreatedEvent)
+        assert chat.has_pending_tool_calls()
+        assert isinstance(text_prompt_queue.get_nowait(), GenerateResponseRequest)
 
-    def test_rejected_response_input_does_not_mutate_chat(self, service, conn_id, text_prompt_queue):
+    def test_response_create_accepts_user_input_while_a_function_call_is_running(
+        self, service, conn_id, text_prompt_queue
+    ):
         chat = service._state(conn_id).runtime_config.chat
         chat.add_ordered_function_call(
             RealtimeConversationItemFunctionCall(
@@ -2114,16 +2168,15 @@ class TestHandleResponseCreate:
         )
         event = ResponseCreateEvent(
             type="response.create",
-            response={"input": [self._user_input("must not survive rejection")]},
+            response={"input": [self._user_input("an unrelated question")]},
         )
 
         result = service.handle_response_create(conn_id, event)
 
-        assert isinstance(result, RealtimeErrorEvent)
-        assert result.error.type == "function_call_output_pending"
-        assert [item.type for item in chat.buffer] == ["function_call"]
+        assert isinstance(result, ResponseCreatedEvent)
+        assert [item.type for item in chat.buffer] == ["function_call", "message"]
         assert chat.has_pending_tool_calls()
-        assert text_prompt_queue.empty()
+        assert isinstance(text_prompt_queue.get_nowait(), GenerateResponseRequest)
 
     def test_partially_resolved_response_input_does_not_mutate_chat(self, service, conn_id, text_prompt_queue):
         chat = service._state(conn_id).runtime_config.chat
@@ -2848,7 +2901,6 @@ class TestResponseDoneOutputItems:
         assert len(tool.call_id) <= 32
         assert chat.buffer[-1].call_id == tool.call_id
         assert not chat.has_pending_tool_calls()
-        assert not chat._ordered_pending_calls
 
         result = service.handle_response_create(conn_id, ResponseCreateEvent(type="response.create"))
         assert isinstance(result, ResponseCreatedEvent)

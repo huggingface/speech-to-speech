@@ -6,6 +6,7 @@ from openai.types.realtime.realtime_audio_config_input import RealtimeAudioConfi
 from openai.types.realtime.realtime_audio_config_output import RealtimeAudioConfigOutput
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
+from speech_to_speech.api.openai_realtime.reasoning import SessionRequest
 from speech_to_speech.LLM.chat import Chat
 from speech_to_speech.utils.request_tracing import safe_identifier
 
@@ -17,8 +18,8 @@ REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
 def reasoning_effort_of(params: Any) -> str | None:
     """Read ``reasoning.effort`` from a Realtime session or response config.
 
-    The pinned OpenAI SDK has no typed ``reasoning`` field yet, so it arrives as
-    a pydantic extra (a plain dict); newer SDKs expose a model. Handle both.
+    Events parsed by the service carry it as a plain dict (see ``reasoning.py``);
+    a config built from the SDK's own classes carries a model. Handle both.
     """
     reasoning = getattr(params, "reasoning", None) if params is not None else None
     if reasoning is None:
@@ -83,8 +84,8 @@ class RuntimeConfig(BaseModel):
     model_config = ConfigDict(validate_assignment=True, arbitrary_types_allowed=True)
 
     chat: Chat = Field(default_factory=lambda: Chat(10))
-    session: RealtimeSessionCreateRequest = Field(
-        default_factory=lambda: RealtimeSessionCreateRequest(type="realtime"),
+    session: SessionRequest = Field(
+        default_factory=lambda: SessionRequest(type="realtime"),
         validate_default=True,
     )
     last_assistant_language: str | None = Field(default=None, exclude=True)
@@ -101,9 +102,14 @@ class RuntimeConfig(BaseModel):
             raise ValueError("invalid server trace session ID")
         self._trace_session_id = session_id
 
+    @field_validator("session", mode="before")
+    @classmethod
+    def _accept_sdk_session(cls, v: Any) -> Any:
+        return SessionRequest.of(v) if isinstance(v, RealtimeSessionCreateRequest) else v
+
     @field_validator("session", mode="after")
     @classmethod
-    def _ensure_audio_structure(cls, v: RealtimeSessionCreateRequest) -> RealtimeSessionCreateRequest:
+    def _ensure_audio_structure(cls, v: SessionRequest) -> SessionRequest:
         """Guarantee 'audio.input' and 'audio.output' are never None."""
         if v.audio is None:
             v.audio = RealtimeAudioConfig()
@@ -156,12 +162,18 @@ class RuntimeConfig(BaseModel):
             and "speech_to_speech.input_audio_transcription.snapshot" in extensions
         )
 
+    @property
+    def reasoning_text_enabled(self) -> bool:
+        """Whether this client wants the provider's readable reasoning output."""
+        extensions = getattr(self.session, "extensions", None)
+        return isinstance(extensions, (list, tuple, set)) and "speech_to_speech.reasoning.delta" in extensions
+
     def apply_session_update(self, update: RealtimeSessionCreateRequest) -> None:
         """Merge non-None, explicitly-set fields from 'update' into the
         current 'session', preserving any fields not present in the update."""
-        # The pinned SDK keeps ``reasoning`` as a plain dict extra, which
-        # _apply_update would replace wholesale; merge its keys so a partial
-        # object (e.g. ``{}``) keeps the current effort. ``null`` still resets.
+        # ``reasoning`` arrives as a plain dict, which _apply_update would
+        # replace wholesale; merge its keys so a partial object (e.g. ``{}``)
+        # keeps the current effort. ``null`` still resets.
         old_reasoning = getattr(self.session, "reasoning", None)
         new_reasoning = getattr(update, "reasoning", None)
         if (

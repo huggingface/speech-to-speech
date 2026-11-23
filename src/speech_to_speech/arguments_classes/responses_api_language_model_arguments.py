@@ -40,7 +40,8 @@ class ResponsesApiLanguageModelHandlerArguments(LanguageModelBaseArguments):
         metadata={
             "help": "Reasoning effort for the OpenAI-compatible API. The Responses backend sends "
             "reasoning={'effort': <value>}; Chat Completions sends reasoning_effort. Default is 'none', "
-            "preserving the previous gpt-5.4-mini reasoning behavior."
+            "preserving the previous gpt-5.4-mini reasoning behavior. Pass an empty value to omit it for models "
+            "without reasoning support, such as gpt-4.1."
         },
     )
     responses_api_audio_max_tokens: int = field(

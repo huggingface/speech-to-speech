@@ -25,6 +25,7 @@ from speech_to_speech.pipeline.events import (
 from speech_to_speech.pipeline.messages import AssistantToolCallPart
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnPhase
 from speech_to_speech.VAD.vad_handler import VADHandler
+from tests.llm_history import close_llm_runners as close_llm_runners
 from tests.llm_history import drive_llm
 from tests.test_vad_iterator import _FakeVADModel
 
@@ -239,7 +240,7 @@ def test_tool_continuation_turn_after_newer_speech(runtime_config, prefetch, ass
         service.finish_response(conn_id, response_key=origin.response_key)
     if newer_turn != "listening":
         # "closed": the newer turn transcribes empty, so nothing answers it and it closes.
-        # "question": the model refuses it while the tool call has no output.
+        # "question": the reply to it fails, so it is still unanswered when the result arrives.
         newer = {"turn_id": unfinished_id, "turn_revision": 0}
         service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(interrupt_response=False, **newer))
         tracker.segment_finalized(300)
@@ -248,9 +249,8 @@ def test_tool_continuation_turn_after_newer_speech(runtime_config, prefetch, ass
         service.dispatch_pipeline_event(conn_id, TranscriptionCompletedEvent(transcript=transcript, **newer))
         if newer_turn == "question":
             refused = prompts.get_nowait()
-            message = "Cannot generate a response while function call outputs are pending."
             service.dispatch_pipeline_event(
-                conn_id, ResponseFailedEvent(message=message, response_key=refused.response_key, **newer)
+                conn_id, ResponseFailedEvent(message="provider error", response_key=refused.response_key, **newer)
             )
             service.finish_response(conn_id, response_key=refused.response_key)
     service.handle_conversation_item_create(
@@ -483,7 +483,8 @@ async def test_completed_answer_suppresses_duplicate_tool_followup(
                 )
 
             handler.client = SimpleNamespace(responses=SimpleNamespace(create=provider_create))
-        outputs = list(handler.process(request))
+        # The streaming backend drives its own event loop, so it cannot run on this one.
+        outputs = await asyncio.to_thread(lambda: list(handler.process(request)))
         terminal = next(item for item in outputs if isinstance(item, EndOfResponse))
         assert terminal.error is None
         if backend == "local":

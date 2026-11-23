@@ -89,7 +89,9 @@ client URL follows the server port; an explicit non-loopback host or conflicting
 client URL fails.
 
 `local` and `talk` show conversation-only terminal output by default, with warnings
-and errors still visible. To include routine logs, backend transcripts, tool details,
+and errors still visible. When you interrupt a reply, the terminal shows the part the
+model history kept, marked `[interrupted]`, redrawing the reply's line when
+nothing has been printed after it. To include routine logs, backend transcripts, tool details,
 and protocol events, set:
 
 ```yaml
@@ -128,6 +130,7 @@ These filesystem fields expand `~` and resolve relative to the YAML file's direc
 
 - `vad_firered_model_dir`, `smart_turn_model_path`
 - `omnivoice_ref_audio`, `omnivoice_voice_clone_prompt`, `omnivoice_ref_voices_dir`
+- `irodori_ref_audio`
 - `qwen3_tts_gguf_talker_path`, `qwen3_tts_gguf_codec_path`, `qwen3_tts_ref_cache_dir`
 - `qwen3_tts_ref_audio`, `qwen3_tts_ref_spk`, `qwen3_tts_ref_rvq`
 

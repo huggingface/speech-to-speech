@@ -7,6 +7,7 @@ import wave
 from queue import Queue
 from threading import Event
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -23,6 +24,7 @@ from speech_to_speech.STT.openai_compatible_handler import (
 )
 from speech_to_speech.STT.streaming_handler import VLLMRealtimeSTTHandler
 from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
+from tests.llm_history import close_llm_runners as close_llm_runners
 from tests.test_chat_completions_backend import _make_handler as make_chat_handler
 from tests.test_openai_tts_handler import _openai_tts_handler
 from tests.test_pocket_tts_handler import _farsi_handler, _run_farsi_inputs, _run_farsi_worker
@@ -116,17 +118,23 @@ def test_remote_llm_records_generation_through_terminal_response(
 
     calls = []
 
-    def provider_request(api_input, optional_kwargs):
+    async def provider_request(api_input, optional_kwargs, *, client):
         calls.append(api_input)
         if failure:
             clock[0] = 10.25
             raise RuntimeError("provider failed")
         clock[0] = 10.10
-        return object()
+        stream = MagicMock()
+        stream.__aenter__.return_value = stream
+        stream.__aexit__.return_value = False
+        stream.__aiter__.return_value = []
+        return stream
 
     handler._request = provider_request
 
     def provider_events(response):
+        # The streaming request is issued when its first chunk is read.
+        assert list(response) == []
         clock[0] = 10.15
         yield llm_module.TextDelta(text="")
         clock[0] = 10.18

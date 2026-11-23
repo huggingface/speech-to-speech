@@ -56,7 +56,7 @@ class RecordingTransport(SessionTransport):
         self.audio.put_nowait(pcm)
 
     def discard_pending_audio(self):
-        pass
+        return 0.0
 
     async def close(self):
         pass

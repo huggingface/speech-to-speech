@@ -1098,20 +1098,17 @@ async def test_audio_client_cancellation_during_blocked_delivery_releases_counte
 
     coordinator.handle_event(response_done(status="cancelled"))
     assert cancelled_batch.pending_deliveries == 0
-    assert coordinator._pending_tool_flushes == 0
 
     conn.release_send.set()
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     assert cancelled_batch.pending_deliveries == 0
-    assert coordinator._pending_tool_flushes == 0
 
     coordinator.handle_event(output_item_added("call_next", response_id="response_2", output_index=0))
     coordinator.handle_event(tool_call("call_next", response_id="response_2", output_index=0))
     coordinator.handle_event(response_done(response_id="response_2", output=[function_call("call_next")]))
     await wait_until(lambda: any(event["type"] == "response.create" for event in conn.sent))
 
-    assert coordinator._pending_tool_flushes == 0
     await coordinator.close()
 
 
@@ -1527,7 +1524,7 @@ async def test_audio_client_tool_follow_up_preserves_batch_beyond_metadata_limit
         await coordinator.close()
 
 
-async def test_audio_client_waits_for_all_tool_flushes_before_follow_up():
+async def test_audio_client_follows_up_each_response_without_waiting_for_other_tools():
     releases = [asyncio.Event(), asyncio.Event()]
     calls = []
 
@@ -1548,20 +1545,19 @@ async def test_audio_client_waits_for_all_tool_flushes_before_follow_up():
     coordinator.handle_event(response_created("response_2"))
     coordinator.handle_event(response_done("response_2", output=[function_call("call_2", arguments='{"index": 1}')]))
 
+    # Each response's results get their follow-up without waiting for the other response's tool.
     await wait_until(lambda: len(calls) == 2)
     releases[0].set()
-    await wait_until(lambda: len(conn.sent) >= 1)
-    await asyncio.sleep(0.01)
-    assert [event["type"] for event in conn.sent] == ["conversation.item.create"]
+    await wait_until(lambda: len(conn.sent) == 2)
+    assert [event["type"] for event in conn.sent] == ["conversation.item.create", "response.create"]
+    assert conn.sent[0]["item"]["call_id"] == "call_1"
+    coordinator.handle_event(response_created("response_3", metadata=conn.sent[1]["response"]["metadata"]))
+    coordinator.handle_event(response_done("response_3"))
 
     releases[1].set()
-    await wait_until(lambda: len(conn.sent) == 3)
-    assert [event["type"] for event in conn.sent] == [
-        "conversation.item.create",
-        "conversation.item.create",
-        "response.create",
-    ]
-    assert [event["item"]["call_id"] for event in conn.sent[:2]] == ["call_1", "call_2"]
+    await wait_until(lambda: len(conn.sent) == 4)
+    assert [event["type"] for event in conn.sent[2:]] == ["conversation.item.create", "response.create"]
+    assert conn.sent[2]["item"]["call_id"] == "call_2"
     await coordinator.close()
 
 
@@ -2143,6 +2139,7 @@ async def test_ready_waits_for_audio_devices_and_session_acknowledgement(monkeyp
     class Worker:
         def __init__(self):
             self.mic_queue = audio_client_module.Queue()
+            self.truncations = audio_client_module.Queue()
             self.playback = PlaybackBuffer(16000)
             self._ready = Event()
 
@@ -2241,3 +2238,562 @@ def test_voice_status_prints_lines_without_a_terminal(capsys):
     renderer = _FriendlyEventRenderer(conversation_only=False)
     renderer.show_status("Voice [2/38]: Zoey — selected")
     assert capsys.readouterr().out == "Voice [2/38]: Zoey — selected\n"
+
+
+def test_playback_buffer_reports_how_much_interrupted_audio_played():
+    interrupted = []
+    playback = PlaybackBuffer(1000, on_interrupted=interrupted.append)
+    playback.append(b"\x01" * 1000, ("item_done", 0))
+    playback.append(b"\x02" * 1000, ("item_cut", 0))
+    playback.append(b"\x03" * 400, ("item_unheard", 0))
+
+    playback.write(bytearray(1400))
+    playback.clear()
+
+    # 2 bytes per sample at 1 kHz: 400 played bytes are 200 ms.
+    assert interrupted == [[("item_cut", 0, 200), ("item_unheard", 0, 0)]]
+
+
+def test_playback_buffer_does_not_report_fully_played_audio():
+    interrupted = []
+    playback = PlaybackBuffer(1000, on_interrupted=interrupted.append)
+    playback.append(b"\x01" * 100, ("item_done", 0))
+
+    playback.write(bytearray(200))
+    playback.clear()
+
+    assert interrupted == []
+
+
+async def test_barge_in_tells_the_server_how_much_assistant_audio_played(monkeypatch):
+    stop = Event()
+    sent = []
+
+    class Stream:
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    class Connection:
+        def __init__(self):
+            self.events = [
+                SimpleNamespace(
+                    type="response.output_audio.delta",
+                    delta=base64.b64encode(bytes(3200)).decode(),
+                    item_id="item_1",
+                    content_index=0,
+                ),
+                SimpleNamespace(type="input_audio_buffer.speech_started"),
+            ]
+
+        async def send(self, event):
+            sent.append(event)
+            if event["type"] == "conversation.item.retrieve":
+                stop.set()
+
+        async def recv(self):
+            if self.events:
+                return self.events.pop(0)
+            await asyncio.Future()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sounddevice",
+        SimpleNamespace(RawInputStream=lambda **_: Stream(), RawOutputStream=lambda **_: Stream()),
+    )
+
+    await asyncio.wait_for(
+        audio_client_module._run_audio_session(Connection(), RealtimeAudioClientConfig(), stop),
+        2,
+    )
+
+    # The speaker callback never ran, so none of the reply was heard. The
+    # client then asks for the item to show what the model history kept.
+    assert sent == [
+        {"type": "conversation.item.truncate", "item_id": "item_1", "content_index": 0, "audio_end_ms": 0},
+        {
+            "type": "conversation.item.retrieve",
+            "event_id": audio_client_module._heard_text_event_id("item_1"),
+            "item_id": "item_1",
+        },
+    ]
+
+
+def test_playback_buffer_counts_audio_played_before_an_underrun():
+    interrupted = []
+    playback = PlaybackBuffer(1000, on_interrupted=interrupted.append)
+    playback.append(b"\x01" * 600, ("item_slow", 0))
+    playback.write(bytearray(800))  # Plays everything queued, then underruns.
+    playback.append(b"\x01" * 600, ("item_slow", 0))
+    playback.write(bytearray(200))
+
+    playback.clear()
+
+    assert interrupted == [[("item_slow", 0, 400)]]
+
+
+def _terminal_renderer(width=40):
+    from io import StringIO
+
+    from rich.console import Console
+
+    output = StringIO()
+    terminal = Console(file=output, force_terminal=True, no_color=True, width=width)
+    return _FriendlyEventRenderer(conversation_only=True, console=terminal), output
+
+
+def _stream_assistant(renderer, text, item_id="item_1"):
+    renderer.render_assistant_text_delta(
+        SimpleNamespace(delta=text, response_id="r", item_id=item_id, output_index=0, content_index=0)
+    )
+    renderer.finish_live_assistant_text()
+
+
+def _retrieved(item_id, transcript, status="incomplete"):
+    return SimpleNamespace(
+        type="conversation.item.retrieved",
+        item=SimpleNamespace(
+            id=item_id,
+            role="assistant",
+            status=status,
+            content=[SimpleNamespace(type="output_audio", transcript=transcript, text=None)],
+        ),
+    )
+
+
+def test_interrupted_assistant_line_is_rewritten_to_the_heard_text():
+    renderer, output = _terminal_renderer()
+    _stream_assistant(renderer, "Sure, here are five ways to improve it.")
+
+    handle_server_event(
+        _retrieved("item_1", "Sure, here are"),
+        playback=SimpleNamespace(clear=lambda: None),
+        renderer=renderer,
+        print_json=False,
+    )
+
+    # The 50-character line took two 40-column rows; both are redrawn.
+    assert output.getvalue() == (
+        "ASSISTANT: Sure, here are five ways to improve it.\n\x1b[2F\x1b[JASSISTANT: Sure, here are [interrupted]\n"
+    )
+
+
+def test_unheard_assistant_line_is_rewritten_as_nothing_heard():
+    renderer, output = _terminal_renderer()
+    _stream_assistant(renderer, "Sure.")
+
+    handle_server_event(
+        SimpleNamespace(
+            type="error",
+            error=SimpleNamespace(
+                type="conversation_item_not_found",
+                message="No conversation item with id 'item_1' found.",
+                event_id=audio_client_module._heard_text_event_id("item_1"),
+            ),
+        ),
+        playback=SimpleNamespace(clear=lambda: None),
+        renderer=renderer,
+        print_json=False,
+    )
+
+    assert output.getvalue() == "ASSISTANT: Sure.\n\x1b[1F\x1b[JASSISTANT: [interrupted, nothing heard]\n"
+
+
+def test_heard_text_is_printed_on_a_new_line_once_other_output_followed():
+    renderer, output = _terminal_renderer(width=80)
+    _stream_assistant(renderer, "Sure, here are five ways to improve it.")
+    renderer.render_live_user_text("Wait", final=True)
+
+    renderer.render_heard_assistant_text("item_1", "Sure, here are")
+
+    assert output.getvalue() == (
+        "ASSISTANT: Sure, here are five ways to improve it.\nUSER: Wait\nASSISTANT: Sure, here are [interrupted]\n"
+    )
+
+
+def test_assistant_line_that_was_fully_heard_is_left_alone():
+    renderer, output = _terminal_renderer(width=80)
+    _stream_assistant(renderer, "Sure, here are five ways to improve it.")
+
+    renderer.render_heard_assistant_text("item_1", "Sure, here are five ways to improve it.")
+
+    assert output.getvalue() == "ASSISTANT: Sure, here are five ways to improve it.\n"
+
+
+def test_heard_text_is_printed_without_a_terminal(capsys):
+    renderer = _FriendlyEventRenderer(conversation_only=False)
+    _stream_assistant(renderer, "Sure, here are five ways to improve it.")
+
+    renderer.render_heard_assistant_text("item_1", "Sure, here are")
+
+    assert capsys.readouterr().out == (
+        "ASSISTANT: Sure, here are five ways to improve it.\nASSISTANT: Sure, here are [interrupted]\n"
+    )
+
+
+def test_unrelated_errors_and_retrieved_items_keep_their_handling():
+    renderer, output = _terminal_renderer(width=80)
+    playback = SimpleNamespace(clear=lambda: None)
+
+    handle_server_event(
+        SimpleNamespace(
+            type="error",
+            error=SimpleNamespace(type="conversation_item_not_found", message="No item 'x'.", event_id="evt_other"),
+        ),
+        playback=playback,
+        renderer=renderer,
+        print_json=False,
+    )
+    user_item = SimpleNamespace(id="item_u", role="user", status="completed", content=[])
+    handle_server_event(
+        SimpleNamespace(type="conversation.item.retrieved", item=user_item),
+        playback=playback,
+        renderer=renderer,
+        print_json=False,
+    )
+
+    assert output.getvalue() == "ERROR: conversation_item_not_found: No item 'x'.\n"
+
+
+@pytest.mark.parametrize(
+    ("audio_end_ms", "expected"),
+    [(800, "ASSISTANT: Sure, here are [interrupted]\n"), (0, "ASSISTANT: [interrupted, nothing heard]\n")],
+)
+def test_terminal_shows_the_history_the_server_kept_after_barge_in(audio_end_ms, expected):
+    from openai.types.realtime import RealtimeServerEvent
+    from pydantic import TypeAdapter
+    from starlette.testclient import TestClient
+
+    import speech_to_speech.api.openai_realtime.websocket_router as router_module
+    from speech_to_speech.LLM.chat import make_assistant_message, make_user_message
+    from speech_to_speech.pipeline.events import AssistantOutputEvent, AssistantResponseDoneEvent
+    from speech_to_speech.pipeline.history import ResponseHistory
+    from tests.openai_realtime.conftest import make_pipeline_unit
+
+    text = "Sure, here are five ways to improve it."
+    unit = make_pipeline_unit()
+    stop_event = Event()
+    app = router_module.create_app(pool=[unit], stop_event=stop_event)
+    renderer, output = _terminal_renderer(width=80)
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/realtime") as ws:
+            ws.receive_json()  # session.created
+            service, conn_id = unit.service, unit.session.session_id
+            chat = service._state(conn_id).runtime_config.chat
+            chat.add_item(make_user_message("How can I improve my essay?"))
+            history = ResponseHistory.capture(
+                chat, [make_assistant_message(text)], after_item_id=chat.history_anchor_id(), complete=True
+            )
+            [*_, item_event] = service.dispatch_pipeline_event(
+                conn_id, AssistantOutputEvent(text=text, response_key="r1", history=history)
+            )
+            item_id = item_event.item_id
+            service.encode_audio_chunk(conn_id, bytes(16_000 * 2 * 2), "r1")
+            service.dispatch_pipeline_event(conn_id, AssistantResponseDoneEvent(response_key="r1"))
+            service.finish_response(conn_id, response_key="r1")
+            _stream_assistant(renderer, text, item_id=item_id)
+
+            ws.send_json(
+                {
+                    "type": "conversation.item.truncate",
+                    "item_id": item_id,
+                    "content_index": 0,
+                    "audio_end_ms": audio_end_ms,
+                }
+            )
+            ws.send_json(
+                {
+                    "type": "conversation.item.retrieve",
+                    "event_id": audio_client_module._heard_text_event_id(item_id),
+                    "item_id": item_id,
+                }
+            )
+            event = TypeAdapter(RealtimeServerEvent).validate_python(ws.receive_json())
+            handle_server_event(
+                event, playback=SimpleNamespace(clear=lambda: None), renderer=renderer, print_json=False
+            )
+    stop_event.set()
+
+    assert output.getvalue() == f"ASSISTANT: {text}\n\x1b[1F\x1b[J{expected}"
+
+
+def test_heard_text_is_printed_on_a_new_line_after_a_log_record():
+    renderer, output = _terminal_renderer(width=80)
+    _stream_assistant(renderer, "Let me check.")
+    guard = audio_client_module._AssistantLineGuard(renderer)
+    guard.handle(logging.LogRecord("x", logging.WARNING, __file__, 1, "Speaker status", None, None))
+
+    renderer.render_heard_assistant_text("item_1", "Let me")
+
+    assert "\x1b[" not in output.getvalue()
+    assert output.getvalue().endswith("ASSISTANT: Let me [interrupted]\n")
+
+
+async def test_tool_errors_print_through_the_reporter():
+    reported = []
+    coordinator = _ToolCallCoordinator(SimpleNamespace(), RealtimeAudioClientConfig(), reported.append)
+
+    coordinator._schedule_call("response_1", SimpleNamespace(call_id=None))
+
+    assert reported == ["TOOL ERROR: received a call without call_id; cannot return an output"]
+
+
+def test_rewrite_counts_rows_of_a_multi_line_reply():
+    renderer, output = _terminal_renderer(width=80)
+    _stream_assistant(renderer, "First line.\nSecond :smile: line.")
+
+    renderer.render_heard_assistant_text("item_1", "First line.")
+
+    assert output.getvalue() == (
+        "ASSISTANT: First line.\nSecond :smile: line.\n\x1b[2F\x1b[JASSISTANT: First line. [interrupted]\n"
+    )
+
+
+def test_retrieved_reply_that_was_not_cut_keeps_its_line():
+    renderer, output = _terminal_renderer(width=80)
+    _stream_assistant(renderer, "Sure, here are five ways to improve it.")
+
+    for status in ("in_progress", "completed"):
+        handle_server_event(
+            _retrieved("item_1", "Sure, here are five ways to improve it. First,", status=status),
+            playback=SimpleNamespace(clear=lambda: None),
+            renderer=renderer,
+            print_json=False,
+        )
+
+    assert output.getvalue() == "ASSISTANT: Sure, here are five ways to improve it.\n"
+
+
+def _slow_and_fast_tools():
+    gates = {0: asyncio.Event(), 1: asyncio.Event()}
+
+    async def executor(_name, arguments):
+        await gates[arguments["index"]].wait()
+        return {"result": arguments["index"]}
+
+    return gates, executor
+
+
+def _run_tool_response(coordinator, response_id, call_id, index):
+    coordinator.handle_event(response_created(response_id))
+    coordinator.handle_event(output_item_added(call_id, response_id=response_id, output_index=0))
+    coordinator.handle_event(
+        tool_call(call_id, response_id=response_id, output_index=0, arguments=json.dumps({"index": index}))
+    )
+    coordinator.handle_event(response_done(response_id=response_id, output=[function_call(call_id)]))
+
+
+async def test_audio_client_delivers_a_later_tool_result_while_an_earlier_tool_runs():
+    gates, executor = _slow_and_fast_tools()
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(
+        conn,
+        RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor),
+    )
+    _run_tool_response(coordinator, "response_1", "call_slow", 0)
+    # The user asks for something else while the first tool is still running.
+    _run_tool_response(coordinator, "response_2", "call_fast", 1)
+
+    gates[1].set()
+    await wait_until(lambda: len(conn.sent) == 2)
+    assert conn.sent[0]["item"]["call_id"] == "call_fast"
+    assert conn.sent[1]["type"] == "response.create"
+    coordinator.handle_event(response_created("response_3", metadata=conn.sent[1]["response"]["metadata"]))
+    coordinator.handle_event(response_done(response_id="response_3"))
+
+    gates[0].set()
+    await wait_until(lambda: len(conn.sent) == 4)
+    assert conn.sent[2]["item"]["call_id"] == "call_slow"
+    assert conn.sent[3]["type"] == "response.create"
+    await coordinator.close()
+
+
+async def test_audio_client_keeps_results_queued_when_the_server_holds_the_follow_up_for_a_running_call():
+    gates, executor = _slow_and_fast_tools()
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(
+        conn,
+        RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor),
+    )
+    _run_tool_response(coordinator, "response_1", "call_slow", 0)
+    _run_tool_response(coordinator, "response_2", "call_fast", 1)
+    gates[1].set()
+    await wait_until(lambda: len(conn.sent) == 2)
+
+    # The user has not spoken since the first call, so the server holds the reply.
+    coordinator.handle_event(
+        SimpleNamespace(
+            type="error",
+            error=SimpleNamespace(
+                type="function_call_output_pending",
+                code=None,
+                event_id=conn.sent[1]["event_id"],
+                message="Cannot create a response while function call outputs are pending.",
+            ),
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert len(conn.sent) == 2
+    assert not coordinator._failure.done()
+
+    gates[0].set()
+    await wait_until(lambda: len(conn.sent) == 4)
+    assert conn.sent[2]["item"]["call_id"] == "call_slow"
+    assert conn.sent[3]["type"] == "response.create"
+    assert json.loads(conn.sent[3]["response"]["metadata"]["s2s_tool_followup_call_ids"]) == ["call_fast", "call_slow"]
+    await coordinator.close()
+
+
+async def test_result_sent_before_a_delayed_batch_rejection_still_gets_a_follow_up():
+    gates, executor = _slow_and_fast_tools()
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(conn, RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor))
+
+    def batch_pending(create_id):
+        return SimpleNamespace(
+            type="error",
+            error=SimpleNamespace(
+                type="function_call_output_pending", code=None, event_id=create_id, message="Batch still pending"
+            ),
+        )
+
+    try:
+        _run_tool_response(coordinator, "r1", "call_earlier", 0)
+        _run_tool_response(coordinator, "r2", "call_later", 1)
+        gates[0].set()
+        await wait_until(lambda: len(conn.sent) == 2)
+        rejected_create = conn.sent[1]["event_id"]
+        # The other tool finishes before the server's rejection is processed.
+        gates[1].set()
+        await wait_until(lambda: len(conn.sent) == 3)
+        await wait_until(lambda: not coordinator._background_tasks)
+        coordinator.handle_event(batch_pending(rejected_create))
+        await wait_until(lambda: len(conn.sent) == 4)
+        assert conn.sent[-1]["type"] == "response.create"
+
+        # A rejection with nothing new queued is not asked for again.
+        coordinator.handle_event(batch_pending(conn.sent[-1]["event_id"]))
+        await wait_until(lambda: not coordinator._background_tasks)
+        assert len(conn.sent) == 4
+    finally:
+        await coordinator.close()
+
+
+def _listed_call(call_id, status):
+    return SimpleNamespace(**vars(function_call(call_id)), status=status)
+
+
+async def test_audio_client_delivers_a_call_kept_by_a_cancelled_response():
+    gates, executor = _slow_and_fast_tools()
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(conn, RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor))
+    try:
+        coordinator.handle_event(response_created("response_1"))
+        coordinator.handle_event(output_item_added("call_kept", output_index=0))
+        coordinator.handle_event(tool_call("call_kept", output_index=0, arguments=json.dumps({"index": 0})))
+        # A second call was announced, but its arguments never finished.
+        coordinator.handle_event(output_item_added("call_unfinished", output_index=1))
+        # The user barges in while the tool is still running.
+        coordinator.handle_event(
+            response_done(
+                status="cancelled",
+                output=[_listed_call("call_kept", "completed"), _listed_call("call_unfinished", "incomplete")],
+            )
+        )
+
+        gates[0].set()
+        await wait_until(lambda: len(conn.sent) == 2)
+        assert conn.sent[0]["item"] == {
+            "type": "function_call_output",
+            "call_id": "call_kept",
+            "output": json.dumps({"result": 0}),
+        }
+        assert conn.sent[1]["type"] == "response.create"
+    finally:
+        await coordinator.close()
+
+
+async def test_audio_client_stops_a_call_the_cancelled_response_dropped():
+    """Only the kept call of a cancelled response runs on; the dropped one's tool is stopped."""
+    gates, executor = _slow_and_fast_tools()
+    conn = RecordingConnection()
+    coordinator = _ToolCallCoordinator(conn, RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor))
+    try:
+        coordinator.handle_event(response_created("response_1"))
+        for index, call_id in enumerate(("call_dropped", "call_kept")):
+            coordinator.handle_event(output_item_added(call_id, output_index=index))
+            coordinator.handle_event(tool_call(call_id, output_index=index, arguments=json.dumps({"index": index})))
+        await asyncio.sleep(0)
+        dropped_task = coordinator._tool_batches["response_1"].call_tasks["call_dropped"]
+
+        coordinator.handle_event(
+            response_done(
+                status="cancelled",
+                output=[_listed_call("call_dropped", "incomplete"), _listed_call("call_kept", "completed")],
+            )
+        )
+        gates[1].set()
+        await wait_until(lambda: len(conn.sent) == 2)
+
+        assert dropped_task.cancelled()
+        assert [event["type"] for event in conn.sent] == ["conversation.item.create", "response.create"]
+        assert conn.sent[0]["item"]["call_id"] == "call_kept"
+        assert coordinator._tool_batches == {}
+        assert not coordinator._failure.done()
+    finally:
+        await coordinator.close()
+
+
+async def test_audio_client_survives_a_call_dropped_while_its_output_is_being_sent():
+    class BlockingConnection(RecordingConnection):
+        def __init__(self):
+            super().__init__()
+            self.send_started = asyncio.Event()
+            self.release_send = asyncio.Event()
+            self.block_next_output = True
+
+        async def send(self, event):
+            if event["type"] == "conversation.item.create" and self.block_next_output:
+                self.block_next_output = False
+                self.send_started.set()
+                await self.release_send.wait()
+            self.sent.append(event)
+
+    gates, executor = _slow_and_fast_tools()
+    conn = BlockingConnection()
+    coordinator = _ToolCallCoordinator(conn, RealtimeAudioClientConfig(tools=[TOOL_DEFINITION], tool_executor=executor))
+    try:
+        coordinator.handle_event(response_created("response_1"))
+        for index, call_id in enumerate(("call_dropped", "call_kept")):
+            coordinator.handle_event(output_item_added(call_id, output_index=index))
+            coordinator.handle_event(tool_call(call_id, output_index=index, arguments=json.dumps({"index": index})))
+        gates[0].set()
+        await asyncio.wait_for(conn.send_started.wait(), timeout=1.0)
+        batch = coordinator._tool_batches["response_1"]
+
+        # The first call's output is on its way when the response drops that call.
+        coordinator.handle_event(
+            response_done(
+                status="cancelled",
+                output=[_listed_call("call_dropped", "incomplete"), _listed_call("call_kept", "completed")],
+            )
+        )
+        assert batch.pending_deliveries == 1
+        conn.release_send.set()
+        gates[1].set()
+        await wait_until(lambda: any(event["type"] == "response.create" for event in conn.sent))
+
+        assert [event["item"]["call_id"] for event in conn.sent if event["type"] == "conversation.item.create"] == [
+            "call_dropped",
+            "call_kept",
+        ]
+        assert batch.pending_deliveries == 0
+        assert batch.delivered_call_ids == {"call_kept"}
+        assert not coordinator._failure.done()
+    finally:
+        await coordinator.close()
