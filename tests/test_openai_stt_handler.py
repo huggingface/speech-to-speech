@@ -402,6 +402,7 @@ def test_unset_word_boosting_is_not_passed_by_handler(monkeypatch):
         '[{"phrases": ["Acme"], "boost": Infinity}]',
         '[{"phrases": ["Acme"], "boost": -Infinity}]',
         '[{"phrases": ["Acme"], "boost": 1e999}]',
+        '[{"phrases": ["Acme"], "boost": 1' + "0" * 400 + "}]",
     ],
 )
 def test_invalid_speech_contexts_fail_setup(monkeypatch, contexts):

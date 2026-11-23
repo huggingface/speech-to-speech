@@ -277,7 +277,11 @@ def _validate_speech_contexts(speech_contexts: str) -> None:
             raise ValueError(f"{message}: each entry needs a nonempty 'phrases' list of strings")
         if "boost" in context:
             boost = context["boost"]
-            if isinstance(boost, bool) or not isinstance(boost, (int, float)) or not math.isfinite(boost):
+            try:
+                valid_boost = not isinstance(boost, bool) and isinstance(boost, (int, float)) and math.isfinite(boost)
+            except OverflowError:
+                valid_boost = False
+            if not valid_boost:
                 raise ValueError(f"{message}: 'boost' must be a number")
 
 

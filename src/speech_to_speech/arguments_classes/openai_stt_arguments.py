@@ -77,7 +77,7 @@ class OpenAICompatibleSTTHandlerArguments:
         metadata={
             "help": "Word boosting for the transcription profile, sent as the 'speech_contexts' form field: "
             'a JSON array like \'[{"phrases": ["Acme"], "boost": 3.0}]\' (NVIDIA NeMo-Speech / Riva shape). '
-            "Ignored by servers that don't support it."
+            "Servers that don't support it may ignore or reject it."
         },
     )
     openai_stt_prompt: Optional[str] = field(
