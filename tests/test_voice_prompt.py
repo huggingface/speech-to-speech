@@ -440,15 +440,11 @@ def test_local_history_commits_text_and_tools_in_emitted_order():
         "first result",
         PENDING_TOOL_OUTPUT,
     ]
-    assert [item["role"] for item in chat.to_transformers_chat()[1:]] == [
-        "assistant",
-        "assistant",
-        "tool",
-        "assistant",
-        "assistant",
-        "tool",
-        "assistant",
-    ]
+    transformers_chat = chat.to_transformers_chat()[1:]
+    assert [item["role"] for item in transformers_chat] == ["assistant", "tool", "assistant", "tool", "assistant"]
+    assert transformers_chat[0]["content"] == "before"
+    assert [call["function"]["name"] for call in transformers_chat[0]["tool_calls"]] == ["first"]
+    assert [call["function"]["name"] for call in transformers_chat[2]["tool_calls"]] == ["second"]
 
     chat.add_item(
         RealtimeConversationItemFunctionCallOutput(

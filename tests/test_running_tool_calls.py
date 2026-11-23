@@ -60,10 +60,16 @@ def _status(*calls):
 
 
 def _shape(chat):
-    """Compact view of what a Chat Completions or local model is shown."""
+    """Compact view of what a Chat Completions or local model is shown.
+
+    Spoken text and the call it led into share one assistant message; the text is
+    listed first so the order of speech and calls stays visible.
+    """
     shape = []
     for message in chat.to_transformers_chat():
         if message["role"] == "assistant" and message.get("tool_calls"):
+            if message["content"]:
+                shape.append(("assistant", message["content"]))
             shape.append(("call", message["tool_calls"][0]["id"]))
         elif message["role"] == "tool":
             shape.append(("tool", message["tool_call_id"], message["content"]))
