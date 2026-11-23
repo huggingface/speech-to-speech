@@ -4,7 +4,6 @@ import json
 import logging
 import time
 from collections.abc import Generator, Iterator
-from functools import partial
 from typing import Any, cast
 
 from openai import Stream
@@ -463,6 +462,9 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
     which already emits OpenAI chat messages including ``tool_calls``/``tool`` roles.
     """
 
+    # Set per request in _generate; direct parser use keeps the filter on.
+    _strip_tool_markup = True
+
     def warmup(self) -> None:
         logger.info(f"Warming up {self.__class__.__name__}")
         start = time.time()
@@ -548,22 +550,14 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
     ) -> Generator[LLMOut, None, bool]:
         # Leaked <tool_call> tags come from the server-side tool parser, which only
         # runs when the request offers tools; otherwise keep the text verbatim.
-        kwargs["event_iterator_fn"] = partial(
-            self._iter_chat_events, strip_tool_markup=bool(optional_kwargs.get("tools"))
-        )
+        self._strip_tool_markup = bool(optional_kwargs.get("tools"))
         return (yield from super()._generate(active_chat, original_chat, turn, optional_kwargs, **kwargs))
 
-    def _iter_chat_events(self, api_response: Any, *, strip_tool_markup: bool) -> Iterator[ProviderEvent]:
-        if self.stream:
-            yield from _iter_chat_stream_events(api_response, strip_tool_markup=strip_tool_markup)
-        else:
-            yield from _iter_chat_response_events(api_response, strip_tool_markup=strip_tool_markup)
-
     def _iter_stream_events(self, api_response: Stream[ChatCompletionChunk]) -> Iterator[ProviderEvent]:
-        yield from _iter_chat_stream_events(api_response)
+        yield from _iter_chat_stream_events(api_response, strip_tool_markup=self._strip_tool_markup)
 
     def _iter_response_events(self, api_response: Any) -> Iterator[ProviderEvent]:
-        yield from _iter_chat_response_events(api_response)
+        yield from _iter_chat_response_events(api_response, strip_tool_markup=self._strip_tool_markup)
 
     @staticmethod
     def _tool_calls_from_accum(tool_accum: dict[int, dict[str, str]]) -> Iterator[ToolCall]:
