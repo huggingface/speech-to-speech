@@ -135,9 +135,13 @@ def test_failed_generation_resets_the_streamer_to_expect_a_new_prompt(handler_ty
 def test_failure_inside_the_streamer_itself_still_ends_the_response(handler_type):
     """If decoding fails, end() fails too. The reader must still be woken."""
 
+    turns = []
+
     def generate(*args, **kwargs):
+        turns.append(1)
         handler.streamer.put(torch.tensor([[1, 2, 3]]))
-        handler.streamer.put(torch.tensor([4]))
+        handler.streamer.put(torch.tensor([4] if len(turns) == 1 else [5]))
+        handler.streamer.end()
 
     handler = build_handler(handler_type, generate)
 
@@ -149,3 +153,12 @@ def test_failure_inside_the_streamer_itself_still_ends_the_response(handler_type
     outputs = run_turn(handler)
     assert isinstance(outputs[-1], EndOfResponse)
     assert "cannot decode" in outputs[-1].error
+
+    # The undecodable tokens must not leak into the next turn.
+    words = {1: "prompt ", 2: "prompt ", 3: "prompt ", 4: "stale ", 5: "Hello. "}
+    handler.tokenizer.decode = lambda tokens, **kwargs: "".join(words[token] for token in tokens)
+
+    recovered = run_turn(handler)
+    assert isinstance(recovered[-1], EndOfResponse)
+    assert recovered[-1].error is None
+    assert text_of(recovered) == "Hello."

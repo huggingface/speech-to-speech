@@ -297,7 +297,12 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     streamer.end()
                 except Exception:
                     # end() decodes the cached tokens, which can be what failed.
-                    # Queue the stop marker directly so the reader still wakes up.
+                    # It raises before resetting, so reset here or the bad tokens are
+                    # decoded again with the next prompt. Then queue the stop marker
+                    # directly so the reader still wakes up.
+                    streamer.token_cache = []
+                    streamer.print_len = 0
+                    streamer.next_tokens_are_prompt = True
                     streamer.on_finalized_text("", stream_end=True)
 
         worker.thread = Thread(target=run)
