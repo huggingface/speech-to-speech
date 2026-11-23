@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 @dataclass
 class LanguageModelBaseArguments:
     model_name: str = field(
-        default="Qwen/Qwen3-4B-Instruct-2507",
+        default="Qwen/Qwen3.5-4B",
         metadata={"help": "The pretrained language model to use."},
     )
     user_role: str = field(

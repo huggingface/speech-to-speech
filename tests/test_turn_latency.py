@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import sys
-from threading import Lock
+from threading import Lock, RLock
 from types import SimpleNamespace
 
 import speech_to_speech.pipeline.speculative_turns as speculative_module
 import speech_to_speech.utils.mlx_lock as mlx_lock
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.turn_latency import (
+    TTSResponseTimer,
     TurnLatencyStore,
     TurnLatencyTracker,
     bind_active_turn_latency_tracker,
+    record_response_e2e,
+    record_response_tts_ttfa,
 )
 
 
@@ -21,6 +24,7 @@ def test_turn_latency_tracker_format_log_line() -> None:
         stt_s=0.14,
         llm_ttft_s=0.11,
         llm_s=1.28,
+        llm_rounds=1,
         tts_ttfa_s=0.16,
         e2e_s=1.61,
         mlx_lock_wait_s=0.0,
@@ -28,7 +32,7 @@ def test_turn_latency_tracker_format_log_line() -> None:
     )
     assert (
         tracker.format_log_line()
-        == "Turn turn_1 rev=0 latency: stt=0.14s llm=1.28s tts_ttfa=0.16s e2e=1.61s vad_decision=n/a hold=n/a smart_turn_status=n/a status=completed"
+        == "Turn turn_1 rev=0 latency: stt=0.14s llm=1.28s llm_first_tts=n/a llm_total=1.28s llm_rounds=1 tts_ttfa=0.16s e2e=1.61s vad_decision=n/a hold=n/a smart_turn_status=n/a status=completed"
         + (" mlx_lock_wait=0.00s" if sys.platform == "darwin" else "")
     )
 
@@ -38,6 +42,7 @@ def test_turn_latency_tracker_record() -> None:
     tracker.record_stt(0.5)
     tracker.record_llm_ttft(0.3)
     tracker.record_llm_ttft(1.0)
+    tracker.start_llm()
     tracker.record_llm(2.0)
     tracker.record_tts_ttfa(0.2)
     tracker.record_e2e(3.0)
@@ -54,8 +59,10 @@ def test_turn_latency_tracker_record() -> None:
     assert "llm=2.00s" in line
     assert "tts_ttfa=0.20s" in line
     assert "e2e=3.00s" in line
+    # No handler name was given, so the total carries no breakdown.
     assert ("mlx_lock_wait=0.15s" in line) == (sys.platform == "darwin")
     assert "status=cancelled" in line
+    assert "tts=cut" in line
 
     assert TurnLatencyTracker().format_log_line() is None
 
@@ -69,6 +76,8 @@ def test_timed_out_mlx_lock_acquisition_records_wait(monkeypatch) -> None:
             assert not acquired
 
     assert tracker.mlx_lock_wait_s >= 0.01
+    assert tracker.mlx_lock_waits["test-timeout"].total_s == tracker.mlx_lock_wait_s
+    assert tracker.mlx_lock_waits["test-timeout"].count == 1
     assert not lock.locked()
 
 
@@ -80,6 +89,34 @@ def test_turn_latency_tracker_first_write_wins_for_ttfa_and_e2e() -> None:
     tracker.record_e2e(4.0)
     assert tracker.tts_ttfa_s == 0.2
     assert tracker.e2e_s == 1.0
+
+
+def test_record_response_helpers_lookup_existing_tracker_only() -> None:
+    store = TurnLatencyStore()
+    tracker = store.get_or_create_response("resp_1", turn_id="turn_1", turn_revision=0)
+
+    record_response_tts_ttfa(None, "resp_1", 0.5)
+    record_response_e2e(None, "resp_1", 1.5)
+    assert tracker.tts_ttfa_s is None
+    assert tracker.e2e_s is None
+
+    record_response_tts_ttfa(store, None, 0.5)
+    record_response_e2e(store, None, 1.5)
+    assert tracker.tts_ttfa_s is None
+    assert tracker.e2e_s is None
+
+    record_response_tts_ttfa(store, "missing", 0.5)
+    record_response_e2e(store, "missing", 1.5)
+    assert tracker.tts_ttfa_s is None
+    assert tracker.e2e_s is None
+    assert store.get_response("missing") is None
+
+    record_response_tts_ttfa(store, "resp_1", 0.12)
+    record_response_e2e(store, "resp_1", 2.4)
+    record_response_tts_ttfa(store, "resp_1", 9.0)
+    record_response_e2e(store, "resp_1", 9.0)
+    assert tracker.tts_ttfa_s == 0.12
+    assert tracker.e2e_s == 2.4
 
 
 def test_turn_latency_store_pending_turn_merges_into_response() -> None:
@@ -156,6 +193,7 @@ def test_configured_grace_is_not_reported_as_wait_without_a_gate(monkeypatch) ->
 def test_turn_latency_store_pop_and_clear_session() -> None:
     store = TurnLatencyStore()
     tracker = store.get_or_create_response("resp_a", turn_id="turn_1", turn_revision=0, session_id="sess_1")
+    tracker.start_llm()
     tracker.record_llm(1.0)
 
     popped = store.pop("resp_a", session_id="sess_1")
@@ -203,6 +241,74 @@ def test_clear_session_keeps_pending_while_other_sessions_active() -> None:
     assert store.get_or_create_for_turn("turn_9", 0).stt_s is None
 
 
+def test_format_log_line_shows_settle_named_lock_and_cut_tts(monkeypatch) -> None:
+    import speech_to_speech.pipeline.turn_latency as latency
+
+    monkeypatch.setattr(latency.sys, "platform", "darwin")
+    tracker = TurnLatencyTracker(turn_id="turn_1", turn_revision=2, status="cancelled")
+    tracker.record_stt(0.12)
+    tracker.record_vad_settle(0.61)
+    tracker.start_llm()
+    tracker.record_llm(2.08)
+    tracker.record_tts_ttfa(0.18)
+    tracker.record_e2e(3.0)
+    tracker.record_mlx_lock_wait(0.02, "ParakeetSTT-Progressive")
+    tracker.record_mlx_lock_hold(0.88, "Qwen3TTS")
+
+    assert tracker.format_log_line() == (
+        "Turn turn_1 rev=2 latency: stt=0.12s llm=2.08s llm_first_tts=n/a llm_total=2.08s llm_rounds=1 tts_ttfa=0.18s e2e=3.00s "
+        "vad_settle=0.61s vad_decision=n/a hold=n/a smart_turn_status=n/a status=cancelled "
+        "mlx_lock_wait=0.02s[ParakeetSTT-Progressive:0.02s] "
+        "mlx_lock_hold=0.88s[Qwen3TTS:0.88s] tts=cut"
+    )
+
+
+def test_repeated_lock_waits_are_summed_per_handler(monkeypatch) -> None:
+    """A turn takes the lock many times; the breakdown must stay one entry per
+    handler and account for the printed total."""
+    import speech_to_speech.pipeline.turn_latency as latency
+
+    monkeypatch.setattr(latency.sys, "platform", "darwin")
+    tracker = TurnLatencyTracker(turn_id="turn_1", turn_revision=0)
+    for _ in range(12):
+        tracker.record_mlx_lock_wait(0.01, "ParakeetSTT-Progressive")
+    tracker.record_mlx_lock_wait(0.03, "Qwen3TTS")
+
+    assert tracker.mlx_lock_waits["ParakeetSTT-Progressive"].count == 12
+    assert "mlx_lock_wait=0.15s[ParakeetSTT-Progressive:0.12sx12,Qwen3TTS:0.03s]" in tracker.format_log_line()
+
+
+def test_pending_turn_merges_vad_settle_and_named_lock() -> None:
+    store = TurnLatencyStore()
+    pending = store.get_or_create_for_turn("turn_3", 1)
+    pending.record_vad_settle(0.4)
+    pending.record_mlx_lock_wait(0.02, "ParakeetSTT")
+    pending.record_mlx_lock_hold(0.3, "ParakeetSTT")
+    assert store.pending_for_turn("turn_3", 1) is pending
+
+    tracker = store.get_or_create_response("resp_a", turn_id="turn_3", turn_revision=1)
+    tracker.record_mlx_lock_hold(0.5, "ParakeetSTT")
+    assert tracker.vad_settle_s == 0.4
+    assert tracker.mlx_lock_waits["ParakeetSTT"].total_s == 0.02
+    assert tracker.mlx_lock_hold_s == 0.8
+    assert tracker.mlx_lock_holds["ParakeetSTT"].count == 2
+    assert store.pending_for_turn("turn_3", 1) is None
+
+
+def test_lock_hold_recorded_once_on_outer_release(monkeypatch) -> None:
+    monkeypatch.setattr(mlx_lock, "_mlx_lock", RLock())
+    tracker = TurnLatencyTracker(turn_id="turn_1", turn_revision=0)
+    with bind_active_turn_latency_tracker(tracker):
+        assert mlx_lock.acquire_mlx_lock(handler_name="Qwen3TTS")
+        assert mlx_lock.acquire_mlx_lock(handler_name="Qwen3TTS")
+        mlx_lock.release_mlx_lock(handler_name="Qwen3TTS")
+        assert tracker.mlx_lock_hold_s == 0.0
+        mlx_lock.release_mlx_lock(handler_name="Qwen3TTS")
+
+    assert tracker.mlx_lock_hold_s > 0.0
+    assert tracker.mlx_lock_holds["Qwen3TTS"].count == 1
+
+
 def test_log_platform_and_export_fields(monkeypatch):
     import speech_to_speech.pipeline.turn_latency as latency
 
@@ -212,6 +318,7 @@ def test_log_platform_and_export_fields(monkeypatch):
         assert ("mlx_lock_wait=" in tracker.format_log_line()) == (platform == "darwin")
     assert set(tracker.metadata_payload(response_key="r", status="completed")) == {
         "version",
+        "source",
         "turn_id",
         "turn_revision",
         "response_key",
@@ -221,6 +328,109 @@ def test_log_platform_and_export_fields(monkeypatch):
         "smart_status",
         "stt_s",
         "llm_s",
+        "llm_first_tts_s",
+        "llm_total_s",
+        "llm_rounds",
         "tts_ttfa_s",
         "hold_s",
     }
+
+
+def test_tts_response_timer_records_each_field_once(monkeypatch) -> None:
+    store = TurnLatencyStore()
+    tracker = store.get_or_create_response("resp_t", turn_id="turn_t", turn_revision=0)
+    clock = iter([10.0, 10.5, 11.0, 12.0, 13.0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: next(clock))
+
+    timer = TTSResponseTimer(store, "resp_t", speech_stopped_at_s=9.0)  # started_at_s = 10.0
+    assert timer.first_provider_audio() is True  # 10.5 - 10.0
+    assert timer.first_provider_audio() is False  # later segments never overwrite
+    assert timer.first_yield() == 2.0  # 11.0 - 9.0
+    assert timer.first_yield() is None
+    assert tracker.tts_ttfa_s == 0.5
+    assert tracker.e2e_s == 2.0
+
+
+def test_tts_response_timer_cancelled_output_records_nothing_and_stays_armed() -> None:
+    store = TurnLatencyStore()
+    tracker = store.get_or_create_response("resp_c", turn_id="turn_c", turn_revision=0)
+    cancelled = True
+    timer = TTSResponseTimer(store, "resp_c", speech_stopped_at_s=0.0, is_cancelled=lambda: cancelled)
+
+    assert timer.first_provider_audio() is False
+    assert timer.first_yield() is None
+    assert tracker.tts_ttfa_s is None
+    assert tracker.e2e_s is None
+
+
+def test_llm_chain_tracks_only_explicit_same_session_and_revision_parents():
+    store = TurnLatencyStore()
+    first = store.get_or_create_response("first", turn_id="turn", turn_revision=0, session_id="s")
+    first.start_llm()
+    first.record_llm(0.7)
+    store.pop("first", session_id="s", tool_call_ids={"call_first"})
+    second = store.get_or_create_response(
+        "second", turn_id="turn", turn_revision=0, session_id="s", parent_response_key="first"
+    )
+    second.start_llm()
+    second.record_llm(0.9)
+    store.pop("second", session_id="s", tool_call_ids={"call_second"})
+    third = store.get_or_create_response(
+        "third", turn_id="turn", turn_revision=0, session_id="s", parent_call_id="call_second"
+    )
+    third.start_llm()
+    third.record_llm(0.8)
+    assert third.metadata_payload(response_key="third", status="completed")["llm_total_s"] == 2.4
+    assert third.llm_rounds == 3
+    assert third.llm_s == 0.8
+    assert third.stt_s is None
+    for key, session, revision, call_id in (
+        ("unrelated", "s", 0, "unknown"),
+        ("revision", "s", 1, "call_second"),
+        ("session", "other", 0, "call_second"),
+    ):
+        tracker = store.get_or_create_response(
+            key,
+            turn_id="turn",
+            turn_revision=revision,
+            session_id=session,
+            parent_call_id=call_id,
+        )
+        tracker.start_llm()
+        tracker.record_llm(0.2)
+        assert tracker.llm_total_s == 0.2
+        assert tracker.llm_rounds == 1
+    store.clear_session("s")
+    fresh = store.get_or_create_response(
+        "fresh", turn_id="turn", turn_revision=0, session_id="s", parent_response_key="second"
+    )
+    assert fresh.llm_total_s is None
+    assert fresh.llm_rounds == 0
+
+
+def test_llm_chain_completed_snapshots_are_bounded_and_failed_work_is_not_retained():
+    store = TurnLatencyStore()
+    for index in range(130):
+        key = f"tool_{index}"
+        tracker = store.get_or_create_response(key, turn_id="turn", turn_revision=0, session_id="s")
+        tracker.start_llm()
+        tracker.record_llm(0.1)
+        store.pop(key, session_id="s", tool_call_ids={"call"})
+    assert len(store._completed_tools["s"]) == 128
+    assert "tool_0" not in store._completed_tools["s"]
+    # A cancelled worker cannot alter the snapshot after a response finishes.
+    tracker.record_llm(9.0)
+    followup = store.get_or_create_response(
+        "followup", turn_id="turn", turn_revision=0, session_id="s", parent_response_key="tool_129"
+    )
+    assert followup.llm_total_s == 0.1
+    followup.start_llm()
+    followup.record_llm(0.2)
+    store.discard_response("followup", session_id="s")
+    replacement = store.get_or_create_response(
+        "replacement", turn_id="turn", turn_revision=0, session_id="s", parent_response_key="followup"
+    )
+    assert replacement.llm_total_s is None
+    assert replacement.llm_rounds == 0
+    store.clear_session("s")
+    assert store._completed_tools == {}

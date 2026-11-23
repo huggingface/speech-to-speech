@@ -2,6 +2,9 @@ from collections import deque
 
 import torch
 
+# Bound noise history while idle, independently of the utterance-end delay.
+_MODEL_RESET_IDLE_MS = 500
+
 
 class VADIterator:
     def __init__(
@@ -11,6 +14,7 @@ class VADIterator:
         sampling_rate: int = 16000,
         min_silence_duration_ms: int = 300,
         speech_pad_ms: int = 30,
+        confident_threshold: float = 0.9,
     ) -> None:
         """
         Mainly taken from https://github.com/snakers4/silero-vad
@@ -33,15 +37,23 @@ class VADIterator:
         speech_pad_ms: int (default - 30 milliseconds)
             Retain up to speech_pad_ms of audio before VAD triggers and prepend it
             to the detected speech chunk
+
+        confident_threshold: float (default - 0.9)
+            Chunks at or above this probability are also counted as confident speech.
+            It does not change what is detected, only what is reported per utterance.
         """
 
         self.model = model
         self.threshold = threshold
+        self.confident_threshold = confident_threshold
         self.sampling_rate = sampling_rate
         self.buffer: list[torch.Tensor] = []
         self.prefix_buffer: list[torch.Tensor] = []
         self.active_speech_samples = 0
         self.last_utterance_active_speech_samples = 0
+        # The part of the active speech that scored at or above confident_threshold.
+        self.confident_speech_samples = 0
+        self.last_utterance_confident_speech_samples = 0
         self._pre_speech_buffer: deque[torch.Tensor] = deque()
         self._pre_speech_samples = 0
 
@@ -50,10 +62,12 @@ class VADIterator:
 
         self.min_silence_samples = int(sampling_rate * min_silence_duration_ms / 1000)
         self.speech_pad_samples = int(sampling_rate * speech_pad_ms / 1000)
+        self._model_reset_idle_samples = int(sampling_rate * _MODEL_RESET_IDLE_MS / 1000)
         self.reset_states()
 
     def reset_states(self) -> None:
         self.model.reset_states()
+        self._model_idle_samples = 0
         self.triggered = False
         self.temp_end = 0
         self.last_speech_end_sample: int | None = None
@@ -62,6 +76,8 @@ class VADIterator:
         self.prefix_buffer = []
         self.active_speech_samples = 0
         self.last_utterance_active_speech_samples = 0
+        self.confident_speech_samples = 0
+        self.last_utterance_confident_speech_samples = 0
         self._pre_speech_buffer.clear()
         self._pre_speech_samples = 0
 
@@ -129,6 +145,7 @@ class VADIterator:
         speech_prob = self.model(x, self.sampling_rate).item()
 
         if (speech_prob >= self.threshold) and not self.triggered:
+            self._model_idle_samples = 0
             self.triggered = True
             self.prefix_buffer = list(self._pre_speech_buffer)
             self._pre_speech_buffer.clear()
@@ -136,16 +153,29 @@ class VADIterator:
             self.buffer.append(x)
             self.active_speech_samples = window_size_samples
             self.last_utterance_active_speech_samples = 0
+            self.confident_speech_samples = window_size_samples if speech_prob >= self.confident_threshold else 0
+            self.last_utterance_confident_speech_samples = 0
             return None
 
         if not self.triggered:
             self._remember_pre_speech(x)
+            if speech_prob < self.threshold - 0.15:
+                self._model_idle_samples += window_size_samples
+                if self._model_idle_samples >= self._model_reset_idle_samples:
+                    # Reset inference history only: padding and the session
+                    # sample clock must survive for the next speech segment.
+                    self.model.reset_states()
+                    self._model_idle_samples = 0
+            else:
+                self._model_idle_samples = 0
             return None
 
         if self.triggered:
             self.buffer.append(x)
             if speech_prob >= self.threshold - 0.15:
                 self.active_speech_samples += window_size_samples
+                if speech_prob >= self.confident_threshold:
+                    self.confident_speech_samples += window_size_samples
                 if self.temp_end:
                     self.temp_end = 0
                     return None
@@ -164,8 +194,12 @@ class VADIterator:
                 spoken_utterance = self.speech_buffer()
                 self.last_utterance_active_speech_samples = self.active_speech_samples
                 self.active_speech_samples = 0
+                self.last_utterance_confident_speech_samples = self.confident_speech_samples
+                self.confident_speech_samples = 0
                 self.buffer = []
                 self.prefix_buffer = []
+                self.model.reset_states()
+                self._model_idle_samples = 0
                 return spoken_utterance
 
         return None

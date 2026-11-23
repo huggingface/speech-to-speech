@@ -16,18 +16,17 @@ from threading import Event
 from typing import Any, Iterator, Optional
 
 import numpy as np
-from rich.console import Console
 
-from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
 from speech_to_speech.utils.mlx_lock import MLXLockContext
 from speech_to_speech.utils.utils import resolve_device
 
 logger = logging.getLogger(__name__)
-console = Console()
 
 # Language code mapping from Whisper/langdetect language codes to Kokoro lang codes
 WHISPER_LANGUAGE_TO_KOKORO_LANG = {
@@ -77,7 +76,7 @@ KOKORO_LANG_DEFAULT_VOICES = {
 KOKORO_NATIVE_LANGUAGES = frozenset({"en", "ja", "zh", "fr", "es", "it", "pt", "hi"})
 
 
-class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
+class KokoroTTSHandler(BaseTTSHandler):
     """
     Handles Text-to-Speech using Kokoro TTS model.
 
@@ -167,11 +166,11 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
             self._preload_multilingual_voices()
         except ImportError as e:
             message = str(e)
-            if "misaki" in message or "espeakng_loader" in message:
+            if any(dep in message for dep in ("misaki", "spacy", "phonemizer", "espeakng_loader", "num2words")):
                 raise ImportError(
                     "Kokoro TTS on Apple Silicon requires additional mlx-audio TTS dependencies. "
                     f"Missing dependency: {message}. "
-                    "Install with: pip install misaki espeakng-loader"
+                    'Install with: pip install "speech-to-speech[kokoro]" (Python 3.11 or 3.12)'
                 ) from e
             raise ImportError(
                 "mlx-audio is required for Kokoro TTS on Apple Silicon. Install with: pip install mlx-audio"
@@ -235,24 +234,12 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         Yields:
             Audio chunks as numpy int16 arrays
         """
-        speculative_turns = getattr(self, "speculative_turns", None)
         if isinstance(tts_input, EndOfResponse):
-            if speculative_turns and not speculative_turns.wait_for_gate(
-                tts_input.turn_id,
-                tts_input.turn_revision,
-            ):
-                if tts_input.response_key is None:
-                    return
-                tts_input.cleanup_only = True
-            yield AUDIO_RESPONSE_DONE
+            if self._gate_end_of_response(tts_input):
+                yield AUDIO_RESPONSE_DONE
             return
 
-        if speculative_turns and not speculative_turns.wait_for_gate(
-            tts_input.turn_id,
-            tts_input.turn_revision,
-            commit=True,
-        ):
-            logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
+        if not self._admit_input(tts_input):
             return
 
         runtime_config = tts_input.runtime_config
@@ -283,10 +270,44 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
             audio_cfg = runtime_config.session.audio
             audio_output = audio_cfg.output if audio_cfg is not None else None
             voice = str(audio_output.voice) if audio_output is not None and audio_output.voice else None
+        voice = self._resolve_requested_voice(voice)
         if self.backend == "mlx":
-            yield from self._process_mlx(text, language_code, pinned_voice=voice)
+            yield from self._process_mlx(text, language_code, pinned_voice=voice, tts_input=tts_input)
         else:
-            yield from self._process_kokoro(text, language_code, pinned_voice=voice)
+            yield from self._process_kokoro(text, language_code, pinned_voice=voice, tts_input=tts_input)
+
+    # Translate Realtime voice names before asking the backend to load them.
+    _OPENAI_VOICE_ALIASES = {
+        "alloy": "af_alloy",
+        "nova": "af_nova",
+        "shimmer": "af_sky",
+        "coral": "af_heart",
+        "sage": "af_sarah",
+        "echo": "am_echo",
+        "ash": "am_adam",
+        "ballad": "bm_fable",
+        "verse": "am_michael",
+        "marin": "af_bella",
+        "cedar": "bm_george",
+    }
+
+    def _resolve_requested_voice(self, voice: Optional[str]) -> Optional[str]:
+        """Translate aliases, preserving backend voice IDs, blends and paths."""
+        if voice is None:
+            return None
+        return self._OPENAI_VOICE_ALIASES.get(voice, voice)
+
+    def _load_requested_voice(self, pipeline: Any, voice: str) -> str:
+        """Load a client voice, retrying a failed load with the setup voice."""
+        try:
+            pipeline.load_voice(voice)
+        except Exception as exc:
+            if voice == self._initial_voice:
+                raise
+            logger.warning("Failed to load Kokoro voice %r; falling back to %r: %s", voice, self._initial_voice, exc)
+            pipeline.load_voice(self._initial_voice)
+            return self._initial_voice
+        return voice
 
     def _lang_and_voice_for(self, language_code: str, pinned_voice: Optional[str] = None) -> tuple[str, str]:
         """Pick the Kokoro language and voice for a reply in ``language_code``.
@@ -306,7 +327,12 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
         return new_lang_code, KOKORO_LANG_DEFAULT_VOICES.get(new_lang_code, self.voice)
 
     def _process_mlx(
-        self, llm_sentence: str, language_code: Optional[str] = None, *, pinned_voice: Optional[str] = None
+        self,
+        llm_sentence: str,
+        language_code: Optional[str] = None,
+        *,
+        pinned_voice: Optional[str] = None,
+        tts_input: TTSInput | None = None,
     ) -> Iterator[np.ndarray]:
         """Process using MLX backend with Apple Silicon optimizations."""
         from scipy.signal import resample_poly
@@ -324,7 +350,10 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 )
                 try:
                     new_pipeline = self.model._get_pipeline(new_lang_code)
-                    new_pipeline.load_voice(new_voice)
+                    if new_voice == pinned_voice:
+                        new_voice = self._load_requested_voice(new_pipeline, new_voice)
+                    else:
+                        new_pipeline.load_voice(new_voice)
                     self.lang_code = new_lang_code
                     self.voice = new_voice
                     self._pipeline = new_pipeline
@@ -332,6 +361,8 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     logger.warning(f"Failed to switch language/voice: {e}. Keeping current language: {self.lang_code}")
 
             console.print(f"[green]ASSISTANT: {llm_sentence}")
+
+            timer = self._latency_timer(tts_input, gen)
 
             # Generate audio using the preloaded pipeline directly
             # This avoids the voice reload that happens in model.generate()
@@ -344,6 +375,9 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     continue
                 # result.audio is an mx.array with shape (1, samples), convert to numpy and squeeze
                 audio = np.array(result.audio, dtype=np.float32).squeeze(0)
+                if audio.size:
+                    # Provider samples, before silence trim / resample / block assembly.
+                    timer.first_provider_audio()
 
                 # Trim silence from start and end of audio
                 # Kokoro generates ~250ms of silence at the start and variable silence at the end
@@ -366,22 +400,25 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 audio = resample_poly(audio, up=2, down=3)
 
                 # Convert to int16 format
-                audio = (audio * 32768).astype(np.int16)
+                audio = np.clip(audio * 32768, -32768, 32767).astype(np.int16)
 
-                # Yield audio in fixed-size chunks
+                # Preserve short tails without inserting silence between provider segments.
                 for i in range(0, len(audio), self.blocksize):
-                    if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
+                    if self._is_stale(gen):
                         logger.info("TTS generation cancelled (interruption)")
                         return
                     chunk = audio[i : i + self.blocksize]
-                    # Pad the last chunk if necessary
-                    if len(chunk) < self.blocksize:
-                        chunk = np.pad(chunk, (0, self.blocksize - len(chunk)))
+                    timer.first_yield()
                     logger.debug(f"TTS yielding audio chunk: {len(chunk)} samples")
                     yield chunk
 
     def _process_kokoro(
-        self, llm_sentence: str, language_code: Optional[str] = None, *, pinned_voice: Optional[str] = None
+        self,
+        llm_sentence: str,
+        language_code: Optional[str] = None,
+        *,
+        pinned_voice: Optional[str] = None,
+        tts_input: TTSInput | None = None,
     ) -> Iterator[np.ndarray]:
         """Process using native kokoro library."""
         from scipy.signal import resample_poly
@@ -400,6 +437,9 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
             self.pipeline = KPipeline(lang_code=new_lang_code, device=self.device)
             self.lang_code = new_lang_code
+        timer = self._latency_timer(tts_input, gen)
+        if new_voice == pinned_voice:
+            new_voice = self._load_requested_voice(self.pipeline, new_voice)
         self.voice = new_voice
 
         console.print(f"[green]ASSISTANT: {llm_sentence}")
@@ -415,6 +455,9 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 audio = np.array(audio, dtype=np.float32)
             else:
                 audio = audio.astype(np.float32)
+            if audio.size:
+                # Provider samples, before resample / block assembly.
+                timer.first_provider_audio()
 
             # Kokoro outputs at 24kHz, resample to 16kHz for the pipeline
             # Using scipy's polyphase resampling (fast and high quality)
@@ -422,17 +465,15 @@ class KokoroTTSHandler(BaseHandler[TTSIn, TTSOut]):
             audio = resample_poly(audio, up=2, down=3)
 
             # Convert to int16 format
-            audio = (audio * 32768).astype(np.int16)
+            audio = np.clip(audio * 32768, -32768, 32767).astype(np.int16)
 
-            # Yield audio in fixed-size chunks
+            # Preserve short tails without inserting silence between provider segments.
             for i in range(0, len(audio), self.blocksize):
-                if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
+                if self._is_stale(gen):
                     logger.info("TTS generation cancelled (interruption)")
                     return
                 chunk = audio[i : i + self.blocksize]
-                # Pad the last chunk if necessary
-                if len(chunk) < self.blocksize:
-                    chunk = np.pad(chunk, (0, self.blocksize - len(chunk)))
+                timer.first_yield()
                 yield chunk
 
     def on_session_end(self) -> None:

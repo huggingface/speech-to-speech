@@ -13,8 +13,10 @@ import numpy as np
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from speech_to_speech.pipeline.history import ResponseHistory
 from speech_to_speech.pipeline.messages import (
     AssistantOutputPart,
+    AssistantReasoningPart,
     AssistantToolCallPart,
     ResponseIncompleteReason,
     _normalize_assistant_output_fields,
@@ -108,6 +110,9 @@ class AudioInputCompletedEvent(PipelineEvent):
 class AssistantOutputEvent(PipelineEvent):
     """Internal ordered assistant output awaiting API-specific serialization."""
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    history: ResponseHistory | None = Field(default=None, exclude=True, repr=False)
+
     type: Literal["assistant_text"] = "assistant_text"
     parts: list[AssistantOutputPart] = Field(default_factory=list)
     text: str = ""
@@ -146,8 +151,12 @@ class AssistantToolCallReadyEvent(PipelineEvent):
     for clients to execute the tool while speech synthesis continues.
     """
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    history: ResponseHistory | None = Field(default=None, exclude=True, repr=False)
+
     type: Literal["assistant_tool_call_ready"] = "assistant_tool_call_ready"
     part: AssistantToolCallPart
+    reasoning: list[AssistantReasoningPart] = Field(default_factory=list)
     output_sequence: int
     turn_id: str | None = None
     turn_revision: int | None = None
@@ -166,12 +175,17 @@ class TokenUsageEvent(PipelineEvent):
 
 
 class AssistantResponseDoneEvent(PipelineEvent):
-    """Marks the end of ordered assistant output for one response."""
+    """Marks ordered output completion and the tool results used by this response."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    history: ResponseHistory | None = Field(default=None, exclude=True, repr=False)
+    reasoning: list[AssistantReasoningPart] = Field(default_factory=list)
 
     type: Literal["assistant_response_done"] = "assistant_response_done"
     status: Literal["completed", "incomplete"] = "completed"
     reason: ResponseIncompleteReason | None = None
     response_key: str | None = Field(default=None, exclude=True, repr=False)
+    input_tool_call_ids: list[str] = Field(default_factory=list)
     turn_id: str | None = None
     turn_revision: int | None = None
     cancel_generation: int | None = None
@@ -185,6 +199,9 @@ class ResponseGenerationDoneEvent(PipelineEvent):
     generation so the server can safely precompute a follow-up once their
     outputs have arrived.
     """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    history: ResponseHistory | None = Field(default=None, exclude=True, repr=False)
 
     type: Literal["response_generation_done"] = "response_generation_done"
     response_key: str | None = Field(default=None, exclude=True, repr=False)
@@ -201,6 +218,9 @@ class ResponseFailedEvent(PipelineEvent):
     Dispatched to the service so it can close the in-progress response with
     ``status="failed"`` instead of the usual ``completed``.
     """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    history: ResponseHistory | None = Field(default=None, exclude=True, repr=False)
 
     type: Literal["response_failed"] = "response_failed"
     message: str = ""

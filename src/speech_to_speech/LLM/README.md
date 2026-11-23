@@ -1,137 +1,65 @@
-# LLM Summary
+# Language models
 
-## Available LLM backends (`--llm_backend`)
+The LLM runs locally by default. After [installation](../../../README.md#installation), `speech-to-speech local` picks a model for your platform:
 
-Runtime-supported values in `s2s_pipeline.py`:
+| Platform | Backend | Model | Device |
+|---|---|---|---|
+| Apple Silicon macOS | `mlx-lm` | `mlx-community/Qwen3.5-4B-4bit` | MLX |
+| Linux / Windows | `transformers` | `Qwen/Qwen3.5-4B` | Available accelerator, otherwise CPU (slow) |
 
-- `transformers` → `language_model.py` (Transformers backend)
-- `mlx-lm` → `language_model.py` (MLX backend)
-- `responses-api` → `responses_api_language_model.py`
-
-## Usage
-
-### 1) Transformers (`--llm_backend transformers`)
-
-- Handler: `LanguageModelHandler`
-- Typical use: local GPU/CPU inference using Hugging Face Transformers
-- Backend-specific args prefix: `--llm_*`
-- Shared args (from base): `--model_name`, `--chat_size`, `--init_chat_prompt`, `--enable_lang_prompt`
+Both backends use `LanguageModelHandler` in `language_model.py`. `--llm_backend` selects a backend and its default model; `--model_name` replaces the model. Use MLX conversions with `mlx-lm` and Transformers checkpoints with `transformers`:
 
 ```bash
-speech-to-speech serve \
-  --llm_backend transformers \
-  --model_name Qwen/Qwen3-4B-Instruct-2507 \
-  --llm_device cuda \
-  --llm_torch_dtype float16 \
-  --llm_gen_max_new_tokens 128
+speech-to-speech local --model_name mlx-community/Qwen3.5-9B-4bit   # Apple Silicon
+speech-to-speech local --model_name Qwen/Qwen3.5-9B                 # Linux / Windows
 ```
 
-Common options:
-- `--llm_gen_min_new_tokens`
-- `--llm_gen_temperature`
-- `--llm_gen_do_sample`
-- `--chat_size`
-- `--init_chat_prompt`
+`--llm_device` changes only the LLM's device (for example `cuda` or `cpu`); `--device` changes every stage. `--llm_torch_dtype` sets the Transformers dtype. `--mac-optimal-settings` is optional on Mac and only sets MPS device defaults.
 
-### 2) MLX-LM (`--llm_backend mlx-lm`)
+## Local generation options
 
-- Handler: `LanguageModelHandler`
-- Typical use: Apple Silicon local inference
-- Backend-specific args prefix: same as Transformers (`--llm_*`)
+Local backends use the `--llm_*` arguments. For example, cap reply length:
 
 ```bash
-speech-to-speech serve \
-  --llm_backend mlx-lm \
-  --model_name mlx-community/Qwen3-4B-Instruct-2507-4bit \
-  --llm_device mps \
-  --llm_gen_max_new_tokens 128
+speech-to-speech local --llm_gen_max_new_tokens 128
 ```
 
-Common options:
-- `--llm_gen_temperature`
-- `--llm_gen_do_sample`
-- `--chat_size`
-- `--init_chat_prompt`
+Transformers also accepts `--llm_gen_temperature`, `--llm_gen_do_sample`, and `--llm_gen_min_new_tokens`. The MLX text path forwards the maximum token count but not those sampling settings. Shared conversation settings include `--chat_size`, `--init_chat_prompt`, `--user_role`, and `--stream_batch_sentences`. See the [argument definitions](../arguments_classes/language_model_arguments.py) for defaults.
 
-### 3) OpenAI-compatible API (`--llm_backend responses-api`)
+For image input, select a vision-language model and pass `--llm_is_vlm` to use `VisionLanguageModelHandler`. MLX vision inference needs `mlx-vlm`, included in `speech-to-speech[mlx-lm]`.
 
-- Handler: `ResponsesApiModelHandler`
-- Typical use: remote model serving via OpenAI-compatible endpoints
-- Backend-specific args prefix: `--responses_api_*`
-- Shared args (from base): `--model_name`, `--chat_size`, `--init_chat_prompt`, `--enable_lang_prompt`
+## API backends
 
-```bash
-speech-to-speech serve \
-  --llm_backend responses-api \
-  --model_name gpt-5.6-terra \
-  --responses_api_api_key YOUR_API_KEY \
-  --responses_api_base_url https://api.example.com/v1 \
-  --responses_api_stream true
-```
+Use an API backend when the LLM runs in a separate server or at a hosted provider. Neither is the default.
 
-Common options:
-- `--chat_size`
-- `--init_chat_prompt`
-- `--user_role`
+| Backend | Endpoint | Handler |
+|---|---|---|
+| `responses-api` | `/v1/responses` | `ResponsesApiModelHandler` |
+| `chat-completions` | `/v1/chat/completions` | `ChatCompletionsApiModelHandler` |
 
-## LLM Behavior
+Both use the `--responses_api_*` connection flags plus the shared settings above; `--llm_*` generation flags do not apply.
 
-When STT is set to language auto-detection (`--language auto`), LLM handlers can receive `(text, language_code)` and prepend a language control instruction like:
-
-- `Please reply to my message in <language>.`
-
-This helps the assistant respond in the detected language. The behavior is opt-in via `--enable_lang_prompt` (shared across all backends); it defaults to `False`.
-
-## Setup
-
-### CUDA setup
-
-```bash
-speech-to-speech serve \
-  --llm_backend transformers \
-  --model_name microsoft/Phi-3-mini-4k-instruct
-```
-
-### Local Mac setup
+A local inference server:
 
 ```bash
 speech-to-speech local \
-  --mac-optimal-settings \
-  --model_name mlx-community/Qwen3-4B-Instruct-2507-4bit
+  --llm_backend chat-completions \
+  --model_name YOUR_SERVED_MODEL \
+  --responses_api_base_url http://127.0.0.1:8000/v1 \
+  --responses_api_api_key ""
 ```
 
-`--mac-optimal-settings` sets `--llm_backend mlx-lm` and defaults the model to `mlx-community/Qwen3-4B-Instruct-2507-4bit` if not overridden. The command independently selects whether to run only the server or compose it with the audio client.
-
-### Realtime (OpenAI-compatible) setup
-
-Run the server, then connect with the packaged audio client:
+A hosted provider, here OpenAI with its default `gpt-5.6-terra`:
 
 ```bash
-# 1. Start the pipeline server
-speech-to-speech serve \
-  --llm_backend mlx-lm \
-  --model_name mlx-community/Qwen3-4B-Instruct-2507-4bit \
-  --host 0.0.0.0 \
-  --port 8765
-
-# 2. Connect with the audio client
-speech-to-speech talk --url ws://127.0.0.1:8765/v1/realtime
+export OPENAI_API_KEY=...
+speech-to-speech local --llm_backend responses-api
 ```
 
-Or with `--mac-optimal-settings` on Apple Silicon:
+Speech recognition and synthesis stay local either way. With a hosted provider, transcribed text and conversation history are sent to it. See [LLM backends](../../../README.md#llm-backends) for the llama.cpp setup, provider examples, and direct audio input.
 
-```bash
-speech-to-speech serve \
-  --mac-optimal-settings \
-  --host 0.0.0.0 \
-  --port 8765
-```
+## Language behavior
 
-### Remote API setup
+`--enable_lang_prompt` adds a per-turn instruction asking the LLM to reply in the language reported by STT. It is off by default. Parakeet chooses its transcription language automatically; the Whisper backends accept `--language auto` or a fixed code.
 
-```bash
-speech-to-speech serve \
-  --llm_backend responses-api \
-  --model_name gpt-5.6-terra \
-  --responses_api_api_key YOUR_API_KEY
-```
+`--detect_llm_output_language` separately detects the assistant's output language for TTS. See [Multi-language support](../../../README.md#multi-language-support) for how these options interact.

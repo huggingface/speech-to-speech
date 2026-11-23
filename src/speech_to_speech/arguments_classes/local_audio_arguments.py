@@ -4,6 +4,10 @@ from typing import Optional
 
 @dataclass
 class LocalAudioArguments:
+    verbose: bool = field(
+        default=False,
+        metadata={"help": "Show backend transcripts, routine logs, tool details, and Realtime events."},
+    )
     local_audio_tool_module: Optional[str] = field(
         default=None,
         metadata={
@@ -37,6 +41,31 @@ class LocalAudioArguments:
         default=False,
         metadata={
             "help": "Pause local microphone capture while audio is playing. Disabled by default so barge-in works."
+        },
+    )
+    local_audio_vad_threshold: Optional[float] = field(
+        default=None,
+        metadata={
+            "help": "Session VAD threshold from 0 to 1 sent by the local client. Defaults to the server's --thresh."
+        },
+    )
+    local_audio_interrupt_response: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Let user speech cancel the active response and clear queued local playback. When false, the "
+                "microphone stays open and speech is still transcribed. Default is true."
+            )
+        },
+    )
+    local_audio_echo_cancellation: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Remove speaker playback from the local microphone so voice barge-in works on speakers. "
+                "Not needed with headphones or a headset."
+            ),
+            "aliases": ["--echo-cancellation"],
         },
     )
     local_audio_print_json: bool = field(

@@ -39,7 +39,9 @@ def test_kokoro_short_auto_reply_restores_setup_voice_after_spanish(monkeypatch)
     handler.voice = "ef_dora"
     handler._initial_lang_code = "b"
     handler._initial_voice = "bm_fable"
-    monkeypatch.setattr(handler, "_process_mlx", lambda _text, _language, *, pinned_voice=None: iter(()))
+    monkeypatch.setattr(
+        handler, "_process_mlx", lambda _text, _language, *, pinned_voice=None, tts_input=None: iter(())
+    )
 
     list(handler.process(TTSInput(text="Sure.", language_code=None, runtime_config=_auto_config())))
 
@@ -80,7 +82,9 @@ def test_kokoro_detected_language_without_native_voice_keeps_session_language(mo
     handler.backend = "mlx"
     handler.voice = "ef_dora"
     monkeypatch.setattr(
-        handler, "_process_mlx", lambda _text, language, *, pinned_voice=None: languages.append(language) or iter(())
+        handler,
+        "_process_mlx",
+        lambda _text, language, *, pinned_voice=None, tts_input=None: languages.append(language) or iter(()),
     )
 
     list(handler.process(TTSInput(text="Hallo.", tts_language_code=detected, runtime_config=_session_config("es"))))

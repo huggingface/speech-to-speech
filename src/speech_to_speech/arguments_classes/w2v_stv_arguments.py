@@ -10,4 +10,4 @@ class Wav2Vec2STVHandlerArguments:
         default="bookbot/wav2vec2-ljspeech-gruut",
         metadata={"help": "Phoneme-recognition checkpoint used for visemes. The default is English."},
     )
-    stv_device: str = field(default="auto", metadata={"help": "Viseme model device: auto, cpu, cuda, or mps."})
+    stv_device: str = field(default="auto", metadata={"help": "Viseme model device: auto, cuda, npu, mps, or cpu."})

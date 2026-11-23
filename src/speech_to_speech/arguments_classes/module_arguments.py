@@ -1,3 +1,4 @@
+import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -12,6 +13,22 @@ _PROXY_LLM_BACKENDS = ", ".join(name for name, spec in LLM_BACKENDS.items() if s
 
 @dataclass
 class ModuleArguments(Wav2Vec2STVHandlerArguments):
+    stt_supported_languages: Optional[list[str]] = field(
+        default=None,
+        metadata={"help": "Declare the active STT model's language coverage when the backend cannot advertise it."},
+    )
+    tts_supported_languages: Optional[list[str]] = field(
+        default=None,
+        metadata={"help": "Declare the active TTS model's language coverage when the backend cannot advertise it."},
+    )
+    stt_auto_language_supported: Optional[bool] = field(
+        default=None,
+        metadata={"help": "Declare whether the active STT model can select its language automatically."},
+    )
+    tts_auto_language_supported: Optional[bool] = field(
+        default=None,
+        metadata={"help": "Declare whether the active TTS model can select its language automatically."},
+    )
     diarization: bool = field(
         default=False,
         metadata={"help": "Enable speaker-aware conversation with Nemotron 3 Diarization."},
@@ -26,8 +43,9 @@ class ModuleArguments(Wav2Vec2STVHandlerArguments):
     diarization_device: str = field(
         default="auto",
         metadata={
-            "help": "Diarization device: auto, cuda, mps, or cpu. Auto selects CUDA, then MPS, then CPU. "
-            "The global --device overrides this setting. CUDA or MPS is recommended for live sessions."
+            "help": "Diarization device: auto, cuda, npu, mps, or cpu. Auto selects CUDA, then NPU, then MPS, "
+            "then CPU. The global --device overrides this setting. CUDA, NPU, or MPS is recommended "
+            "for live sessions."
         },
     )
     diarization_dtype: str = field(default="float32", metadata={"choices": ("float32", "float16", "bfloat16")})
@@ -68,10 +86,11 @@ class ModuleArguments(Wav2Vec2STVHandlerArguments):
         },
     )
     llm_backend: Optional[str] = field(
-        default="responses-api",
+        default_factory=lambda: "mlx-lm" if sys.platform == "darwin" else "transformers",
         metadata={
             "choices": tuple(LLM_BACKENDS),
-            "help": "The LLM backend to use. Default is 'responses-api'.",
+            "help": "The LLM backend to use. Defaults to local inference: 'mlx-lm' on macOS, "
+            "'transformers' elsewhere. API backends must be selected explicitly.",
         },
     )
     tts: Optional[str] = field(
@@ -94,6 +113,17 @@ class ModuleArguments(Wav2Vec2STVHandlerArguments):
                 "retained by service managers, containers and hosted log aggregators, so "
                 "conversation content would outlive the conversation there. Default is False."
             )
+        },
+    )
+    torch_num_threads: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Set PyTorch's CPU intra-op thread count (torch.set_num_threads) for the whole process. "
+            "Unset by default, which keeps the current behaviour: Silero VAD sets PyTorch to one thread "
+            "when it loads. The value is shared by Silero and every other PyTorch CPU model, such as a "
+            "CPU STT, so more threads can speed up CPU STT while slowing Silero; tune it for the whole "
+            "pipeline. It does not configure ONNX Runtime, MLX or other non-PyTorch backends. Must be a "
+            "positive integer."
         },
     )
     enable_live_transcription: bool = field(

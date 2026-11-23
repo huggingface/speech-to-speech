@@ -8,7 +8,7 @@ from openai.types.realtime import RealtimeSessionCreateRequest
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
-from speech_to_speech.LLM.chat import Chat, make_user_message
+from speech_to_speech.LLM.chat import Chat, make_system_message, make_user_message
 from speech_to_speech.LLM.language_model import BaseLanguageModelHandler, StreamContext
 from speech_to_speech.pipeline.messages import GenerateResponseRequest, LLMResponseChunk
 
@@ -83,3 +83,28 @@ def test_local_backend_preserves_response_creation_language():
     outputs = list(handler.process(request))
 
     assert outputs[0].selected_language == "es"
+
+
+def test_local_backend_keeps_injected_context_with_session_instructions():
+    handler = object.__new__(_RecordingLocalHandler)
+    handler.cancel_scope = None
+    handler.speculative_turns = None
+    handler.enable_lang_prompt = False
+    handler.compactor = None
+    handler.tokenizer = SimpleNamespace(encode=lambda _text: [])
+    chat = Chat(10)
+    snapshot = make_system_message("CURRENT CHAT SNAPSHOT")
+    chat.add_item(snapshot)
+    chat.add_item(make_user_message("What was my last question?"))
+    config = RuntimeConfig(
+        chat=chat,
+        session=RealtimeSessionCreateRequest(type="realtime", instructions="SESSION INSTRUCTIONS"),
+    )
+
+    for _ in range(2):
+        list(handler.process(GenerateResponseRequest(runtime_config=config)))
+        prompt = handler.seen_chat.to_transformers_chat()[0]["content"]
+        assert "SESSION INSTRUCTIONS" in prompt
+        assert prompt.count("CURRENT CHAT SNAPSHOT") == 1
+        assert chat.init_chat_message is snapshot
+        assert snapshot.content[0].text == "CURRENT CHAT SNAPSHOT"

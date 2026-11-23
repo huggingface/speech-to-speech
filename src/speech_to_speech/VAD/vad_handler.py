@@ -52,14 +52,11 @@ try:
     HAS_DF = True
 except (ImportError, ModuleNotFoundError) as e:
     HAS_DF = False
-    logger.warning(f"DeepFilterNet not available for audio enhancement: {e}")
+    logger.debug("DeepFilterNet not available for optional audio enhancement: %s", e)
 
 
 class VADHandler(BaseHandler[VADIn, VADOut]):
-    """
-    Handles voice activity detection. When voice activity is detected, audio will be accumulated until the end of speech is detected and then passed
-    to the following part.
-    """
+    """Emit speech audio at segment end, with optional cumulative snapshots during capture."""
 
     def setup(
         self,
@@ -88,7 +85,26 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         vad: str = "silero",
         vad_firered_model_dir: str | None = None,
         vad_firered_use_gpu: bool = False,
+        confident_thresh: float = 0.9,
+        min_confident_speech_ms: int = 0,
+        idle_after_s: float = 0.0,
+        idle_min_speech_ms: int = 0,
+        idle_min_confident_speech_ms: int = 0,
     ) -> None:
+        if not 0 < confident_thresh <= 1:
+            raise ValueError("confident_thresh must be in (0, 1]")
+        if min(min_confident_speech_ms, idle_min_speech_ms, idle_min_confident_speech_ms) < 0 or idle_after_s < 0:
+            raise ValueError("Confident-speech and idle turn-opening settings must not be negative")
+        if (idle_after_s or idle_min_speech_ms or idle_min_confident_speech_ms) and min_confident_speech_ms <= 0:
+            raise ValueError("Idle turn-opening settings require min_confident_speech_ms > 0")
+        if vad != "silero" and min_confident_speech_ms > 0:
+            raise ValueError("min_confident_speech_ms requires the silero VAD, which reports speech probabilities")
+        self.min_confident_speech_ms = min_confident_speech_ms
+        self.idle_after_s = idle_after_s
+        self.idle_min_speech_ms = idle_min_speech_ms
+        self.idle_min_confident_speech_ms = idle_min_confident_speech_ms
+        # Audio time of the last accepted segment; with the last finished response it dates idleness.
+        self._last_accept_audio_ms = 0
         self.should_listen = should_listen
         self.sample_rate = sample_rate
         self.min_silence_ms = min_silence_ms
@@ -163,6 +179,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 sampling_rate=sample_rate,
                 min_silence_duration_ms=min_silence_ms,
                 speech_pad_ms=speech_pad_ms,
+                confident_threshold=confident_thresh,
             )
         else:
             raise ValueError(f"Unknown VAD backend {vad!r}. Choose silero or firered.")
@@ -193,6 +210,10 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._log_progressive_yields = 0
         self._speech_started_emitted = False
         self._speculative_audio_prefix: np.ndarray | None = None
+        # Optional snapshot cadence in input samples, independent of live transcription.
+        self.transcription_window_samples: int | None = None
+        self._last_window_snapshot_samples = 0
+        self._window_check_after_samples = 0
         self._speculative_raw_audio_prefix: np.ndarray | None = None
         self._pending_short_segment: _PendingShortSegment | None = None
         self.streaming_stt_sink: Any | None = None
@@ -266,10 +287,51 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             return self.min_speech_continuation_ms
         return self.min_speech_ms
 
+    def _should_score_new_turn(self, start_ms: int, *, stitched: bool = False) -> bool:
+        return (
+            getattr(self, "min_confident_speech_ms", 0) > 0
+            and not self._speech_started_emitted
+            and not stitched
+            and not self.speculative_turns.has_speech_candidate()
+            and not self.speculative_turns.can_reopen(start_ms)
+        )
+
+    def _last_utterance_confident_speech_duration_ms(self) -> float:
+        confident_speech_samples = getattr(self.iterator, "last_utterance_confident_speech_samples", 0)
+        return confident_speech_samples / self.sample_rate * 1000
+
+    def _idle_s(self, start_ms: int) -> float:
+        """Seconds since the last accepted segment or finished assistant response, whichever is later."""
+        idle_s = max(0, start_ms - self._last_accept_audio_ms) / 1000
+        since_response = self.speculative_turns.seconds_since_response_closed()
+        return idle_s if since_response is None else min(idle_s, since_response)
+
+    def _new_turn_score(self, active_ms: float, confident_ms: float, start_ms: int) -> tuple[float, float]:
+        """Score a new-turn candidate; it opens at 1.0 or more. Returns (score, idle seconds).
+
+        Confident speech counts against min_confident_speech_ms and the rest of the active
+        speech against min_speech_ms, so a few very confident chunks open a turn alone, enough
+        ordinary ones do too, and mixtures add up. After idle_after_s of nothing, the idle pair
+        replaces both requirements where it is set.
+        """
+        idle_s = self._idle_s(start_ms)
+        min_speech_ms: float = self.min_speech_ms
+        min_confident_ms: float = self.min_confident_speech_ms
+        if self.idle_after_s > 0 and idle_s > self.idle_after_s:
+            min_speech_ms = self.idle_min_speech_ms or min_speech_ms
+            min_confident_ms = self.idle_min_confident_speech_ms or min_confident_ms
+        # A zero effective minimum disables duration filtering for VAD-detected speech.
+        if min_speech_ms == 0:
+            return 1.0, idle_s
+        confident_ms = min(confident_ms, active_ms)
+        return (active_ms - confident_ms) / min_speech_ms + confident_ms / min_confident_ms, idle_s
+
     def _ensure_turn_for_speech_start(self, audio_start_ms: int) -> tuple[str, int, bool]:
         turn_id, revision, reopened = self.speculative_turns.speech_started(audio_start_ms)
         if not reopened and revision == 0 and not self._speech_started_emitted:
             self._speculative_audio_prefix = None
+            self._last_window_snapshot_samples = 0
+            self._window_check_after_samples = 0
             self._speculative_raw_audio_prefix = None
             self._speculative_speaker_prefix = None
         return turn_id, revision, reopened
@@ -617,7 +679,21 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             )
             self.speculative_turns.speech_candidate_started(effective_start_ms)
             active_speech_min_ms = self._active_speech_min_ms(effective_start_ms)
-            if effective_active_speech_duration_ms >= active_speech_min_ms:
+            accepted = effective_active_speech_duration_ms >= active_speech_min_ms
+            stitched = effective_active_speech_duration_ms > active_speech_duration_ms
+            if self._should_score_new_turn(effective_start_ms, stitched=stitched):
+                confident_ms = getattr(self.iterator, "confident_speech_samples", 0) / self.sample_rate * 1000
+                score, idle_s = self._new_turn_score(active_speech_duration_ms, confident_ms, effective_start_ms)
+                accepted = score >= 1.0
+                if accepted:
+                    logger.info(
+                        "VAD: new-turn score=%.2f (active=%.0fms, confident=%.0fms, idle=%.0fs)",
+                        score,
+                        active_speech_duration_ms,
+                        confident_ms,
+                        idle_s,
+                    )
+            if accepted:
                 turn_id, turn_revision, reopened = self._ensure_turn_for_speech_start(effective_start_ms)
                 self._speech_started_emitted = True
                 self._log_speech_starts += 1
@@ -656,8 +732,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             self._log_progressive_yields = 0
             self._last_log_time = now
 
-        # Live transcription controls whether progressive STT work is emitted
-        # before the final segment.
+        # Emit requested snapshots or finalize a detected speech segment.
         yield from self._process_realtime(vad_output, runtime_config, received_at_s, decision_at_s)
 
     def _process_realtime(
@@ -667,21 +742,44 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         received_at_s: float | None = None,
         decision_at_s: float | None = None,
     ) -> Iterator[VADOut]:
-        """Process with real-time progressive audio release."""
+        """Emit cumulative progressive snapshots and handle detected speech ends."""
+        window_samples = getattr(self, "transcription_window_samples", None)
+        # Within a segment the turn grows by at most the audio received, so
+        # window-only checks skip recounting the whole buffer until one can be due.
+        window_check = window_samples is not None and self._total_samples >= self._window_check_after_samples
         # Check if we're currently in a speech segment.
-        if self.enable_realtime_transcription and hasattr(self.iterator, "buffer") and len(self.iterator.buffer) > 0:
+        if (
+            (self.enable_realtime_transcription or window_check)
+            and hasattr(self.iterator, "buffer")
+            and len(self.iterator.buffer) > 0
+        ):
             current_time = time.time()
             duration_ms = self._speech_buffer_duration_ms()
+            segment_samples = round(duration_ms * self.sample_rate / 1000)
+            prefix_samples = len(self._speculative_audio_prefix) if self._speculative_audio_prefix is not None else 0
+            turn_samples = prefix_samples + segment_samples
+            window_due = window_samples is not None and (
+                turn_samples >= self._last_window_snapshot_samples + window_samples
+            )
+            if window_samples is not None and not window_due:
+                self._window_check_after_samples = (
+                    self._total_samples + self._last_window_snapshot_samples + window_samples - turn_samples
+                )
             progressive_pause = self._progressive_processing_pause(duration_ms)
 
             # Yield accumulated audio periodically while speaking
-            if (current_time - self.last_process_time) >= progressive_pause:
+            if window_due or (
+                self.enable_realtime_transcription and (current_time - self.last_process_time) >= progressive_pause
+            ):
                 array = torch.cat(self.iterator.speech_buffer()).cpu().numpy()
                 duration_ms = len(array) / self.sample_rate * 1000
                 active_speech_duration_ms = self._current_active_speech_duration_ms()
                 start_ms = max(0, self._audio_ms - int(duration_ms))
 
-                if active_speech_duration_ms >= self._active_speech_min_ms(start_ms):
+                admitted = active_speech_duration_ms >= self._active_speech_min_ms(start_ms)
+                if getattr(self, "min_confident_speech_ms", 0) > 0:
+                    admitted = self._speech_started_emitted
+                if admitted:
                     self._log_progressive_yields += 1
                     logger.debug(
                         "VAD: yielding progressive audio (segment=%.0fms, active=%.0fms, interval=%.2fs)",
@@ -690,6 +788,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                         progressive_pause,
                     )
                     turn_id, turn_revision = self._current_turn_metadata()
+                    self._last_window_snapshot_samples = turn_samples
                     yield VADAudio(
                         audio=self._combined_turn_audio(array),
                         runtime_config=runtime_config,
@@ -701,6 +800,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
         # Handle end of speech
         if vad_output is not None:
+            # A new prefix or stitched segment can outgrow received audio.
+            self._window_check_after_samples = 0
             if len(vad_output) == 0:
                 logger.info("VAD: phantom trigger (empty buffer), closing speech pair")
                 if self._speech_started_emitted and self.text_output_queue:
@@ -741,12 +842,26 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             min_active_ms = 0.0 if self._speech_started_emitted else self._active_speech_min_ms(start_ms)
 
             duration_exceeds_limit = duration_ms > self.max_speech_ms
-            if active_speech_duration_ms < min_active_ms or duration_exceeds_limit:
+            too_little_speech = active_speech_duration_ms < min_active_ms
+            # A new turn can be scored on how confident its speech was instead of on active time
+            # alone. Continuations and stitched fragments keep the plain active-time rule.
+            if self._should_score_new_turn(start_ms, stitched=stitched_short_segment):
+                confident_ms = self._last_utterance_confident_speech_duration_ms()
+                score, idle_s = self._new_turn_score(raw_active_ms, confident_ms, start_ms)
+                too_little_speech = score < 1.0
+                logger.info(
+                    "VAD: new-turn score=%.2f (active=%.0fms, confident=%.0fms, idle=%.0fs)",
+                    score,
+                    raw_active_ms,
+                    confident_ms,
+                    idle_s,
+                )
+            if too_little_speech or duration_exceeds_limit:
                 held_for_merge = False
                 if (
                     self._short_segment_merge_window_ms() > 0
                     and raw_active_ms >= _SHORT_SEGMENT_MIN_FRAGMENT_MS
-                    and active_speech_duration_ms < min_active_ms
+                    and too_little_speech
                     and duration_ms <= self.max_speech_ms
                 ):
                     self._hold_short_segment(array, active_speech_duration_ms, start_ms, end_ms)
@@ -798,6 +913,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 else:
                     turn_id, turn_revision = self._current_turn_metadata()
                 self._log_speech_ends += 1
+                self._last_accept_audio_ms = end_ms
                 logger.info(
                     "Speech soft-ended (segment=%.0fms, active=%.0fms, turn=%s rev=%s)",
                     duration_ms,
@@ -920,8 +1036,11 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self.iterator.buffer = []
         self.last_process_time = 0.0
         self._total_samples = 0
+        self._last_accept_audio_ms = 0
         self._speech_started_emitted = False
         self._speculative_audio_prefix = None
+        self._last_window_snapshot_samples = 0
+        self._window_check_after_samples = 0
         self._speculative_raw_audio_prefix = None
         self.speculative_turns.reset()
         self.should_listen.set()

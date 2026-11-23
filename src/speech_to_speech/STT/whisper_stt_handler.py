@@ -7,16 +7,15 @@ from typing import Any, Iterator, Optional
 
 import numpy as np
 import torch
-from rich.console import Console
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
+from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
 
 logger = logging.getLogger(__name__)
-console = Console()
 
 SUPPORTED_LANGUAGES = [
     "en",
@@ -64,7 +63,8 @@ class WhisperSTTHandler(BaseSTTHandler):
         self.device = resolve_device(device, TORCH_DEVICES, "Whisper STT")
         self.torch_dtype = getattr(torch, torch_dtype)
         self.compile_mode = compile_mode
-        self.gen_kwargs = gen_kwargs
+        # Copy before adding the language so handlers and caller-owned config stay isolated.
+        self.gen_kwargs = dict(gen_kwargs)
         language = self.canonical_language(language)
         self.start_language = language
         self.last_language = language if language != "auto" else None

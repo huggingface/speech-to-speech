@@ -11,24 +11,31 @@ import base64
 import time
 from queue import Empty, Queue
 from threading import Event as ThreadingEvent
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from openai.types.realtime import RealtimeConversationItemFunctionCall, RealtimeConversationItemFunctionCallOutput
 from starlette.testclient import TestClient
 
 import speech_to_speech.api.openai_realtime.websocket_router as router_module
-from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
-from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService
+from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES
+from speech_to_speech.api.openai_realtime.tool_followup import (
+    TOOL_FOLLOWUP_COVERED,
+    TOOL_FOLLOWUP_METADATA_KEY,
+    TOOL_INPUT_METADATA_KEY,
+)
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
+from speech_to_speech.LLM.chat import make_assistant_message, make_user_message
 from speech_to_speech.LLM.language_model import LanguageModelHandler
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
-from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
     AssistantToolCallReadyEvent,
     AudioInputCompletedEvent,
+    PartialTranscriptionEvent,
     PipelineEvent,
     ResponseFailedEvent,
     ResponseGenerationDoneEvent,
@@ -38,17 +45,22 @@ from speech_to_speech.pipeline.events import (
     TranscriptionCompletedEvent,
     TranscriptionFailedEvent,
 )
+from speech_to_speech.pipeline.history import ResponseHistory
 from speech_to_speech.pipeline.messages import (
     AUDIO_RESPONSE_DONE,
     PIPELINE_END,
     AssistantTextPart,
     AssistantToolCallPart,
     AudioOutput,
+    EndOfResponse,
     GenerateResponseRequest,
     ResponsePrefetchTransaction,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.speech_languages import SpeechLanguageCapabilities
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
+from tests.openai_realtime.conftest import make_pipeline_unit
+from tests.test_response_overrides import _RecordingLocalHandler
 from tests.turns import reopen
 
 from .realtime_contract import (
@@ -59,6 +71,77 @@ from .realtime_contract import (
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("direct_audio", [False, True])
+def test_manual_response_mode_delivers_one_reply_per_explicit_request(setup, direct_audio):
+    app, service, _, output_queue, text_output_queue, *_ = setup
+    tracker = SpeculativeTurnTracker()
+    service.speculative_turns = tracker
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/realtime") as ws:
+            ws.receive_json()
+            ws.send_json(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "type": "realtime",
+                        "audio": {
+                            "input": {
+                                "turn_detection": {
+                                    "type": "server_vad",
+                                    "create_response": False,
+                                    "interrupt_response": True,
+                                }
+                            }
+                        },
+                    },
+                }
+            )
+            updated = ws.receive_json()
+            assert updated["type"] == "session.updated"
+            assert updated["session"]["audio"]["input"]["turn_detection"]["create_response"] is False
+            for number in (1, 2):
+                turn_id, revision = tracker.start_turn()
+                turn = {"turn_id": turn_id, "turn_revision": revision}
+                text_output_queue.put(SpeechStartedEvent(**turn))
+                started = ws.receive_json()
+                assert started["type"] == "input_audio_buffer.speech_started"
+                tracker.segment_finalized(number * 100)
+                text_output_queue.put(SpeechStoppedEvent(duration_s=0.1, **turn))
+                text_output_queue.put(
+                    AudioInputCompletedEvent(audio=np.zeros(1600, dtype=np.float32), audio_duration_s=0.1, **turn)
+                    if direct_audio
+                    else TranscriptionCompletedEvent(transcript=f"Question {number}", **turn)
+                )
+                terminals = [ws.receive_json() for _ in range(3 if direct_audio else 4)]
+                assert [event["type"] for event in terminals[:3]] == [
+                    "input_audio_buffer.speech_stopped",
+                    "input_audio_buffer.committed",
+                    "conversation.item.created",
+                ]
+                assert terminals[1]["item_id"] == terminals[2]["item"]["id"] == started["item_id"]
+                if not direct_audio:
+                    assert terminals[-1]["type"] == "conversation.item.input_audio_transcription.completed"
+                    assert terminals[-1]["item_id"] == started["item_id"]
+                assert service.text_prompt_queue.empty()
+                ws.send_json({"type": "response.create"})
+                created = ws.receive_json()
+                assert created["type"] == "response.created"
+                request = service.text_prompt_queue.get(timeout=1)
+                assert request.turn_id == turn["turn_id"]
+                output_queue.put(AssistantOutputEvent(text=f"Answer {number}", response_key=request.response_key))
+                output_queue.put(AudioOutput(audio=_pcm_bytes(256), response_key=request.response_key))
+                output_queue.put(AssistantResponseDoneEvent(response_key=request.response_key))
+                output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=request.response_key))
+                emitted = []
+                while not emitted or emitted[-1]["type"] != "response.done":
+                    emitted.append(ws.receive_json())
+                assert all(event["type"] != "response.created" for event in emitted)
+                assert emitted[-1]["response"]["id"] == created["response"]["id"]
+                assert emitted[-1]["response"]["status"] == "completed"
+                assert any(event["type"] == "response.output_audio.delta" for event in emitted)
+                assert service.text_prompt_queue.empty()
 
 
 @pytest.fixture(autouse=True)
@@ -85,42 +168,19 @@ def setup():
     service unregistered) must drain SESSION_END themselves — see
     `_simulate_session_end_drain` below.
     """
-    text_prompt_queue: Queue = Queue()
-    should_listen = ThreadingEvent()
-    should_listen.set()
-    service = RealtimeService(
-        text_prompt_queue=text_prompt_queue,
-        should_listen=should_listen,
-    )
-    input_queue: Queue = Queue()
-    output_queue: Queue = Queue()
-    text_output_queue: Queue = Queue()
+    unit = make_pipeline_unit()
     stop_event = ThreadingEvent()
-    response_playing = ThreadingEvent()
-    cancel_scope = CancelScope()
-    unit = PipelineUnit(
-        index=0,
-        service=service,
-        cancel_scope=cancel_scope,
-        should_listen=should_listen,
-        response_playing=response_playing,
-        input_queue=input_queue,
-        output_queue=output_queue,
-        text_output_queue=text_output_queue,
-        text_prompt_queue=text_prompt_queue,
-        handlers=[],
-    )
     app = create_app(pool=[unit], stop_event=stop_event)
     return (
         app,
-        service,
-        input_queue,
-        output_queue,
-        text_output_queue,
-        should_listen,
+        unit.service,
+        unit.input_queue,
+        unit.output_queue,
+        unit.text_output_queue,
+        unit.should_listen,
         stop_event,
-        response_playing,
-        cancel_scope,
+        unit.response_playing,
+        unit.cancel_scope,
     )
 
 
@@ -295,6 +355,28 @@ class TestClientEventDispatch:
                 assert msg["type"] == "conversation.item.created"
                 assert msg["item"]["content"][0]["text"] == "ping"
 
+    def test_openwebui_history_snapshot_id_is_accepted(self, setup):
+        app, service, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime?model=faster-qwen3-tts") as ws:
+                ws.receive_json()
+                ws.send_json(
+                    {
+                        "type": "conversation.item.create",
+                        "item": {
+                            "id": "chat_context_1",
+                            "type": "message",
+                            "role": "system",
+                            "content": [{"type": "input_text", "text": "Current chat snapshot"}],
+                        },
+                    }
+                )
+                event = ws.receive_json()
+                assert event["type"] == "conversation.item.created"
+                assert event["item"]["id"] == "chat_context_1"
+                config = next(iter(service._conns.values())).runtime_config
+                assert config.chat.to_transformers_chat()[0]["content"] == "Current chat snapshot"
+
     def test_response_create_error_when_active(self, setup):
         app, service, *_ = setup
         with TestClient(app) as client:
@@ -331,14 +413,25 @@ class TestClientEventDispatch:
                 ws.receive_json()
                 conn_id = list(service._conns)[0]
                 st = service._state(conn_id)
-                request = GenerateResponseRequest(runtime_config=st.runtime_config)
+                request = GenerateResponseRequest(
+                    runtime_config=st.runtime_config, prefetch_transaction=ResponsePrefetchTransaction()
+                )
                 st.tool_followup_prefetch_request = request
                 st.tool_followup_prefetch_origin_response_key = "response_origin"
                 st.mark_response_pending(request.response_key)
-                output_queue.put(AssistantOutputEvent(text="prefetched", response_key=request.response_key))
+                proposal = ResponseHistory.capture(
+                    st.runtime_config.chat,
+                    [make_assistant_message("prefetched")],
+                    after_item_id=st.runtime_config.chat.history_anchor_id(),
+                    complete=True,
+                )
+                output_queue.put(
+                    AssistantOutputEvent(text="prefetched", response_key=request.response_key, history=proposal)
+                )
 
                 # Give the send loop time to encounter and hold the output.
                 time.sleep(0.1)
+                assert st.runtime_config.chat.buffer == []
                 ws.send_json(
                     {
                         "type": "response.create",
@@ -366,6 +459,7 @@ class TestClientEventDispatch:
                 assert part_added["type"] == "response.content_part.added"
                 assert delta["type"] == "response.output_audio_transcript.delta"
                 assert delta["delta"] == "prefetched"
+                assert [item.content[0].text for item in st.runtime_config.chat.buffer] == ["prefetched"]
 
     def test_early_tool_call_waits_until_response_created_send_completes(self, setup, monkeypatch):
         app, service, _, _, text_output_queue, *_ = setup
@@ -507,7 +601,12 @@ class TestClientEventDispatch:
                 output_queue.put(_pcm_bytes(256))
                 output_queue.put(AssistantOutputEvent(text="stale"))
                 ws.send_json({"type": "response.cancel"})
-                assert ws.receive_json()["type"] == "response.done"
+                # Event-driven wakeup (#692) can deliver a chunk that already left
+                # the queue before cancel runs; drain until the cancel terminal.
+                while True:
+                    event = ws.receive_json()
+                    if event["type"] == "response.done":
+                        break
                 time.sleep(0.1)
                 assert output_queue.empty()
                 assert text_output_queue.empty()
@@ -596,6 +695,82 @@ class TestClientEventDispatch:
 
 
 class TestSendLoop:
+    @pytest.mark.parametrize("partial_count", [0, 5])
+    def test_completed_tool_answer_rejects_duplicate_with_side_channel_backlog(self, setup, partial_count):
+        app, service, _, output_queue, text_output_queue, *_ = setup
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                conn_id = next(iter(service._conns))
+                state = service._state(conn_id)
+                chat = state.runtime_config.chat
+                chat.add_item(make_user_message("Find flights."))
+                chat.add_ordered_function_call(
+                    RealtimeConversationItemFunctionCall(
+                        type="function_call", call_id="call_1", name="lookup", arguments="{}"
+                    )
+                )
+                chat.append_tool_output(
+                    "call_1",
+                    RealtimeConversationItemFunctionCallOutput(
+                        type="function_call_output", call_id="call_1", output="Flights are ready."
+                    ),
+                )
+                ws.send_json({"type": "response.create", "response": {"output_modalities": ["text"]}})
+                assert ws.receive_json()["type"] == "response.created"
+                request = service.text_prompt_queue.get_nowait()
+
+                # Use the real local completion path to compute the consumed IDs.
+                handler = object.__new__(_RecordingLocalHandler)
+                handler.cancel_scope = handler.speculative_turns = handler.compactor = None
+                handler.enable_lang_prompt = False
+                handler.tokenizer = SimpleNamespace(encode=lambda _text: [])
+                handler.emit_text = True
+                chunks = list(handler.process(request))
+                terminal = next(chunk for chunk in chunks if isinstance(chunk, EndOfResponse))
+                assert terminal.input_tool_call_ids == ["call_1"]
+                processor = object.__new__(LMOutputProcessor)
+                processor.setup(text_output_queue=text_output_queue)
+                tts = object.__new__(Qwen3TTSHandler)
+                tts.speculative_turns = None
+
+                # Non-interrupting speech can backlog ordinary partials ahead of
+                # logical completion while this short answer drains in order.
+                service.dispatch_pipeline_event(conn_id, SpeechStartedEvent(interrupt_response=False))
+                for index in range(partial_count):
+                    text_output_queue.put(PartialTranscriptionEvent(delta="And hotels " + "please " * index))
+                for chunk in chunks:
+                    if hasattr(chunk, "response"):
+                        chunk.response = request.response
+                    for event in processor.process(chunk):
+                        if isinstance(event, EndOfResponse):
+                            for output in tts.process(event):
+                                output_queue.put(tts.output_for_queue(output, event))
+                        else:
+                            output_queue.put(event)
+
+                while True:
+                    event = ws.receive_json()
+                    if event["type"] == "response.done":
+                        answer = event["response"]
+                        break
+                assert answer["status"] == "completed" and answer["output"]
+                assert answer["metadata"][TOOL_INPUT_METADATA_KEY] == '["call_1"]'
+                assert "call_1" in state.answered_tool_call_ids
+                ws.send_json(
+                    {
+                        "type": "response.create",
+                        "response": {"metadata": {TOOL_FOLLOWUP_METADATA_KEY: '["call_1"]'}},
+                    }
+                )
+                while True:
+                    event = ws.receive_json()
+                    if event["type"] in {"error", "response.created"}:
+                        break
+                assert event["type"] == "error"
+                assert event["error"]["type"] == TOOL_FOLLOWUP_COVERED
+                assert service.text_prompt_queue.empty()
+
     def test_audio_output_ignores_session_end_control_message(self, setup):
         app, _, _, output_queue, *_ = setup
         with TestClient(app) as client:
@@ -636,12 +811,19 @@ class TestSendLoop:
 
     def test_audio_output_batches_immediately_available_chunks(self, setup):
         app, _, _, output_queue, *_ = setup
+        chunks = [b"\x01\x00" * 256, b"\x02\x00" * 256]
+
+        async def enqueue_available_chunks():
+            # No await: both chunks must be queued before the send loop resumes.
+            for chunk in chunks:
+                output_queue.put(chunk)
+            output_queue.put(PIPELINE_END)
+
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()  # session.created
-                output_queue.put(_pcm_bytes(256))
-                output_queue.put(_pcm_bytes(256))
-                output_queue.put(PIPELINE_END)
+                assert client.portal is not None
+                client.portal.call(enqueue_available_chunks)
 
                 msg1 = ws.receive_json()
                 assert msg1["type"] == "response.created"
@@ -653,7 +835,7 @@ class TestSendLoop:
                 msg4 = ws.receive_json()
                 assert msg4["type"] == "response.output_audio.delta"
                 decoded = base64.b64decode(msg4["delta"])
-                assert len(decoded) == len(_pcm_bytes(512))
+                assert decoded == b"".join(chunks)
 
                 terminal = [ws.receive_json() for _ in range(4)]
                 assert [event["type"] for event in terminal] == [
@@ -662,6 +844,48 @@ class TestSendLoop:
                     "response.output_item.done",
                     "response.done",
                 ]
+                assert_response_lifecycle_contract(
+                    parse_wire_events([msg1, msg2, msg3, msg4, *terminal]),
+                    wants_audio=True,
+                    expected_status="completed",
+                )
+
+    def test_audio_output_delivers_chunk_before_next_chunk_is_produced(self, setup):
+        app, _, _, output_queue, *_ = setup
+        chunks = [b"\x01\x00" * 256, b"\x02\x00" * 256]
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                output_queue.put(chunks[0])
+
+                opening = [ws.receive_json() for _ in range(4)]
+                assert [event["type"] for event in opening] == [
+                    "response.created",
+                    "response.output_item.added",
+                    "response.content_part.added",
+                    "response.output_audio.delta",
+                ]
+                assert base64.b64decode(opening[-1]["delta"]) == chunks[0]
+
+                # Receiving A establishes delivery before B even exists in the queue.
+                output_queue.put(chunks[1])
+                output_queue.put(PIPELINE_END)
+                second = ws.receive_json()
+                assert second["type"] == "response.output_audio.delta"
+                assert base64.b64decode(second["delta"]) == chunks[1]
+
+                terminal = [ws.receive_json() for _ in range(4)]
+                assert [event["type"] for event in terminal] == [
+                    "response.output_audio.done",
+                    "response.content_part.done",
+                    "response.output_item.done",
+                    "response.done",
+                ]
+                assert_response_lifecycle_contract(
+                    parse_wire_events([*opening, second, *terminal]),
+                    wants_audio=True,
+                    expected_status="completed",
+                )
 
     def test_end_marker_sends_finish_events(self, setup):
         app, _, _, output_queue, *_ = setup
@@ -1746,25 +1970,76 @@ class TestDrainRelease:
 # ===================================================================
 
 
-def _make_unit(index: int) -> PipelineUnit:
-    text_prompt_queue: Queue = Queue()
-    should_listen = ThreadingEvent()
-    should_listen.set()
-    return PipelineUnit(
-        index=index,
-        service=RealtimeService(text_prompt_queue=text_prompt_queue, should_listen=should_listen),
-        cancel_scope=CancelScope(),
-        should_listen=should_listen,
-        response_playing=ThreadingEvent(),
-        input_queue=Queue(),
-        output_queue=Queue(),
-        text_output_queue=Queue(),
-        text_prompt_queue=text_prompt_queue,
-        handlers=[],
-    )
+def _make_unit(index: int):
+    return make_pipeline_unit(index=index)
 
 
 class TestPool:
+    @pytest.mark.parametrize(
+        ("stt_languages", "tts_languages", "selection", "shared", "selectable"),
+        [
+            ({"en", "es"}, {"en", "fr"}, True, ["en"], ["en"]),
+            ({"en", "es"}, {"en", "es"}, False, ["en", "es"], []),
+            (None, {"en"}, True, None, None),
+            ({"en"}, None, True, None, None),
+            (None, None, False, None, []),
+            (set(), {"en"}, True, [], []),
+            ({"es"}, {"en"}, True, [], []),
+        ],
+    )
+    def test_language_capabilities_preserve_unknown_and_separate_coverage_from_selection(
+        self, stt_languages, tts_languages, selection, shared, selectable
+    ):
+        unit = _make_unit(0)
+        service = unit.service
+        service.stt_language_capabilities = SpeechLanguageCapabilities(
+            None if stt_languages is None else frozenset(stt_languages), selection, True
+        )
+        service.tts_language_capabilities = SpeechLanguageCapabilities(
+            None if tts_languages is None else frozenset(tts_languages), True, None
+        )
+        service.stt_supported_languages = stt_languages
+        service.tts_supported_languages = tts_languages
+        service.stt_auto_reset_supported = False
+        app = create_app(pool=[unit, _make_unit(1)], stop_event=ThreadingEvent())
+        with TestClient(app) as client:
+            response = client.get("/v1/realtime/capabilities")
+            assert response.status_code == 200
+            pipelines = response.json()["pipelines"]
+            assert [pipeline["index"] for pipeline in pipelines] == [0, 1]
+            discovered = pipelines[0]
+
+            def codes(languages):
+                return None if languages is None else [language["code"] for language in languages]
+
+            assert codes(discovered["stt"]["languages"]) == (None if stt_languages is None else sorted(stt_languages))
+            assert codes(discovered["tts"]["languages"]) == (None if tts_languages is None else sorted(tts_languages))
+            assert codes(discovered["conversation"]["languages"]) == shared
+            assert codes(discovered["conversation"]["selectable_languages"]) == selectable
+            assert discovered["stt"]["supports_language_selection"] is selection
+            assert discovered["stt"]["supports_auto"] is True
+            assert discovered["tts"]["supports_auto"] is None
+            assert discovered["conversation"]["session_auto_supported"] is False
+            assert pipelines[1]["conversation"]["languages"] is None
+            assert client.get("/v1/pool").json()["in_use"] == 0
+            assert service.get_usage()["connections"] == 0
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                assert client.get("/v1/realtime/capabilities").json() == response.json()
+                for language in discovered["conversation"]["selectable_languages"] or []:
+                    ws.send_json(
+                        {
+                            "type": "session.update",
+                            "session": {
+                                "type": "realtime",
+                                "audio": {"input": {"transcription": {"language": language["name"].title()}}},
+                            },
+                        }
+                    )
+                    updated = ws.receive_json()
+                    assert updated["type"] == "session.updated"
+                    assert updated["session"]["audio"]["input"]["transcription"]["language"] == language["code"]
+
     def test_pool_endpoint_reports_idle_state(self):
         pool = [_make_unit(0), _make_unit(1)]
         app = create_app(pool=pool, stop_event=ThreadingEvent())

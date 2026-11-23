@@ -24,6 +24,9 @@ from speech_to_speech.utils.utils import resolve_device
 
 logger = logging.getLogger(__name__)
 
+# Devices the viseme checkpoint can run on; "auto" resolves in this order.
+STV_DEVICES = ("cuda", "npu", "mps", "cpu")
+
 
 class Wav2Vec2STVHandler(BaseHandler[AudioOutItem, AudioOutItem]):
     """Buffer up to half a second for inference and preserve every audio sample.
@@ -54,7 +57,7 @@ class Wav2Vec2STVHandler(BaseHandler[AudioOutItem, AudioOutItem]):
         # Importing Transformers and loading the model are opt-in.
         from transformers import pipeline
 
-        self.device = resolve_device(device, ("cuda", "mps", "cpu"), "Speech-to-viseme")
+        self.device = resolve_device(device, STV_DEVICES, "Speech-to-viseme")
         resource = files("speech_to_speech.STV").joinpath("phoneme_viseme_map.json")
         self.phoneme_viseme_map = json.loads(resource.read_text(encoding="utf-8"))
         self.asr_pipeline = pipeline("automatic-speech-recognition", model=model_name, device=self.device)
