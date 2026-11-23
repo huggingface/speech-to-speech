@@ -626,8 +626,10 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             return
 
         # Normal listening mode
-        self._log_chunks += 1
         audio_int16 = np.frombuffer(audio_chunk, dtype=np.int16)
+        if audio_int16.size == 0:
+            return
+        self._log_chunks += 1
         self._total_samples += len(audio_int16)
         audio_float32 = int2float(audio_int16)
         was_triggered = self.iterator.triggered
