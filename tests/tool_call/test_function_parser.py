@@ -1,4 +1,5 @@
 import json
+import logging
 
 import pytest
 
@@ -9,6 +10,7 @@ from speech_to_speech.LLM.tool_call.function_call import (
     parse_function_call,
 )
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
+from speech_to_speech.pipeline.transcript_logging import set_log_transcripts
 
 # ---------------------------------------------------------------------------
 # parse_function_call – single calls
@@ -417,6 +419,21 @@ class TestJsonToolCallBlocks:
 
         assert parse_json_tool_call_block("<tool_call>{not json}</tool_call>") == []
         assert parse_json_tool_call_block('<tool_call>{"arguments": {}}</tool_call>') == []
+
+    def test_malformed_json_warning_respects_transcript_logging(self, caplog, monkeypatch):
+        private_value = "account-number-8675309"
+        block = '<tool_call>{"name":"remember","arguments":{"note":"' + private_value + '"},}</tool_call>'
+        monkeypatch.setattr("speech_to_speech.pipeline.transcript_logging._log_transcripts", False)
+        with caplog.at_level(logging.WARNING, logger=function_call_module.__name__):
+            assert function_call_module.parse_json_tool_call_block(block) == []
+        assert "Ignoring malformed <tool_call> block" in caplog.text
+        assert private_value not in caplog.text
+
+        caplog.clear()
+        set_log_transcripts(True)
+        with caplog.at_level(logging.WARNING, logger=function_call_module.__name__):
+            assert function_call_module.parse_json_tool_call_block(block) == []
+        assert private_value in caplog.text
 
     @pytest.mark.parametrize("arguments", ["{not json}", [99], None, "", "[]", "null", 42])
     def test_invalid_arguments_do_not_become_empty_calls(self, arguments):

@@ -6,7 +6,7 @@ from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 
-import httpx
+import httpx2
 import numpy as np
 import pytest
 from huggingface_hub.errors import HfHubHTTPError
@@ -201,7 +201,7 @@ def voice_audio_backend(voice_backend, monkeypatch):
         if voice.endswith(suffix):
             Path(voice).read_bytes()
         elif not all(part in available for part in voice.split(",")):
-            response = httpx.Response(404, request=httpx.Request("GET", "https://huggingface.co/missing"))
+            response = httpx2.Response(404, request=httpx2.Request("GET", "https://huggingface.co/missing"))
             raise HfHubHTTPError(f"Missing voice {voice}", response=response)
         load_voice(self, voice)
 

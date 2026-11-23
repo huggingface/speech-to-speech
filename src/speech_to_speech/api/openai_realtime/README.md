@@ -389,6 +389,37 @@ Both handlers yield ordered `AssistantTextPart` and `AssistantToolCallPart` valu
 3. If the tool result needs to be spoken to the user, such as camera/search/data results, the client sends `response.create` to trigger follow-up generation.
 4. For fire-and-forget robot actions such as dance, emotion, head movement, stop, or idle tools, the client can stop after `conversation.item.created`; the assistant should already have spoken the natural lead-in before the tool call.
 
+### Long-running tools
+
+A tool that has not returned does not block the conversation: the user can keep talking, and `response.create` is accepted while calls are running. The model is shown each running call paired with a stand-in output saying the tool is still running, so every backend gets a valid request and the model can see it already made the call. While any call is running, the newest user message in the request also carries one line, marked as not said by the user, that lists the calls still running, including ones the client created itself or whose turn has been trimmed from history; with several in flight, models otherwise lose track and issue them again.
+
+The result is accepted whenever it arrives, in any order, and never starts a response by itself. Each call takes one result: a second `function_call_output` for the same `call_id` is rejected with `invalid_conversation_item` (`invalid_input_item` when it is sent as `response.create` input). If the model has replied in the meantime, to new input or to another `response.create`, the result is shown to it where it arrived, as a message marked as not said by the user, so the client's follow-up `response.create` announces it. When the user's next words follow it directly, a closing `[End of tool result]` line separates the two. Stored history and the wire protocol are unchanged; both renderings exist only in the model request.
+
+Two things follow from this. A call counts as running until an output arrives: a client that gives up on a tool should still send an output saying so, or delete the call item, because the model is otherwise told on every turn that the tool is still running. And a result that arrives late is shown to the model in the user role, marked but not isolated, so a tool that returns text from outside (a web page, a search result) deserves the same care as text pasted into a user message.
+
+One request is still rejected with `function_call_output_pending`: a `response.create` sent right after a tool result while other calls are running that the user has not spoken after, typically the rest of a parallel batch. A message with only an image does not count as the user speaking. Clients that request a follow-up after every result therefore get one reply for the whole batch.
+
+The packaged Python client (`talk`, `local`) follows the same rule. Results of one response are delivered in call order and get one follow-up. Responses do not wait for each other, so the result of a tool called in a later turn is delivered and announced while an earlier tool is still running. If the server holds the follow-up back, the result stays queued and is announced with the next one.
+
+A cancelled response (a barge-in or `response.cancel`) keeps every function call whose `response.function_call_arguments.done` it had sent, from any backend: the client has the full arguments and may already be running the tool. Kept calls are listed as `completed` in its `response.done`, stay in history, and their outputs are still expected. A client that abandons such a call should still send an output saying so; otherwise the model is told on every turn that the tool is still running. The packaged client lets these calls finish and delivers their results. A call listed as `incomplete` was not kept, and an output for it is rejected: this is the case for out-of-band responses, which never write to the conversation, and for failed or incomplete responses.
+
+#### Start-and-notify: the pattern to prefer for work that takes minutes
+
+When the client controls the tool, make it return at once and report the outcome later:
+
+1. The tool starts the work in the background and returns a handle straight away, for example `{"job_id": "a1", "state": "started"}`. The model's next reply ("I've started that") is then based on a real result.
+2. When the work finishes, fails or needs input, the client adds a user message marked as not coming from the user and asks for a response:
+
+```json
+{"type": "conversation.item.create", "item": {"type": "message", "role": "user", "content": [
+  {"type": "input_text", "text": "[background event, not said by the user] Job a1 finished: the site is in ~/sites/bakery"}]}}
+{"type": "response.create"}
+```
+
+3. The session instructions say what such messages are ("messages marked [background event] come from the system, not the user: tell the user briefly what happened") and when to call the tool ("call start_job at once; do not ask for details first"). A status tool lets the model answer "how is it going?".
+
+The client chooses the moment to deliver the event, typically once the user has stopped speaking and no reply is playing, and can drop one that is no longer relevant. With this pattern no call is ever left without a result, so the stand-in described above never appears; that behaviour remains the fallback for tools that cannot return early.
+
 ### Packaged Python client tools
 
 The microphone/speaker client used by `talk` and `local` only executes explicitly declared Python tools. An importable tool module provides flattened Realtime function definitions in `TOOLS` and an async `execute_tool(name, arguments)` callback:
@@ -456,7 +487,7 @@ export YDC_API_KEY="your-key"
 
 Return `ToolResult(output, create_response=False)` for a fire-and-forget action that should not produce another assistant turn. The client submits every pending tool output before sending one follow-up `response.create` if any result requests one. Plain return values use the module-wide `CREATE_RESPONSE` fallback, which defaults to `True`; set it to `False` when most tools in a module are fire-and-forget and opt individual result-bearing tools back in with `ToolResult`.
 
-Calls start as soon as their standard `response.function_call_arguments.done` events arrive, away from the receive loop. Completed outputs are submitted in protocol `output_index` order from `response.output_item.added`; the terminal `response.output` provides the same ordering authority for compatible servers that omit the added event. This lets tool work and hidden follow-up generation overlap acknowledgement speech without turning completion-event timing into conversation order. The client still waits for the origin `response.done(status="completed")` before sending one public follow-up `response.create`; cancelled or incomplete responses cancel any results that have not already been submitted. `execute_tool` may be an async function, an object with async `__call__`, or another callable that returns an awaitable. Unknown tools, malformed JSON, non-awaitable handlers, and handler failures are returned as `function_call_output` errors and always request a recovery response, even when the module default is fire-and-forget. Outstanding async handlers are cancelled on disconnect or shutdown.
+Calls start as soon as their standard `response.function_call_arguments.done` events arrive, away from the receive loop. Completed outputs are submitted in protocol `output_index` order from `response.output_item.added`; the terminal `response.output` provides the same ordering authority for compatible servers that omit the added event. This lets tool work and hidden follow-up generation overlap acknowledgement speech without turning completion-event timing into conversation order. The client still waits for the origin `response.done` before sending one public follow-up `response.create`. A cancelled response keeps the calls it lists as `completed`: they run to the end and their results are submitted and followed up as usual. Its other calls, and every call of an incomplete or failed response, are cancelled along with any result that has not already been submitted. `execute_tool` may be an async function, an object with async `__call__`, or another callable that returns an awaitable. Unknown tools, malformed JSON, non-awaitable handlers, and handler failures are returned as `function_call_output` errors and always request a recovery response, even when the module default is fire-and-forget. Outstanding async handlers are cancelled on disconnect or shutdown.
 
 If a tool finishes while the user is speaking, the client submits its output but holds the follow-up `response.create` until the user's item is committed, when the turn can no longer reopen. A completed answer suppresses a follow-up only when the server reports that its model input included the result. A result that arrives after generation starts still needs a follow-up. Failed, cancelled and empty answers do not suppress it.
 

@@ -71,7 +71,7 @@ _YES_RE = re.compile(r"\b(?:yes|yeah|yep|yup)\b", re.IGNORECASE)
 _NO_RE = re.compile(r"\b(?:no|nope|nah)\b", re.IGNORECASE)
 _VALID_RE = re.compile(r"\b(?:in\s*-?\s*valid|invalid|valid)\b", re.IGNORECASE)
 # Matches "not valid" and "not deductively valid", but not "not sure this is valid".
-_NEGATION_RE = re.compile(r"\b(?:not|isn't|aren't|never|n't)\b(?:\s+\w+ly)?\s*$", re.IGNORECASE)
+_NEGATION_RE = re.compile(r"\b(?:not|isn['’]t|aren['’]t|never|n['’]t)\b(?:\s+\w+ly)?\s*$", re.IGNORECASE)
 
 _NUMBER_WORDS: dict[str, int] = {
     "zero": 0,

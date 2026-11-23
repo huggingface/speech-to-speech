@@ -79,6 +79,7 @@ class SpeculativeTurnTracker:
         self._last_final_audio_ms: int | None = None
         self._processing_deadline: float | None = None
         self._unanswered_reopen_ms = 7000
+        self._last_response_closed_at: float | None = None
         self.wait_observer: Callable[[str, int, float, float], None] | None = None
 
     @property
@@ -276,6 +277,8 @@ class SpeculativeTurnTracker:
         and client-requested responses for it remain valid, and it cannot
         reopen. The next turn makes it stale.
         """
+        # Stamped for every finished response, including ones with no user turn (a greeting).
+        self._last_response_closed_at = time.monotonic()
         if turn_id is None or revision is None:
             return
         with self._condition:
@@ -288,6 +291,11 @@ class SpeculativeTurnTracker:
                 self._phase = TurnPhase.CLOSED
                 self._processing_deadline = None
             self._condition.notify_all()
+
+    def seconds_since_response_closed(self) -> float | None:
+        """Wall-clock seconds since the last response reached its terminal event, if any."""
+        closed_at = self._last_response_closed_at
+        return None if closed_at is None else max(0.0, time.monotonic() - closed_at)
 
     def is_current_turn(self, turn_id: str | None) -> bool:
         """Return whether *turn_id* is the conversation's current turn at any revision."""
@@ -481,6 +489,7 @@ class SpeculativeTurnTracker:
             self._phase = None
             self._last_final_audio_ms = None
             self._processing_deadline = None
+            self._last_response_closed_at = None
             self._committed.clear()
             self._closed_current = None
             self._pending_reopen = None

@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.LLM.tool_call.signature_from_schema import signature_from_schema
+from speech_to_speech.pipeline.transcript_logging import transcript_for_log
 from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
@@ -308,7 +309,7 @@ def parse_json_tool_call_block(block: str) -> List[FunctionToolCall]:
     try:
         payload = json.loads(inner.strip())
     except json.JSONDecodeError:
-        logger.warning("Ignoring malformed <tool_call> block: %r", block[:200])
+        logger.warning("Ignoring malformed <tool_call> block: %s", transcript_for_log(block[:200]))
         return []
     items = payload if isinstance(payload, list) else [payload]
     calls: List[FunctionToolCall] = []

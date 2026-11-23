@@ -124,9 +124,11 @@ def _extract_json(text: str) -> dict[str, Any]:
         return json.loads(m.group(1))
 
     start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end > start:
-        return json.loads(text[start : end + 1])
+    if start != -1:
+        try:
+            return json.JSONDecoder().raw_decode(text[start:])[0]
+        except json.JSONDecodeError:
+            pass
 
     raise ValueError(f"No JSON object found in compaction response: {text!r}")
 

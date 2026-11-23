@@ -140,24 +140,12 @@ class FacebookMMSTTSHandler(BaseTTSHandler):
             return None
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
-        speculative_turns = getattr(self, "speculative_turns", None)
         if isinstance(tts_input, EndOfResponse):
-            if speculative_turns and not speculative_turns.wait_for_gate(
-                tts_input.turn_id,
-                tts_input.turn_revision,
-            ):
-                if tts_input.response_key is None:
-                    return
-                tts_input.cleanup_only = True
-            yield AUDIO_RESPONSE_DONE
+            if self._gate_end_of_response(tts_input):
+                yield AUDIO_RESPONSE_DONE
             return
 
-        if speculative_turns and not speculative_turns.wait_for_gate(
-            tts_input.turn_id,
-            tts_input.turn_revision,
-            commit=True,
-        ):
-            logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
+        if not self._admit_input(tts_input):
             return
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
@@ -214,7 +202,7 @@ class FacebookMMSTTSHandler(BaseTTSHandler):
         audio_resampled = librosa.resample(audio_numpy, orig_sr=self.model.config.sampling_rate, target_sr=16000)
         logger.debug(f"Resampled audio shape: {audio_resampled.shape}, dtype: {audio_resampled.dtype}")
 
-        audio_int16 = (audio_resampled * 32768).astype(np.int16)
+        audio_int16 = np.clip(audio_resampled * 32768, -32768, 32767).astype(np.int16)
         logger.debug(f"Final audio shape: {audio_int16.shape}, dtype: {audio_int16.dtype}")
 
         for i in range(0, len(audio_int16), self.chunk_size):

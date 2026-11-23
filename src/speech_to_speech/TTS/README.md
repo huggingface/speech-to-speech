@@ -19,6 +19,7 @@ Runtime-supported values in `s2s_pipeline.py`:
 - `kokoro` → `kokoro_handler.py`
 - `kitten` → `kitten_tts_handler.py`
 - `omnivoice` → `omnivoice_handler.py`
+- `irodori` → `irodori_tts_handler.py`
 - `qwen3` → `qwen3_tts_handler.py`
 - `openai` → `openai_compatible_handler.py`
 - `drama3` → `drama3_handler.py`
@@ -351,6 +352,37 @@ speech-to-speech serve --tts phonon
 For a checkout, install with `pip install -e ".[phonon]"`. An optional real-checkpoint test can be run with `PHONON_TEST_CHECKPOINT=/path/to/checkpoint pytest tests/test_phonon_tts_handler.py`; ordinary tests use a fake runtime and require no weights.
 
 Upstream: [runtime](https://github.com/gradium-ai/xn-ptts/releases/tag/v0.4.0), [Python guide](https://github.com/gradium-ai/xn-ptts/tree/v0.4.0/ptts-pyo3), and [default checkpoint](https://huggingface.co/gradium/phonon-31m-en).
+
+### 11) Irodori-TTS (`--tts irodori`)
+
+Primary args prefix: `--irodori_*`
+
+Irodori-TTS and its DACVAE codec are not on PyPI. Install these inspected commits after `speech-to-speech`; the [README](../../../README.md#irodori-tts) explains `--no-deps`:
+
+```bash
+pip install --no-deps \
+    "irodori-tts @ git+https://github.com/Aratako/Irodori-TTS@382205679ebc32295b7d1bfb329327d04c8f4eed" \
+    "dacvae @ git+https://github.com/facebookresearch/dacvae@414c20785fc3a28373073ea8ef7a1316eeeaca6e" \
+    "descript-audiotools==0.7.2"
+pip install einops ffmpy flatten-dict importlib-resources julius pyloudnorm randomname tensorboard torchcodec
+speech-to-speech serve \
+  --tts irodori \
+  --irodori_device mps \
+  --irodori_caption "明るく元気な若い女性の声。親しみやすく、楽しげに話す。"
+```
+
+- `--irodori_caption` describes the voice and speaking style in Japanese. It needs a checkpoint with caption conditioning, such as the v4 ones. With neither a caption nor a reference clip the model draws a new voice for every sentence, so the handler then uses a calm young female voice.
+- `--irodori_ref_audio /voices/reference.wav` clones a voice instead. Add a caption to steer its style. The clip is encoded once during setup; `torchcodec` decodes it and needs FFmpeg.
+- Every sentence is sampled with the same caption and the same seed, which keeps one voice across a conversation. A caption alone still leaves the voice less fixed than a reference clip does.
+- `--irodori_model_name` takes a Hugging Face repository or a local `model.safetensors`; for a local v4 checkpoint keep its `tokenizer/` directory next to it. The default MeanFlow checkpoint samples in four steps and the Rectified Flow checkpoints in 40; `--irodori_num_steps` overrides either.
+- `--irodori_device` accepts `auto`, `cuda`, `xpu`, `mps`, or `cpu`. The model runs in float32 and the codec uses the same device.
+- Japanese only. The handler reports `ja` as its one language and ignores session language selection. Uncommon kanji readings can be wrong; see the model card.
+- Irodori-TTS returns a complete 48 kHz waveform. The handler downsamples it to 16 kHz `int16` blocks, so the first block follows synthesis of the whole sentence, and an interruption during synthesis discards the result once the blocking call returns.
+- Emoji style control is not available: the pipeline removes emoji from assistant text before it reaches TTS.
+- Irodori-TTS watermarks its output with SilentCipher when that package is installed. The commands above do not install it.
+
+> [!WARNING]
+> Irodori-TTS code and weights are MIT, with [ethical restrictions](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small-MF) in the model card. Clone a voice only with the speaker's consent; do not use it for impersonation or to mislead.
 
 ## Setup
 
