@@ -215,6 +215,53 @@ def test_prepare_surfaces_failure_and_bounds_wait(broker_type, tmp_path):
         finish.set()
 
 
+def _late_failure_path():
+    """A Path type whose first look at failure.json waits for the driver to finish, then misses it.
+
+    That is the interleaving where the worker fails between a waiter's failure check and its
+    closed/finished check.
+    """
+
+    class LatePath(type(Path())):
+        missed = False
+
+        def exists(self, *args, **kwargs):
+            if self.name == "failure.json" and not LatePath.missed:
+                LatePath.missed = True
+                deadline = time.monotonic() + 2
+                while not (self.parent / "finished").exists():
+                    assert time.monotonic() < deadline, "driver never finished"
+                    time.sleep(0.002)
+                return False
+            return super().exists(*args, **kwargs)
+
+    return LatePath
+
+
+def test_prepare_reports_a_failure_written_between_its_checks(worker_definitions, tmp_path, monkeypatch):
+    def fail(ident):
+        raise RuntimeError("warmup failed")
+        yield
+
+    monkeypatch.setitem(worker_definitions, "Path", _late_failure_path())
+    with pytest.raises(RuntimeError, match="warmup failed"):
+        worker_definitions["LeaseBroker"](fail, tmp_path).prepare()
+
+
+def test_submit_reports_a_failure_written_between_its_checks(worker_definitions, tmp_path, monkeypatch):
+    def runner(ident):
+        directory = tmp_path / ident
+        request = requests(directory)[0]
+        (directory / (request.name.split(".")[0] + ".accepted")).touch()
+        raise RuntimeError("worker crashed")
+        yield
+
+    monkeypatch.setitem(worker_definitions, "Path", _late_failure_path())
+    broker = worker_definitions["LeaseBroker"](runner, tmp_path, wait_timeout=3)
+    with pytest.raises(RuntimeError, match="worker crashed"):
+        list(broker.submit("tokens", {}))
+
+
 @pytest.mark.parametrize("accepted", [False, True])
 def test_cancel_pending_command_returns_before_worker_and_leaves_tombstone(broker_type, tmp_path, accepted):
     entered, release, cancelled = Event(), Event(), Event()
