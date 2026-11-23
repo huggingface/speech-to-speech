@@ -171,7 +171,7 @@ test("Parakeet capabilities keep named preferences out of audio configuration an
   assert.equal(session.audio.output.voice, "Vivian");
 });
 
-test("a language must be selectable on every known pipeline to be sent", async (t) => {
+test("a language partly selectable across pipelines is sent only in the separate update", async (t) => {
   const client = new S2sRealtimeClient({ transport: "websocket", language: "es" });
   await discoverCapabilities(t, client,
     conversationCapabilities(["en", "es"], false), conversationCapabilities(["en"], false));
@@ -179,9 +179,20 @@ test("a language must be selectable on every known pipeline to be sent", async (
   const events = [];
   client._transport = { sendEvent: event => events.push(event) };
   client._sendLanguageUpdate("es");
-  assert.equal(events.length, 0);
+  assert.deepEqual(events[0].session.audio, { input: { transcription: { language: "es" } } });
   client._sendLanguageUpdate("en");
-  assert.equal(events[0].session.audio.input.transcription.language, "en");
+  assert.equal(events[1].session.audio.input.transcription.language, "en");
+});
+
+test("a language no pipeline can select is never sent", async (t) => {
+  const client = new S2sRealtimeClient({ transport: "websocket", language: "es" });
+  await discoverCapabilities(t, client,
+    conversationCapabilities(["en", "de"], false), conversationCapabilities(["en"], false));
+  assert.deepEqual(client._sessionConfig().audio.input.transcription, { model: "whisper-1" });
+  const events = [];
+  client._transport = { sendEvent: event => events.push(event) };
+  client._sendLanguageUpdate("es");
+  assert.equal(events.length, 0);
 });
 
 test("unavailable discovery keeps unverified hints separate from audio configuration", async (t) => {

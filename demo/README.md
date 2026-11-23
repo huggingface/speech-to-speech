@@ -392,7 +392,7 @@ reply language. The choice persists across reloads. Changes made while queued
 apply when the conversation starts.
 
 The demo also uses the selection as a speech hint when the backends support it.
-If a pipeline rules out that hint, the demo uses **Auto** when available. If
-discovery cannot confirm a named hint, the demo sends it in a separate update so
-a rejection cannot discard the audio settings. Switching back to **Auto** during
+If every pipeline rules out that hint, the demo uses **Auto** when available. If
+discovery cannot confirm that every pipeline accepts a named hint, the demo sends
+it in a separate update so a rejection cannot discard the audio settings. Switching back to **Auto** during
 a call requires backend support.

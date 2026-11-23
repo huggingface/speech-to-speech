@@ -349,11 +349,14 @@ export class S2sRealtimeClient extends EventTarget {
     const auto = this._autoLanguageSupported ? "auto" : undefined;
     if (language === "auto") return auto;
     // The server can route the connection to any pipeline in the pool.
-    if (this._selectableLanguages.some(languages => Array.isArray(languages)
-      && !languages.some(choice => choice?.code === language))) return auto;
-    if (allowUnknown || (this._selectableLanguages.length && this._selectableLanguages.every(Array.isArray))) {
-      return language;
-    }
+    const pipelines = this._selectableLanguages;
+    const known = pipelines.length > 0 && pipelines.every(Array.isArray);
+    const accepts = pipelines.map(languages => Array.isArray(languages)
+      && languages.some(choice => choice?.code === language));
+    // A separate hint can fail harmlessly, so skip it only when every pipeline rejects it.
+    if (allowUnknown) return known && !accepts.some(Boolean) ? auto : language;
+    if (known && accepts.every(Boolean)) return language;
+    if (pipelines.some((languages, index) => Array.isArray(languages) && !accepts[index])) return auto;
   }
 
   _languageConfig(language) {
