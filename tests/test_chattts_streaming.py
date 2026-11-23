@@ -154,3 +154,20 @@ def test_streaming_speaks_every_sentence_of_the_input(handler_factory, monkeypat
     # Each sentence plays in full and in order, not interleaved with the others.
     runs = [(level, len(list(group))) for level, group in itertools.groupby(levels)]
     assert runs == [(1, 4000), (2, 8000), (3, 12000)]
+
+
+def test_non_streaming_clips_pcm_instead_of_wrapping(handler_factory, monkeypatch):
+    # librosa.resample can overshoot a peak near full scale; int16 must saturate, not wrap.
+    from speech_to_speech.TTS import chatTTS_handler
+
+    resampled = np.array([1.0, 1.2, -1.2, 0.5], dtype=np.float32)
+    monkeypatch.setattr(chatTTS_handler, "librosa", SimpleNamespace(resample=lambda *_a, **_k: resampled))
+    handler = handler_factory([])
+    handler.stream = False
+    handler.model = SimpleNamespace(infer=lambda *_a, **_k: [np.full(6, 0.5, dtype=np.float32)])
+
+    blocks = _blocks(handler)
+
+    assert len(blocks) == 1
+    np.testing.assert_array_equal(blocks[0][:4], np.array([32767, 32767, -32768, 16384], dtype=np.int16))
+    assert not np.any(blocks[0][4:])
