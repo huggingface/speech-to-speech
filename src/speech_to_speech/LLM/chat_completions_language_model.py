@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
+from functools import partial
 from typing import Any, cast
 
 from openai import Stream
@@ -38,6 +39,7 @@ from speech_to_speech.LLM.base_openai_compatible_language_model import (
 from speech_to_speech.LLM.chat import Chat
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn
 from speech_to_speech.LLM.tool_call.function_call import JSON_TOOL_CALL_END, JSON_TOOL_CALL_ENTER
+from speech_to_speech.pipeline.handler_types import LLMOut
 from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
@@ -315,8 +317,14 @@ class _ToolCallMarkupFilter:
         return bool(segment.strip()) if self.stripped else bool(segment)
 
 
-def _iter_chat_stream_events(api_response: Stream[ChatCompletionChunk]) -> Iterator[ProviderEvent]:
-    """Normalize a streaming Chat Completions response."""
+def _iter_chat_stream_events(
+    api_response: Stream[ChatCompletionChunk], *, strip_tool_markup: bool = True
+) -> Iterator[ProviderEvent]:
+    """Normalize a streaming Chat Completions response.
+
+    ``strip_tool_markup`` drops leaked ``<tool_call>`` tags; pass ``False`` when
+    the request offered no tools so text passes through verbatim.
+    """
     tool_accum: dict[int, dict[str, str]] = {}
     usage: Usage | None = None
     text_segment = ""
@@ -369,6 +377,9 @@ def _iter_chat_stream_events(api_response: Stream[ChatCompletionChunk]) -> Itera
         deferred_tools.clear()
 
     def handle_text(text: str) -> Iterator[ProviderEvent]:
+        if not strip_tool_markup:
+            yield from emit_text(text)
+            return
         held, new = markup.feed(text)
         yield from emit_text(held)
         release_deferred_tools()
@@ -410,7 +421,7 @@ def _iter_chat_stream_events(api_response: Stream[ChatCompletionChunk]) -> Itera
         yield usage
 
 
-def _iter_chat_response_events(api_response: Any) -> Iterator[ProviderEvent]:
+def _iter_chat_response_events(api_response: Any, *, strip_tool_markup: bool = True) -> Iterator[ProviderEvent]:
     """Normalize a non-streaming Chat Completions response."""
     usage = api_response.usage
     if usage:
@@ -428,7 +439,7 @@ def _iter_chat_response_events(api_response: Any) -> Iterator[ProviderEvent]:
     raw_content = message.content or getattr(message, "refusal", None)
     if raw_content:
         markup = _ToolCallMarkupFilter()
-        content = "".join(markup.feed(raw_content)) + markup.flush()
+        content = "".join(markup.feed(raw_content)) + markup.flush() if strip_tool_markup else raw_content
         if markup.keeps(content):
             yield AssistantMessage(content=[AssistantContent(type="output_text", text=content)])
             yield TextDelta(text=content)
@@ -526,6 +537,27 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
             timeout=self.request_timeout,
             optional_kwargs=optional_kwargs,
         )
+
+    def _generate(
+        self,
+        active_chat: Chat,
+        original_chat: Chat,
+        turn: Any,
+        optional_kwargs: dict[str, Any],
+        **kwargs: Any,
+    ) -> Generator[LLMOut, None, bool]:
+        # Leaked <tool_call> tags come from the server-side tool parser, which only
+        # runs when the request offers tools; otherwise keep the text verbatim.
+        kwargs["event_iterator_fn"] = partial(
+            self._iter_chat_events, strip_tool_markup=bool(optional_kwargs.get("tools"))
+        )
+        return (yield from super()._generate(active_chat, original_chat, turn, optional_kwargs, **kwargs))
+
+    def _iter_chat_events(self, api_response: Any, *, strip_tool_markup: bool) -> Iterator[ProviderEvent]:
+        if self.stream:
+            yield from _iter_chat_stream_events(api_response, strip_tool_markup=strip_tool_markup)
+        else:
+            yield from _iter_chat_response_events(api_response, strip_tool_markup=strip_tool_markup)
 
     def _iter_stream_events(self, api_response: Stream[ChatCompletionChunk]) -> Iterator[ProviderEvent]:
         yield from _iter_chat_stream_events(api_response)

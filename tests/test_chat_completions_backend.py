@@ -1076,6 +1076,40 @@ def test_non_streaming_drops_leaked_tool_call_tag():
     assert not any(getattr(i, "role", None) == "assistant" for i in chat.buffer)
 
 
+_LITERAL_TAG = "Example: <tool_call> is a literal tag."
+
+
+def _assistant_history(chat):
+    return [part.text for i in chat.buffer if getattr(i, "role", None) == "assistant" for part in i.content]
+
+
+def test_streaming_keeps_literal_tool_call_tag_without_tools():
+    h = _make_handler(stream=True)
+    h.client.chat.completions.create = lambda **k: _FakeStream(
+        [
+            _chunk(content="Example: <tool_"),
+            _chunk(content="call> is a literal tag."),
+            _chunk(usage=SimpleNamespace(prompt_tokens=2, completion_tokens=2)),
+        ]
+    )
+    text, tools, _usage, chat, _end = _drive(h, response=RealtimeResponseCreateParams(output_modalities=["text"]))
+    assert text == _LITERAL_TAG
+    assert tools == []
+    assert _assistant_history(chat) == [_LITERAL_TAG]
+
+
+def test_non_streaming_keeps_literal_tool_call_tag_without_tools():
+    h = _make_handler(stream=False)
+    h.client.chat.completions.create = lambda **k: SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=_LITERAL_TAG, tool_calls=[]))],
+        usage=SimpleNamespace(prompt_tokens=2, completion_tokens=2),
+    )
+    text, tools, _usage, chat, _end = _drive(h, response=RealtimeResponseCreateParams(output_modalities=["text"]))
+    assert text == _LITERAL_TAG
+    assert tools == []
+    assert _assistant_history(chat) == [_LITERAL_TAG]
+
+
 # ── tool_choice decoupled from tools ──────────────────────────────────────────
 
 
