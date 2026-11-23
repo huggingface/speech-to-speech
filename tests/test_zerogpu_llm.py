@@ -232,3 +232,51 @@ def test_zero_gpu_generation_counts_a_latency_round(adapter):
     with bind_active_turn_latency_tracker(tracker):
         list(h._generate(config.chat, "en", None, ctx))
     assert tracker.llm_rounds == 1
+
+
+def _registry_handler(**options):
+    from speech_to_speech.arguments_classes.zerogpu_arguments import ZeroGPULLMArguments
+    from speech_to_speech.backend_registry import LLM_BACKENDS, BackendSelection, HandlerContext, create_backend_handler
+    from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+
+    spec = LLM_BACKENDS["zerogpu"]
+    context = HandlerContext(
+        stop_event=Event(),
+        queue_in=Queue(),
+        queue_out=Queue(),
+        text_output_queue=Queue(),
+        should_listen=Event(),
+        cancel_scope=CancelScope(),
+        speculative_turns=SpeculativeTurnTracker(),
+        pipeline_index=0,
+        sample_rate=16000,
+        enable_live_transcription=False,
+        live_transcription_update_interval=0.5,
+    )
+    return create_backend_handler(BackendSelection(spec, spec.normalize(ZeroGPULLMArguments(**options))), context)
+
+
+def test_current_date_flags_reach_zero_gpu_handler(adapter):
+    from zoneinfo import ZoneInfo
+
+    module, worker = adapter
+    seen = []
+
+    def tokens(messages, kwargs, *, cancelled=None):
+        seen.append(messages)
+        yield "Hi."
+
+    worker.tokens = tokens
+    h = _registry_handler(llm_current_date=True, llm_timezone="America/New_York")
+    assert h.current_date is True
+    assert h.current_date_tz == ZoneInfo("America/New_York")
+    config = RuntimeConfig()
+    config.chat.add_item(make_user_message("What day is it?"))
+    assert list(h.process(request(config)))[-1].error is None
+    assert seen[0][0]["role"] == "system"
+    assert str(seen[0][0]["content"]).startswith("Today is ")
+
+
+def test_zero_gpu_rejects_invalid_timezone(adapter):
+    with pytest.raises(ValueError, match="Unknown --llm_timezone 'Not/AZone'"):
+        _registry_handler(llm_current_date=True, llm_timezone="Not/AZone")

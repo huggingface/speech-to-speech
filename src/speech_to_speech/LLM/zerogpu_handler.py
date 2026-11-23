@@ -8,12 +8,13 @@ from speech_to_speech.zerogpu import runtime
 
 
 class ZeroGPULLMHandler(BaseLanguageModelHandler):
-    def setup(self, compact_history=False, **kwargs):
+    def setup(self, compact_history=False, llm_current_date=False, llm_timezone=None, **kwargs):
         if compact_history:
             raise ValueError("ZeroGPU background history compaction is not supported yet.")
         # The parent only formats prompts; inference always runs on worker CUDA.
         kwargs["device"] = "cpu"
-        super().setup(compact_history=False, **kwargs)
+        # The zerogpu_llm config prefix leaves the shared llm_* date options unstripped.
+        super().setup(compact_history=False, current_date=llm_current_date, timezone=llm_timezone, **kwargs)
 
     def _load_model(self, model_name, device, torch_dtype, gen_kwargs):
         # Token counting and prompt formatting are CPU operations.
