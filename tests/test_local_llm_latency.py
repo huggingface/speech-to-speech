@@ -76,7 +76,7 @@ def test_local_ttft_precedes_sentence_batching_and_trailing_reply(monkeypatch, t
 
 @pytest.mark.parametrize("handler_type", [LanguageModelHandler, VisionLanguageModelHandler])
 @pytest.mark.parametrize("interrupt", [None, "cancel", "shutdown"])
-def test_transformers_cleanup_consumes_end_marker_once_and_reuses_streamer(monkeypatch, handler_type, interrupt):
+def test_transformers_generation_honors_settings_and_reuses_streamer(monkeypatch, handler_type, interrupt):
     handler = object.__new__(handler_type)
     handler.backend = "transformers"
     handler.device = "cpu"
@@ -93,7 +93,13 @@ def test_transformers_cleanup_consumes_end_marker_once_and_reuses_streamer(monke
     handler.enable_lang_prompt = False
     handler.compactor = None
     handler.stream_batch_sentences = 1
-    handler.gen_kwargs = {}
+    handler.gen_kwargs = {
+        "max_new_tokens": 16,
+        "min_new_tokens": 2,
+        "do_sample": True,
+        "temperature": 0.7,
+        "eos_token_id": 7,
+    }
     store = handler.turn_latency_store = TurnLatencyStore()
     reads_after_end = []
     consumed_end = [False]
@@ -109,8 +115,10 @@ def test_transformers_cleanup_consumes_end_marker_once_and_reuses_streamer(monke
 
     monkeypatch.setattr(handler.streamer.text_queue, "get", get)
     turns = [interrupt, None]
+    generation_calls = []
 
     def generate(*args, **kwargs):
+        generation_calls.append(kwargs)
         mode = turns.pop(0)
         if mode == "cancel":
             handler.cancel_scope.cancel()
@@ -134,6 +142,10 @@ def test_transformers_cleanup_consumes_end_marker_once_and_reuses_streamer(monke
         )
         tracker = store.get_or_create_response(request.response_key)
         outputs = list(handler.process(request))
+        assert {key: generation_calls[-1].get(key) for key in handler.gen_kwargs} == handler.gen_kwargs
+        if handler_type is VisionLanguageModelHandler:
+            assert generation_calls[-1]["streamer"] is handler.streamer
+            assert generation_calls[-1]["stopping_criteria"] == [handler._cancel_criteria]
         if turn == 0 and interrupt == "shutdown":
             assert not outputs
         else:
@@ -147,3 +159,28 @@ def test_transformers_cleanup_consumes_end_marker_once_and_reuses_streamer(monke
             assert tracker.llm_s is not None
         assert handler.streamer.text_queue.empty()
     assert not reads_after_end
+
+
+@pytest.mark.parametrize("temperature", [None, 0.7])
+def test_vision_sampling_requires_positive_temperature_before_loading(monkeypatch, temperature):
+    from speech_to_speech.arguments_classes.language_model_arguments import LanguageModelHandlerArguments
+    from speech_to_speech.backend_registry import normalize_dataclass_config
+
+    args = LanguageModelHandlerArguments(llm_gen_do_sample=True)
+    if temperature is not None:
+        args.llm_gen_temperature = temperature
+    gen_kwargs = normalize_dataclass_config(args, "llm")["gen_kwargs"]
+
+    class Loaded(Exception):
+        pass
+
+    def from_pretrained(*args, **kwargs):
+        raise Loaded
+
+    monkeypatch.setattr(language_model.AutoProcessor, "from_pretrained", from_pretrained)
+    handler = object.__new__(VisionLanguageModelHandler)
+    handler.backend = "transformers"
+
+    expected = Loaded if temperature else ValueError
+    with pytest.raises(expected):
+        handler._load_model("model", "cpu", "float32", gen_kwargs)

@@ -1,7 +1,7 @@
 FROM node:24-slim AS agents-sdk
 
 WORKDIR /sdk
-COPY package.json package-lock.json ./
+COPY package.json package-lock.json .npmrc ./
 RUN npm ci --omit=dev
 
 # Single runtime container: serves the static front-end AND API proxies.

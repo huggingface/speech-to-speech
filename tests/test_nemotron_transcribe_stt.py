@@ -21,6 +21,7 @@ from speech_to_speech.STT.nemotron_transcribe import (
     NemotronTranscriptionOperation,
     build_prompt,
     clean_transcript,
+    is_filler_only,
 )
 from speech_to_speech.STT.openai_compatible_handler import (
     OpenAICompatibleSTTHandler,
@@ -147,9 +148,8 @@ def test_session_language_then_auto_clears_configured_hint_and_next_session(nati
         replies.append(response("bonjour"))
         output = transcribe(stt, cfg)
         prompt = json.loads(requests[-1].content)["messages"][0]["content"][0]["text"]
-        assert ("Language:" in prompt) == (code != "auto")
-        if code != "auto":
-            assert build_prompt("", (), code) == prompt
+        assert build_prompt("", (), code) == prompt
+        assert ("Do not translate." in prompt) == (code != "auto")
         assert output.language_code == (None if code == "auto" else code)
         stt.on_session_end()
         stt.reset_session_language()
@@ -305,10 +305,94 @@ def test_native_request_cancellation_interrupts_http_and_allows_reuse(monkeypatc
 
 
 @pytest.mark.parametrize(
+    "text",
+    ["Uh-huh.", "Uh-oh.", "Uh-uh.", "Oh.", "Ooh.", "Huh?", "Cough.", "Cough cough.", "Laughter.", "Ugh."],
+)
+def test_filler_only_transcripts_are_recognised(text):
+    assert is_filler_only(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["", "Sí.", "No.", "Okay.", "Ajá.", "Mm.", "Oh my god.", "Uh-huh, that's right.", "I have a cough.", "はい。"],
+)
+def test_real_replies_are_not_filler_only(text):
+    assert not is_filler_only(text)
+
+
+def test_filler_only_transcripts_become_empty_finals_only_when_enabled(native_server):
+    _, replies = native_server
+    keeping, dropping, dropping_again = handler(), handler(drop_filler_only=True), handler(drop_filler_only=True)
+    replies.extend([response("<ev:breath> Uh-huh."), response("Uh-huh."), response("Uh-huh, yes.")])
+
+    assert transcribe(keeping).text == "Uh-huh."
+    assert transcribe(dropping).text == ""
+    assert transcribe(dropping_again).text == "Uh-huh, yes."
+
+
+@pytest.mark.parametrize(
+    "windows,expected",
+    [
+        (["Uh-huh.", "That's right."], "Uh-huh. That's right."),
+        (["That's right.", "Uh-huh."], "That's right. Uh-huh."),
+        (["<ev:breath>", "Uh-huh."], ""),
+    ],
+)
+def test_filler_filter_applies_to_assembled_turn(native_server, monkeypatch, windows, expected):
+    requests, replies = native_server
+    stt = handler(drop_filler_only=True, max_window_s=1)
+    monkeypatch.setattr(stt, "_window_end", lambda audio, start, maximum: start + maximum)
+    requests.clear()  # Exclude the setup warmup request.
+    replies.extend(response(text) for text in windows)
+    try:
+        assert transcribe(stt, seconds=2).text == expected
+        assert len(requests) == 2
+    finally:
+        stt.cleanup()
+
+
+@pytest.mark.parametrize("max_window_s", [None, 30])
+def test_filler_filter_handles_single_request(native_server, max_window_s):
+    _, replies = native_server
+    stt = handler(drop_filler_only=True, max_window_s=max_window_s)
+    replies.append(response("Uh-huh."))
+    try:
+        assert transcribe(stt).text == ""
+    finally:
+        stt.cleanup()
+
+
+def test_default_instruction_is_plain_transcription():
+    expected = (
+        "Audio transcription. Language: as spoken. Wording: verbatim, including fillers and repetitions. "
+        "Formatting: punctuation and capitalization. Output: transcript only."
+    )
+    assert build_prompt("", (), None) == expected
+    assert build_prompt("", (), None, "  ") == expected
+    assert NemotronTranscriptionOperation.__dataclass_fields__["prompt"].default == expected
+
+
+def test_custom_instruction_replaces_only_the_opening_instruction(native_server):
+    requests, replies = native_server
+    instruction = "Audio transcription. Language: as spoken. Output: transcript only."
+    stt = handler(instruction=f"  {instruction} ", recognition_context="Robot audio.", context_terms=["Reachy Mini"])
+    replies.append(response("Hello."))
+    transcribe(stt)
+    prompt = json.loads(requests[-1].content)["messages"][0]["content"][0]["text"]
+    assert prompt == (
+        f"{instruction} Robot audio. Context terms: Reachy Mini. Use these spellings only when supported by the audio."
+    )
+    assert build_prompt("", (), "fr", instruction) == f"{instruction} Language: French. Do not translate."
+    assert build_prompt("", (), None, "  ") == build_prompt("", (), None)
+
+
+@pytest.mark.parametrize(
     "kwargs",
     [
         {"profile": "invalid"},
         {"profile": "transcription", "context_terms": ["example"]},
+        {"profile": "transcription", "instruction": "Transcribe."},
+        {"profile": "transcription", "drop_filler_only": True},
         {"context_terms": "example"},
         {"context_terms": [""]},
         {"model": "  "},

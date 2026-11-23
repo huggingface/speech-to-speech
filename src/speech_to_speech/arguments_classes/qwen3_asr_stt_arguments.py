@@ -14,6 +14,10 @@ class Qwen3ASRSTTHandlerArguments:
             )
         },
     )
+    qwen3_asr_revision: Optional[str] = field(
+        default=None,
+        metadata={"help": "Hub branch, tag, or commit for both the Qwen3-ASR processor and weights. Defaults to main."},
+    )
     qwen3_asr_device: str = field(
         default="auto",
         metadata={
