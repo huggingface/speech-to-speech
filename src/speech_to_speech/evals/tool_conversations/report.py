@@ -1,0 +1,129 @@
+"""Metrics, rendering and comparison for tool-conversation runs.
+
+Reports are plain JSON holding every conversation, so every number here can be recomputed
+from ``results``. Rates are counts with their denominators; comparisons add a two-sided Fisher
+exact test so a difference of a few cases is not read as a regression.
+"""
+
+from __future__ import annotations
+
+import math
+import re
+from typing import Any
+
+from speech_to_speech.evals.tool_conversations.scenarios import EXPRESSION_TOOLS, LONG_RUNNING_TOOLS
+
+REPORT_SCHEMA = "tool-conversations/1"
+
+# Tool-call markup written into spoken text instead of being parsed as a call.
+CALL_MARKUP = re.compile(r"<\|?tool_call|call:\w+\{|<\|\"\|>|<function=|\[TOOL_CALLS\]", re.IGNORECASE)
+
+# (key, label, numerator, denominator) — what a person reads in the table.
+METRICS = (
+    ("right_tool", "Right tool called", "right_tool", "tool_turns"),
+    ("said_no_call", "Said it, no call", "said_no_call", "tool_turns"),
+    ("first_turn_misses", "  of which on a conversation's first turn", "first_turn_misses", "first_tool_turns"),
+    ("spoke_first", "Spoke before calling", "spoke_first", "tool_turns"),
+    ("spoke_first_expression", "Spoke before an expression tool", "spoke_first_expression", "expression_turns"),
+    ("call_markup_spoken", "Call markup in spoken text", "call_markup_spoken", "user_turns"),
+    ("extra_call", "Call when none was needed", "extra_call", "free_turns"),
+    ("late_result_spoken", "Late result spoken", "late_result_spoken", "late_results"),
+    ("late_result_recalled", "Long-running tool called again", "repeated_long_running", "late_results"),
+    ("crashed", "Conversations that crashed", "crashed", "conversations"),
+)
+
+
+def summarize(results: list[dict[str, Any]]) -> dict[str, int]:
+    """Count outcomes over all conversations."""
+    c: dict[str, int] = {key: 0 for metric in METRICS for key in metric[2:]}
+    c["server_errors"] = 0
+    for row in results:
+        c["conversations"] += 1
+        if "crash" in row:
+            c["crashed"] += 1
+            continue
+        c["server_errors"] += len(row.get("errors") or [])
+        for turn in row.get("turns") or []:
+            if turn["kind"] == "late_result":
+                c["late_results"] += 1
+                c["late_result_spoken"] += bool(turn["text"])
+                c["repeated_long_running"] += any(name in LONG_RUNNING_TOOLS for name in turn["calls"])
+                continue
+            c["user_turns"] += 1
+            rounds = turn["rounds"]
+            first = rounds[0] if rounds else {"text": "", "calls": []}
+            called = [name for r in rounds for name in r["calls"]]
+            expected = turn["expected_tool"]
+            c["call_markup_spoken"] += any(CALL_MARKUP.search(r["text"] or "") for r in rounds)
+            long_calls = sum(called.count(name) for name in LONG_RUNNING_TOOLS)
+            c["repeated_long_running"] += max(0, long_calls - (expected in LONG_RUNNING_TOOLS))
+            if expected:
+                c["tool_turns"] += 1
+                c["right_tool"] += expected in called
+                missed = not first["calls"] and bool(first["text"])
+                c["said_no_call"] += missed
+                c["spoke_first"] += bool(first["calls"]) and bool(first["text"])
+                if turn["index"] == 0:
+                    c["first_tool_turns"] += 1
+                    c["first_turn_misses"] += missed
+                if expected in EXPRESSION_TOOLS:
+                    c["expression_turns"] += 1
+                    c["spoke_first_expression"] += bool(first["calls"]) and bool(first["text"])
+            else:
+                c["free_turns"] += 1
+                c["extra_call"] += any(name not in LONG_RUNNING_TOOLS for name in called)
+    return c
+
+
+def build_report(meta: dict[str, Any], results: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"schema": REPORT_SCHEMA, **meta, "summary": summarize(results), "results": results}
+
+
+def _rate(numerator: int, denominator: int) -> str:
+    return f"{numerator}/{denominator} ({100 * numerator / denominator:.1f}%)" if denominator else "-"
+
+
+def render_report(report: dict[str, Any]) -> str:
+    s = report["summary"]
+    lines = [
+        f"## {report.get('label') or report.get('url')}",
+        "",
+        f"{s['conversations']} conversations, set `{report.get('scenario_set')}`, {s['server_errors']} server errors",
+        "",
+        "| Metric | Result |",
+        "|---|---|",
+    ]
+    lines += [f"| {label} | {_rate(s[num], s[den])} |" for _key, label, num, den in METRICS]
+    return "\n".join(lines)
+
+
+def fisher_exact(a: int, b: int, c: int, d: int) -> float:
+    """Two-sided Fisher exact p-value for the table [[a, b], [c, d]]."""
+    n1, n2, k = a + b, c + d, a + c
+    total = math.comb(n1 + n2, k)
+
+    def p(x: int) -> float:
+        return math.comb(n1, x) * math.comb(n2, k - x) / total
+
+    observed = p(a)
+    low, high = max(0, k - n2), min(k, n1)
+    return min(1.0, sum(p(x) for x in range(low, high + 1) if p(x) <= observed * (1 + 1e-9)))
+
+
+def render_comparison(reports: list[dict[str, Any]]) -> str:
+    """One column per report; the p-value compares the first report with each other one."""
+    names = [r.get("label") or r.get("url") or f"run {i}" for i, r in enumerate(reports)]
+    header = "| Metric | " + " | ".join(names) + " |"
+    lines = [header, "|" + "---|" * (len(reports) + 1)]
+    base = reports[0]["summary"]
+    for _key, label, num, den in METRICS:
+        cells = []
+        for i, report in enumerate(reports):
+            s = report["summary"]
+            cell = _rate(s[num], s[den])
+            if i and s[den] and base[den]:
+                pval = fisher_exact(base[num], base[den] - base[num], s[num], s[den] - s[num])
+                cell += f" p={pval:.2g}"
+            cells.append(cell)
+        lines.append(f"| {label} | " + " | ".join(cells) + " |")
+    return "\n".join(lines)
