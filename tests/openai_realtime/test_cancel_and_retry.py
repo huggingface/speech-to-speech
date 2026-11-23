@@ -5,8 +5,10 @@ provider client and the TTS backend are fake, and the provider's cancelled
 request is held open on an event so the ordering does not depend on timing.
 """
 
+import base64
 import logging
 import threading
+import time
 from queue import Empty, Queue
 from threading import Event
 from types import SimpleNamespace
@@ -16,12 +18,14 @@ from starlette.testclient import TestClient
 
 import speech_to_speech.LLM.base_openai_compatible_language_model as base_mod
 import speech_to_speech.LLM.chat_completions_language_model as ccm
+from speech_to_speech.api.openai_realtime.service import PIPELINE_SAMPLE_RATE
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.LLM.chat_completions_language_model import ChatCompletionsApiModelHandler
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.control import SESSION_END, is_control_message
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
+from tests.llm_history import mock_async_client
 from tests.openai_realtime.conftest import make_pipeline_unit
 
 EMPTY_COMPLETION_LOG = "LLM completed without output"
@@ -111,6 +115,13 @@ def _forward_session_end(unit, stop):
 def chain(monkeypatch):
     provider = _Provider()
     monkeypatch.setattr(base_mod, "OpenAI", lambda **_kwargs: provider)
+    # Streamed turns use the async client; run its calls on the provider in
+    # threads so that the held cancelled request does not block the loop.
+    monkeypatch.setattr(
+        ChatCompletionsApiModelHandler,
+        "_make_async_client",
+        lambda handler: mock_async_client(handler, in_threads=True),
+    )
     monkeypatch.setattr(ccm, "Stream", _Stream)
     stop = Event()
     unit = make_pipeline_unit()
@@ -172,7 +183,12 @@ def _complete_tool_exchange(ws):
     )
     call = _create_response(ws, tool_choice="required")[-1]["response"]["output"][0]
     _add_item(ws, {"type": "function_call_output", "call_id": call["call_id"], "output": '{"value":"seven"}'})
-    _create_response(ws)
+    followup = _create_response(ws)
+    # Let the follow-up reply play out before the cancel. Otherwise the
+    # WebSocket transport estimates it as unplayed and drops it from history
+    # as unheard, which these tests are not about.
+    audio = sum(len(base64.b64decode(e["delta"])) for e in followup if e["type"] == "response.output_audio.delta")
+    time.sleep(audio / 2 / PIPELINE_SAMPLE_RATE)
 
 
 def _cancel_early_and_retry(ws, provider):
