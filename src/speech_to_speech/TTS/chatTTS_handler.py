@@ -18,7 +18,7 @@ from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfRespons
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
 from speech_to_speech.TTS.pcm_blocks import PCMBlockBuffer
-from speech_to_speech.utils.utils import validate_device
+from speech_to_speech.utils.utils import normalize_device, validate_device
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,7 @@ class ChatTTSHandler(BaseTTSHandler):
         self.should_listen = should_listen
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
+        device = normalize_device(device)
         validate_device(device, ("cuda", "npu", "mps", "cpu"), "ChatTTS")
         self.model = ChatTTS.Chat()
         # With "auto", ChatTTS picks CUDA/NPU (by free memory) or CPU; it skips MPS as slower than CPU.

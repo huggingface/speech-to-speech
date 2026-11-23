@@ -190,9 +190,9 @@ class Qwen3TTSHandler(BaseTTSHandler):
             # Only the torch backend places the model itself; qwentts.cpp (GGML) picks its own device.
             if self.faster_backend == "torch":
                 self.device = resolve_device(device, ("cuda",), "Qwen3-TTS torch backend")
+                attn_implementation = resolve_attn_implementation(attn_implementation, self.device)
             else:
                 self.device = normalize_device(device)
-            attn_implementation = resolve_attn_implementation(attn_implementation, self.device)
             self.model_name = model_name
             logger.info(
                 "Loading Qwen3-TTS model: %s via faster-qwen3-tts (%s backend)",
