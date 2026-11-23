@@ -244,33 +244,10 @@ speech-to-speech serve --stt qwen3-asr --qwen3_asr_language fr
 speech-to-speech serve --stt qwen3-asr \
   --qwen3_asr_model_name Qwen/Qwen3-ASR-1.7B-hf \
   --qwen3_asr_prompt "Vocabulary: Quilter, apostle."
+speech-to-speech serve --stt qwen3-asr \
+  --qwen3_asr_model_name Qwen/Qwen3-ASR-1.7B-hf \
+  --qwen3_asr_revision <commit-hash>
 ```
-
-For a local, noncommercial research comparison, the same handler can transcribe a single English clip with [Oruk Fourier 2B](https://huggingface.co/oruk/oruk-fourier-2b) in process. This example reads a 16 kHz mono file and pins the Hub revision. It does not start a server or upload the audio.
-
-```python
-from queue import Queue
-from threading import Event
-
-import soundfile as sf
-
-from speech_to_speech.pipeline.messages import VADAudio
-from speech_to_speech.STT.qwen3_asr_handler import Qwen3ASRSTTHandler
-
-audio, sample_rate = sf.read("english.wav", dtype="float32")
-if sample_rate != 16_000 or audio.ndim != 1:
-    raise ValueError("Use a mono, 16 kHz recording")
-
-handler = Qwen3ASRSTTHandler(Event(), Queue(), Queue(), setup_kwargs={
-    "model_name": "oruk/oruk-fourier-2b",
-    "revision": "8c2a8871f1304aa2f634da4fb95e24438c4945b9",
-    "language": "en",
-})
-result = next(handler.process(VADAudio(audio=audio, mode="final")))
-print(result.text)
-```
-
-The Fourier weights are [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) and require attribution to Oruk. Its [model card](https://huggingface.co/oruk/oruk-fourier-2b#license) requires a separate license for commercial use, commercial integration, or hosted/API serving.
 
 ### Parakeet Unified
 
