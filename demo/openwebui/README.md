@@ -18,8 +18,7 @@ Compose pins the official **Open WebUI 0.11.4-dev** image (commit
 `sha256:06f24056e2fc15dacf23f7ee1f0a19cdf7cb0b8c61c5a6afb61c76ecaec8e15c`).
 **This example requires that development build**, whose Realtime call path was
 verified; do not substitute a moving `dev` tag or infer support from Standard
-voice mode. Use a speech-to-speech checkout containing merged #687 and #689.
-Other operating systems, model combinations and Open WebUI builds are not tested
+voice mode. Other operating systems, model combinations and Open WebUI builds are not tested
 by this example.
 
 ## Quickstart
@@ -27,7 +26,7 @@ by this example.
 1. From the repository root, install the host dependencies:
 
    ```bash
-   uv sync --python 3.12
+   uv sync --python 3.12 --extra kokoro
    ```
 
 2. In one terminal at the repository root, start the text/model endpoint:
@@ -42,7 +41,7 @@ by this example.
    the same endpoint for voice-model inference:
 
    ```bash
-   uv run speech-to-speech serve \
+   uv run --extra kokoro speech-to-speech serve \
      --host 0.0.0.0 --port 8765 \
      --stt parakeet-tdt --parakeet_tdt_device mps \
      --llm_backend chat-completions \
@@ -152,6 +151,5 @@ explains text endpoints and Docker host addresses. [Voice Mode](https://docs.ope
 describes the UI; the pinned development source is authoritative for this
 Realtime setup. The prior real-model verification is recorded in
 [#687](https://github.com/huggingface/speech-to-speech/pull/687).
-Existing limitations in [#686](https://github.com/huggingface/speech-to-speech/issues/686)
-(function-call IDs) and [#485](https://github.com/huggingface/speech-to-speech/issues/485)
-(ambiguous transcription terminals) remain outside this example.
+The existing limitation in [#485](https://github.com/huggingface/speech-to-speech/issues/485)
+(ambiguous transcription terminals) remains outside this example.
