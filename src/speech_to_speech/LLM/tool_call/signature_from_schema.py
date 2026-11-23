@@ -1,6 +1,5 @@
 import inspect
 import keyword
-import re
 from typing import Any, Literal, Union
 
 JSON_TYPE_TO_PYTHON_TYPE = {
@@ -78,31 +77,45 @@ def _annotation_from_spec(spec: dict[str, Any]) -> Any:
     return JSON_TYPE_TO_PYTHON_TYPE.get(json_type, Any)
 
 
-def _sanitize_identifier(name: str, existing: set[str] | None = None) -> str:
-    """Convert an arbitrary string to a valid Python identifier, avoiding collisions."""
-    if not name:
-        sanitized = '_'
-    else:
-        # Replace any non-identifier character with underscore
-        sanitized = re.sub(r'[^0-9a-zA-Z_]', '_', name)
-        
-        # Ensure it doesn't start with a digit
-        if sanitized and sanitized[0].isdigit():
-            sanitized = '_' + sanitized
-        
-        # Avoid Python keywords
-        if keyword.iskeyword(sanitized):
-            sanitized = sanitized + '_'
-        
-        # Avoid collisions with existing identifiers
-        if existing is not None:
-            original = sanitized
-            suffix = 1
-            while sanitized in existing:
-                suffix += 1
-                sanitized = original + '_' + str(suffix)
-    
-    return sanitized
+def _needs_alias(name: str) -> bool:
+    return not name.isidentifier() or keyword.iskeyword(name)
+
+
+def _identifier_base(name: str) -> str:
+    """Turn *name* into a valid Python identifier without collision handling."""
+    base = "".join(char if f"a{char}".isidentifier() else "_" for char in name)
+    if not base.isidentifier():
+        base = f"_{base}"
+    if keyword.iskeyword(base):
+        base = f"{base}_"
+    return base
+
+
+def parameter_names_from_schema(schema: object | None) -> dict[str, str]:
+    """Map each schema property name to the Python parameter name the prompt shows.
+
+    Names that are already valid identifiers are kept. Other names get an alias,
+    assigned in schema ``properties`` order and never equal to another property's
+    name or alias.
+    """
+    if not schema or not isinstance(schema, dict):
+        return {}
+    props = schema.get("properties", {})
+    used = {name for name in props if not _needs_alias(name)}
+    names: dict[str, str] = {}
+    for name in props:
+        if not _needs_alias(name):
+            names[name] = name
+            continue
+        base = _identifier_base(name)
+        alias = base
+        suffix = 1
+        while alias in used:
+            suffix += 1
+            alias = f"{base}_{suffix}"
+        used.add(alias)
+        names[name] = alias
+    return names
 
 
 def signature_from_schema(schema: object | None) -> inspect.Signature:
@@ -118,6 +131,7 @@ def signature_from_schema(schema: object | None) -> inspect.Signature:
     # with defaults. Keep the schema's order within both groups while moving
     # required fields without schema defaults ahead of optional/defaulted ones.
     property_items = list(props.items())
+    parameter_names = parameter_names_from_schema(schema)
     required_without_default = [
         (name, spec)
         for name, spec in property_items
@@ -129,7 +143,6 @@ def signature_from_schema(schema: object | None) -> inspect.Signature:
         if not (name in required and not (isinstance(spec, dict) and "default" in spec))
     ]
 
-    used_names: set[str] = set()
     for name, spec in [*required_without_default, *defaulted_or_optional]:
         annotation = _annotation_from_spec(spec)
 
@@ -142,13 +155,9 @@ def signature_from_schema(schema: object | None) -> inspect.Signature:
         else:
             default = None
 
-        # Sanitize parameter name to be a valid Python identifier
-        safe_name = _sanitize_identifier(name, used_names)
-        used_names.add(safe_name)
-
         params.append(
             inspect.Parameter(
-                safe_name,
+                parameter_names[name],
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
                 default=default,
                 annotation=annotation,

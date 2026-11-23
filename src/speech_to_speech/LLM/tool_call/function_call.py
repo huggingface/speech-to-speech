@@ -7,10 +7,8 @@ strings containing ')' characters, tuples, dicts, etc. are handled correctly.
 """
 
 import ast
-import inspect
 import io
 import json
-import keyword
 import logging
 import re
 import tokenize
@@ -21,7 +19,10 @@ from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel
 
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
-from speech_to_speech.LLM.tool_call.signature_from_schema import signature_from_schema
+from speech_to_speech.LLM.tool_call.signature_from_schema import (
+    parameter_names_from_schema,
+    signature_from_schema,
+)
 from speech_to_speech.pipeline.transcript_logging import transcript_for_log
 from speech_to_speech.utils.utils import _generate_id
 
@@ -196,6 +197,8 @@ class FunctionToolCall(BaseModel):
     parameters: Dict[str, Any]
     original_string: str
     description: str = ""
+    # True for ``<tool_call>{json}</tool_call>`` calls, keyed by the raw schema names.
+    json_call: bool = False
 
     def to_realtime_function_tool_call(
         self,
@@ -243,76 +246,25 @@ class FunctionToolCall(BaseModel):
                     bound[name] = self.parameters[key]
                 arguments = {**bound, **arguments}
 
-            # Build mapping from original property names to sanitized parameter names
-            sig = signature_from_schema(schema)
-            original_names = list(properties.keys())
-            # Create a mapping from original names to sanitized names (in order)
-            # Note: this assumes the sanitization preserves order within required/optional groups
-            # which matches what signature_from_schema does
-            name_to_sanitized = {}
-            used = set()
-            for orig in original_names:
-                safe = orig
-                # Apply same sanitization logic
-                if not safe:
-                    safe = '_'
-                else:
-                    safe = re.sub(r'[^0-9a-zA-Z_]', '_', safe)
-                    if safe and safe[0].isdigit():
-                        safe = '_' + safe
-                    if keyword.iskeyword(safe):
-                        safe = safe + '_'
-                    orig_safe = safe
-                    suffix = 1
-                    while safe in used:
-                        suffix += 1
-                        safe = orig_safe + '_' + str(suffix)
-                used.add(safe)
-                name_to_sanitized[orig] = safe
+            # The prompt shows aliases for property names that are not Python
+            # identifiers; map a Python-style call's names back to the schema keys.
+            # JSON tool calls already use the schema keys.
+            if not self.json_call:
+                original_names = {alias: name for name, alias in parameter_names_from_schema(schema).items()}
+                arguments = {original_names.get(key, key): value for key, value in arguments.items()}
 
-            # Map arguments from sanitized names back to original names for property lookup
-            # The model uses sanitized names (from the prompt), but properties uses original names
-            sanitized_to_original = {v: k for k, v in name_to_sanitized.items()}
-            mapped_arguments = {}
-            for k, v in arguments.items():
-                if k in sanitized_to_original:
-                    mapped_arguments[sanitized_to_original[k]] = v
-                else:
-                    mapped_arguments[k] = v  # keep as-is if not in mapping
-
-            # Filter undeclared using original property names
-            undeclared = {k for k in mapped_arguments if k not in properties}
+            undeclared = {k for k in arguments if k not in properties}
             if undeclared:
                 logger.warning(
                     "Dropping undeclared parameters for '%s': %s",
                     self.function_name,
                     undeclared,
                 )
-                mapped_arguments = {k: v for k, v in mapped_arguments.items() if k in properties}
+                arguments = {k: v for k, v in arguments.items() if k in properties}
 
-            # Check required using sanitized names (from signature)
-            required_params = {
-                name for name, param in sig.parameters.items()
-                if param.default is inspect.Parameter.empty
-            }
-            # Map required sanitized names to original names for checking against mapped_arguments
-            # Actually, mapped_arguments now uses original names, so we need to check
-            # if the required sanitized name's corresponding original name is present
-            missing_originals = set()
-            for sanitized_name in required_params:
-                original_name = name_to_sanitized.get(sanitized_name)
-                # Find which original name maps to this sanitized name
-                orig_for_sanitized = None
-                for orig, san in name_to_sanitized.items():
-                    if san == sanitized_name:
-                        orig_for_sanitized = orig
-                        break
-                if orig_for_sanitized and orig_for_sanitized not in mapped_arguments:
-                    missing_originals.add(orig_for_sanitized)
-            if missing_originals:
-                raise ValueError(f"Missing required parameters for '{self.function_name}': {missing_originals}")
-
-            arguments = mapped_arguments
+            missing = required - set(arguments.keys())
+            if missing:
+                raise ValueError(f"Missing required parameters for '{self.function_name}': {missing}")
 
         return ResponseFunctionToolCall(
             name=self.function_name,
@@ -384,7 +336,9 @@ def parse_json_tool_call_block(block: str) -> List[FunctionToolCall]:
                 continue
         if not isinstance(args, dict):
             continue
-        calls.append(FunctionToolCall(function_name=item["name"], parameters=args, original_string=block))
+        calls.append(
+            FunctionToolCall(function_name=item["name"], parameters=args, original_string=block, json_call=True)
+        )
     return calls
 
 
