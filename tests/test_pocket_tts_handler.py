@@ -552,6 +552,31 @@ def test_persian_normalization_signed_numbers(text, expected):
     assert normalize(text) == expected
 
 
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (0, "صفر"),
+        (1402, "هزار و چهارصد و دو"),
+        (
+            999_999_999_999_999,
+            "نهصد و نود و نه تریلیون و نهصد و نود و نه میلیارد و نهصد و نود و نه میلیون و نهصد و نود و نه هزار و نهصد و نود و نه",
+        ),
+        (1_000_000_000_000_000, "یک صفر صفر صفر صفر صفر صفر صفر صفر صفر صفر صفر صفر صفر صفر صفر"),
+        (1_000_000_000_000_007, "یک صفر صفر صفر صفر صفر صفر صفر صفر صفر صفر صفر صفر صفر صفر هفت"),
+        (10**30, "یک " + " ".join(["صفر"] * 30)),
+    ],
+)
+def test_number_to_words_handles_any_non_negative_integer(value, expected):
+    """The public helper promises any non-negative integer, not just up to 999 trillion.
+
+    numbers_to_words() reads oversized digit runs one digit at a time;
+    number_to_words() must not raise IndexError on that same input range.
+    """
+    from speech_to_speech.TTS.persian_normalization import number_to_words
+
+    assert number_to_words(value) == expected
+
+
 def _run_farsi_inputs(handler, inputs):
     from queue import Queue
 
