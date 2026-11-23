@@ -1,6 +1,6 @@
 """Unit tests for the chat-completions LLM backend.
 
-These run without a GPU or a live server: the OpenAI client is faked at the
+These run without a GPU or a hosted server: the OpenAI client is faked at the
 module level, so the streaming/non-streaming parse logic and the format
 converters are exercised purely in-process.
 
@@ -12,9 +12,10 @@ from __future__ import annotations
 import json
 import queue
 import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
-import httpx
+import httpx2
 import numpy as np
 import pytest
 from openai import APIConnectionError, InternalServerError, RateLimitError
@@ -31,7 +32,7 @@ from openai.types.responses import ResponseFunctionToolCall
 import speech_to_speech.LLM.base_openai_compatible_language_model as base_mod
 import speech_to_speech.LLM.chat_completions_language_model as ccm
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
-from speech_to_speech.LLM.chat import Chat, make_user_audio_message, make_user_message
+from speech_to_speech.LLM.chat import Chat, make_system_message, make_user_audio_message, make_user_message
 from speech_to_speech.LLM.chat_completions_language_model import (
     ChatCompletionsApiModelHandler,
     _to_chat_tool_choice,
@@ -49,6 +50,9 @@ from speech_to_speech.pipeline.messages import (
     TTSInput,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from tests.llm_history import close_llm_runners as close_llm_runners
+from tests.llm_history import drive_llm, mock_async_client
+from tests.turns import reopen
 
 # ── Fakes ────────────────────────────────────────────────────────────────────
 
@@ -103,7 +107,10 @@ class _FakeClient:
 def _make_handler(stream=True, *, base_url="http://fake/v1", reasoning_effort=None):
     """Build a handler whose warmup hits the fake client (no network)."""
     orig_openai = base_mod.OpenAI
+    orig_async_client = ChatCompletionsApiModelHandler._make_async_client
     base_mod.OpenAI = _FakeClient
+    # A streaming handler warms up through its async client.
+    ChatCompletionsApiModelHandler._make_async_client = mock_async_client
     try:
         h = ChatCompletionsApiModelHandler(
             threading.Event(),
@@ -121,6 +128,8 @@ def _make_handler(stream=True, *, base_url="http://fake/v1", reasoning_effort=No
         )
     finally:
         base_mod.OpenAI = orig_openai
+        ChatCompletionsApiModelHandler._make_async_client = orig_async_client
+    h._make_async_client = lambda: mock_async_client(h)
     return h
 
 
@@ -161,10 +170,10 @@ def _drive(
         session.tool_choice = tool_choice
     rc = RuntimeConfig(chat=chat, session=session)
     req = GenerateResponseRequest(
-        runtime_config=rc, response=response, language_code="de", turn_id="t", turn_revision=0
+        runtime_config=rc, response=response, language_code="de", turn_id="turn_1", turn_revision=0
     )
     text, tools_out, usage, end = "", [], None, None
-    for out in handler.process(req):
+    for out in drive_llm(handler, req):
         if isinstance(out, LLMResponseChunk):
             text += out.text
             tools_out += list(out.tools)
@@ -341,12 +350,13 @@ def test_chat_completions_backend_processes_audio_without_responses_api():
     )
 
     outputs = list(
-        handler.process(
+        drive_llm(
+            handler,
             GenerateResponseRequest(
                 runtime_config=cfg,
                 audio=np.zeros(1600, dtype=np.float32),
                 audio_sample_rate=16000,
-            )
+            ),
         )
     )
 
@@ -382,6 +392,108 @@ def test_chat_completions_backend_uses_configured_audio_url_payload():
     assert audio_part["audio_url"]["url"].startswith("data:audio/wav;base64,UklGR")
 
 
+def test_cancel_keepalive_stream_releases_next_request(monkeypatch):
+    reading, release = threading.Event(), threading.Event()
+    requests = []
+
+    class Provider(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            requests.append(self.client_address)
+            chunk = {
+                "id": "test",
+                "choices": [{"index": 0, "delta": {"content": "Ready."}, "finish_reason": "stop"}],
+            }
+            payload = b"data: " + json.dumps(chunk).encode() + b"\n\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            if len(requests) == 1:
+                self.send_header("Connection", "close")
+            else:
+                self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            try:
+                if len(requests) == 1:
+                    reading.set()
+                    while not release.wait(0.05):
+                        self.wfile.write(b": keep-alive\n\n")
+                        self.wfile.flush()
+                self.wfile.write(payload)
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+    serving = threading.Thread(target=server.serve_forever)
+    serving.start()
+    monkeypatch.setattr(ChatCompletionsApiModelHandler, "warmup", lambda self: None)
+    handler = ChatCompletionsApiModelHandler(
+        threading.Event(),
+        queue.Queue(),
+        queue.Queue(),
+        setup_kwargs={
+            "base_url": f"http://127.0.0.1:{server.server_port}/v1",
+            "api_key": "none",
+            "cancel_scope": CancelScope(),
+        },
+    )
+    handler.request_timeout = 0.6
+    response = RealtimeResponseCreateParams(output_modalities=["text"])
+    outputs = []
+    worker = threading.Thread(target=lambda: outputs.append(_drive(handler, response=response)))
+    try:
+        worker.start()
+        assert reading.wait(2)
+        handler.cancel_scope.cancel()
+        worker.join(1)
+        assert not worker.is_alive(), "cancelled turn is still reading SSE keep-alives"
+        assert outputs[0][-1].error is None
+        for _ in range(2):
+            text, _, _, _, end = _drive(handler, response=response)
+            assert text == "Ready."
+            assert end.error is None
+        assert len(requests) == 3
+        assert requests[1] == requests[2], "ordinary turns did not reuse the HTTP connection"
+    finally:
+        release.set()
+        worker.join(2)
+        handler.cleanup()
+        server.shutdown()
+        server.server_close()
+        serving.join()
+
+
+@pytest.mark.parametrize("interrupt", ["stop", "cancel"])
+def test_interrupted_stream_does_not_flush_a_partial_tool_call(caplog, interrupt):
+    h = _make_handler(stream=True)
+    h.cancel_scope = CancelScope()
+
+    def chunks():
+        yield _chunk(tool_calls=[_tc_delta(0, id="srv_1", name="search_docs", arguments='{"query": "bo')])
+        # The turn is interrupted while the provider is still sending arguments.
+        h.stop_event.set() if interrupt == "stop" else h.cancel_scope.cancel()
+        yield _chunk(tool_calls=[_tc_delta(0, arguments="ld")])
+
+    h.client.chat.completions.create = lambda **k: _FakeStream(chunks())
+    with caplog.at_level("WARNING"):
+        _text, tools, _usage, chat, end = _drive(
+            h,
+            tools=[{"type": "function", "name": "search_docs", "parameters": {"type": "object"}}],
+            tool_choice="required",
+        )
+
+    assert tools == [], "an abandoned stream must not surface truncated tool arguments"
+    assert end.error is None
+    assert end.history is None or not end.history.complete
+    assert [item.type for item in chat.buffer] == ["message"]
+    assert "without a finish_reason" not in caplog.text
+
+
 def test_streaming_text_and_usage():
     h = _make_handler(stream=True)
     h.client.chat.completions.create = lambda **k: _FakeStream(
@@ -397,6 +509,64 @@ def test_streaming_text_and_usage():
     assert tools == []
     # assistant text was stored back into the conversation history
     assert any(getattr(i, "role", None) == "assistant" for i in chat.buffer)
+
+
+class _RecordingDeltas:
+    """Provider chunks that record how many have been consumed so far."""
+
+    def __init__(self, deltas: list[str]):
+        self.chunks = [_chunk(content=d) for d in deltas]
+        self.chunks.append(_chunk(usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1)))
+        self.consumed = 0
+
+    def __iter__(self):
+        for chunk in self.chunks:
+            self.consumed += 1
+            yield chunk
+
+
+def _stream_spoken_reply(deltas: list[str], language_code: str) -> list[tuple[str, int]]:
+    """Drive a streamed audio reply; return (chunk text, provider chunks consumed when it was emitted)."""
+    h = _make_handler(stream=True)
+    h.stream_batch_sentences = 1
+    provider = _RecordingDeltas(deltas)
+    h.client.chat.completions.create = lambda **k: _FakeStream(provider)
+    chat = Chat(10)
+    chat.add_item(make_user_message("hi"))
+    rc = RuntimeConfig(chat=chat, session=RealtimeSessionCreateRequest(type="realtime", instructions="x"))
+    req = GenerateResponseRequest(
+        runtime_config=rc, response=None, language_code=language_code, turn_id="turn_1", turn_revision=0
+    )
+    return [
+        (out.text, provider.consumed) for out in drive_llm(h, req) if isinstance(out, LLMResponseChunk) and out.text
+    ]
+
+
+def test_streaming_flushes_chinese_sentences_as_they_complete():
+    """NLTK never ends a sentence at '。', so a Chinese reply used to reach TTS as one
+    chunk after the whole stream finished instead of sentence by sentence."""
+    emitted = _stream_spoken_reply(["你好。我很", "好。今天天气", "不错。"], "zh")
+    assert emitted == [("你好。", 1), ("我很好。", 2), ("今天天气不错。", 4)]
+
+
+def test_streaming_flushes_arabic_sentences_as_they_complete():
+    """'؟' is stripped by remove_unspeechable and ignored by NLTK, so an Arabic reply used
+    to reach TTS as one chunk after the whole stream finished."""
+    emitted = _stream_spoken_reply(["مرحبا؟ كيف ", "حالك؟ أنا ", "بخير"], "ar")
+    assert emitted == [("مرحبا؟", 1), ("كيف حالك؟", 2), ("أنا بخير", 4)]
+
+
+@pytest.mark.parametrize(
+    ("deltas", "expected"),
+    [
+        (["运行 `print('a。b", "')` 即可。然后重启。"], ["运行 print('a。b') 即可。", "然后重启。"]),
+        (["运行 ``print('a。b')`", "` 即可。然后重启。"], ["运行 print('a。b') 即可。", "然后重启。"]),
+        (["**重要。", "** 然后重启。"], ["重要。 然后重启。"]),
+    ],
+)
+def test_streaming_does_not_split_markdown_spans_that_are_still_open(deltas, expected):
+    """A '。' inside code or emphasis whose closing delimiter has not arrived is not a boundary."""
+    assert [text for text, _ in _stream_spoken_reply(deltas, "zh")] == expected
 
 
 def test_streaming_strips_markdown_delimiters_split_across_deltas():
@@ -459,6 +629,7 @@ def test_streaming_tool_call_accumulates_arguments():
     tc = tools[0]
     assert isinstance(tc, ResponseFunctionToolCall)
     assert tc.name == "search_docs"
+    assert tc.call_id.startswith("call_") and len(tc.call_id) <= 32
     # Markdown cleanup only applies to spoken text, never structured tool arguments.
     assert json.loads(tc.arguments) == {"query": "**bold** _italic_ x*y"}
     assert usage == (20, 8)
@@ -481,7 +652,7 @@ def test_streaming_preserves_text_tool_text_order():
     session.tools = [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}]
     request = GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat, session=session))
 
-    outputs = list(h.process(request))
+    outputs = list(drive_llm(h, request))
 
     output_parts = [part.type for output in outputs if isinstance(output, LLMResponseChunk) for part in output.parts]
     assert output_parts == ["text", "tool_call", "text"]
@@ -525,7 +696,7 @@ def test_prefetch_defers_irreversible_chat_cleanup_until_claim():
         prefetch_transaction=transaction,
     )
 
-    list(handler.process(request))
+    list(drive_llm(handler, request))
 
     assert any(item.id == old_message.id for item in chat.buffer)
     live_image = next(item for item in chat.buffer if item.id == image_message.id)
@@ -555,7 +726,7 @@ def test_prefetch_cleanup_failure_restores_consumed_image_and_history(monkeypatc
         runtime_config=RuntimeConfig(chat=chat, session=session),
         prefetch_transaction=transaction,
     )
-    list(handler.process(request))
+    list(drive_llm(handler, request))
 
     def fail_after_image_strip(compactor=None):
         live_image = next(item for item in chat.buffer if item.id == image_message.id)
@@ -593,7 +764,7 @@ def test_tool_call_recorded_before_chunk_is_emitted():
     req = GenerateResponseRequest(runtime_config=rc, language_code="de", turn_id="t", turn_revision=0)
 
     emitted_call_id = None
-    for out in h.process(req):
+    for out in drive_llm(h, req):
         if isinstance(out, LLMResponseChunk) and out.tools:
             emitted_call_id = out.tools[0].call_id
             # At the moment the client receives the call, it must exist in history.
@@ -629,7 +800,7 @@ def test_cancelled_text_tool_turn_rolls_back_ordered_call():
         turn_id="t",
         turn_revision=0,
     )
-    generation = h.process(request)
+    generation = drive_llm(h, request)
 
     while True:
         output = next(generation)
@@ -878,14 +1049,14 @@ def test_generation_error_emits_failed_end_of_response():
 
 
 def _api_error_response(status_code):
-    request = httpx.Request("POST", "https://provider.example/v1/chat/completions")
-    return httpx.Response(status_code, request=request)
+    request = httpx2.Request("POST", "https://provider.example/v1/chat/completions")
+    return httpx2.Response(status_code, request=request)
 
 
 @pytest.mark.parametrize(
     ("error", "message"),
     [
-        (APIConnectionError(request=httpx.Request("POST", "https://provider.example")), "Connection error"),
+        (APIConnectionError(request=httpx2.Request("POST", "https://provider.example")), "Connection error"),
         (RateLimitError("rate limited", response=_api_error_response(429), body=None), "rate limited"),
         (InternalServerError("server failed", response=_api_error_response(500), body=None), "server failed"),
     ],
@@ -948,12 +1119,12 @@ def test_cancelled_provider_failure_does_not_emit_fallback():
 
 def test_stale_provider_failure_does_not_emit_fallback():
     tracker = SpeculativeTurnTracker()
-    tracker.observe("t", 0)
+    tracker.start_turn()
     h = _make_handler(stream=True)
     h.speculative_turns = tracker
 
     def fail(**kwargs):
-        tracker.observe("t", 1)
+        reopen(tracker)
         raise RuntimeError("stale request failed")
 
     h.client.chat.completions.create = fail
@@ -983,6 +1154,22 @@ def test_out_of_band_does_not_commit_to_default_conversation():
 
 
 # ── Standalone runner (no pytest required) ────────────────────────────────────
+
+
+def test_chat_backend_keeps_injected_context_with_session_instructions():
+    handler = _make_handler(stream=False)
+    chat = Chat(10)
+    snapshot = make_system_message("CURRENT CHAT SNAPSHOT")
+    chat.add_item(snapshot)
+
+    for _ in range(2):
+        _drive(handler, chat=chat, instructions="SESSION INSTRUCTIONS")
+        prompt = handler.client.chat.completions.last_kwargs["messages"][0]["content"]
+        assert "SESSION INSTRUCTIONS" in prompt
+        assert prompt.count("CURRENT CHAT SNAPSHOT") == 1
+        assert chat.init_chat_message is snapshot
+        assert snapshot.content[0].text == "CURRENT CHAT SNAPSHOT"
+
 
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

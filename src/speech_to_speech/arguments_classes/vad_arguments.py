@@ -49,6 +49,40 @@ class VADHandlerArguments:
             "help": "Hysteresis threshold (ms of active speech) for accepting speech that continues a reopenable turn (soft-ended, uncommitted, within the reopen window). Set to 0 to disable the split and use min_speech_ms. Clamped to [100, min_speech_ms]. New turns and barge-ins always require min_speech_ms. Default and recommended: 192 with min_speech_ms 384."
         },
     )
+    confident_thresh: float = field(
+        default=0.9,
+        metadata={
+            "help": "Speech probability at or above which a chunk counts as confident speech. Only used when "
+            "min_confident_speech_ms is set. Silero only."
+        },
+    )
+    min_confident_speech_ms: int = field(
+        default=0,
+        metadata={
+            "help": "When greater than 0, a new turn opens on a score instead of on min_speech_ms alone: "
+            "confident speech divided by this value, plus the remaining active speech divided by "
+            "min_speech_ms, must reach 1. Lets a short, clearly spoken reply open a turn while "
+            "min_speech_ms is raised against low-confidence noise. Default 0 keeps the plain rule."
+        },
+    )
+    idle_after_s: float = field(
+        default=0.0,
+        metadata={
+            "help": "When greater than 0, new turns that start more than this many seconds after the last "
+            "accepted speech or finished assistant response use idle_min_speech_ms and "
+            "idle_min_confident_speech_ms instead. Requires min_confident_speech_ms."
+        },
+    )
+    idle_min_speech_ms: int = field(
+        default=0,
+        metadata={"help": "min_speech_ms to use for a new turn after idle_after_s. 0 keeps min_speech_ms."},
+    )
+    idle_min_confident_speech_ms: int = field(
+        default=0,
+        metadata={
+            "help": "min_confident_speech_ms to use for a new turn after idle_after_s. 0 keeps min_confident_speech_ms."
+        },
+    )
     max_speech_ms: float = field(
         default=float("inf"),
         metadata={
@@ -80,13 +114,17 @@ class VADHandlerArguments:
     speculative_reopen_ms: int = field(
         default=800,
         metadata={
-            "help": "Keep a soft-ended Realtime turn reopenable for this many milliseconds unless a response commits it. Default is 800 ms."
+            "help": "Output grace (ms) from turn finalization when Smart Turn reports complete, is disabled, "
+            "or fails. The first assistant text waits until this grace expires before it can be sent to TTS. "
+            "Default is 800 ms."
         },
     )
     unanswered_reopen_ms: int = field(
         default=7000,
         metadata={
-            "help": "Sanity cap (ms) for reopening a soft-ended speculative turn that has not yet been answered by any assistant output. While a turn is uncommitted, resumed speech within this window reopens the same turn instead of starting a new one. Has no effect below speculative_reopen_ms and is clamped to smart_turn_max_wait_ms when Smart Turn is enabled."
+            "help": "Streamed-audio time limit (ms) for reopening an uncommitted, soft-ended turn when speech resumes. "
+            "The effective limit is at least --speculative_reopen_ms and, with Smart Turn enabled, at least "
+            "--smart_turn_max_wait_ms. It can extend beyond the output grace. Default is 7000 ms."
         },
     )
     short_segment_merge_ms: int = field(
@@ -116,13 +154,17 @@ class VADHandlerArguments:
     smart_turn_max_wait_ms: int = field(
         default=2000,
         metadata={
-            "help": "Speculative reopen grace used when Smart Turn reports an incomplete turn. Resumed speech creates a newer turn revision; otherwise output may commit after this delay. Default is 2000 ms."
+            "help": "Output grace (ms) from turn finalization when Smart Turn reports incomplete. "
+            "The first assistant text waits until this grace expires before it can be sent to TTS. "
+            "Default is 2000 ms."
         },
     )
     smart_turn_incomplete_delay_ms: int = field(
         default=600,
         metadata={
-            "help": "Delay STT and LLM processing after Smart Turn reports an incomplete turn, allowing resumed speech to invalidate the revision before expensive work begins. This delay runs within smart_turn_max_wait_ms. Default is 600 ms."
+            "help": "Extra delay (ms) before processing final speech input when Smart Turn reports incomplete. "
+            "It starts with the output grace and is capped by --smart_turn_max_wait_ms. "
+            "Default is 600 ms."
         },
     )
     smart_turn_cpu_count: int = field(

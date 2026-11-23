@@ -109,6 +109,7 @@ def _validate_package_defaults() -> None:
         ResponsesApiLanguageModelHandlerArguments,
     )
     from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
+    from speech_to_speech.s2s_pipeline import parse_arguments
 
     module_args = ModuleArguments()
     responses_api_args = ResponsesApiLanguageModelHandlerArguments()
@@ -116,7 +117,12 @@ def _validate_package_defaults() -> None:
     vad_args = VADHandlerArguments()
 
     assert module_args.stt == "parakeet-tdt"
-    assert module_args.llm_backend == "responses-api"
+    assert module_args.llm_backend == ("mlx-lm" if sys.platform == "darwin" else "transformers")
+    local_args = parse_arguments([])
+    assert local_args.llm_backend.config["model_name"] == (
+        "mlx-community/Qwen3.5-4B-4bit" if sys.platform == "darwin" else "Qwen/Qwen3.5-4B"
+    )
+    assert "api_key" not in local_args.llm_backend.config
     assert module_args.tts == "qwen3"
     assert module_args.log_level == "info"
     assert module_args.enable_live_transcription is True
@@ -175,7 +181,7 @@ def _validate_realtime_engine_imports() -> None:
 
 def _validate_default_handler_imports() -> None:
     default_handler_modules = [
-        "speech_to_speech.LLM.responses_api_language_model",
+        "speech_to_speech.LLM.language_model",
         "speech_to_speech.STT.parakeet_tdt_handler",
         "speech_to_speech.TTS.qwen3_tts_handler",
         "speech_to_speech.VAD.vad_handler",
@@ -185,7 +191,12 @@ def _validate_default_handler_imports() -> None:
 
 
 def _validate_runtime_dependency_imports() -> None:
-    if sys.platform != "darwin":
+    importlib.import_module("transformers.models.nemotron3_diarization.modeling_nemotron3_diarization")
+    if sys.platform == "darwin":
+        # Exercise the actual default MLX model module without downloading weights.
+        # Kokoro's optional phonemization dependencies must not be needed here.
+        importlib.import_module("mlx_audio.tts.models.qwen3_tts")
+    else:
         importlib.import_module("faster_qwen3_tts")
     if os.environ.get("SPEECH_TO_SPEECH_SMOKE_EXTRA") == "omnivoice":
         omnivoice = importlib.import_module("omnivoice")
@@ -200,12 +211,12 @@ def _validate_realtime_websocket_support() -> None:
 def _validate_darwin_dependency_pins() -> None:
     expected_versions = {
         "miniaudio": "1.61",
-        "mlx": "0.32.0",
+        "mlx": "0.32.3",
         "mlx-audio": "0.4.7",
         "mlx-lm": "0.31.3",
-        "mlx-metal": "0.32.0",
+        "mlx-metal": "0.32.3",
         "sounddevice": "0.5.3",
-        "transformers": "5.14.1",
+        "transformers": "5.18.0",
     }
     mismatches = []
     for package_name, expected_version in expected_versions.items():
@@ -240,7 +251,7 @@ def main() -> None:
         "websockets",
     ]
     if sys.platform == "darwin":
-        required_modules.extend(["miniaudio", "mlx", "mlx_audio", "mlx_lm", "misaki", "soundfile", "spacy"])
+        required_modules.extend(["miniaudio", "mlx", "mlx_audio", "mlx_lm", "soundfile"])
     else:
         required_modules.extend(["faster_qwen3_tts", "nano_parakeet"])
     if os.environ.get("SPEECH_TO_SPEECH_SMOKE_EXTRA") == "omnivoice":

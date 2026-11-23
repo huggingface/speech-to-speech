@@ -5,6 +5,7 @@ import logging
 from typing import TYPE_CHECKING, Literal
 
 from openai.types.realtime import (
+    ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionFailedEvent,
     InputAudioBufferAppendEvent,
     InputAudioBufferCommittedEvent,
@@ -25,6 +26,7 @@ from speech_to_speech.api.openai_realtime.input_state import (
 )
 from speech_to_speech.api.openai_realtime.utils import StreamingPcm16Resampler
 from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEvent
+from speech_to_speech.pipeline.speculative_turns import TurnGateAction
 
 if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import ServerEvent
@@ -194,15 +196,35 @@ class AudioHandler(RealtimeBaseHandler):
         if started_turn_id is not None and pending.turn_id != started_turn_id:
             return "publish"
         st = self._state(conn_id)
-        unanswered = pending.input_closed and not (st.in_response or st.response_pending)
+        active_owns_turn = st.in_response and (
+            st.current_response_turn_id is None
+            or (st.current_response_turn_id, st.current_response_turn_revision)
+            == (pending.turn_id, pending.turn_revision)
+        )
+        pending_owns_turn = False
+        for response_key in st.pending_response_keys:
+            response_latency = self._service.turn_latency_store.get_response(response_key)
+            if response_latency is None or (response_latency.turn_id, response_latency.turn_revision) == (
+                pending.turn_id,
+                pending.turn_revision,
+            ):
+                pending_owns_turn = True
+                break
+        has_response = active_owns_turn or pending_owns_turn
+        unanswered = pending.input_closed and not has_response
         if unanswered or isinstance(pending.transcription, ConversationItemInputAudioTranscriptionFailedEvent):
             # No output will commit this turn: its transcription failed, was
             # empty, or its response ended without output. The item cannot
             # reopen once published, so commit after the same reopen gate
             # used for accepted output.
-            committed = turns.try_commit_if_latest_after_reopen_grace(pending.turn_id, pending.turn_revision)
-            if committed is None:
+            decision = turns.gate(pending.turn_id, pending.turn_revision, commit=True)
+            if decision.action is TurnGateAction.HOLD:
                 return "hold"
+            committed = decision.action is TurnGateAction.ACCEPT
+            if committed and not has_response:
+                # Terminal-only input has no response completion to retire its
+                # commitment. Retire that record once the input is final.
+                turns.close(pending.turn_id, pending.turn_revision)
             return "publish" if committed else "discard"
         if turns.is_committed(pending.turn_id, pending.turn_revision):
             return "publish"
@@ -242,12 +264,30 @@ class AudioHandler(RealtimeBaseHandler):
                 )
             )
         if pending.transcription is not None:
+            if isinstance(pending.transcription, ConversationItemInputAudioTranscriptionCompletedEvent):
+                self._record_published_transcript(conn_id, item_id, pending.transcription.transcript)
             events.append(pending.transcription)
             pending.transcription = None
         if pending.input_closed:
             st.pending_input_terminals.pop(item_id, None)
             self._release_input_item_state_by_id(conn_id, item_id)
         return events
+
+    def _record_published_transcript(self, conn_id: str, item_id: str, transcript: str) -> None:
+        """Remember the transcript a client received, bounded by retained history."""
+        st = self._state(conn_id)
+        retained_ids = st.runtime_config.chat.item_ids()
+        transcripts = {
+            known_id: text
+            for known_id, text in st.published_input_transcripts.items()
+            if known_id != item_id and (known_id in retained_ids or not text)
+        }
+        transcripts[item_id] = transcript
+        # Empty transcripts never enter the chat; keep only the most recent ones.
+        empty_ids = [known_id for known_id, text in transcripts.items() if not text]
+        for known_id in empty_ids[:-128]:
+            del transcripts[known_id]
+        st.published_input_transcripts = transcripts
 
     def handle_audio_append(self, conn_id: str, event: InputAudioBufferAppendEvent) -> list[bytes]:
         """Decode base64 audio, resample to pipeline rate, and split into 512-sample PCM16 chunks for the VAD."""
@@ -344,12 +384,17 @@ class AudioHandler(RealtimeBaseHandler):
             response.discard_tool_followup_prefetch(conn_id)
             st.generation_done_tool_calls.clear()
             st.completed_tool_response_keys.clear()
-        is_reopen = bool(event.reopened and event.turn_id is not None and event.turn_id == st.speculative_turn_id)
+        is_reopen = bool(event.reopened and event.turn_id is not None)
         preserve_active_response = st.in_response
-        previous_input_item_id = (
-            st.input_item_by_turn_revision.get((event.turn_id, st.speculative_turn_revision))
-            if is_reopen and event.turn_id is not None
-            else None
+        # Reopen ownership comes from the protocol item's turn mapping, not a
+        # second mutable copy of the tracker's current revision.
+        previous_input_item_id = next(
+            (
+                item_id
+                for (turn_id, _revision), item_id in st.input_item_by_turn_revision.items()
+                if is_reopen and turn_id == event.turn_id
+            ),
+            None,
         )
         previous_input_item = st.input_items.get(previous_input_item_id) if previous_input_item_id is not None else None
         if previous_input_item_id is not None and previous_input_item is not None:
@@ -370,8 +415,6 @@ class AudioHandler(RealtimeBaseHandler):
             )
         if not is_reopen:
             st.response_usage.turns += 1
-        st.speculative_turn_id = event.turn_id
-        st.speculative_turn_revision = event.turn_revision
         # A reopened revision is still the same externally open speech item.
         # Keep cancellation and revision bookkeeping above, but do not reset
         # a generic client's audio onset with another speech_started event.
@@ -461,14 +504,19 @@ class AudioHandler(RealtimeBaseHandler):
         self,
         conn_id: str,
         response_key: str | None = None,
+        samples: int = 0,
     ) -> tuple[str, str, int, list[ServerEvent]]:
-        """Ensure an audio response and reserve its assistant output identity."""
+        """Ensure an audio response and reserve its assistant output identity.
+
+        *samples* counts the pipeline-rate audio the caller is delivering.
+        """
         resp_id, item_id, events = self.begin_audio_response(conn_id, response_key)
         st = self._state(conn_id)
         assistant_item_id, output_index = self._service.response._ensure_assistant_output_item(
             conn_id,
             item_id,
         )
+        self._service.response.record_audio_samples(conn_id, assistant_item_id, samples)
         pending = next(item for item in st.pending_text_outputs if int(item["output_index"]) == output_index)
         events.extend(self._service.response._begin_message_output(conn_id, pending, wants_audio=True))
         st.audio_output_started = True
@@ -487,6 +535,7 @@ class AudioHandler(RealtimeBaseHandler):
         resp_id, assistant_item_id, assistant_output_index, events = self.begin_audio_output(
             conn_id,
             response_key,
+            len(audio) // 2,
         )
         rp = st.current_response_params
         client_out_rate = None

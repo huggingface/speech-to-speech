@@ -38,11 +38,6 @@ def set_log_transcripts(enabled: bool) -> None:
     _log_transcripts = bool(enabled)
 
 
-def log_transcripts_enabled() -> bool:
-    """Whether log sites may include conversation content."""
-    return _log_transcripts
-
-
 def warn_if_log_transcripts_enabled() -> None:
     """Emit the prominent opt-in warning, before any conversation is processed."""
     if _log_transcripts:

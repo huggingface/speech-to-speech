@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter, OrderedDict
-from time import perf_counter
+from time import monotonic, perf_counter
 from typing import Any
 
 from speech_to_speech.baseHandler import BaseHandler
@@ -17,6 +17,9 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
     """Base STT handler with speculative-turn stale input filtering."""
 
     _MAX_COMPLETED_FINAL_REVISIONS = 2048
+    # The gate normally returns immediately. Below this the wait is noise, so it
+    # is neither logged nor added to the turn line as a permanent `0.00s` field.
+    _GATE_WAIT_REPORT_S = 0.05
 
     speculative_turns: SpeculativeTurnTracker | None = None
     final_revision_settle_s: float = 0.0
@@ -26,11 +29,23 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
     start_language: Any = None
     last_language: Any = None
 
+    def output_for_queue(self, output: STTOut, source_input: STTIn) -> STTOut:
+        # The background worker overlaps inference with STT. Resolve only now,
+        # without waiting: a late result is explicitly incomplete, not a reason
+        # to stall the response or attach metadata from a different revision.
+        if isinstance(output, Transcription):
+            attribution = source_input.speaker_attribution
+            if source_input.speaker_pending is not None:
+                attribution = source_input.speaker_pending.resolve()
+            return output.model_copy(update={"speaker_attribution": attribution})
+        return output
+
     def should_process_input(self, item: STTIn) -> bool:
         mode = getattr(item, "mode", None)
         turn_id = getattr(item, "turn_id", None)
         turn_revision = getattr(item, "turn_revision", None)
         if self._is_completed_final_revision(item):
+            # The emitted final can still be queued for the notifier/service.
             queued_drops = self._drop_stale_queued_inputs()
             self._log_stale_turn_item(item, "input-after-final", queued_drops=queued_drops)
             return False
@@ -46,7 +61,7 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
             wait_for_stability=wait_for_stability,
         )
         gate_wait_s = perf_counter() - gate_start
-        if gate_wait_s >= 0.05:
+        if gate_wait_s >= self._GATE_WAIT_REPORT_S:
             logger.info(
                 "%s: STT input gate waited %.3fs for turn=%s rev=%s mode=%s latest=%s age=%.3fs queue=%s",
                 self.__class__.__name__,
@@ -59,12 +74,13 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
                 self._safe_qsize(),
             )
 
+        if is_latest and mode == "final" and gate_wait_s >= self._GATE_WAIT_REPORT_S:
+            self._record_vad_settle(item, gate_wait_s)
         if not is_latest:
-            if mode == "final":
-                store = getattr(self, "turn_latency_store", None)
-                if store is not None:
-                    store.discard_pending_turn(turn_id, turn_revision)
             queued_drops = self._drop_stale_queued_inputs()
+            # This revision is superseded, so nothing will consume its pending
+            # slot — including one a progressive update opened for the lock wait.
+            self._discard_pending_latency(item)
             self._log_stale_turn_item(item, "input", queued_drops=queued_drops)
             return False
         return True
@@ -76,17 +92,34 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
         if tracker is not None:
             tracker.record_stt(seconds)
 
+    def _record_vad_settle(self, item: object, gate_wait_s: float) -> None:
+        store = getattr(self, "turn_latency_store", None)
+        if store is None:
+            return
+        tracker = store.get_or_create_for_turn(
+            getattr(item, "turn_id", None),
+            getattr(item, "turn_revision", None),
+        )
+        if tracker is not None:
+            tracker.record_vad_settle(gate_wait_s)
+
+    def _discard_pending_latency(self, item: object) -> None:
+        store = getattr(self, "turn_latency_store", None)
+        if store is not None:
+            store.discard_pending_turn(
+                getattr(item, "turn_id", None),
+                getattr(item, "turn_revision", None),
+            )
+
     def should_emit_output(self, output: STTOut) -> bool:
         if isinstance(output, PartialTranscription) and self._is_completed_final_revision(output):
             self._log_stale_turn_item(output, "output-after-final")
             return False
 
         if not self._is_latest_turn_item(output, wait_for_pending_reopen=True, wait_for_stability=False):
-            if isinstance(output, Transcription):
+            if isinstance(output, (Transcription, PartialTranscription)):
                 # Rejected output never reaches the service's final-STT cleanup.
-                store = getattr(self, "turn_latency_store", None)
-                if store is not None:
-                    store.discard_pending_turn(output.turn_id, output.turn_revision)
+                self._discard_pending_latency(output)
             self._log_stale_turn_item(output, "output")
             return False
         return True
@@ -111,11 +144,15 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
 
         if wait_for_stability:
             item_delay_s = max(0.0, getattr(item, "processing_delay_s", 0.0) - self._item_age_s(item))
+            processing_deadline = self.speculative_turns.processing_deadline(turn_id, turn_revision)
+            if processing_deadline is not None:
+                item_delay_s = max(0.0, processing_deadline - monotonic())
             wait_started_at_s = perf_counter()
-            is_latest = self.speculative_turns.is_latest_after_stability_window(
+            is_latest = self.speculative_turns.wait_for_gate(
                 turn_id,
                 turn_revision,
-                max(self.final_revision_settle_s, item_delay_s),
+                hold_for_grace=False,
+                hold_until=monotonic() + max(self.final_revision_settle_s, item_delay_s),
             )
             store = getattr(self, "turn_latency_store", None)
             if store is not None and item_delay_s > 0:
@@ -123,7 +160,7 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
                     turn_id, turn_revision, wait_started_at_s, min(perf_counter(), wait_started_at_s + item_delay_s)
                 )
         elif wait_for_pending_reopen:
-            is_latest = self.speculative_turns.is_latest_after_pending_reopen(turn_id, turn_revision)
+            is_latest = self.speculative_turns.wait_for_gate(turn_id, turn_revision, hold_for_grace=False)
         else:
             is_latest = self.speculative_turns.is_latest(turn_id, turn_revision)
         return is_latest
@@ -133,7 +170,7 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
             return 0
 
         dropped = 0
-        dropped_finals: list[tuple[str | None, int | None]] = []
+        dropped_pending: list[tuple[str | None, int | None]] = []
         with self.queue_in.mutex:
             kept: list[Any] = []
             while self.queue_in.queue:
@@ -148,8 +185,12 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
                     )
                 ):
                     dropped += 1
-                    if queued_item.mode == "final":
-                        dropped_finals.append((queued_item.turn_id, queued_item.turn_revision))
+                    # A completed final still owns its pending timings.
+                    # Skipping a progressive before its queued final also keeps them.
+                    if not self._is_completed_final_revision(queued_item) and not self._is_latest_turn_item(
+                        queued_item, wait_for_pending_reopen=False, wait_for_stability=False
+                    ):
+                        dropped_pending.append((queued_item.turn_id, queued_item.turn_revision))
                 else:
                     kept.append(queued_item)
             self.queue_in.queue.extend(kept)
@@ -157,7 +198,7 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
                 self.queue_in.not_full.notify_all()
         store = getattr(self, "turn_latency_store", None)
         if store is not None:
-            for turn_id, revision in dropped_finals:
+            for turn_id, revision in dropped_pending:
                 store.discard_pending_turn(turn_id, revision)
         return dropped
 

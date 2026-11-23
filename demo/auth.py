@@ -140,12 +140,6 @@ def oauth_login_required_reason(request) -> "str | None":
     return None
 
 
-def current_user(request):
-    """The signed-in HF user-info, or None."""
-    info = current_oauth(request)
-    if _oauth_token_expired(info) or not _oauth_token(info):
-        return None
-    return _field(info, "user_info")
 
 
 def current_access_token(request) -> "str | None":
@@ -178,9 +172,9 @@ def _whoami_via_token(token: str) -> dict:
     if token in _whoami_cache:
         return _whoami_cache[token]
     try:
-        import httpx
+        import httpx2
 
-        resp = httpx.get(
+        resp = httpx2.get(
             "https://huggingface.co/api/whoami-v2",
             headers={"Authorization": f"Bearer {token}"},
             timeout=5.0,

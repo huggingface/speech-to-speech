@@ -27,6 +27,7 @@ from speech_to_speech.pipeline.events import (
 )
 from speech_to_speech.pipeline.handler_types import LLMOut, TTSIn
 from speech_to_speech.pipeline.messages import (
+    AssistantReasoningPart,
     AssistantTextPart,
     AssistantToolCallPart,
     EndOfResponse,
@@ -118,6 +119,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
             ResponseGenerationDoneEvent(
                 response_key=response_key,
                 call_ids=list(self._tool_call_ids),
+                history=lm_output.history,
                 succeeded=succeeded,
                 turn_id=lm_output.turn_id,
                 turn_revision=lm_output.turn_revision,
@@ -128,7 +130,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
     def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
         if self.speculative_turns is None:
             return True
-        return self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)
+        return self.speculative_turns.wait_for_gate(turn_id, turn_revision)
 
     def process(self, lm_output: LLMOut) -> Iterator[TTSIn | PipelineEvent]:
         """
@@ -173,11 +175,13 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                         cleanup_only=True,
                     )
                 return
-            self._notify_generation_done(lm_output, response_key, succeeded=lm_output.error is None)
-            if lm_output.error is None and self._detected_assistant_language and self._tts_runtime_config is not None:
+            succeeded = lm_output.error is None and lm_output.status == "completed"
+            self._notify_generation_done(lm_output, response_key, succeeded=succeeded)
+            if succeeded and self._detected_assistant_language and self._tts_runtime_config is not None:
                 self._tts_runtime_config.last_assistant_language = self._detected_assistant_language
             if lm_output.error:
                 yield ResponseFailedEvent(
+                    history=lm_output.history,
                     message=lm_output.error,
                     turn_id=lm_output.turn_id,
                     turn_revision=lm_output.turn_revision,
@@ -186,7 +190,12 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 )
             else:
                 yield AssistantResponseDoneEvent(
+                    history=lm_output.history,
+                    reasoning=lm_output.reasoning,
+                    status=lm_output.status,
+                    reason=lm_output.reason,
                     response_key=response_key,
+                    input_tool_call_ids=lm_output.input_tool_call_ids if succeeded else [],
                     turn_id=lm_output.turn_id,
                     turn_revision=lm_output.turn_revision,
                     cancel_generation=lm_output.cancel_generation,
@@ -215,7 +224,10 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
 
         response_key = self._start_response(lm_output.response_key)
 
+        reasoning = [part for part in lm_output.parts if isinstance(part, AssistantReasoningPart)]
         for part in lm_output.parts:
+            if isinstance(part, AssistantReasoningPart):
+                continue
             output_sequence = self._output_sequence
             self._output_sequence += 1
             if isinstance(part, AssistantToolCallPart) and part.tool.call_id not in self._tool_call_ids:
@@ -223,7 +235,9 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 if self.text_output_queue is not None:
                     self.text_output_queue.put(
                         AssistantToolCallReadyEvent(
+                            history=lm_output.history,
                             part=part,
+                            reasoning=reasoning,
                             output_sequence=output_sequence,
                             turn_id=lm_output.turn_id,
                             turn_revision=lm_output.turn_revision,
@@ -232,13 +246,15 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                         )
                     )
             event = AssistantOutputEvent(
-                parts=[part],
+                history=lm_output.history,
+                parts=[*reasoning, part],
                 turn_id=lm_output.turn_id,
                 turn_revision=lm_output.turn_revision,
                 cancel_generation=lm_output.cancel_generation,
                 response_key=response_key,
                 output_sequence=output_sequence,
             )
+            reasoning = []
             yield event
             if (
                 not isinstance(part, AssistantTextPart)
@@ -276,7 +292,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                     self._response_tts_language = detected or selected
                 self._response_language_resolved = True
             selected = self._response_selected_language
-            yield TTSInput(
+            tts_input = TTSInput(
                 text=part.text,
                 language_code=language_code,
                 selected_language=selected,
@@ -293,6 +309,19 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 response_key=response_key,
                 prefetch_transaction=lm_output.prefetch_transaction,
             )
+            store = getattr(self, "turn_latency_store", None)
+            tracker = store.get_response(response_key) if store is not None else None
+            transaction = lm_output.prefetch_transaction
+            if (
+                tracker is not None
+                and (transaction is None or not transaction.discarded)
+                and (
+                    self.speculative_turns is None
+                    or self.speculative_turns.is_latest(lm_output.turn_id, lm_output.turn_revision)
+                )
+            ):
+                tracker.record_llm_first_tts()
+            yield tts_input
 
     def on_session_end(self) -> None:
         self._reset_response()

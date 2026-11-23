@@ -8,9 +8,12 @@ from openai.types.realtime import (
     ConversationItem,
     ConversationItemCreatedEvent,
     ConversationItemCreateEvent,
+    ConversationItemDeletedEvent,
+    ConversationItemDeleteEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionDeltaEvent,
     ConversationItemInputAudioTranscriptionFailedEvent,
+    ConversationItemRetrieveEvent,
     ConversationItemTruncateEvent,
     InputAudioBufferAppendEvent,
     InputAudioBufferCommitEvent,
@@ -19,9 +22,10 @@ from openai.types.realtime import (
     InputAudioBufferSpeechStoppedEvent,
     OutputAudioBufferClearEvent,
     RealtimeConversationItemFunctionCall,
+    RealtimeConversationItemFunctionCallOutput,
+    RealtimeConversationItemUserMessage,
     RealtimeError,
     RealtimeErrorEvent,
-    RealtimeSessionCreateRequest,
     ResponseAudioDeltaEvent,
     ResponseAudioDoneEvent,
     ResponseAudioTranscriptDeltaEvent,
@@ -45,11 +49,14 @@ from openai.types.realtime.conversation_item_input_audio_transcription_completed
     UsageTranscriptTextUsageDuration,
 )
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
+from openai.types.realtime.realtime_server_event import ConversationItemRetrieved
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from speech_to_speech.api.openai_realtime.handlers import (
     AudioHandler,
     ConversationHandler,
+    HistoryCommitError,
+    HistoryHandler,
     ResponseHandler,
     SessionHandler,
 )
@@ -58,8 +65,16 @@ from speech_to_speech.api.openai_realtime.input_state import (
     PendingInputTerminal,
     SpeechToSpeechInputAudioTranscriptionSnapshotEvent,
 )
+from speech_to_speech.api.openai_realtime.reasoning import (
+    ResponseCreate,
+    SessionRequest,
+    SessionUpdate,
+    SpeechToSpeechReasoningDeltaEvent,
+)
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
-from speech_to_speech.LLM.chat import Chat, make_user_message
+from speech_to_speech.api.openai_realtime.visemes import SpeechToSpeechVisemesEvent
+from speech_to_speech.LLM.chat import Chat, make_user_audio_message, make_user_message
+from speech_to_speech.LLM.utils import WHISPER_LANGUAGE_TO_LLM_LANGUAGE
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
@@ -77,12 +92,30 @@ from speech_to_speech.pipeline.events import (
 )
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
 from speech_to_speech.pipeline.queue_types import TextPromptItem
-from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnGateAction, TurnPhase
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
-from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
-from speech_to_speech.utils.utils import _generate_id
+from speech_to_speech.pipeline.turn_latency import SpeechLatencyAnchor, TurnLatencyStore
+from speech_to_speech.speech_languages import SpeechLanguageCapabilities
+from speech_to_speech.utils.request_tracing import log_response_binding
+from speech_to_speech.utils.utils import _generate_id, audio_to_wav_base64
 
 logger = logging.getLogger(__name__)
+
+# Speculative turn work that stops being relevant once its turn is superseded.
+_TURN_INPUT_EVENTS = (
+    PartialTranscriptionEvent,
+    TranscriptionCompletedEvent,
+    TranscriptionFailedEvent,
+    AudioInputCompletedEvent,
+)
+# Assistant output additionally waits for resumed speech and the reopen grace.
+_TURN_OUTPUT_EVENTS = (
+    AssistantOutputEvent,
+    AssistantResponseDoneEvent,
+    AssistantToolCallReadyEvent,
+    ResponseGenerationDoneEvent,
+    ResponseFailedEvent,
+)
 
 PIPELINE_SAMPLE_RATE = 16000
 CHUNK_SAMPLES = 512
@@ -96,10 +129,12 @@ _EVENT_TYPE_TO_MODEL: dict[str, type[BaseModel]] = {
     "input_audio_buffer.append": InputAudioBufferAppendEvent,
     "input_audio_buffer.commit": InputAudioBufferCommitEvent,
     "output_audio_buffer.clear": OutputAudioBufferClearEvent,
-    "session.update": SessionUpdateEvent,
+    "session.update": SessionUpdate,
     "conversation.item.create": ConversationItemCreateEvent,
+    "conversation.item.delete": ConversationItemDeleteEvent,
     "conversation.item.truncate": ConversationItemTruncateEvent,
-    "response.create": ResponseCreateEvent,
+    "conversation.item.retrieve": ConversationItemRetrieveEvent,
+    "response.create": ResponseCreate,
     "response.cancel": ResponseCancelEvent,
 }
 
@@ -109,12 +144,16 @@ ClientEvent = Union[
     OutputAudioBufferClearEvent,
     SessionUpdateEvent,
     ConversationItemCreateEvent,
+    ConversationItemDeleteEvent,
     ConversationItemTruncateEvent,
+    ConversationItemRetrieveEvent,
     ResponseCreateEvent,
     ResponseCancelEvent,
 ]
 
 ServerEvent = Union[
+    SpeechToSpeechReasoningDeltaEvent,
+    SpeechToSpeechVisemesEvent,
     SessionCreatedEvent,
     SessionUpdatedEvent,
     RealtimeErrorEvent,
@@ -122,6 +161,8 @@ ServerEvent = Union[
     InputAudioBufferSpeechStoppedEvent,
     InputAudioBufferCommittedEvent,
     ConversationItemCreatedEvent,
+    ConversationItemDeletedEvent,
+    ConversationItemRetrieved,
     ConversationItemInputAudioTranscriptionDeltaEvent,
     ConversationItemInputAudioTranscriptionCompletedEvent,
     ConversationItemInputAudioTranscriptionFailedEvent,
@@ -140,8 +181,6 @@ ServerEvent = Union[
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
 ]
-
-RealtimeEvent = Union[ClientEvent, ServerEvent]
 
 
 _UsageMetricsT = TypeVar("_UsageMetricsT", bound="UsageMetrics")
@@ -189,6 +228,17 @@ class GlobalUsageMetrics(UsageMetrics):
         return sum(self.errors_by_type.values())
 
 
+InputTurnReference = tuple[str | None, int | None, float | None]
+
+
+class InputTurnAccounting(BaseModel):
+    """Chat and usage attributed to an input turn, independent of its lifecycle."""
+
+    user_item_id: str | None = None
+    audio_duration_s: float = 0.0
+    speech_stopped_at_s: float | None = None
+
+
 class ConnState(BaseModel):
     """Per-connection mutable state, including all protocol-level IDs."""
 
@@ -207,11 +257,12 @@ class ConnState(BaseModel):
     input_audio_resampler_rate: int | None = None
     current_response_id: Optional[str] = None
     current_response_key: Optional[str] = None
-    # Stable response ownership. Unlike speculative_user_turn_id/revision,
-    # these do not change when newer user speech arrives mid-response.
+    # Stable response ownership does not change when newer speech arrives.
     current_response_turn_id: Optional[str] = None
     current_response_turn_revision: Optional[int] = None
     response_failed: bool = False
+    response_incomplete: bool = False
+    response_incomplete_reason: Literal["max_output_tokens", "content_filter"] | None = None
     response_error_type: Optional[str] = None
     current_item_id: Optional[str] = None
     content_index: int = 0
@@ -226,6 +277,15 @@ class ConnState(BaseModel):
     pending_input_terminals: dict[str, PendingInputTerminal] = Field(default_factory=dict)
     input_audio_duration_s: float = 0.0
     last_item_id: Optional[str] = None
+    acknowledged_item_ids: list[str] = Field(default_factory=list)
+    deleted_input_turn_ids: dict[str, None] = Field(default_factory=dict)
+    # Final transcript sent to the client for each published speech item. The
+    # chat may hold different text (speaker annotations) or nothing (empty
+    # transcripts), so conversation.item.retrieve answers from here.
+    published_input_transcripts: dict[str, str] = Field(default_factory=dict)
+    # Delivered assistant messages that were audio. The chat holds their text,
+    # so retrieval restores the output_audio shape the client saw.
+    audio_output_item_ids: dict[str, None] = Field(default_factory=dict)
     current_response_params: RealtimeResponseCreateParams | None = None
     pending_assistant_item_id: Optional[str] = None
     pending_assistant_output_index: Optional[int] = None
@@ -239,6 +299,12 @@ class ConnState(BaseModel):
     # flags. Kept as plain internal data to avoid coupling connection state to
     # protocol event models.
     pending_text_outputs: list[dict[str, Any]] = Field(default_factory=list)
+    # Recent assistant audio items, oldest first: transcript segments with the
+    # pipeline-rate samples delivered after each. Truncation maps a playback
+    # position back to the transcript the user heard.
+    assistant_audio_segments: dict[str, list[list[Any]]] = Field(default_factory=dict)
+    # Played position (pipeline samples) each truncated assistant item was cut to.
+    assistant_audio_cuts: dict[str, int] = Field(default_factory=dict)
     # Keyed by output index so response.done can preserve interleaving with
     # assistant message items.
     pending_function_calls: dict[int, RealtimeConversationItemFunctionCall] = Field(default_factory=dict)
@@ -252,18 +318,23 @@ class ConnState(BaseModel):
     pending_early_tool_calls: dict[int, Any] = Field(default_factory=dict)
     response_usage: UsageMetrics = Field(default_factory=UsageMetrics)
     pending_token_usage: dict[str, tuple[int, int]] = Field(default_factory=dict)
-    speculative_turn_id: Optional[str] = None
-    speculative_turn_revision: Optional[int] = None
-    speculative_user_turn_id: Optional[str] = None
-    speculative_user_turn_revision: Optional[int] = None
-    speculative_user_speech_stopped_at_s: Optional[float] = None
-    speculative_user_item_id: Optional[str] = None
-    speculative_audio_duration_s: float = 0.0
+    # The tracker owns the current turn and revision. This map holds only the
+    # chat/usage effects that a later accepted revision may replace.
+    input_turn_accounting: dict[str, InputTurnAccounting] = Field(default_factory=dict)
+    # Immutable ownership of supplied input, not a second lifecycle cursor.
+    # Speech onset never updates these; only supplied input and accepted tool
+    # calls establish which turn a later generation can actually answer.
+    input_turn_by_item_id: dict[str, InputTurnReference] = Field(default_factory=dict)
+    input_turn_by_call_id: dict[str, InputTurnReference] = Field(default_factory=dict)
+    speech_latency_anchors: dict[tuple[str, int | None], SpeechLatencyAnchor] = Field(default_factory=dict)
+    response_tool_inputs: dict[str, set[str]] = Field(default_factory=dict)
+    # Recent acknowledgements outlive history trimming, with bounded retention.
+    answered_tool_call_ids: dict[str, None] = Field(default_factory=dict)
     # Client conversation.item.create items that arrived while a response was
     # generating. Applying them mid-generation races the LLM handler's chat
     # write-back (cross-thread), so they are buffered here and flushed in order
     # once the response completes. See ConversationHandler.flush_deferred_items.
-    deferred_items: list[ConversationItem] = Field(default_factory=list)
+    deferred_items: list[ConversationItem | ConversationItemDeleteEvent] = Field(default_factory=list)
     # Preserve the standard insertion anchor supplied with deferred function
     # outputs so an image/output sequence can be applied in the intended order.
     # The anchor does not imply that the output owns the preceding image.
@@ -336,10 +407,13 @@ class RealtimeService:
         # None means the active backend does not declare a complete language set.
         self.stt_supported_languages: set[str] | None = None
         self.tts_supported_languages: set[str] | None = None
+        self.stt_language_capabilities = SpeechLanguageCapabilities()
+        self.tts_language_capabilities = SpeechLanguageCapabilities()
         self.stt_auto_reset_supported: bool = True
         self._conns: dict[str, ConnState] = {}
         self.total_usage = GlobalUsageMetrics()
 
+        self.history = HistoryHandler(self)
         self.audio = AudioHandler(self)
         self.session = SessionHandler(self)
         self.response = ResponseHandler(self)
@@ -357,6 +431,47 @@ class RealtimeService:
             ResponseFailedEvent: self._on_response_failed,
         }
 
+    def get_language_capabilities(self) -> dict[str, Any]:
+        """Describe coverage separately from valid named session selections."""
+
+        def languages(codes: frozenset[str] | set[str] | None) -> list[dict[str, str | None]] | None:
+            if codes is None:
+                return None
+            return [{"code": code, "name": WHISPER_LANGUAGE_TO_LLM_LANGUAGE.get(code)} for code in sorted(codes)]
+
+        def describe(capabilities: SpeechLanguageCapabilities) -> dict[str, Any]:
+            return {
+                "languages": languages(capabilities.languages),
+                "supports_language_selection": capabilities.supports_language_selection,
+                "supports_auto": capabilities.supports_auto,
+            }
+
+        stt, tts = self.stt_language_capabilities, self.tts_language_capabilities
+        shared = None if stt.languages is None or tts.languages is None else stt.languages & tts.languages
+        selectable: set[str] | None = None
+        for capabilities, allowed in (
+            (stt, self.stt_supported_languages),
+            (tts, self.tts_supported_languages),
+        ):
+            if not capabilities.supports_language_selection:
+                selectable = set()
+                break
+            for known in (capabilities.languages, allowed):
+                if known is not None:
+                    selectable = set(known) if selectable is None else selectable.intersection(known)
+        # A partial known set cannot establish complete coverage for a selector.
+        if selectable and shared is None:
+            selectable = None
+        return {
+            "stt": describe(stt),
+            "tts": describe(tts),
+            "conversation": {
+                "languages": languages(shared),
+                "selectable_languages": languages(selectable),
+                "session_auto_supported": self.stt_auto_reset_supported,
+            },
+        }
+
     # ── Connection lifecycle ─────────────────────
 
     def register(self) -> str:
@@ -366,17 +481,19 @@ class RealtimeService:
         state = ConnState(
             runtime_config=RuntimeConfig(
                 chat=Chat(self._chat_size),
-                session=RealtimeSessionCreateRequest(
+                session=SessionRequest(
                     type="realtime",
                     instructions=self._default_instructions,
                 ),
             )
         )
+        state.runtime_config.bind_trace_session(state.session_id)
         self._conns[state.session_id] = state
         self.total_usage.connections += 1
         return state.session_id
 
     def unregister(self, conn_id: str) -> None:
+        self.history.close_session(conn_id)
         st = self._conns.pop(conn_id, None)
         if st is not None:
             # Suppress any in-flight compaction splice so a daemon worker can't
@@ -406,17 +523,34 @@ class RealtimeService:
         *,
         turn_id: str | None = None,
         turn_revision: int | None = None,
+        parent_response_key: str | None = None,
+        parent_call_id: str | None = None,
+        source: Literal["speech", "client", "tool"] = "speech",
+        speech_anchor: SpeechLatencyAnchor | None = None,
     ) -> None:
-        self.turn_latency_store.get_or_create_response(
+        existing = self.turn_latency_store.get_response(response_key)
+        tracker = self.turn_latency_store.get_or_create_response(
             response_key,
             turn_id=turn_id,
             turn_revision=turn_revision,
             session_id=conn_id,
+            parent_response_key=parent_response_key,
+            parent_call_id=parent_call_id,
         )
-
-    @property
-    def connection_ids(self) -> list[str]:
-        return list(self._conns)
+        tracker.source = source
+        if existing is None:
+            log_response_binding(
+                session_id=self._state(conn_id).session_id,
+                response_key=response_key,
+                turn_id=turn_id,
+                turn_revision=turn_revision,
+                source=source,
+            )
+        if source == "speech" and speech_anchor is None and turn_id is not None:
+            speech_anchor = self._state(conn_id).speech_latency_anchors.get((turn_id, turn_revision))
+        tracker.speech_anchor = speech_anchor
+        if speech_anchor is not None:
+            speech_anchor.requested = True
 
     # ── Client event parsing ─────────────────────
 
@@ -476,8 +610,9 @@ class RealtimeService:
         self,
         conn_id: str,
         response_key: str | None = None,
+        samples: int = 0,
     ) -> tuple[str, str, int, list[ServerEvent]]:
-        return self.audio.begin_audio_output(conn_id, response_key)
+        return self.audio.begin_audio_output(conn_id, response_key, samples)
 
     def encode_audio_chunk(
         self,
@@ -497,6 +632,12 @@ class RealtimeService:
     def handle_response_create(self, conn_id: str, event: ResponseCreateEvent) -> ServerEvent | None:
         return self.response.handle_response_create(conn_id, event)
 
+    def handle_conversation_item_truncate(self, conn_id: str, event: ConversationItemTruncateEvent) -> None:
+        self.response.handle_conversation_item_truncate(conn_id, event)
+
+    def truncate_unplayed_audio(self, conn_id: str, unplayed_ms: float) -> None:
+        self.response.truncate_unplayed_audio(conn_id, unplayed_ms)
+
     def handle_response_cancel(self, conn_id: str) -> list[ServerEvent]:
         return self.response.handle_response_cancel(conn_id)
 
@@ -512,9 +653,14 @@ class RealtimeService:
     def close_pending_responses(self, conn_id: str) -> None:
         """Cancel queued responses without losing usage already reported by their LMs."""
         st = self._state(conn_id)
+        # Close eligibility before discarding private prefetch work removes
+        # its tracker/key. Ordinary prefetch replacement keeps its anchor.
+        for response_key in tuple(st.pending_response_keys):
+            tracker = self.turn_latency_store.get_response(response_key)
+            if tracker is not None and tracker.speech_anchor is not None:
+                tracker.speech_anchor.close()
         self.response.discard_tool_followup_prefetch(conn_id)
         for response_key in tuple(st.pending_response_keys):
-            st.runtime_config.chat.rollback_provisional_generation(response_key)
             self.close_response_key(conn_id, response_key)
         st.generation_done_tool_calls.clear()
         st.completed_tool_response_keys.clear()
@@ -534,6 +680,7 @@ class RealtimeService:
             self.total_usage.input_tokens += input_tokens
             self.total_usage.output_tokens += output_tokens
             self.turn_latency_store.discard_response(response_key, session_id=conn_id)
+        self.history.close(conn_id, response_key)
         st.close_response_key(response_key)
 
     def handle_conversation_item_create(self, conn_id: str, event: ConversationItemCreateEvent) -> list[ServerEvent]:
@@ -546,43 +693,18 @@ class RealtimeService:
         self.response.maybe_start_tool_followup_prefetch(conn_id)
         return events
 
+    def handle_conversation_item_delete(self, conn_id: str, event: ConversationItemDeleteEvent) -> list[ServerEvent]:
+        # Hidden follow-up work captured the old history; it cannot be reused.
+        self.response.discard_tool_followup_prefetch(conn_id)
+        return self.conversation.handle_conversation_item_delete(conn_id, event)
+
+    def handle_conversation_item_retrieve(
+        self, conn_id: str, event: ConversationItemRetrieveEvent
+    ) -> list[ServerEvent]:
+        return self.conversation.handle_conversation_item_retrieve(conn_id, event)
+
     def dispatch_pipeline_event(self, conn_id: str, event: PipelineEvent) -> list[ServerEvent]:
         """Route an internal pipeline event to the appropriate handler."""
-        events = self._dispatch_pipeline_event(conn_id, event, wait_for_pending_reopen=True)
-        return [] if events is None else events
-
-    def try_dispatch_pipeline_event(self, conn_id: str, event: PipelineEvent) -> list[ServerEvent] | None:
-        """Non-blocking dispatch.
-
-        Returns ``None`` when dispatch must be retried after a speculative
-        reopen candidate resolves.
-        """
-        return self._dispatch_pipeline_event(conn_id, event, wait_for_pending_reopen=False)
-
-    def should_defer_pipeline_event(self, event: PipelineEvent) -> bool:
-        if self.speculative_turns is None or not isinstance(
-            event,
-            (
-                AssistantOutputEvent,
-                AssistantResponseDoneEvent,
-                AssistantToolCallReadyEvent,
-                ResponseGenerationDoneEvent,
-                ResponseFailedEvent,
-            ),
-        ):
-            return False
-        return self.speculative_turns.has_pending_reopen_or_grace(
-            getattr(event, "turn_id", None),
-            getattr(event, "turn_revision", None),
-        )
-
-    def _dispatch_pipeline_event(
-        self,
-        conn_id: str,
-        event: PipelineEvent,
-        *,
-        wait_for_pending_reopen: bool,
-    ) -> list[ServerEvent] | None:
         # Provider-reported usage is billable accounting, not client-visible
         # assistant output. Cancellation must not make it stale.
         if isinstance(event, TokenUsageEvent):
@@ -601,10 +723,14 @@ class RealtimeService:
                 logger.info("Ignoring %s after response failure", event.type)
                 return []
 
-        is_stale = self._is_stale_turn_event(event, wait_for_pending_reopen=wait_for_pending_reopen)
-        if is_stale is None:
-            return None
-        if is_stale:
+        if isinstance(event, _TURN_INPUT_EVENTS) and event.turn_id in self._state(conn_id).deleted_input_turn_ids:
+            self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
+            return []
+
+        if self._is_stale_turn_event(event):
+            history = getattr(event, "history", None)
+            if history is not None:
+                history.resolve()
             if isinstance(event, (TranscriptionCompletedEvent, TranscriptionFailedEvent)):
                 self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
             logger.info(
@@ -615,74 +741,160 @@ class RealtimeService:
             )
             return []
 
-        self._observe_turn_event(event)
-        if isinstance(event, AssistantOutputEvent):
-            return self.response.on_assistant_output(
+        try:
+            self.history.stage(conn_id, event)
+            if isinstance(event, AssistantOutputEvent):
+                return self.response.on_assistant_output(conn_id, event)
+            if isinstance(event, AssistantResponseDoneEvent):
+                return self.response.on_assistant_response_done(conn_id, event)
+            handler = self._pipeline_dispatch.get(type(event))
+            if handler is None:
+                logger.debug("Unhandled pipeline event type: %s", type(event).__name__)
+                return []
+            return handler(conn_id, event)
+        except HistoryCommitError as exc:
+            log_exception(logger, "History acceptance failed", exc)
+            return self._on_response_failed(
                 conn_id,
-                event,
-                wait_for_pending_reopen=wait_for_pending_reopen,
+                ResponseFailedEvent(
+                    response_key=getattr(event, "response_key", None),
+                    turn_id=getattr(event, "turn_id", None),
+                    turn_revision=getattr(event, "turn_revision", None),
+                    message=str(exc),
+                ),
             )
-        if isinstance(event, AssistantResponseDoneEvent):
-            return self.response.on_assistant_response_done(conn_id, event)
-        handler = self._pipeline_dispatch.get(type(event))
-        if handler is None:
-            logger.debug("Unhandled pipeline event type: %s", type(event).__name__)
-            return []
-        return handler(conn_id, event)
 
-    def _is_stale_turn_event(self, event: PipelineEvent, *, wait_for_pending_reopen: bool = True) -> bool | None:
-        if self.speculative_turns is None:
-            return False
-        if not isinstance(
-            event,
-            (
-                PartialTranscriptionEvent,
-                TranscriptionCompletedEvent,
-                TranscriptionFailedEvent,
-                AudioInputCompletedEvent,
-                AssistantOutputEvent,
-                AssistantResponseDoneEvent,
-                AssistantToolCallReadyEvent,
-                ResponseGenerationDoneEvent,
-                ResponseFailedEvent,
-            ),
-        ):
-            return False
-        turn_id = getattr(event, "turn_id", None)
-        turn_revision = getattr(event, "turn_revision", None)
-        if isinstance(
-            event,
-            (
-                AssistantOutputEvent,
-                AssistantResponseDoneEvent,
-                AssistantToolCallReadyEvent,
-                ResponseGenerationDoneEvent,
-                ResponseFailedEvent,
-            ),
-        ):
-            is_latest: bool | None
-            if wait_for_pending_reopen:
-                is_latest = self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)
-            else:
-                is_latest = self.speculative_turns.try_is_latest_after_reopen_grace(turn_id, turn_revision)
-            if is_latest is None:
-                return None
-            return not is_latest
-        return not self.speculative_turns.is_latest(turn_id, turn_revision)
+    def is_turn_output_held(self, event: object) -> bool:
+        """Whether assistant output must wait for its speculative turn to settle.
 
-    def _observe_turn_event(self, event: PipelineEvent) -> None:
-        if self.speculative_turns is None:
-            return
-        self.speculative_turns.observe(
+        The send loop keeps a held event queued and retries it, so checking
+        resumed speech and the reopen grace never blocks the event loop.
+        """
+        if self.speculative_turns is None or not isinstance(event, _TURN_OUTPUT_EVENTS):
+            return False
+        decision = self.speculative_turns.gate(event.turn_id, event.turn_revision)
+        return decision.action is TurnGateAction.HOLD
+
+    def _is_stale_turn_event(self, event: PipelineEvent) -> bool:
+        if self.speculative_turns is None or not isinstance(event, (*_TURN_INPUT_EVENTS, *_TURN_OUTPUT_EVENTS)):
+            return False
+        return not self.speculative_turns.is_latest(
             getattr(event, "turn_id", None),
             getattr(event, "turn_revision", None),
         )
+
+    def response_input_turn(self, conn_id: str, *, origin_call_ids: set[str] | None = None) -> InputTurnReference:
+        return self._response_input(conn_id, origin_call_ids=origin_call_ids)[0]
+
+    def response_latency_context(
+        self, conn_id: str, *, origin_call_ids: set[str] | None = None
+    ) -> tuple[InputTurnReference, Literal["speech", "client", "tool"], SpeechLatencyAnchor | None]:
+        reference, continuation = self._response_input(conn_id, origin_call_ids=origin_call_ids)
+        if origin_call_ids is not None:
+            # A rebuilt prefetch still has the original generation ownership,
+            # but a user item supplied after those calls supersedes its timing.
+            for item in reversed(self._state(conn_id).runtime_config.chat.copy().buffer):
+                if isinstance(item, RealtimeConversationItemFunctionCall):
+                    if item.call_id in origin_call_ids:
+                        break
+                elif isinstance(item, RealtimeConversationItemUserMessage):
+                    if self._state(conn_id).input_turn_by_item_id.get(item.id or "") != reference:
+                        return (reference[0], reference[1], None), "client", None
+                    break
+        anchor = (
+            self._state(conn_id).speech_latency_anchors.get((reference[0], reference[1]))
+            if reference[0] is not None and (not continuation or reference[2] is not None)
+            else None
+        )
+        if anchor is not None and anchor.available and (continuation or not anchor.requested):
+            return reference, "tool" if continuation else "speech", anchor
+        # Identity still follows input for speculative gates; only the timing
+        # anchor is ineligible. A previous answer is not fresh speech input.
+        return (reference[0], reference[1], None), "tool" if continuation else "client", None
+
+    def _response_input(
+        self, conn_id: str, *, origin_call_ids: set[str] | None = None
+    ) -> tuple[InputTurnReference, bool]:
+        """Resolve generation ownership from supplied conversation input.
+
+        A listening cursor is not input to generation. Tool continuations keep
+        their call's ownership unless a user message follows the call, or a
+        newer turn closes without one; an unassociated origin stays untagged.
+        Unknown client input must not inherit an older speech association.
+        """
+        st = self._state(conn_id)
+        reference: InputTurnReference = (None, None, None)
+        continuation = origin_call_ids is not None
+        if origin_call_ids is not None:
+            references = {st.input_turn_by_call_id.get(call_id, (None, None, None)) for call_id in origin_call_ids}
+            if len(references) == 1:
+                reference = references.pop()
+        else:
+            tool_reference: InputTurnReference | None = None
+            unconsumed_tool_output = False
+            for item in reversed(st.runtime_config.chat.copy().buffer):
+                if isinstance(item, RealtimeConversationItemFunctionCallOutput):
+                    unconsumed_tool_output |= item.call_id not in st.answered_tool_call_ids
+                    if tool_reference is None:
+                        tool_reference = st.input_turn_by_call_id.get(item.call_id, (None, None, None))
+                    continue
+                if isinstance(item, RealtimeConversationItemUserMessage):
+                    # A message that follows the tool call is input this
+                    # response answers too, so it takes that message's turn.
+                    reference = st.input_turn_by_item_id.get(item.id or "", (None, None, None))
+                    break
+                if isinstance(item, RealtimeConversationItemFunctionCall) and tool_reference is not None:
+                    reference = tool_reference
+                    continuation = unconsumed_tool_output
+                    break
+            else:
+                if tool_reference is not None:
+                    reference = tool_reference
+                    continuation = unconsumed_tool_output
+        turns = self.speculative_turns
+        if turns is None or reference[0] is None:
+            return reference, continuation
+        # Once a newer turn has closed (for example after an empty or failed
+        # transcript), no speech is waiting on this response, so it moves to
+        # that turn instead of being dropped as stale with its origin. Read
+        # the turn before the phase: speech that starts in between shows as
+        # LISTENING.
+        current = turns.current_turn()
+        if current == reference[:2] or turns.phase != TurnPhase.CLOSED:
+            return reference, continuation
+        return (current[0], current[1], None), continuation
+
+    def record_input_turn(
+        self, conn_id: str, item_id: str, turn_id: str | None, revision: int | None, stopped_at_s: float | None
+    ) -> None:
+        """Attach the supplied revision to its chat item; never advance lifecycle."""
+        st = self._state(conn_id)
+        retained_ids = {item.id for item in st.runtime_config.chat.copy().buffer}
+        st.input_turn_by_item_id = {
+            key: value for key, value in st.input_turn_by_item_id.items() if key in retained_ids
+        }
+        st.input_turn_by_item_id[item_id] = (turn_id, revision, stopped_at_s)
+        if turn_id is not None:
+            st.speech_latency_anchors.setdefault((turn_id, revision), SpeechLatencyAnchor())
+            while len(st.speech_latency_anchors) > 128:
+                st.speech_latency_anchors.pop(next(iter(st.speech_latency_anchors)))
+
+    def _input_turn_accounting(self, conn_id: str, turn_id: str | None) -> InputTurnAccounting | None:
+        if turn_id is None:
+            return None
+        records = self._state(conn_id).input_turn_accounting
+        if turn_id not in records:
+            # A new input turn cannot revise the preceding turn's chat entry.
+            records.clear()
+            records[turn_id] = InputTurnAccounting()
+        return records[turn_id]
 
     # ── STT → LM bridge ────────────────────────────
 
     def _on_transcription_completed(self, conn_id: str, event: TranscriptionCompletedEvent) -> list[ServerEvent]:
         """Handle a final STT transcription: emit protocol event, append to chat, trigger LM."""
         st = self._state(conn_id)
+        protocol_item_id = self.audio._input_item_id(conn_id, event.turn_id, event.turn_revision)
         completed_events = self.conversation.on_transcription_completed(conn_id, event)
         if not completed_events:
             self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
@@ -691,39 +903,41 @@ class RealtimeService:
         self.response.discard_tool_followup_prefetch(conn_id)
         st.generation_done_tool_calls.clear()
         st.completed_tool_response_keys.clear()
-        same_speculative_turn = event.turn_id is not None and event.turn_id == st.speculative_user_turn_id
-        if same_speculative_turn:
-            st.response_usage.audio_duration_s -= st.speculative_audio_duration_s
-        else:
-            st.speculative_audio_duration_s = 0.0
-
-        if event.turn_id is not None:
-            st.speculative_audio_duration_s = input_duration_s
+        accounting = self._input_turn_accounting(conn_id, event.turn_id)
+        if accounting is not None:
+            st.response_usage.audio_duration_s -= accounting.audio_duration_s
+            accounting.audio_duration_s = input_duration_s
+            accounting.speech_stopped_at_s = event.speech_stopped_at_s
 
         cfg = st.runtime_config
         transcript = event.transcript
+        if event.speaker_attribution is not None:
+            transcript = event.speaker_attribution.for_llm(transcript)
+        user_item_id = accounting.user_item_id if accounting is not None else None
+        user_message = make_user_message(transcript)
+        if protocol_item_id is not None:
+            user_message.id = protocol_item_id
         if transcript:
-            if same_speculative_turn and st.speculative_user_item_id:
-                replaced = cfg.chat.replace_user_message_text(st.speculative_user_item_id, transcript)
+            if accounting is not None and user_item_id:
+                replaced = cfg.chat.replace_user_message_text(user_item_id, transcript)
                 if not replaced:
-                    item = cfg.chat.add_item(make_user_message(transcript))
-                    st.speculative_user_item_id = item.id
+                    item = cfg.chat.add_item(user_message)
+                    accounting.user_item_id = item.id
             else:
-                item = cfg.chat.add_item(make_user_message(transcript))
-                st.speculative_user_item_id = item.id
-        elif same_speculative_turn and st.speculative_user_item_id:
-            cfg.chat.remove_user_message(st.speculative_user_item_id)
-            st.speculative_user_item_id = None
-        elif event.turn_id is not None and event.turn_id != st.speculative_user_turn_id:
-            st.speculative_user_item_id = None
-
-        if event.turn_id is not None:
-            st.speculative_user_turn_id = event.turn_id
-            st.speculative_user_turn_revision = event.turn_revision
-            st.speculative_user_speech_stopped_at_s = event.speech_stopped_at_s
+                item = cfg.chat.add_item(user_message)
+                if accounting is not None:
+                    accounting.user_item_id = item.id
+            supplied_item_id = accounting.user_item_id if accounting is not None else item.id
+            if supplied_item_id is not None:
+                self.record_input_turn(
+                    conn_id, supplied_item_id, event.turn_id, event.turn_revision, event.speech_stopped_at_s
+                )
+        elif accounting is not None and user_item_id:
+            cfg.chat.remove_user_message(user_item_id)
+            accounting.user_item_id = None
 
         queue = self.text_prompt_queue
-        if queue and transcript:
+        if queue and transcript and cfg.create_response_enabled:
             request = GenerateResponseRequest(
                 runtime_config=cfg,
                 language_code=event.language_code,
@@ -765,12 +979,13 @@ class RealtimeService:
         owns_current_input = failed_events[0].item_id == current_input_item_id
         if owns_current_input and self.should_listen is not None:
             self.should_listen.set()
-        if event.turn_id is not None and event.turn_id == st.speculative_user_turn_id:
-            if st.speculative_user_item_id is not None:
-                st.runtime_config.chat.remove_user_message(st.speculative_user_item_id)
-                st.speculative_user_item_id = None
-            st.response_usage.audio_duration_s -= st.speculative_audio_duration_s
-            st.speculative_audio_duration_s = 0.0
+        accounting = st.input_turn_accounting.get(event.turn_id) if event.turn_id is not None else None
+        if accounting is not None:
+            if accounting.user_item_id is not None:
+                st.runtime_config.chat.remove_user_message(accounting.user_item_id)
+                accounting.user_item_id = None
+            st.response_usage.audio_duration_s -= accounting.audio_duration_s
+            accounting.audio_duration_s = 0.0
         self.audio.hold_input_terminal(
             conn_id,
             failed_events[0].item_id,
@@ -783,28 +998,48 @@ class RealtimeService:
     def _on_audio_input_completed(self, conn_id: str, event: AudioInputCompletedEvent) -> list[ServerEvent]:
         """Record final input audio and queue its realtime LM request."""
         st = self._state(conn_id)
+        protocol_item_id = self.audio._input_item_id(conn_id, event.turn_id, event.turn_revision)
         self.audio.release_input_item_state(conn_id, event.turn_id, event.turn_revision)
         self.response.discard_tool_followup_prefetch(conn_id)
         st.generation_done_tool_calls.clear()
         st.completed_tool_response_keys.clear()
-        same_speculative_turn = event.turn_id is not None and event.turn_id == st.speculative_user_turn_id
-        if same_speculative_turn:
-            st.response_usage.audio_duration_s -= st.speculative_audio_duration_s
-        else:
-            st.speculative_audio_duration_s = 0.0
+        accounting = self._input_turn_accounting(conn_id, event.turn_id)
+        if accounting is not None:
+            st.response_usage.audio_duration_s -= accounting.audio_duration_s
+            accounting.audio_duration_s = event.audio_duration_s
+            accounting.speech_stopped_at_s = event.speech_stopped_at_s
 
         st.input_audio_duration_s = event.audio_duration_s
         st.response_usage.audio_duration_s += event.audio_duration_s
-        if event.turn_id is not None:
-            st.speculative_audio_duration_s = event.audio_duration_s
-            st.speculative_user_turn_id = event.turn_id
-            st.speculative_user_turn_revision = event.turn_revision
-            st.speculative_user_speech_stopped_at_s = event.speech_stopped_at_s
+
+        if not st.runtime_config.create_response_enabled:
+            # Retain speech independently of generation so response.create can
+            # answer it later, including multiple turns before a request.
+            item = make_user_audio_message(audio_to_wav_base64(event.audio, event.audio_sample_rate))
+            if accounting is not None and accounting.user_item_id is not None:
+                st.runtime_config.chat.remove_user_message(accounting.user_item_id)
+                item.id = accounting.user_item_id
+            if protocol_item_id is not None:
+                item.id = protocol_item_id
+            retained_item = st.runtime_config.chat.add_item(item)
+            if accounting is not None:
+                accounting.user_item_id = retained_item.id
+            if retained_item.id is not None:
+                self.record_input_turn(
+                    conn_id, retained_item.id, event.turn_id, event.turn_revision, event.speech_stopped_at_s
+                )
+            self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
+            return self.audio.resolve_input_terminals(conn_id)
 
         queue = self.text_prompt_queue
         if queue:
+            input_item_id = protocol_item_id or _generate_id("msg")
+            self.record_input_turn(
+                conn_id, input_item_id, event.turn_id, event.turn_revision, event.speech_stopped_at_s
+            )
             request = GenerateResponseRequest(
                 runtime_config=st.runtime_config,
+                input_item_id=input_item_id,
                 audio=event.audio,
                 audio_sample_rate=event.audio_sample_rate,
                 turn_id=event.turn_id,
@@ -896,6 +1131,8 @@ class RealtimeService:
             self.response._ensure_response(conn_id, event.response_key)
         if st.response_failed:
             return events
+        if event.response_key is not None:
+            self.history.reject(conn_id, event.response_key)
         st.response_failed = True
         st.response_error_type = "response_failed"
         events.extend(self.response.finish_audio_output(conn_id, event.response_key))

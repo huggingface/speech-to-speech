@@ -12,6 +12,13 @@ GitHub issue #386: two concurrent handlers were stable, while unrestricted
 three-way STT/LLM/TTS load intermittently caused a Metal MMU GPU restart with
 Lightning Whisper and a Parakeet decoder IndexError. Keep this lock until the
 complete three-way pipeline is proven stable, not merely the MLX core runtime.
+
+Issue #646 validation upgraded mlx/metal to 0.32.3 to fix frozen worker-thread
+Qwen3-TTS sampling, retaining mlx-lm 0.31.3 and mlx-audio 0.4.7. On an M3 Pro,
+all four unlocked three-way stress processes still failed: Parakeet raised a
+decoder IndexError followed by GPU recovery errors, and Lightning Whisper Small
+workloads triggered Metal GPU hangs. All four locked controls passed. The sampling
+fix does not remove the need for this lock.
 """
 
 import logging
@@ -86,13 +93,19 @@ def _record_lock_released(handler_name: str) -> tuple[int, float | None]:
         return depth, hold_s
 
 
-def acquire_mlx_lock(timeout: float | None = None, handler_name: str = "Unknown") -> bool:
+def acquire_mlx_lock(
+    timeout: float | None = None,
+    handler_name: str = "Unknown",
+    miss_log_level: int = logging.WARNING,
+) -> bool:
     """
     Acquire the global MLX lock.
 
     Args:
         timeout: Optional timeout in seconds
         handler_name: Name of the handler acquiring the lock (for logging)
+        miss_log_level: Level for a timed-out acquisition; callers that skip work when
+            the lock is busy can lower it so routine misses are not reported as warnings
 
     Returns:
         True if lock was acquired, False if timeout occurred
@@ -105,7 +118,7 @@ def acquire_mlx_lock(timeout: float | None = None, handler_name: str = "Unknown"
     wait_s = perf_counter() - start
     tracker = active_turn_latency_tracker()
     if tracker is not None:
-        tracker.record_mlx_lock_wait(wait_s)
+        tracker.record_mlx_lock_wait(wait_s, handler_name)
 
     if acquired:
         depth = _record_lock_acquired(handler_name)
@@ -128,7 +141,8 @@ def acquire_mlx_lock(timeout: float | None = None, handler_name: str = "Unknown"
     else:
         with _mlx_lock_state:
             owner_after = _owner_snapshot()
-        logger.warning(
+        logger.log(
+            miss_log_level,
             "%s: Failed to acquire MLX lock after %.3fs (timeout=%s, owner=%s)",
             handler_name,
             wait_s,
@@ -149,6 +163,10 @@ def release_mlx_lock(handler_name: str = "Unknown") -> None:
     try:
         depth, hold_s = _record_lock_released(handler_name)
         _mlx_lock.release()
+        if hold_s is not None and depth == 0:
+            tracker = active_turn_latency_tracker()
+            if tracker is not None:
+                tracker.record_mlx_lock_hold(hold_s, handler_name)
         if hold_s is not None and depth == 0 and hold_s >= 0.25:
             logger.info("%s: MLX lock released after holding %.2fs", handler_name, hold_s)
         else:
@@ -164,13 +182,23 @@ def release_mlx_lock(handler_name: str = "Unknown") -> None:
 class MLXLockContext:
     """Context manager for MLX lock."""
 
-    def __init__(self, handler_name: str = "Unknown", timeout: float | None = None) -> None:
+    def __init__(
+        self,
+        handler_name: str = "Unknown",
+        timeout: float | None = None,
+        miss_log_level: int = logging.WARNING,
+    ) -> None:
         self.handler_name = handler_name
         self.timeout = timeout
+        self.miss_log_level = miss_log_level
         self.acquired = False
 
     def __enter__(self) -> bool:
-        self.acquired = acquire_mlx_lock(timeout=self.timeout, handler_name=self.handler_name)
+        self.acquired = acquire_mlx_lock(
+            timeout=self.timeout,
+            handler_name=self.handler_name,
+            miss_log_level=self.miss_log_level,
+        )
         return self.acquired
 
     def __exit__(

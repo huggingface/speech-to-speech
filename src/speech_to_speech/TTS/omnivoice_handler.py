@@ -2,27 +2,27 @@ from __future__ import annotations
 
 import logging
 from math import gcd
+from pathlib import Path
 from threading import Event
 from typing import Any, Iterator
 
 import numpy as np
 import scipy.signal
-from rich.console import Console
 
-from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
 from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
 
 logger = logging.getLogger(__name__)
-console = Console()
 
 PIPELINE_SAMPLE_RATE = 16000
 
 
-class OmniVoiceTTSHandler(BaseHandler[TTSIn, TTSOut]):
+class OmniVoiceTTSHandler(BaseTTSHandler):
     def setup(
         self,
         should_listen: Event,
@@ -32,6 +32,7 @@ class OmniVoiceTTSHandler(BaseHandler[TTSIn, TTSOut]):
         ref_audio: str | None = None,
         ref_text: str | None = None,
         voice_clone_prompt: str | None = None,
+        ref_voices_dir: str | None = None,
         instruct: str | None = None,
         language: str | None = None,
         num_steps: int = 32,
@@ -53,7 +54,9 @@ class OmniVoiceTTSHandler(BaseHandler[TTSIn, TTSOut]):
             raise ValueError("ref_audio is required when ref_text is configured")
         if voice_clone_prompt is not None and ref_audio is not None:
             raise ValueError("voice_clone_prompt and ref_audio are mutually exclusive")
-        if instruct is not None and (voice_clone_prompt is not None or ref_audio is not None):
+        if instruct is not None and (
+            voice_clone_prompt is not None or ref_audio is not None or ref_voices_dir is not None
+        ):
             raise ValueError("instruct cannot be combined with voice-cloning configuration")
 
         import torch
@@ -89,32 +92,40 @@ class OmniVoiceTTSHandler(BaseHandler[TTSIn, TTSOut]):
             self.voice_clone_prompt = self.model.create_voice_clone_prompt(ref_audio=ref_audio, ref_text=ref_text)
             logger.info("Prepared OmniVoice clone prompt from %r", ref_audio)
 
-    def _is_cancelled(self, generation: int | None) -> bool:
-        return generation is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(generation)
+        self.language_voice_clone_prompts: dict[str, Any] = {}
+        if ref_voices_dir is not None:
+            for audio_path in sorted(Path(ref_voices_dir).glob("*.wav")):
+                text_path = audio_path.with_suffix(".txt")
+                if not text_path.is_file():
+                    raise ValueError(f"{audio_path} has no matching transcript {text_path.name}")
+                self.language_voice_clone_prompts[audio_path.stem.lower()] = self.model.create_voice_clone_prompt(
+                    ref_audio=str(audio_path), ref_text=text_path.read_text(encoding="utf-8").strip()
+                )
+            if not self.language_voice_clone_prompts:
+                raise ValueError(f"ref_voices_dir {ref_voices_dir!r} contains no <language>.wav references")
+            logger.info(
+                "Prepared OmniVoice clone prompts for languages: %s", ", ".join(self.language_voice_clone_prompts)
+            )
+
+    def _voice_clone_prompt_for(self, language: str | None) -> Any:
+        if language and self.language_voice_clone_prompts:
+            from omnivoice.utils.lang_map import LANG_NAME_TO_ID
+
+            code = language.lower()
+            code = LANG_NAME_TO_ID.get(code, code)
+            for key in (code, code.split("-")[0]):
+                if key in self.language_voice_clone_prompts:
+                    return self.language_voice_clone_prompts[key]
+        return self.voice_clone_prompt
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
-        speculative_turns = getattr(self, "speculative_turns", None)
         if isinstance(tts_input, EndOfResponse):
-            if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
-                tts_input.turn_id, tts_input.turn_revision
-            ):
-                if tts_input.response_key is None:
-                    return
-                tts_input.cleanup_only = True
-            yield AUDIO_RESPONSE_DONE
+            if self._gate_end_of_response(tts_input):
+                yield AUDIO_RESPONSE_DONE
             return
 
-        if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
-            tts_input.turn_id, tts_input.turn_revision
-        ):
-            logger.debug(
-                "Dropping stale TTS input for turn=%s rev=%s",
-                tts_input.turn_id,
-                tts_input.turn_revision,
-            )
+        if not self._admit_input(tts_input):
             return
-        if speculative_turns:
-            speculative_turns.commit(tts_input.turn_id, tts_input.turn_revision)
 
         text = tts_input.text
         if not text.strip():
@@ -130,23 +141,32 @@ class OmniVoiceTTSHandler(BaseHandler[TTSIn, TTSOut]):
         language = (self.language or tts_input.language_code) if selected is None else tts_input.tts_language_code
         if language:
             generation_kwargs["language"] = language
-        if self.voice_clone_prompt is not None:
-            generation_kwargs["voice_clone_prompt"] = self.voice_clone_prompt
+        voice_clone_prompt = self._voice_clone_prompt_for(language)
+        if voice_clone_prompt is not None:
+            generation_kwargs["voice_clone_prompt"] = voice_clone_prompt
         elif self.instruct is not None:
             generation_kwargs["instruct"] = self.instruct
 
         console.print(f"[green]ASSISTANT: {text}")
+        # Synthesis start: after speculative gate / prompt selection, before provider work.
+        timer = self._latency_timer(tts_input, cancel_generation)
         audios = self.model.generate(**generation_kwargs)
 
         # OmniVoice generation is blocking. If the user interrupted while it ran,
         # discard the completed buffer before it reaches the output client.
-        if self._is_cancelled(cancel_generation):
+        if self._is_stale(cancel_generation):
             logger.info("OmniVoice TTS output cancelled (interruption)")
             return
         if not audios:
             return
 
         audio = np.asarray(audios[0], dtype=np.float32).reshape(-1)
+        if audio.size == 0:
+            return
+
+        # Full waveform is available before resample / block assembly.
+        timer.first_provider_audio()
+
         source_sample_rate = int(getattr(self.model, "sampling_rate", 24000))
         if source_sample_rate != PIPELINE_SAMPLE_RATE:
             divisor = gcd(source_sample_rate, PIPELINE_SAMPLE_RATE)
@@ -157,16 +177,21 @@ class OmniVoiceTTSHandler(BaseHandler[TTSIn, TTSOut]):
             )
 
         audio_int16 = np.clip(audio * 32768, -32768, 32767).astype(np.int16)
+
+        def emit(block: np.ndarray) -> Iterator[TTSOut]:
+            timer.first_yield()
+            yield block
+
         full_block_samples = (len(audio_int16) // self.blocksize) * self.blocksize
         for offset in range(0, full_block_samples, self.blocksize):
-            if self._is_cancelled(cancel_generation):
+            if self._is_stale(cancel_generation):
                 logger.info("OmniVoice TTS output cancelled (interruption)")
                 return
-            yield audio_int16[offset : offset + self.blocksize]
+            yield from emit(audio_int16[offset : offset + self.blocksize])
 
         if full_block_samples < len(audio_int16):
-            if self._is_cancelled(cancel_generation):
+            if self._is_stale(cancel_generation):
                 logger.info("OmniVoice TTS output cancelled (interruption)")
                 return
             tail = audio_int16[full_block_samples:]
-            yield np.pad(tail, (0, self.blocksize - len(tail)))
+            yield from emit(np.pad(tail, (0, self.blocksize - len(tail))))

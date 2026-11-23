@@ -11,6 +11,8 @@ import numpy as np
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from openai.types.realtime import (
     ConversationItemCreateEvent,
+    ConversationItemDeleteEvent,
+    ConversationItemRetrieveEvent,
     ConversationItemTruncateEvent,
     InputAudioBufferAppendEvent,
     InputAudioBufferCommitEvent,
@@ -31,6 +33,7 @@ from speech_to_speech.api.openai_realtime.transports import (
     WebSocketTransport,
     send_ws_event,
 )
+from speech_to_speech.api.openai_realtime.visemes import SpeechToSpeechVisemesEvent
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
@@ -48,6 +51,7 @@ from speech_to_speech.pipeline.events import (
 )
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
+from speech_to_speech.pipeline.speculative_turns import TurnOutputHeld
 from speech_to_speech.pipeline.transcript_logging import log_exception
 
 # aiortc (the 'webrtc' extra) is optional. Import it here, at module load,
@@ -68,6 +72,14 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 MAX_AUDIO_BATCH_BYTES = 6400
+# Upper bound on how long the event-driven send loop idles between output
+# and shutdown. Queue puts wake it sooner; the timeout is only a lost-wakeup
+# safety net (#692).
+SEND_LOOP_WAIT_TIMEOUT_S = 1.0
+# Held output and input terminals wait on state that changes without a queue
+# write (response announcement, speculative reopen grace), so re-check them at
+# the old poll cadence instead of the idle safety net (#692).
+SEND_LOOP_HOLD_RETRY_S = 0.01
 # How long the release path waits for SESSION_END to propagate through the
 # handler chain back to output_queue before warning that the unit is stuck.
 # Tests monkeypatch this to a small value since their fixtures usually skip
@@ -165,14 +177,15 @@ def _output_response_key(item: Any) -> str | None:
     return None
 
 
-def _response_key_output_is_blocked(
-    unit: PipelineUnit,
-    session_id: str,
-    response_key: str | None,
-) -> bool:
-    if response_key is None:
-        return False
-    return unit.service.response.is_response_output_blocked(session_id, response_key)
+def _output_is_held(unit: PipelineUnit, session_id: str, item: Any) -> bool:
+    """Whether *item* must stay queued until its response or turn allows it.
+
+    Holding never waits here, so speech and connection events keep flowing.
+    """
+    response_key = _output_response_key(item)
+    if response_key is not None and unit.service.response.is_response_output_blocked(session_id, response_key):
+        return True
+    return unit.service.is_turn_output_held(item)
 
 
 def _discard_obsolete_response_key(unit: PipelineUnit, session_id: str, response_key: str | None) -> None:
@@ -209,6 +222,10 @@ def _flush_queue(
             for item in reversed(preserved):
                 q.queue.appendleft(item)
             q.not_empty.notify(len(preserved))
+        # Re-insert bypasses NotifyingQueue.put; wake the send loop explicitly.
+        notify = getattr(getattr(q, "_signal", None), "notify_threadsafe", None)
+        if notify is not None:
+            notify()
 
 
 def _clean_unit(
@@ -450,7 +467,18 @@ async def _dispatch_client_event(
             )
             return
         _flush_queue(unit.output_queue, preserve=_keep_non_audio_output)
-        transport.discard_pending_audio()
+        # The send loop may have stashed an audio chunk it pulled while batching;
+        # it is consumed before the queue, so drop it too. Only touch the session
+        # that sent the clear so a delayed event can't hit a replacement session.
+        session = unit.session
+        if (
+            session is not None
+            and session.session_id == session_id
+            and session.pending_output_item is not None
+            and not _keep_non_audio_output(session.pending_output_item)
+        ):
+            session.pending_output_item = None
+        service.truncate_unplayed_audio(session_id, transport.discard_pending_audio())
 
     elif isinstance(event, SessionUpdateEvent):
         err = service.handle_session_update(session_id, event)
@@ -464,13 +492,20 @@ async def _dispatch_client_event(
         if events:
             await send_correlated(events)
 
+    elif isinstance(event, ConversationItemDeleteEvent):
+        events = service.handle_conversation_item_delete(session_id, event)
+        if events:
+            await send_correlated(events)
+
+    elif isinstance(event, ConversationItemRetrieveEvent):
+        # The stock Agents SDK (>= 0.20) sends this after every completed
+        # input transcription to refresh its local copy of the user item.
+        await send_correlated(service.handle_conversation_item_retrieve(session_id, event))
+
     elif isinstance(event, ConversationItemTruncateEvent):
-        # The stock Agents SDK sends this after an audible WebSocket
-        # interruption. An explicit response.cancel or automatic server-VAD
-        # cancellation has already discarded provisional generation, and
-        # client-side playback owns the unheard tail, so there is no additional
-        # server state to mutate.
-        logger.debug("Accepted conversation.item.truncate for %s", event.item_id)
+        # The client's playback position replaces the server's estimate. No
+        # conversation.item.truncated acknowledgement is sent.
+        service.handle_conversation_item_truncate(session_id, event)
 
     elif isinstance(event, ResponseCreateEvent):
         result = service.handle_response_create(session_id, event)
@@ -491,11 +526,72 @@ async def _dispatch_client_event(
             _flush_queue(unit.text_prompt_queue, preserve=_keep_pipeline_control)
         _flush_queue(unit.output_queue, preserve=_keep_cancel_bookkeeping)
         _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
-        transport.discard_pending_audio()
+        unplayed_ms = transport.discard_pending_audio()
         events = service.handle_response_cancel(session_id)
+        service.truncate_unplayed_audio(session_id, unplayed_ms)
         if events:
             await send_correlated(events)
         unit.response_playing.clear()
+
+
+def _send_loop_wait_timeout(unit: PipelineUnit) -> float:
+    """Choose how long the send loop may idle before re-checking local state.
+
+    Truly idle units (including unclaimed ones) use the long safety-net
+    timeout. Held pending output and input terminals still depend on timed
+    gates that do not write queues, so they keep the historical 10 ms retry.
+    """
+    session = unit.session
+    if session is None:
+        return SEND_LOOP_WAIT_TIMEOUT_S
+    if session.pending_output_item is not None or session.pending_text_output_items:
+        return SEND_LOOP_HOLD_RETRY_S
+    session_id = session.session_id
+    if not session_id:
+        return SEND_LOOP_WAIT_TIMEOUT_S
+    try:
+        pending_terminals = unit.service._state(session_id).pending_input_terminals
+    except KeyError:
+        return SEND_LOOP_WAIT_TIMEOUT_S
+    if pending_terminals:
+        return SEND_LOOP_HOLD_RETRY_S
+    return SEND_LOOP_WAIT_TIMEOUT_S
+
+
+def _pipeline_output_ready(unit: PipelineUnit) -> bool:
+    """Check for consumable work, respecting the serial output hold barrier."""
+    if not unit.text_output_queue.empty():
+        return True
+    session = unit.session
+    if session is not None:
+        session_id = session.session_id
+        if any(not _output_is_held(unit, session_id, item) for item in session.pending_text_output_items):
+            return True
+        if session.pending_output_item is not None:
+            # Later output must not overtake a held item. Text events can still
+            # run above, including speech that cancels this response.
+            return not _output_is_held(unit, session_id, session.pending_output_item)
+    return not unit.output_queue.empty()
+
+
+async def _wait_for_pipeline_output(unit: PipelineUnit) -> None:
+    """Idle the send loop until a producer signals work or the timeout expires.
+
+    Replaces fixed 10 ms polling (#692): puts on either output queue fire the
+    unit's signal, held output re-checks after the hold retry, and the idle
+    timeout bounds the delay of any missed signal. Shutdown cancels this wait
+    via the send task.
+    """
+    if _pipeline_output_ready(unit):
+        # Notifications coalesce; drain existing work before waiting for a new
+        # one. Yield so a backlog cannot starve client cancellation or shutdown.
+        await asyncio.sleep(0)
+        return
+    try:
+        async with asyncio.timeout(_send_loop_wait_timeout(unit)):
+            await unit.output_signal.wait()
+    except TimeoutError:
+        pass
 
 
 def create_app(
@@ -505,8 +601,8 @@ def create_app(
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        # One send loop per pipeline unit; each polls its own queues and forwards
-        # to the websocket currently attached via unit.session.
+        # One send loop per pipeline unit; notifications wake it to forward
+        # queued output to the transport currently attached via unit.session.
         send_tasks = [asyncio.create_task(_send_loop_for(unit)) for unit in pool]
         yield
         for task in send_tasks:
@@ -602,6 +698,12 @@ def create_app(
             # WebSocketDisconnect propagates, subsequent awaits in the same task
             # can be skipped/cancelled by Starlette's runner and never resume.
             _release_session(unit, session_id)
+
+    @app.get("/v1/realtime/capabilities")
+    async def capabilities_endpoint() -> dict[str, Any]:
+        return {
+            "pipelines": [{"index": unit.index, **unit.service.get_language_capabilities()} for unit in pool],
+        }
 
     @app.get("/v1/usage")
     async def usage_endpoint() -> dict[str, Any]:
@@ -808,15 +910,19 @@ def create_app(
         return Response(content="Unknown call", status_code=404, media_type="text/plain")
 
     async def _send_loop_for(unit: PipelineUnit) -> None:
-        """Per-pipeline send loop. Polls this unit's output queues and forwards
-        to the transport currently attached via unit.session.
+        """Per-pipeline send loop. Waits on output signals and forwards queued
+        items to the transport currently attached via unit.session.
 
         Per-session scratch (pending_output_item) lives on SessionState, so it
         disappears together with the transport when the session is released —
         no stale sentinel can leak into the next claim.
         """
         pipeline_log_ctx.set(unit.index)
+        # Bind the wakeup signal to this loop, then clear any stale signal
+        # before draining so an item arriving during the drain re-sets it.
+        unit.output_signal.bind_loop(asyncio.get_running_loop())
         while not stop_event.is_set():
+            unit.output_signal.clear()
             try:
                 # Snapshot the session once per iteration; if the route releases the
                 # unit mid-iteration, we continue against the prior snapshot which is
@@ -828,32 +934,26 @@ def create_app(
                 # Text events first (speech_started cancels active response).
                 try:
                     text_msg = None
+                    parked_index = None
                     if session is not None and session_id is not None:
                         for index, pending in enumerate(session.pending_text_output_items):
-                            if not _response_key_output_is_blocked(
-                                unit,
-                                session_id,
-                                _output_response_key(pending),
-                            ):
+                            if not _output_is_held(unit, session_id, pending):
                                 text_msg = session.pending_text_output_items.pop(index)
+                                parked_index = index
                                 break
                     if text_msg is None:
                         text_msg = unit.text_output_queue.get_nowait()
 
-                    if (
-                        session is not None
-                        and session_id is not None
-                        and _response_key_output_is_blocked(
-                            unit,
-                            session_id,
-                            _output_response_key(text_msg),
-                        )
-                    ):
+                    if session is not None and session_id is not None and _output_is_held(unit, session_id, text_msg):
                         # Response-dependent side-channel events share the same
                         # exposure barrier as audio/output events. In particular,
                         # an early tool call must never overtake response.created.
                         # Unlike the serial output hold, this list does not stall
-                        # the origin response whose completion enables the claim.
+                        # the origin response whose completion enables the claim,
+                        # or speech events while resumed speech is checked.
+                        # Keep its history private; a prefetch claim or the
+                        # later dispatch writes it before anything is exposed.
+                        unit.service.history.hold(session_id, text_msg)
                         session.pending_text_output_items.append(text_msg)
                         text_msg = None
                     if text_msg is None:
@@ -875,23 +975,46 @@ def create_app(
                         was_in_response = st.in_response
                         was_response_pending = st.response_pending
 
-                    if transport is not None and isinstance(text_msg, PipelineEvent) and session_id:
-                        events = unit.service.dispatch_pipeline_event(session_id, text_msg)
-                        if events:
-                            await transport.send_events(events)
+                    events: list[Any] = []
+                    if (
+                        transport is not None
+                        and isinstance(text_msg, PipelineEvent)
+                        and session is not None
+                        and session_id
+                    ):
+                        try:
+                            events = unit.service.dispatch_pipeline_event(session_id, text_msg)
+                        except TurnOutputHeld:
+                            # Resumed speech started after the hold check. Park
+                            # the event again in its original place.
+                            pending_items = session.pending_text_output_items
+                            pending_items.insert(len(pending_items) if parked_index is None else parked_index, text_msg)
+                            events = []
 
+                    interrupt_enabled = False
                     if isinstance(text_msg, SpeechStartedEvent) and session_id:
                         active_cfg = unit.service._state(session_id).runtime_config
                         interrupt_enabled = text_msg.interrupt_response and (
                             active_cfg is None or active_cfg.interrupt_response_enabled
                         )
                         if interrupt_enabled and transport is not None:
-                            # Flush even when no response is active: the WebRTC
-                            # track can still hold unplayed audio from a response
-                            # whose done-sentinel was already observed —
+                            # Flush even when no response is active: the client
+                            # can still hold unplayed audio from a response whose
+                            # done-sentinel was already observed —
                             # finish_response() runs on the sentinel, not when
-                            # playback completes. No-op over WebSocket.
-                            transport.discard_pending_audio()
+                            # playback completes. WebSocket only estimates it.
+                            # Cut history before speech_started goes out, so a
+                            # client that retrieves the reply sees the cut. An
+                            # interrupted reply has already ended: dispatching
+                            # SpeechStartedEvent ran on_speech_started, which
+                            # finished it as cancelled, so the cut is not
+                            # skipped as in-progress output.
+                            unit.service.truncate_unplayed_audio(session_id, transport.discard_pending_audio())
+
+                    if events and transport is not None:
+                        await transport.send_events(events)
+
+                    if isinstance(text_msg, SpeechStartedEvent) and session_id:
                         if was_in_response or was_response_pending:
                             if interrupt_enabled:
                                 unit.cancel_scope.cancel()
@@ -930,18 +1053,17 @@ def create_app(
                     if (
                         session is not None
                         and session_id is not None
-                        and _response_key_output_is_blocked(
-                            unit,
-                            session_id,
-                            _output_response_key(audio_chunk),
-                        )
+                        and _output_is_held(unit, session_id, audio_chunk)
                     ):
                         # Generation and TTS may complete before the client sends
                         # response.create, or before response.created finishes
                         # sending. Keep every lifecycle event private until the
-                        # response is publicly announced.
+                        # response is publicly announced and its turn has settled.
+                        unit.service.history.hold(session_id, audio_chunk)
                         session.pending_output_item = audio_chunk
-                        await asyncio.sleep(0.01)
+                        # Re-check after the hold retry (or sooner on new output);
+                        # a bare continue would busy-spin on the same item (#692).
+                        await _wait_for_pipeline_output(unit)
                         continue
 
                     if isinstance(audio_chunk, TokenUsageEvent):
@@ -957,8 +1079,15 @@ def create_app(
                         if session_id is not None and _response_key_is_obsolete(unit, session_id, response_key):
                             _discard_obsolete_response_key(unit, session_id, response_key)
                             continue
-                        if transport is not None and session_id is not None:
-                            await transport.send_events(unit.service.dispatch_pipeline_event(session_id, audio_chunk))
+                        if transport is not None and session is not None and session_id is not None:
+                            try:
+                                events = unit.service.dispatch_pipeline_event(session_id, audio_chunk)
+                            except TurnOutputHeld:
+                                # Resumed speech started after the hold check.
+                                session.pending_output_item = audio_chunk
+                                await _wait_for_pipeline_output(unit)
+                                continue
+                            await transport.send_events(events)
                         continue
 
                     if _is_pipeline_end(audio_chunk):
@@ -1042,6 +1171,8 @@ def create_app(
                         _discard_obsolete_response_key(unit, session_id, response_key)
                         continue
 
+                    audio_generation = _audio_generation(audio_chunk)
+                    visemes = audio_chunk.visemes if isinstance(audio_chunk, AudioOutput) else []
                     audio_chunk = _to_audio_bytes(audio_chunk)
 
                     audio_batch = bytearray(audio_chunk)
@@ -1055,6 +1186,7 @@ def create_app(
                             _is_pipeline_end(next_chunk)
                             or _is_audio_done(next_chunk)
                             or isinstance(next_chunk, PipelineEvent)
+                            or (isinstance(next_chunk, AudioOutput) and bool(next_chunk.visemes))
                             or is_control_message(next_chunk, SESSION_END.kind)
                         ):
                             # Only stash if we still have a session; otherwise drop it.
@@ -1082,6 +1214,32 @@ def create_app(
                         unit.should_listen.set()
 
                     if transport is not None and session_id:
+                        if visemes:
+                            response_id, item_id, output_index, events = unit.service.begin_audio_output(
+                                session_id,
+                                response_key,
+                            )
+                            events.append(
+                                SpeechToSpeechVisemesEvent(
+                                    event_id=unit.service._next_event_id(),
+                                    response_id=response_id,
+                                    item_id=item_id,
+                                    output_index=output_index,
+                                    visemes=visemes,
+                                )
+                            )
+                            await transport.send_events(events)
+                            # Sending metadata yields to cancellation and session
+                            # release. Never reopen that response with stale audio.
+                            if (
+                                session is None
+                                or unit.session is not session
+                                or session.released_at is not None
+                                or session.transport is not transport
+                                or _generation_is_discardable(unit, audio_generation)
+                                or unit.service._state(session_id).current_response_id != response_id
+                            ):
+                                continue
                         await transport.send_audio_chunk(
                             unit.service,
                             session_id,
@@ -1091,7 +1249,7 @@ def create_app(
                 except Empty:
                     pass
 
-                await asyncio.sleep(0.01)
+                await _wait_for_pipeline_output(unit)
 
             except asyncio.CancelledError:
                 break

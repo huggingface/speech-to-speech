@@ -7,20 +7,19 @@ from typing import Any, Iterator
 import librosa
 import numpy as np
 import torch
-from rich.console import Console
 from transformers import AutoTokenizer, VitsModel
 
-from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
+from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
 from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
 
 logger = logging.getLogger(__name__)
 
-console = Console()
 
 WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE = {
     "en": "eng",  # English
@@ -64,7 +63,7 @@ WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE = {
 }
 
 
-class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
+class FacebookMMSTTSHandler(BaseTTSHandler):
     def setup(
         self,
         should_listen: Event,
@@ -141,26 +140,13 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
             return None
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
-        speculative_turns = getattr(self, "speculative_turns", None)
         if isinstance(tts_input, EndOfResponse):
-            if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
-                tts_input.turn_id,
-                tts_input.turn_revision,
-            ):
-                if tts_input.response_key is None:
-                    return
-                tts_input.cleanup_only = True
-            yield AUDIO_RESPONSE_DONE
+            if self._gate_end_of_response(tts_input):
+                yield AUDIO_RESPONSE_DONE
             return
 
-        if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(
-            tts_input.turn_id,
-            tts_input.turn_revision,
-        ):
-            logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
+        if not self._admit_input(tts_input):
             return
-        if speculative_turns:
-            speculative_turns.commit(tts_input.turn_id, tts_input.turn_revision)
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
         language_code = tts_input.tts_language_code
@@ -193,11 +179,22 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 )
                 logger.warning(f"Unsupported language: {language_code}")
 
+        # Synthesis start: after any language model reload, before provider work.
+        timer = self._latency_timer(tts_input, gen)
         audio_output = self.generate_audio(text)
 
         if audio_output is None or audio_output.numel() == 0:
             logger.warning("No audio output generated")
             return
+
+        # Device tensors may return before synthesis kernels finish. Wait for
+        # waveform readiness without including the later CPU copy or resampling.
+        device_type = audio_output.device.type
+        if device_type == "mps":
+            torch.mps.synchronize()
+        elif device_type in {"cuda", "xpu", "npu"}:
+            getattr(torch, device_type).current_stream(audio_output.device).synchronize()
+        timer.first_provider_audio()
 
         audio_numpy = audio_output.cpu().numpy().squeeze()
         logger.debug(f"Raw audio shape: {audio_numpy.shape}, dtype: {audio_numpy.dtype}")
@@ -205,25 +202,17 @@ class FacebookMMSTTSHandler(BaseHandler[TTSIn, TTSOut]):
         audio_resampled = librosa.resample(audio_numpy, orig_sr=self.model.config.sampling_rate, target_sr=16000)
         logger.debug(f"Resampled audio shape: {audio_resampled.shape}, dtype: {audio_resampled.dtype}")
 
-        audio_int16 = (audio_resampled * 32768).astype(np.int16)
+        audio_int16 = np.clip(audio_resampled * 32768, -32768, 32767).astype(np.int16)
         logger.debug(f"Final audio shape: {audio_int16.shape}, dtype: {audio_int16.dtype}")
 
-        if self.stream:
-            for i in range(0, len(audio_int16), self.chunk_size):
-                if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
-                    logger.info("TTS generation cancelled (interruption)")
-                    return
-                chunk = audio_int16[i : i + self.chunk_size]
-                yield np.pad(chunk, (0, self.chunk_size - len(chunk)))
-        else:
-            for i in range(0, len(audio_int16), self.chunk_size):
-                if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
-                    logger.info("TTS generation cancelled (interruption)")
-                    return
-                yield np.pad(
-                    audio_int16[i : i + self.chunk_size],
-                    (0, self.chunk_size - len(audio_int16[i : i + self.chunk_size])),
-                )
+        for i in range(0, len(audio_int16), self.chunk_size):
+            if self._is_stale(gen):
+                logger.info("TTS generation cancelled (interruption)")
+                return
+            chunk = audio_int16[i : i + self.chunk_size]
+            block = np.pad(chunk, (0, self.chunk_size - len(chunk)))
+            timer.first_yield()
+            yield block
 
     def on_session_end(self) -> None:
         custom_model_changed = self._initial_model_name is not None and self.model_name != self._initial_model_name

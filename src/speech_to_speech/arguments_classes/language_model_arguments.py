@@ -2,12 +2,14 @@ from dataclasses import dataclass, field
 
 from speech_to_speech.arguments_classes.language_model_base_arguments import LanguageModelBaseArguments
 
+MLX_DEFAULT_LM_MODEL = "mlx-community/Qwen3.5-4B-4bit"
+
 
 @dataclass
 class LanguageModelHandlerArguments(LanguageModelBaseArguments):
     llm_device: str = field(
-        default="cuda",
-        metadata={"help": "The device type on which the model will run. Default is 'cuda' for GPU acceleration."},
+        default="auto",
+        metadata={"help": "The device type on which the model will run. 'auto' selects an available GPU or CPU."},
     )
     llm_torch_dtype: str = field(
         default="float16",
@@ -40,4 +42,16 @@ class LanguageModelHandlerArguments(LanguageModelBaseArguments):
             "Loads AutoProcessor + AutoModelForImageTextToText instead of the default text-only model. "
             "Default is False."
         },
+    )
+
+
+@dataclass
+class MLXLanguageModelHandlerArguments(LanguageModelHandlerArguments):
+    model_name: str = field(
+        default=MLX_DEFAULT_LM_MODEL,
+        metadata={"help": "The MLX language model to use. Defaults to 4-bit Qwen3.5-4B."},
+    )
+    llm_device: str = field(
+        default="mps",
+        metadata={"help": "Device for the MLX backend on Apple Silicon. Default is 'mps'."},
     )

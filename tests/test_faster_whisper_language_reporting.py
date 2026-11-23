@@ -29,7 +29,7 @@ from openai.types.realtime import RealtimeSessionCreateRequest
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.utils import resolve_auto_language
-from speech_to_speech.pipeline.messages import VADAudio
+from speech_to_speech.pipeline.messages import Transcription, VADAudio
 
 
 class FakeInfo:
@@ -89,7 +89,7 @@ def make_handler(handler_module, *, language="en", segments=None, info=None):
 
 
 def vad_audio():
-    return VADAudio(audio=np.zeros(16000, dtype=np.float32), turn_id="turn_1", turn_revision=0)
+    return VADAudio(audio=np.zeros(16000, dtype=np.float32), turn_id="turn_1", turn_revision=1)
 
 
 def run(handler):
@@ -114,6 +114,11 @@ def test_pinned_language_is_reported_when_the_model_honours_it(handler_module):
 
     outputs = run(handler)
 
+    assert len(outputs) == 1
+    assert isinstance(outputs[0], Transcription)
+    assert outputs[0].text == "Hello there."
+    assert outputs[0].turn_id == "turn_1"
+    assert outputs[0].turn_revision == 1
     assert outputs[0].language_code == "de"
     assert handler.model.calls[0]["language"] == "de"
 
@@ -266,9 +271,10 @@ def test_empty_detected_language_falls_back_to_the_request(handler_module):
     assert run(handler)[0].language_code == "de"
 
 
-def test_empty_transcription_still_yields_nothing(handler_module):
+@pytest.mark.parametrize("language", ["auto", "en"])
+def test_empty_transcription_still_yields_nothing(handler_module, language):
     """Pre-existing behaviour: silence produces no Transcription at all."""
-    handler = make_handler(handler_module, language="auto", segments=[FakeSegment("   ")])
+    handler = make_handler(handler_module, language=language, segments=[FakeSegment("   ")])
 
     assert run(handler) == []
 
@@ -281,3 +287,16 @@ def test_segment_text_is_joined_and_stripped(handler_module):
     )
 
     assert run(handler)[0].text == "Hello  there."
+
+
+def test_timing_logs_only_final_transcriptions(handler_module):
+    handler = make_handler(handler_module)
+    handler._times = [0.01]
+
+    final = run(handler)
+    audio = vad_audio()
+    audio.mode = "progressive"
+    partial = list(handler.process(audio))
+
+    assert handler.should_log_timing(final[0])
+    assert not handler.should_log_timing(partial[0])

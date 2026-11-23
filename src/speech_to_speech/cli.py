@@ -138,11 +138,40 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
         default=defaults.voice,
         help="session.audio.output.voice (for example bm_fable, marin, or alloy).",
     )
+    parser.add_argument("--voices", nargs="+", default=[], help="Voice names to cycle with terminal arrow keys.")
     parser.add_argument("--print-json", action="store_true", default=defaults.print_json)
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        default=defaults.verbose,
+        help="Show routine logs, tool details, and Realtime events alongside the conversation.",
+    )
     parser.add_argument(
         "--block-mic-during-playback",
         action="store_true",
         default=defaults.block_mic_during_playback,
+    )
+    parser.add_argument(
+        "--vad-threshold",
+        type=float,
+        default=defaults.vad_threshold,
+        help="session.audio.input.turn_detection.threshold, from 0 to 1. Defaults to the server's VAD threshold.",
+    )
+    parser.add_argument(
+        "--interrupt-response",
+        action=argparse.BooleanOptionalAction,
+        default=defaults.interrupt_response,
+        help=(
+            "Let user speech cancel the active response and clear queued playback. "
+            "With --no-interrupt-response the microphone stays open and speech is still transcribed."
+        ),
+    )
+    parser.add_argument(
+        "--echo-cancellation",
+        action="store_true",
+        default=defaults.echo_cancellation,
+        help="Remove speaker playback from the microphone so voice barge-in works on speakers. "
+        "Not needed with headphones or a headset.",
     )
     parser.add_argument(
         "--log-transcripts",
@@ -177,8 +206,13 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
         output_device=namespace.output_device,
         instructions=namespace.instructions,
         voice=namespace.voice,
+        voice_choices=namespace.voices,
         print_json=namespace.print_json,
+        verbose=namespace.verbose,
         block_mic_during_playback=namespace.block_mic_during_playback,
+        vad_threshold=namespace.vad_threshold,
+        interrupt_response=namespace.interrupt_response,
+        echo_cancellation=namespace.echo_cancellation,
         log_transcripts=namespace.log_transcripts,
         connection_retry_timeout_s=namespace.connection_retry_timeout_s,
         tools=tools,
@@ -187,8 +221,56 @@ def parse_talk_arguments(argv: Sequence[str]) -> RealtimeAudioClientConfig:
     )
 
 
+def _run_file_command(command: Command, command_args: list[str]) -> None:
+    from speech_to_speech.config import ConfigurationError, load_config, resolve_config
+
+    parser = argparse.ArgumentParser(prog=f"speech-to-speech {command}", allow_abbrev=False, exit_on_error=False)
+    parser.add_argument("-f", "--file", action="append", metavar="YAML", help="Read a YAML configuration file.")
+    parser.add_argument("--name", action="append", help="Select one pipeline definition; repeat for distinct names.")
+    if "-h" in command_args or "--help" in command_args:
+        parser.print_help()
+        raise SystemExit(0)
+    try:
+        namespace, unknown = parser.parse_known_args(command_args)
+    except argparse.ArgumentError:
+        parser.exit(2, "Configuration error: use --file YAML and optional --name values.\n")
+    if unknown:
+        parser.error("File mode accepts only --file and --name; put settings in the YAML file.")
+    if not namespace.file or len(namespace.file) != 1:
+        parser.error("Specify exactly one configuration file with -f or --file.")
+    if command == "talk" and namespace.name is not None:
+        parser.error("talk does not accept --name.")
+    try:
+        document = load_config(namespace.file[0])
+        config = resolve_config(
+            document,
+            names=namespace.name,
+            include_client=command == "local",
+            client_only=command == "talk",
+        )
+        if command != "talk" and len(config.pipelines) != 1:
+            parser.error("serve and local require exactly one selected definition; use --name.")
+    except (ConfigurationError, ImportError):
+        parser.exit(2, "Configuration error: check the YAML file, selected names, and required environment settings.\n")
+    try:
+        from speech_to_speech.configured_runtime import run_configured_command
+
+        run_configured_command(command, config)
+    except ConfigurationError:
+        parser.exit(2, "Configuration error: check the configured runtime and client settings.\n")
+    except Exception:
+        parser.exit(1, "Configured startup failed; check the selected backends and runtime resources.\n")
+
+
 def main() -> None:
     command, command_args = parse_command()
+    if any(
+        argument.startswith("-f") or argument == "--file" or argument.startswith("--file=") for argument in command_args
+    ):
+        _run_file_command(command, command_args)
+        return
+    if any(argument == "--name" or argument.startswith("--name=") for argument in command_args):
+        _command_parser().error("--name requires a configuration file.")
     if command == "talk":
         config = parse_talk_arguments(command_args)
         set_log_transcripts(config.log_transcripts)

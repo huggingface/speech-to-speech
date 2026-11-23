@@ -7,6 +7,10 @@ on:
 
 permissions: {}
 
+# Keep tooling and browser integration jobs on the oldest supported interpreter.
+env:
+  UV_PYTHON: "3.11"
+
 jobs:
   ruff:
     permissions:
@@ -14,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "latest"
       - run: uv sync --group dev
@@ -29,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "latest"
       - run: uv sync --group dev
@@ -37,12 +41,19 @@ jobs:
         run: uv run mypy src/
 
   pytest:
+    name: Pytest (Python ${{ matrix.python-version }})
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
     permissions:
       contents: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "latest"
       - run: uv sync --group dev
@@ -58,10 +69,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - name: Build browser demo image
+        run: docker build -f demo/Dockerfile demo
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "latest"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
           cache: npm
@@ -71,6 +84,7 @@ jobs:
       - run: npx --prefix demo playwright install --with-deps chromium
       - run: npm --prefix demo run test:agents:adapter
       - run: npm --prefix demo run test:agents:ws
+      - run: npm --prefix demo run test:ui
 
   agents-sdk-webrtc:
     permissions:
@@ -79,10 +93,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "latest"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
           cache: npm
@@ -98,69 +112,42 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "latest"
       - name: Build distributions
         run: uv build
       - name: Check package metadata
         run: uvx twine check --strict dist/*
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist
           path: dist/*
 
-  omnivoice-resolver:
-    permissions:
-      contents: read
-    name: OmniVoice resolver (${{ matrix.label }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - label: linux
-            platform: x86_64-manylinux_2_39
-          - label: windows
-            platform: x86_64-pc-windows-msvc
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
-        with:
-          version: "latest"
-      - name: Resolve speech-to-speech[omnivoice]
-        run: >-
-          uv pip compile pyproject.toml
-          --extra omnivoice
-          --python-version 3.11
-          --python-platform ${{ matrix.platform }}
-          --output-file ${{ runner.temp }}/omnivoice-${{ matrix.label }}.txt
-
+  # Optional OmniVoice compatibility checks live in omnivoice.yml.
+  # Keep these checks focused on the default installation on every PR.
   install-smoke:
     permissions:
       contents: read
-    name: Install smoke (${{ matrix.label }})
+    name: Install smoke (${{ matrix.platform.label }}, Python ${{ matrix.python-version }})
     needs: package
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        include:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        platform:
           - label: linux
             os: ubuntu-latest
-            extra: "[omnivoice]"
-            smoke_extra: omnivoice
           - label: macos-arm64
-            os: macos-14
-            extra: ""
-            smoke_extra: ""
+            os: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.11"
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dist
           path: dist
@@ -171,14 +158,21 @@ jobs:
           source .venv-smoke/bin/activate
           python -m pip install --upgrade pip
           wheel=$(find dist -name 'speech_to_speech-*.whl' -print -quit)
-          python -m pip install "${wheel}${{ matrix.extra }}"
+          python -m pip install "${wheel}"
           python -m pip check
       - name: Run installed CLI smoke test
         shell: bash
-        env:
-          SPEECH_TO_SPEECH_SMOKE_EXTRA: ${{ matrix.smoke_extra }}
         run: |
           source .venv-smoke/bin/activate
           unset OPENAI_API_KEY
           # Validate the installed entry point without loading models or calling OpenAI.
           python tests/install_smoke.py
+      - name: Check optional Kokoro installation
+        if: matrix.platform.label == 'macos-arm64' && matrix.python-version == '3.12'
+        shell: bash
+        run: |
+          source .venv-smoke/bin/activate
+          wheel=$(find dist -name 'speech_to_speech-*.whl' -print -quit)
+          python -m pip install "${wheel}[kokoro]"
+          python -m pip check
+          python -c "from mlx_audio.tts.models.kokoro.pipeline import KokoroPipeline; from misaki import en, espeak"
