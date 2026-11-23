@@ -234,24 +234,12 @@ class KokoroTTSHandler(BaseTTSHandler):
         Yields:
             Audio chunks as numpy int16 arrays
         """
-        speculative_turns = getattr(self, "speculative_turns", None)
         if isinstance(tts_input, EndOfResponse):
-            if speculative_turns and not speculative_turns.wait_for_gate(
-                tts_input.turn_id,
-                tts_input.turn_revision,
-            ):
-                if tts_input.response_key is None:
-                    return
-                tts_input.cleanup_only = True
-            yield AUDIO_RESPONSE_DONE
+            if self._gate_end_of_response(tts_input):
+                yield AUDIO_RESPONSE_DONE
             return
 
-        if speculative_turns and not speculative_turns.wait_for_gate(
-            tts_input.turn_id,
-            tts_input.turn_revision,
-            commit=True,
-        ):
-            logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
+        if not self._admit_input(tts_input):
             return
 
         runtime_config = tts_input.runtime_config
@@ -412,7 +400,7 @@ class KokoroTTSHandler(BaseTTSHandler):
                 audio = resample_poly(audio, up=2, down=3)
 
                 # Convert to int16 format
-                audio = (audio * 32768).astype(np.int16)
+                audio = np.clip(audio * 32768, -32768, 32767).astype(np.int16)
 
                 # Preserve short tails without inserting silence between provider segments.
                 for i in range(0, len(audio), self.blocksize):
@@ -477,7 +465,7 @@ class KokoroTTSHandler(BaseTTSHandler):
             audio = resample_poly(audio, up=2, down=3)
 
             # Convert to int16 format
-            audio = (audio * 32768).astype(np.int16)
+            audio = np.clip(audio * 32768, -32768, 32767).astype(np.int16)
 
             # Preserve short tails without inserting silence between provider segments.
             for i in range(0, len(audio), self.blocksize):

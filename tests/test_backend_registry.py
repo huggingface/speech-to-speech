@@ -569,6 +569,36 @@ def test_omnivoice_cli_config_is_normalized_for_the_handler():
     }
 
 
+def test_irodori_cli_config_is_normalized_for_the_handler():
+    args = parse_arguments(
+        [
+            "--tts",
+            "irodori",
+            "--irodori_model_name",
+            "local/model.safetensors",
+            "--irodori_device",
+            "mps",
+            "--irodori_caption",
+            "落ち着いた男性の声",
+            "--irodori_num_steps",
+            "8",
+        ]
+    )
+
+    assert args.tts_backend.name == "irodori"
+    # Not on PyPI, so there is no extra for the import error to name.
+    assert args.tts_backend.spec.required_extra is None
+    assert args.tts_backend.config == {
+        "model_name": "local/model.safetensors",
+        "device": "mps",
+        "caption": "落ち着いた男性の声",
+        "ref_audio": None,
+        "num_steps": 8,
+        "blocksize": 512,
+        "gen_kwargs": {},
+    }
+
+
 def test_registry_rejects_duplicate_names_and_wrong_kinds():
     spec = BackendSpec("fake", "stt", FakeArguments, _factory)
 
@@ -738,10 +768,16 @@ def test_nemotron_stt_profile_and_terms_construct_through_registry(monkeypatch):
             "30",
             "--openai_stt_max_output_tokens",
             "512",
+            "--openai_stt_instruction",
+            "Audio transcription. Output: transcript only.",
+            "--openai_stt_drop_filler_only",
+            "true",
         ]
     )
     stt = create_backend_handler(args.stt_backend, _context())
     assert stt.profile == "nemotron"
+    assert stt.instruction == "Audio transcription. Output: transcript only."
+    assert stt.drop_filler_only is True
     assert stt.endpoint_url.endswith("/v1/chat/completions")
     assert stt.context_terms == ("Reachy Mini", "Pollen Robotics", "Hugging Face")
     assert stt.max_window_s == 30

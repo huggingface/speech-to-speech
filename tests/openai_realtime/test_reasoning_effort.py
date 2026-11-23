@@ -1,16 +1,17 @@
 """Client-selected reasoning effort via Realtime ``session.update`` / ``response.create``."""
 
+import warnings
 from types import SimpleNamespace
 
 import pytest
 from openai.types.realtime import (
     RealtimeErrorEvent,
     RealtimeSessionCreateRequest,
-    ResponseCreateEvent,
     SessionUpdateEvent,
 )
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 
+from speech_to_speech.api.openai_realtime.reasoning import ResponseCreate, SessionUpdate
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig, resolve_reasoning_effort
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
@@ -26,7 +27,7 @@ from tests.test_responses_api_language_model import _make_handler as _make_respo
 
 
 def _session_update(session: dict) -> SessionUpdateEvent:
-    return SessionUpdateEvent.model_validate({"type": "session.update", "session": {"type": "realtime", **session}})
+    return SessionUpdate.model_validate({"type": "session.update", "session": {"type": "realtime", **session}})
 
 
 def _runtime_config(session_effort: str | None = None) -> RuntimeConfig:
@@ -76,6 +77,30 @@ def test_session_update_empty_reasoning_object_keeps_effort(service, conn_id, ru
     assert updated["session"]["reasoning"] == {"effort": "high"}
 
 
+def test_client_events_accept_effort_none(service):
+    """The SDK's own event models reject ``none``; the events the service parses must not."""
+    conn_id = service.register()
+    runtime_config = service._state(conn_id).runtime_config
+    try:
+        update = service.parse_client_event(
+            {"type": "session.update", "session": {"type": "realtime", "reasoning": {"effort": "none"}}}
+        )
+        assert service.handle_session_update(conn_id, update) is None
+        assert resolve_reasoning_effort(runtime_config) == "none"
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # pydantic warns when a value does not fit the event's types
+            created = service.build_session_created(conn_id).model_dump(exclude_none=True)
+            updated = service.build_session_updated(conn_id).model_dump(exclude_none=True)
+        assert created["session"]["reasoning"] == updated["session"]["reasoning"] == {"effort": "none"}
+
+        service.handle_session_update(conn_id, _session_update({"reasoning": {"effort": "high"}}))
+        create = service.parse_client_event({"type": "response.create", "response": {"reasoning": {"effort": "none"}}})
+        assert resolve_reasoning_effort(runtime_config, create.response) == "none"
+    finally:
+        service.unregister(conn_id)
+
+
 @pytest.mark.parametrize("reasoning", [{"effort": "maximum"}, {"effort": 3}, "high"])
 def test_session_update_rejects_invalid_reasoning(service, conn_id, runtime_config, reasoning):
     error = service.handle_session_update(conn_id, _session_update({"reasoning": reasoning}))
@@ -85,9 +110,7 @@ def test_session_update_rejects_invalid_reasoning(service, conn_id, runtime_conf
 
 
 def test_response_create_rejects_invalid_reasoning(service, conn_id):
-    event = ResponseCreateEvent.model_validate(
-        {"type": "response.create", "response": {"reasoning": {"effort": "turbo"}}}
-    )
+    event = ResponseCreate.model_validate({"type": "response.create", "response": {"reasoning": {"effort": "turbo"}}})
     error = service.handle_response_create(conn_id, event)
     assert isinstance(error, RealtimeErrorEvent)
     assert error.error.type == "invalid_request_error"

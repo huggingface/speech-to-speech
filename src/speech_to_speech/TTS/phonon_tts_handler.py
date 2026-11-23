@@ -15,6 +15,7 @@ from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfRespons
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
+from speech_to_speech.TTS.pcm_blocks import PCMBlockBuffer
 
 logger = logging.getLogger(__name__)
 PIPELINE_SAMPLE_RATE = 16000
@@ -197,18 +198,14 @@ class PhononTTSHandler(BaseTTSHandler):
         )
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
-        tracker = self.speculative_turns
         identity = (tts_input.cancel_generation, tts_input.response_key, tts_input.turn_id, tts_input.turn_revision)
         if isinstance(tts_input, EndOfResponse):
             self._failed_responses.discard(identity)
-            if tracker and not tracker.wait_for_gate(tts_input.turn_id, tts_input.turn_revision):
-                if tts_input.response_key is None:
-                    return
-                tts_input.cleanup_only = True
-            yield AUDIO_RESPONSE_DONE
+            if self._gate_end_of_response(tts_input):
+                yield AUDIO_RESPONSE_DONE
             return
 
-        if tracker and not tracker.wait_for_gate(tts_input.turn_id, tts_input.turn_revision, commit=True):
+        if not self._admit_input(tts_input):
             return
         generation = tts_input.cancel_generation
         if generation is None and self.cancel_scope is not None:
@@ -247,7 +244,7 @@ class PhononTTSHandler(BaseTTSHandler):
         console.print(f"[green]ASSISTANT: {tts_input.text}")
         timer = self._latency_timer(tts_input, also_cancelled=lambda: self._is_cancelled(generation, tts_input))
         first_audio = True
-        pending = np.empty(0, dtype=np.int16)
+        pcm_blocks = PCMBlockBuffer(self.blocksize)
         tail_ms = self.max_trailing_silence_ms
         trimmer = _TrailingSilenceTrimmer(PIPELINE_SAMPLE_RATE, tail_ms) if tail_ms is not None else None
 
@@ -266,14 +263,10 @@ class PhononTTSHandler(BaseTTSHandler):
             )
 
             def blocks(samples: np.ndarray) -> Iterator[np.ndarray]:
-                nonlocal pending
                 pcm = np.clip(samples * 32768, -32768, 32767).astype(np.int16)
-                pending = np.concatenate((pending, pcm))
-                while pending.size >= self.blocksize:
+                for block in pcm_blocks.push(pcm):
                     if self._is_cancelled(generation, tts_input):
                         return
-                    block = pending[: self.blocksize]
-                    pending = pending[self.blocksize :]
                     yield emit(block)
 
             def trimmed_blocks(samples: np.ndarray) -> Iterator[np.ndarray]:
@@ -304,5 +297,7 @@ class PhononTTSHandler(BaseTTSHandler):
             if trimmer is not None:
                 for retained in trimmer.finish():
                     yield from blocks(retained)
-            if pending.size and not self._is_cancelled(generation, tts_input):
-                yield emit(np.pad(pending, (0, self.blocksize - pending.size)))
+            for block in pcm_blocks.flush():
+                if self._is_cancelled(generation, tts_input):
+                    return
+                yield emit(block)

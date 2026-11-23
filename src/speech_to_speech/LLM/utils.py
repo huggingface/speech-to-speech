@@ -19,7 +19,7 @@ SMART_PUNCT_TRANSLATION = str.maketrans(
 )
 
 SPEECHABLE_PATTERN = re.compile(
-    r"[^\w\s.,!?;:'\"\-()\/\\@#%&*+=$€£¥₹₽¢\[\]{}<>~`^|…—–，。！？；：、\n\r\t]",
+    r"[^\w\s.,!?;:'\"\-()\/\\@#%&*+=$€£¥₹₽¢\[\]{}<>~`^|…—–，。！？；：、｡؟।॥\n\r\t]",
     flags=re.UNICODE,
 )
 
@@ -100,6 +100,32 @@ def _has_unclosed_markdown_fence(text: str) -> bool:
     return opening_ticks is not None
 
 
+# NLTK's Punkt tokenizer only ends a sentence at ASCII ". ? !", so CJK, Arabic
+# and Devanagari replies would otherwise stay one sentence until the stream
+# ends. Split again after those terminators, keeping closing quotes and brackets
+# with the sentence they close.
+_NON_LATIN_SENTENCE_END_PATTERN = re.compile(r"[。！？｡؟।॥]+[」』）”’\"')]*")
+
+
+def _split_after_non_latin_terminators(sentence: str) -> list[str]:
+    # Complete Markdown code and emphasis are already masked. A delimiter left
+    # here may open a span that is still streaming, so leave the sentence whole,
+    # as Punkt alone would, rather than send half a span to TTS.
+    if "`" in sentence or "*" in sentence:
+        return [sentence]
+    parts: list[str] = []
+    start = 0
+    for match in _NON_LATIN_SENTENCE_END_PATTERN.finditer(sentence):
+        parts.append(sentence[start : match.end()].strip())
+        start = match.end()
+    if not parts:
+        return [sentence]
+    remainder = sentence[start:].strip()
+    if remainder:
+        parts.append(remainder)
+    return parts
+
+
 def sent_tokenize_preserving_markdown_code(
     text: str,
     tokenizer: Callable[[str], list[str]],
@@ -110,8 +136,9 @@ def sent_tokenize_preserving_markdown_code(
     protected_text, protected_code = _protect_markdown_code(text, keep_delimiters=True)
     protected_text, protected_emphasis = _protect_matched_emphasis(protected_text)
     return [
-        _restore_markdown_code(_restore_matched_emphasis(sentence, protected_emphasis), protected_code)
+        _restore_markdown_code(_restore_matched_emphasis(part, protected_emphasis), protected_code)
         for sentence in tokenizer(protected_text)
+        for part in _split_after_non_latin_terminators(sentence)
     ]
 
 

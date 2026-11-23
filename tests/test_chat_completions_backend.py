@@ -15,7 +15,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
-import httpx
+import httpx2
 import numpy as np
 import pytest
 from openai import APIConnectionError, InternalServerError, RateLimitError
@@ -107,7 +107,10 @@ class _FakeClient:
 def _make_handler(stream=True, *, base_url="http://fake/v1", reasoning_effort=None):
     """Build a handler whose warmup hits the fake client (no network)."""
     orig_openai = base_mod.OpenAI
+    orig_async_client = ChatCompletionsApiModelHandler._make_async_client
     base_mod.OpenAI = _FakeClient
+    # A streaming handler warms up through its async client.
+    ChatCompletionsApiModelHandler._make_async_client = mock_async_client
     try:
         h = ChatCompletionsApiModelHandler(
             threading.Event(),
@@ -125,6 +128,7 @@ def _make_handler(stream=True, *, base_url="http://fake/v1", reasoning_effort=No
         )
     finally:
         base_mod.OpenAI = orig_openai
+        ChatCompletionsApiModelHandler._make_async_client = orig_async_client
     h._make_async_client = lambda: mock_async_client(h)
     return h
 
@@ -505,6 +509,64 @@ def test_streaming_text_and_usage():
     assert tools == []
     # assistant text was stored back into the conversation history
     assert any(getattr(i, "role", None) == "assistant" for i in chat.buffer)
+
+
+class _RecordingDeltas:
+    """Provider chunks that record how many have been consumed so far."""
+
+    def __init__(self, deltas: list[str]):
+        self.chunks = [_chunk(content=d) for d in deltas]
+        self.chunks.append(_chunk(usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1)))
+        self.consumed = 0
+
+    def __iter__(self):
+        for chunk in self.chunks:
+            self.consumed += 1
+            yield chunk
+
+
+def _stream_spoken_reply(deltas: list[str], language_code: str) -> list[tuple[str, int]]:
+    """Drive a streamed audio reply; return (chunk text, provider chunks consumed when it was emitted)."""
+    h = _make_handler(stream=True)
+    h.stream_batch_sentences = 1
+    provider = _RecordingDeltas(deltas)
+    h.client.chat.completions.create = lambda **k: _FakeStream(provider)
+    chat = Chat(10)
+    chat.add_item(make_user_message("hi"))
+    rc = RuntimeConfig(chat=chat, session=RealtimeSessionCreateRequest(type="realtime", instructions="x"))
+    req = GenerateResponseRequest(
+        runtime_config=rc, response=None, language_code=language_code, turn_id="turn_1", turn_revision=0
+    )
+    return [
+        (out.text, provider.consumed) for out in drive_llm(h, req) if isinstance(out, LLMResponseChunk) and out.text
+    ]
+
+
+def test_streaming_flushes_chinese_sentences_as_they_complete():
+    """NLTK never ends a sentence at '。', so a Chinese reply used to reach TTS as one
+    chunk after the whole stream finished instead of sentence by sentence."""
+    emitted = _stream_spoken_reply(["你好。我很", "好。今天天气", "不错。"], "zh")
+    assert emitted == [("你好。", 1), ("我很好。", 2), ("今天天气不错。", 4)]
+
+
+def test_streaming_flushes_arabic_sentences_as_they_complete():
+    """'؟' is stripped by remove_unspeechable and ignored by NLTK, so an Arabic reply used
+    to reach TTS as one chunk after the whole stream finished."""
+    emitted = _stream_spoken_reply(["مرحبا؟ كيف ", "حالك؟ أنا ", "بخير"], "ar")
+    assert emitted == [("مرحبا؟", 1), ("كيف حالك؟", 2), ("أنا بخير", 4)]
+
+
+@pytest.mark.parametrize(
+    ("deltas", "expected"),
+    [
+        (["运行 `print('a。b", "')` 即可。然后重启。"], ["运行 print('a。b') 即可。", "然后重启。"]),
+        (["运行 ``print('a。b')`", "` 即可。然后重启。"], ["运行 print('a。b') 即可。", "然后重启。"]),
+        (["**重要。", "** 然后重启。"], ["重要。 然后重启。"]),
+    ],
+)
+def test_streaming_does_not_split_markdown_spans_that_are_still_open(deltas, expected):
+    """A '。' inside code or emphasis whose closing delimiter has not arrived is not a boundary."""
+    assert [text for text, _ in _stream_spoken_reply(deltas, "zh")] == expected
 
 
 def test_streaming_strips_markdown_delimiters_split_across_deltas():
@@ -990,14 +1052,14 @@ def test_generation_error_emits_failed_end_of_response():
 
 
 def _api_error_response(status_code):
-    request = httpx.Request("POST", "https://provider.example/v1/chat/completions")
-    return httpx.Response(status_code, request=request)
+    request = httpx2.Request("POST", "https://provider.example/v1/chat/completions")
+    return httpx2.Response(status_code, request=request)
 
 
 @pytest.mark.parametrize(
     ("error", "message"),
     [
-        (APIConnectionError(request=httpx.Request("POST", "https://provider.example")), "Connection error"),
+        (APIConnectionError(request=httpx2.Request("POST", "https://provider.example")), "Connection error"),
         (RateLimitError("rate limited", response=_api_error_response(429), body=None), "rate limited"),
         (InternalServerError("server failed", response=_api_error_response(500), body=None), "server failed"),
     ],

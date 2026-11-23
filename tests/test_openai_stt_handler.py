@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from queue import Queue
 from threading import Barrier, Event, Thread
 
-import httpx
+import httpx2
 import numpy as np
 import pytest
 from openai.types.realtime import (
@@ -202,10 +202,10 @@ def test_http_transcription_operation_parses_plain_text():
 )
 async def test_backend_rejections_surface_only_known_sanitized_reasons(monkeypatch, status, body, reason):
     def reject(request):
-        return httpx.Response(status, json=body)
+        return httpx2.Response(status, json=body)
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(reject))
-    monkeypatch.setattr(stt_module.httpx, "AsyncClient", lambda **kwargs: client)
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(reject))
+    monkeypatch.setattr(stt_module.httpx2, "AsyncClient", lambda **kwargs: client)
     operation = HttpTranscriptionOperation(
         endpoint_url="https://example.test/v1/audio/transcriptions",
         api_key="private credential",
