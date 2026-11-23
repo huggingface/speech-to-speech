@@ -598,6 +598,64 @@ def test_openai_tts_preserves_per_response_custom_voice_id(monkeypatch):
     assert _FakeSpeechOperation.instances[0].payload["voice"] == {"id": "voice_response"}
 
 
+def _voice_override_handler(monkeypatch, voice_override: str | None) -> OpenAICompatibleTTSHandler:
+    _reset_fake_speech_operation()
+    monkeypatch.setattr(tts_module, "HttpSpeechOperation", _FakeSpeechOperation)
+    return OpenAICompatibleTTSHandler(
+        Event(),
+        queue_in=Queue(),
+        queue_out=Queue(),
+        setup_args=(Event(),),
+        setup_kwargs={"voice": "configured", "voice_override": voice_override, "blocksize": 512},
+    )
+
+
+def _voice_inputs() -> dict[str, TTSInput]:
+    return {
+        "response": TTSInput(
+            text="Hello",
+            response=RealtimeResponseCreateParams(audio={"output": {"voice": "Aiden"}}),
+        ),
+        "session": TTSInput(
+            text="Hello",
+            runtime_config=RuntimeConfig(
+                session=RealtimeSessionCreateRequest(type="realtime", audio={"output": {"voice": "Ryan"}})
+            ),
+        ),
+        "none": TTSInput(text="Hello"),
+    }
+
+
+@pytest.mark.parametrize("voice_override", [None, "", "   "])
+def test_openai_tts_without_voice_override_prefers_client_voice(monkeypatch, voice_override):
+    handler = _voice_override_handler(monkeypatch, voice_override)
+
+    assert handler.voice_override is None
+    assert _FakeSpeechOperation.instances[0].payload["voice"] == "configured"
+    _reset_fake_speech_operation()
+    for tts_input in _voice_inputs().values():
+        assert list(handler.process(tts_input))
+
+    assert [operation.payload["voice"] for operation in _FakeSpeechOperation.instances] == [
+        "Aiden",
+        "Ryan",
+        "configured",
+    ]
+
+
+def test_openai_tts_voice_override_ignores_client_voices(monkeypatch):
+    handler = _voice_override_handler(monkeypatch, " Magpie-Multilingual.EN-US.Aria ")
+
+    assert _FakeSpeechOperation.instances[0].payload["voice"] == "Magpie-Multilingual.EN-US.Aria"
+    _reset_fake_speech_operation()
+    for tts_input in _voice_inputs().values():
+        assert list(handler.process(tts_input))
+
+    assert [operation.payload["voice"] for operation in _FakeSpeechOperation.instances] == [
+        "Magpie-Multilingual.EN-US.Aria"
+    ] * 3
+
+
 def test_openai_tts_invalid_custom_voice_emits_failure(monkeypatch):
     handler = _openai_tts_handler(monkeypatch)
     response = RealtimeResponseCreateParams(
