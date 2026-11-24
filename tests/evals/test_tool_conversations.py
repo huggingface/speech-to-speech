@@ -7,9 +7,9 @@ import stat
 import pytest
 
 from speech_to_speech.evals.tool_conversations.__main__ import main
-from speech_to_speech.evals.tool_conversations.report import fisher_exact, render_comparison, summarize
+from speech_to_speech.evals.tool_conversations.report import fisher_exact, render_comparison, render_report, summarize
 from speech_to_speech.evals.tool_conversations.runner import RunnerConfig, run_set
-from speech_to_speech.evals.tool_conversations.scenarios import RESULTS, Turn
+from speech_to_speech.evals.tool_conversations.scenarios import CONVERSATIONS, RESULTS, Turn
 
 
 def _user(index, expected, *rounds):
@@ -48,6 +48,52 @@ def test_summary_counts_each_outcome():
     assert (s["conversations"], s["crashed"]) == (2, 1)
 
 
+def test_argument_scores_distinguish_selection_schema_and_values():
+    timer = _user(0, "set_timer")
+    timer["expected_arguments"] = {"minutes": 10}
+    retries = [
+        '{"minutes":60,"label":"eggs"}',
+        "{}",
+        '{"minutes":10}',
+        '{"minutes":"10","label":"eggs"}',
+        '{"minutes":10,"label":"eggs","extra":NaN}',
+        "{",
+        "[]",
+        "",
+    ]
+    timer["rounds"] = [
+        {
+            "text": "",
+            "calls": ["get_time", "set_timer"],
+            "arguments": ['{"city":"Tokyo"}', '{"minutes":10,"label":"eggs"}'],
+        },
+        {"text": "", "calls": ["set_timer"] * len(retries), "arguments": retries},
+    ]
+    search = _user(1, "search_web")
+    search["rounds"] = [{"text": "", "calls": ["search_web"], "arguments": ['{"query":"lunar landing"}']}]
+    miss = _user(2, "get_weather", ("Sorry.", []))
+    miss["expected_arguments"] = {"city": "Lisbon"}
+    s = summarize([{"turns": [timer, search, miss]}])
+    assert (s["right_tool"], s["tool_turns"]) == (2, 3)
+    assert (s["valid_arguments"], s["argument_calls"]) == (3, 10)
+    assert (s["correct_arguments"], s["scored_argument_calls"]) == (1, 9)
+
+
+def test_argument_values_accept_any_listed_alternative():
+    weather = _user(0, "get_weather")
+    # A report stores the scenario's tuple of accepted values as a JSON list.
+    weather["expected_arguments"] = {"city": ["Quebec", "Quebec City"]}
+    weather["rounds"] = [
+        {
+            "text": "",
+            "calls": ["get_weather"] * 3,
+            "arguments": ['{"city":"quebec city"}', '{"city":"Quebec"}', '{"city":"Montreal"}'],
+        }
+    ]
+    s = summarize([{"turns": [weather]}])
+    assert (s["correct_arguments"], s["scored_argument_calls"]) == (2, 3)
+
+
 def test_fisher_exact_matches_known_values():
     assert fisher_exact(5, 5, 5, 5) == pytest.approx(1.0)
     assert fisher_exact(0, 10, 10, 0) == pytest.approx(1.0825e-05, rel=1e-3)
@@ -55,13 +101,20 @@ def test_fisher_exact_matches_known_values():
 
 
 def test_comparison_renders_one_column_per_report():
-    report = {"label": "a", "summary": summarize([])}
-    table = render_comparison([report, {**report, "label": "b"}])
-    assert table.splitlines()[0] == "| Metric | a | b |"
+    current = {"label": "new", "summary": summarize([])}
+    legacy = {"label": "old", "summary": dict(current["summary"])}
+    for key in ("valid_arguments", "argument_calls", "correct_arguments", "scored_argument_calls"):
+        del legacy["summary"][key]
+    current["summary"].update(valid_arguments=1, argument_calls=2, correct_arguments=1, scored_argument_calls=2)
+    assert "| Expected argument values matched | - |" in render_report(legacy)
+    for reports, cells in (([legacy, current], "- | 1/2 (50.0%)"), ([current, legacy], "1/2 (50.0%) | -")):
+        table = render_comparison(reports)
+        assert table.splitlines()[0] == f"| Metric | {reports[0]['label']} | {reports[1]['label']} |"
+        assert f"| Expected argument values matched | {cells} |" in table
 
 
 class _ScriptedServer:
-    """Answers like a Realtime server: a report call, then speech; records what the client sent."""
+    """Emits a report call and a weather call, then records when the client returns each result."""
 
     def __init__(self):
         self.received = []
@@ -74,11 +127,19 @@ class _ScriptedServer:
             if event["type"] != "response.create":
                 continue
             responses += 1
-            output = (
-                [{"type": "function_call", "name": "research_report", "call_id": "call_r", "arguments": "{}"}]
-                if responses == 1
-                else [{"type": "message", "content": [{"type": "output_text", "text": f"reply {responses}"}]}]
-            )
+            if responses == 1:
+                output = [{"type": "function_call", "name": "research_report", "call_id": "call_r", "arguments": "{}"}]
+            elif responses == 2:
+                output = [
+                    {
+                        "type": "function_call",
+                        "name": "get_weather",
+                        "call_id": "call_w",
+                        "arguments": '{"city":" LISBON "}',
+                    }
+                ]
+            else:
+                output = [{"type": "message", "content": [{"type": "output_text", "text": f"reply {responses}"}]}]
             await ws.send(json.dumps({"type": "response.done", "response": {"status": "completed", "output": output}}))
 
 
@@ -86,7 +147,7 @@ def test_runner_sends_the_long_running_result_two_turns_later():
     import websockets
 
     server = _ScriptedServer()
-    conversation = (Turn("Write a report.", "research_report"), Turn("Hi?", None), Turn("And now?", None))
+    conversation = (Turn("Write a report.", "research_report"), CONVERSATIONS[0][0], Turn("And now?", None))
 
     async def scenario():
         async with websockets.serve(server.handler, "127.0.0.1", 0) as ws_server:
@@ -97,9 +158,14 @@ def test_runner_sends_the_long_running_result_two_turns_later():
     kinds = [turn["kind"] for turn in row["turns"]]
     assert kinds == ["user", "user", "late_result", "user"]
     outputs = [e["item"] for e in server.received if e.get("item", {}).get("type") == "function_call_output"]
-    assert [(o["call_id"], json.loads(o["output"])) for o in outputs] == [("call_r", RESULTS["research_report"])]
+    assert [(o["call_id"], json.loads(o["output"])) for o in outputs] == [
+        ("call_w", RESULTS["get_weather"]),
+        ("call_r", RESULTS["research_report"]),
+    ]
     s = summarize([row])
-    assert (s["right_tool"], s["late_results"], s["late_result_spoken"]) == (1, 1, 1)
+    assert (s["right_tool"], s["late_results"], s["late_result_spoken"]) == (2, 1, 1)
+    assert (s["valid_arguments"], s["argument_calls"]) == (1, 2)
+    assert (s["correct_arguments"], s["scored_argument_calls"]) == (1, 1)
 
 
 def test_server_config_is_private_and_points_speech_at_the_stand_in(tmp_path, monkeypatch):
