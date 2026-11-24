@@ -193,6 +193,74 @@ class TestSystemMessages:
         chat.add_item(_system("system"))
         assert chat.buffer == []
 
+    def test_system_item_after_conversation_stays_in_order(self):
+        """A system item after a turn is not folded into the leading prompt.
+
+        llama.cpp continues a chat that ends on an assistant message, so hoisting
+        the item leaves the previous reply as a prefill and drops the new text.
+        """
+        chat = Chat(size=5)
+        chat.add_item(_system("You are helpful."))
+        chat.add_item(_user("check the weather"))
+        chat.add_ordered_function_call(_fc("c1", "get_weather", "{}"))
+        chat.add_item(_fco("c1", "sunny"))
+        chat.add_item(_assistant("It is sunny."))
+        announcement = "run #21 finished, tell the operator briefly"
+        chat.add_item(_system(announcement))
+
+        assert chat.init_chat_message is not None
+        assert chat.init_chat_message.content[0].text == "You are helpful."
+        assert [item.content[0].text for item in chat.buffer if item.type == "message" and item.role == "system"] == [
+            announcement
+        ]
+
+        chat.prepend_instructions("Speak briefly.")
+        transformers = chat.to_transformers_chat()
+        responses = chat.to_responses_api_chat()
+
+        assert [message["role"] for message in transformers] == [
+            "system",
+            "user",
+            "assistant",
+            "tool",
+            "assistant",
+            "system",
+        ]
+        assert transformers[0]["content"] == "Speak briefly.\n\nYou are helpful."
+        assert announcement not in transformers[0]["content"]
+        assert transformers[-1] == {"role": "system", "content": announcement}
+        assert transformers[-2] == {"role": "assistant", "content": "It is sunny."}
+        assert responses[0]["role"] == "system"
+        assert announcement not in responses[0]["content"][0]["text"]
+        assert responses[-1]["role"] == "system"
+        assert responses[-1]["content"][0]["text"] == announcement
+
+    def test_system_item_does_not_make_an_open_tool_result_late(self):
+        chat = Chat(size=5)
+        chat.add_item(_user("do it"))
+        chat.add_ordered_function_call(_fc("c1", "lookup", "{}"))
+        chat.add_item(_user("anything else?"))
+        chat.add_item(_system("background note"))
+        chat.add_item(_fco("c1", "42"))
+
+        messages = chat.to_transformers_chat()
+
+        assert [message["role"] for message in messages] == ["user", "assistant", "tool", "user", "system"]
+        assert messages[2]["content"] == "42"
+        assert messages[-1] == {"role": "system", "content": "background note"}
+
+    def test_system_item_does_not_close_an_incomplete_tool_batch(self):
+        chat = Chat(size=5)
+        chat.add_item(_user("do both"))
+        chat.add_ordered_function_call(_fc("c1"))
+        chat.add_ordered_function_call(_fc("c2"))
+        chat.add_item(_fco("c1", "first"))
+        assert chat.has_incomplete_tool_batch()
+
+        chat.add_item(_system("note"))
+
+        assert chat.has_incomplete_tool_batch()
+
 
 # ===================================================================
 # 4. TestAddItemEviction
