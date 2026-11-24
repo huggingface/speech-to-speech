@@ -70,7 +70,8 @@ RESULTS: dict[str, Any] = {
 class Turn:
     ask: str
     expected_tool: Optional[str]
-    expected_arguments: dict[str, str | int] | None = None
+    # Values a call must send; a tuple lists every accepted value.
+    expected_arguments: dict[str, str | int | tuple[str, ...]] | None = None
 
 
 Conversation = tuple[Turn, ...]
@@ -121,7 +122,7 @@ FIRST_TURNS: tuple[Conversation, ...] = tuple(
         Turn("Could you research fusion startups and write it up for me?", "research_report"),
         Turn("What's the weather in Lisbon?", "get_weather", {"city": "Lisbon"}),
         Turn("Is it raining in Oslo right now?", "get_weather", {"city": "Oslo"}),
-        Turn("Do I need a jacket in Quebec today?", "get_weather", {"city": "Quebec"}),
+        Turn("Do I need a jacket in Quebec today?", "get_weather", {"city": ("Quebec", "Quebec City")}),
         Turn("What time is it in Tokyo?", "get_time", {"city": "Tokyo"}),
         Turn("What's the time in New York right now?", "get_time", {"city": "New York"}),
         Turn("Set a 10 minute timer for the eggs.", "set_timer", {"minutes": 10}),

@@ -48,6 +48,12 @@ def _normalized(value: Any) -> Any:
     return value.strip().casefold() if isinstance(value, str) else value
 
 
+def _matches(actual: Any, expected: Any) -> bool:
+    # A tuple lists every accepted value; reports store it as a JSON list.
+    accepted = expected if isinstance(expected, (list, tuple)) else (expected,)
+    return any(_normalized(actual) == _normalized(value) for value in accepted)
+
+
 def _count_arguments(turn: dict[str, Any], counts: dict[str, int]) -> None:
     tool = turn["expected_tool"]
     validator = _ARGUMENT_VALIDATORS.get(tool)
@@ -71,8 +77,7 @@ def _count_arguments(turn: dict[str, Any], counts: dict[str, int]) -> None:
             counts["valid_arguments"] += 1
             if expected is not None:
                 counts["correct_arguments"] += all(
-                    key in arguments and _normalized(arguments[key]) == _normalized(value)
-                    for key, value in expected.items()
+                    key in arguments and _matches(arguments[key], value) for key, value in expected.items()
                 )
 
 

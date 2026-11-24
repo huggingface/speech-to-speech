@@ -282,8 +282,9 @@ column per report, with a two-sided Fisher exact p-value against the first:
   value, out of all calls to the expected tool on turns with a specified city, direction or timer
   duration. Both rates count each attempt, including repeated calls. A ten-minute timer needs a
   string label and ten minutes to pass both checks. The label wording is free. Strings match
-  exactly after trimming whitespace and ignoring case, so a city alias can miss. Older summaries
-  show a dash for both rates.
+  exactly after trimming whitespace and ignoring case. A turn can list several accepted values:
+  "Quebec" accepts "Quebec City", which most models send. Other aliases still miss. Older
+  summaries show a dash for both rates.
 - **Spoke before calling**, overall and before expression tools (dance, emotion, head moves).
 - **Call markup in spoken text**: call syntax the server did not parse. The check is a regex over
   known formats, so read unusual misses by hand.

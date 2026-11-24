@@ -79,6 +79,21 @@ def test_argument_scores_distinguish_selection_schema_and_values():
     assert (s["correct_arguments"], s["scored_argument_calls"]) == (1, 9)
 
 
+def test_argument_values_accept_any_listed_alternative():
+    weather = _user(0, "get_weather")
+    # A report stores the scenario's tuple of accepted values as a JSON list.
+    weather["expected_arguments"] = {"city": ["Quebec", "Quebec City"]}
+    weather["rounds"] = [
+        {
+            "text": "",
+            "calls": ["get_weather"] * 3,
+            "arguments": ['{"city":"quebec city"}', '{"city":"Quebec"}', '{"city":"Montreal"}'],
+        }
+    ]
+    s = summarize([{"turns": [weather]}])
+    assert (s["correct_arguments"], s["scored_argument_calls"]) == (2, 3)
+
+
 def test_fisher_exact_matches_known_values():
     assert fisher_exact(5, 5, 5, 5) == pytest.approx(1.0)
     assert fisher_exact(0, 10, 10, 0) == pytest.approx(1.0825e-05, rel=1e-3)
