@@ -125,7 +125,14 @@ async def run_conversation(config: RunnerConfig, conversation: Conversation) -> 
                 if not answered:
                     break
             turns.append(
-                {"kind": "user", "index": index, "ask": turn.ask, "expected_tool": turn.expected_tool, "rounds": rounds}
+                {
+                    "kind": "user",
+                    "index": index,
+                    "ask": turn.ask,
+                    "expected_tool": turn.expected_tool,
+                    "expected_arguments": turn.expected_arguments,
+                    "rounds": rounds,
+                }
             )
     return {"turns": turns, "errors": errors}
 

@@ -277,6 +277,13 @@ column per report, with a two-sided Fisher exact p-value against the first:
 - **Right tool called** and **Said it, no call** (the reply speaks but makes no call), with the
   first-turn share split out. Opening requests have identical prompts in any setup, so a
   difference there is noise.
+- **Schema-valid arguments** checks each call to the expected tool against its parameter schema.
+  **Expected argument values matched** counts schema-valid calls that also match every specified
+  value, out of all calls to the expected tool on turns with a specified city, direction or timer
+  duration. Both rates count each attempt, including repeated calls. A ten-minute timer needs a
+  string label and ten minutes to pass both checks. The label wording is free. Strings match
+  exactly after trimming whitespace and ignoring case, so a city alias can miss. Older summaries
+  show a dash for both rates.
 - **Spoke before calling**, overall and before expression tools (dance, emotion, head moves).
 - **Call markup in spoken text**: call syntax the server did not parse. The check is a regex over
   known formats, so read unusual misses by hand.
