@@ -1588,6 +1588,38 @@ class TestCompaction:
 
         assert chat.init_chat_message is sys_msg
 
+    def test_compaction_keeps_mid_conversation_system_message(self):
+        """A system item inside the compacted range must stay in the buffer."""
+        chat = Chat(size=2)
+        compactor = _make_stub_compactor()
+        chat.add_item(_system("You are helpful."))
+        chat.add_item(_user("u0"))
+        chat.add_item(_assistant("a0"))
+        chat.add_item(_system("The operator's name is Dana"))
+        chat.add_item(_user("u1"))
+        chat.add_item(_assistant("a1"))
+        chat.add_item(_user("u2"))
+        chat.add_item(_assistant("a2"))
+        chat.add_item(_user("u3"))
+        chat.trim_if_needed(compactor)
+        _wait_thread(chat)
+
+        assert chat.init_chat_message is not None
+        assert chat.init_chat_message.content[0].text == "You are helpful."
+        assert [
+            item.content[0].text for item in chat.buffer if isinstance(item, RealtimeConversationItemSystemMessage)
+        ] == ["The operator's name is Dana"]
+        assert chat.buffer[0].content[0].text == "USER_SUMMARY"
+        assert chat.buffer[1].content[0].text == "ASSISTANT_SUMMARY"
+        assert chat.buffer[2].content[0].text == "The operator's name is Dana"
+        assert chat.buffer[3].content[0].text == "u3"
+        serialized = chat.to_transformers_chat()
+        assert serialized[0]["content"] == "You are helpful."
+        assert any(
+            message.get("role") == "system" and message.get("content") == "The operator's name is Dana"
+            for message in serialized
+        )
+
     def test_snapshot_strips_images(self):
         chat = Chat(size=2)
         captured: list = []

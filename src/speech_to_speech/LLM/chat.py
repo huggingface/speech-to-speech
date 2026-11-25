@@ -1615,7 +1615,14 @@ class Chat:
                     break
 
         items_to_compact = self.buffer[:end_idx]
-        marker_ids = {entry.id for entry in items_to_compact if entry.id is not None}
+        # Mid-conversation system items stay in the buffer. They are not a
+        # compactable turn, and dropping them would lose operator context
+        # that the transcript renderer also skips.
+        marker_ids = {
+            entry.id
+            for entry in items_to_compact
+            if entry.id is not None and not isinstance(entry, RealtimeConversationItemSystemMessage)
+        }
         # A completed result can appear after this turn-aligned prefix. Leave
         # its call out of the summarizer input; _apply_compaction keeps that
         # call in the live buffer so the pair remains intact after the splice.
