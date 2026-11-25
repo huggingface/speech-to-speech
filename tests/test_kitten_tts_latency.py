@@ -210,15 +210,20 @@ def test_cancel_after_first_model_chunk_preserves_timing_boundaries(monkeypatch,
         return _waveform()
 
     def resample(audio, *, up, down):
-        handler.cancel_scope.cancel()
+        if stop_at == "resample":
+            handler.cancel_scope.cancel()
         return audio
 
     handler.model.generate_single_chunk = generate
     monkeypatch.setattr(kitten_module, "resample_poly", resample)
-    assert list(handler.process(TTSInput(text="Hello", response_key="response", speech_stopped_at_s=9.0))) == []
-    assert tracker.e2e_s is None
+    outputs = list(handler.process(TTSInput(text="Hello", response_key="response", speech_stopped_at_s=9.0)))
+    # Both boundaries belong to the first chunk, whatever happens to later ones.
+    assert tracker.tts_ttfa_s == pytest.approx(0.1)
     if stop_at == "later_generation":
-        assert tracker.tts_ttfa_s is None
+        # The first chunk was delivered before the second was synthesized.
+        assert [block.shape for block in outputs] == [(512,)]
+        assert tracker.e2e_s == pytest.approx(1.1)
     else:
         # Synthesis was eligible when recorded; cancellation prevented delivery.
-        assert tracker.tts_ttfa_s == pytest.approx(0.1)
+        assert outputs == []
+        assert tracker.e2e_s is None

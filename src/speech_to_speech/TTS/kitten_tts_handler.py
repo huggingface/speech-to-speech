@@ -85,13 +85,13 @@ class KittenTTSHandler(BaseTTSHandler):
 
     def warmup(self) -> None:
         logger.info("Warming up KittenTTSHandler")
-        self._generate_audio(text="Hello", voice=self.voice)
+        for _ in self._generate_chunks(text="Hello", voice=self.voice):
+            pass
         logger.info("KittenTTSHandler warmed up")
 
-    def _generate_audio(self, text: str, voice: str) -> tuple[np.ndarray, float | None]:
+    def _generate_chunks(self, text: str, voice: str) -> Iterator[np.ndarray]:
+        """Synthesize one checkpoint-sized text chunk at a time, in order."""
         pending = list(reversed(self._chunk_text(self.model.preprocessor(text))))
-        audio = []
-        first_audio_at_s = None
         while pending:
             chunk = pending.pop()
             # Character bounds alone do not bound phonemes: acronyms can expand.
@@ -110,11 +110,7 @@ class KittenTTSHandler(BaseTTSHandler):
                     raise ValueError("KittenTTS text cannot fit the checkpoint's token limit")
                 pending.extend(reversed(parts))
                 continue
-            waveform = self.model.generate_single_chunk(text=chunk, voice=voice)
-            if first_audio_at_s is None and waveform.size:
-                first_audio_at_s = perf_counter()
-            audio.append(waveform)
-        return np.concatenate(audio, axis=-1), first_audio_at_s
+            yield self.model.generate_single_chunk(text=chunk, voice=voice)
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         if isinstance(tts_input, EndOfResponse):
@@ -135,34 +131,40 @@ class KittenTTSHandler(BaseTTSHandler):
 
         # Synthesis start: after speculative gate / voice resolve, before provider work.
         timer = self._latency_timer(tts_input, cancel_gen)
-        # Synthesis completes before delivery; every inference fits the token limit.
-        # Let BaseHandler report failures through its privacy-safe exception logger.
-        audio_chunk, first_audio_at_s = self._generate_audio(text=text, voice=voice)
-        if self._is_stale(cancel_gen):
-            return
-
-        audio = np.asarray(audio_chunk, dtype=np.float32).reshape(-1)
-        if audio.size == 0:
-            return
-
-        # Use the first model waveform, excluding later synthesis and concatenation.
-        # Publish only after the assembled output passes cancellation/empty checks.
-        if first_audio_at_s is not None:
-            timer.first_provider_audio(first_audio_at_s)
-
-        audio = resample_poly(audio, up=2, down=3)
-        audio_int16 = np.clip(audio * 32768, -32768, 32767).astype(np.int16)
 
         def emit(block: np.ndarray) -> Iterator[TTSOut]:
             timer.first_yield()
             yield block
 
-        n = (len(audio_int16) // self.blocksize) * self.blocksize
-        for i in range(0, n, self.blocksize):
+        # One input can hold several sentences, each a blocking model call. Deliver
+        # each chunk before synthesizing the next so the first one is not held back
+        # and an interruption skips the remaining calls.
+        # Let BaseHandler report failures through its privacy-safe exception logger.
+        carry = np.zeros(0, dtype=np.int16)
+        for waveform in self._generate_chunks(text=text, voice=voice):
+            generated_at_s = perf_counter()
             if self._is_stale(cancel_gen):
                 return
-            yield from emit(audio_int16[i : i + self.blocksize])
-        if n < len(audio_int16):
+            audio = np.asarray(waveform, dtype=np.float32).reshape(-1)
+            if audio.size == 0:
+                continue
+            # First-write-wins: only the first non-empty model waveform is recorded.
+            timer.first_provider_audio(generated_at_s)
+
+            audio = resample_poly(audio, up=2, down=3)
+            # Carry the partial block into the next chunk, so padding is added
+            # only at the end of the input and never between chunks.
+            audio_int16 = np.concatenate([carry, np.clip(audio * 32768, -32768, 32767).astype(np.int16)])
+            n = (len(audio_int16) // self.blocksize) * self.blocksize
+            for i in range(0, n, self.blocksize):
+                if self._is_stale(cancel_gen):
+                    return
+                yield from emit(audio_int16[i : i + self.blocksize])
+            carry = audio_int16[n:]
+            # Advancing the generator starts the next blocking model call.
             if self._is_stale(cancel_gen):
                 return
-            yield from emit(np.pad(audio_int16[n:], (0, self.blocksize - (len(audio_int16) - n))))
+        if len(carry):
+            if self._is_stale(cancel_gen):
+                return
+            yield from emit(np.pad(carry, (0, self.blocksize - len(carry))))
