@@ -232,3 +232,35 @@ def test_zero_gpu_generation_counts_a_latency_round(adapter):
     with bind_active_turn_latency_tracker(tracker):
         list(h._generate(config.chat, "en", None, ctx))
     assert tracker.llm_rounds == 1
+
+
+def test_input_tokens_include_the_generation_prompt_the_worker_sends(adapter):
+    from speech_to_speech.LLM.language_model import StreamContext
+
+    module, worker = adapter
+
+    class TemplateTokenizer:
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False, enable_thinking=True):
+            ids = [1] * len(messages)
+            if add_generation_prompt:
+                ids += [2] if enable_thinking else [2, 3, 4]
+            return ids
+
+    seen = []
+
+    def tokens(messages, kwargs, *, cancelled=None):
+        seen.append(messages)
+        yield "Hello."
+
+    worker.tokens = tokens
+    config = RuntimeConfig()
+    config.chat.add_item(make_user_message("Hello"))
+    h = handler(module, CancelScope())
+    h.tokenizer = TemplateTokenizer()
+    ctx = StreamContext()
+    list(h._generate(config.chat, "en", None, ctx))
+    # The worker renders the prompt with add_generation_prompt=True, enable_thinking=False.
+    expected = h.tokenizer.apply_chat_template(
+        seen[0], tokenize=True, add_generation_prompt=True, enable_thinking=False
+    )
+    assert ctx.input_tokens == len(expected)

@@ -24,7 +24,9 @@ class ZeroGPULLMHandler(BaseLanguageModelHandler):
 
     def _generate(self, chat, language_code, gen, ctx, runtime_config=None, response=None):
         messages = chat.to_transformers_chat()
-        ids = self.tokenizer.apply_chat_template(messages, tokenize=True, enable_thinking=False)
+        ids = self.tokenizer.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=True, enable_thinking=False
+        )
         ctx.input_tokens += len(ids if isinstance(ids, list) else ids["input_ids"])
         aborted = Event()
 
