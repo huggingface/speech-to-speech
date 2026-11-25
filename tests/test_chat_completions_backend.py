@@ -1100,6 +1100,58 @@ def test_provider_failure_before_output_speaks_fallback_then_fails_without_histo
     ]
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_image_rejected_by_text_only_backend_does_not_break_later_turns(stream):
+    """A backend without vision rejects the image once; the image must not stay in
+    history, or every later text turn is rejected too."""
+    h = _make_handler(stream=stream)
+    requests = []
+
+    def create(**kwargs):
+        requests.append(kwargs)
+        if "image_url" in json.dumps(kwargs["messages"]):
+            raise InternalServerError(
+                "image input is not supported - hint: if this is unexpected, you may need to provide the mmproj",
+                response=_api_error_response(500),
+                body=None,
+            )
+        text = "The server could not process the photo." if len(requests) == 2 else "Dublin."
+        if stream:
+            return _FakeStream([_chunk(content=text)])
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=text, tool_calls=[]), finish_reason="stop")],
+            usage=None,
+        )
+
+    h.client.chat.completions.create = create
+    chat = Chat(10)
+    chat.add_item(make_user_message("Hello"))
+    chat.add_item(
+        RealtimeConversationItemUserMessage(
+            type="message",
+            role="user",
+            content=[UserContent(type="input_image", image_url="data:image/jpeg;base64,abc")],
+        )
+    )
+    text, _, _, _, end = _drive(h, user="How many fingers?", chat=chat)
+    assert text == "The server could not process the photo."
+    assert end is not None and end.error is None
+    assert len(requests) == 2
+    assert "image_url" not in json.dumps(requests[1]["messages"])
+    assert "image input is not supported" in json.dumps(requests[1]["messages"])
+    assert requests[1]["tool_choice"] == "none"
+
+    text, _, _, _, end = _drive(h, user="What is the capital of Ireland?", chat=chat)
+    assert end is not None and end.error is None
+    assert text == "Dublin."
+    assert len(requests) == 3
+    assert "image_url" not in json.dumps(requests[2]["messages"])
+    user_texts = [
+        p.text for i in chat.buffer if getattr(i, "role", None) == "user" for p in i.content if p.type == "input_text"
+    ]
+    assert "Hello" in user_texts
+
+
 def test_cancelled_provider_failure_does_not_emit_fallback():
     scope = CancelScope()
     h = _make_handler(stream=True)

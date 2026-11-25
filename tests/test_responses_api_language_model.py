@@ -9,16 +9,19 @@ from unittest.mock import MagicMock
 import httpx2
 import numpy as np
 import pytest
-from openai import Stream
+from openai import InternalServerError, Stream
 from openai.types.realtime.conversation_item import (
     RealtimeConversationItemAssistantMessage,
     RealtimeConversationItemFunctionCall,
     RealtimeConversationItemFunctionCallOutput,
+    RealtimeConversationItemUserMessage,
 )
+from openai.types.realtime.realtime_conversation_item_user_message import Content as UserContent
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
+    ResponseErrorEvent,
     ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
@@ -344,6 +347,190 @@ def test_claimed_failed_prefetch_emits_transactional_fallback():
     assert outputs[1].error == "Language model generation failed: provider failed"
 
 
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("recovery_fails", [False, True])
+@pytest.mark.parametrize("event_error", [False, True])
+def test_camera_image_rejected_by_text_only_backend_keeps_later_turns_working(stream, recovery_fails, event_error):
+    handler = _make_handler(stream=stream, cancel_scope=CancelScope())
+    inputs = []
+
+    def create(**kwargs):
+        inputs.append(kwargs["input"])
+        if any(
+            p.get("type") == "input_image"
+            for item in kwargs["input"]
+            for p in item.get("content", [])
+            if isinstance(p, dict)
+        ):
+            if event_error:
+                if stream:
+                    return _make_stream(
+                        [
+                            ResponseErrorEvent(
+                                type="error",
+                                sequence_number=0,
+                                code="invalid_image",
+                                message="image input is not supported",
+                                param=None,
+                            )
+                        ]
+                    )
+                failed = _make_response([])
+                failed.status = "failed"
+                failed.error = SimpleNamespace(message="image input is not supported")
+                return failed
+            request = httpx2.Request("POST", "http://fake/v1/responses")
+            raise InternalServerError(
+                "image input is not supported - hint: if this is unexpected, you may need to provide the mmproj",
+                response=httpx2.Response(500, request=request),
+                body=None,
+            )
+        if len(inputs) == 2:
+            assert "image input is not supported" in json.dumps(kwargs["input"])
+            assert kwargs["tool_choice"] == "none"
+            if recovery_fails:
+                raise RuntimeError("explanation request failed")
+        text = "The server could not process the photo." if len(inputs) == 2 else "Dublin."
+        if stream:
+            return _make_stream([_make_text_delta_event(text), _make_output_item_done_event(content=text)])
+        return _make_response(
+            [
+                ResponseOutputMessage(
+                    id="msg_reply",
+                    type="message",
+                    role="assistant",
+                    status="completed",
+                    content=[ResponseOutputText(type="output_text", text=text, annotations=[])],
+                )
+            ]
+        )
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    cfg = _make_runtime_config(chat_size=10)
+    chat = cfg.chat
+    chat.add_item(make_user_message("How many fingers am I holding up?"))
+    chat.add_item(
+        RealtimeConversationItemFunctionCall(
+            type="function_call", call_id="call_cam", name="camera_snapshot", arguments="{}"
+        )
+    )
+    chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output", call_id="call_cam", output="Snapshot captured from the webcam."
+        )
+    )
+    chat.add_item(
+        RealtimeConversationItemUserMessage(
+            type="message",
+            role="user",
+            content=[UserContent(type="input_image", image_url="data:image/jpeg;base64,abc")],
+        )
+    )
+
+    outputs = list(drive_llm(handler, GenerateResponseRequest(runtime_config=cfg)))
+
+    assert len(inputs) == 2
+    if recovery_fails:
+        # A failed explanation is an ordinary provider failure: the user still hears the fallback.
+        assert [o.text for o in outputs if isinstance(o, LLMResponseChunk)] == [
+            base_openai_compatible_language_model.PROVIDER_FAILURE_FALLBACK
+        ]
+        assert "explanation request failed" in outputs[-1].error
+    else:
+        assert outputs[0].text == "The server could not process the photo."
+        assert outputs[-1].error is None
+
+    for question in ("What is the capital of Ireland?",):
+        chat.add_item(make_user_message(question))
+        outputs = list(drive_llm(handler, GenerateResponseRequest(runtime_config=cfg)))
+        assert outputs[-1].error is None
+        assert "Dublin." in "".join(o.text for o in outputs if isinstance(o, LLMResponseChunk))
+
+    assert len(inputs) == 3
+    assert not any(
+        p.get("type") == "input_image"
+        for items in inputs[1:]
+        for item in items
+        for p in item.get("content", [])
+        if isinstance(p, dict)
+    )
+    # The tool call and its result stay in the conversation.
+    later = json.dumps(inputs[-1])
+    assert "call_cam" in later and "Snapshot captured from the webcam." in later
+    assert sum(i.type == "function_call_output" and i.call_id == "call_cam" for i in chat.buffer) == 1
+
+
+def test_image_rejected_by_unclaimed_prefetch_stays_for_the_real_request():
+    handler = _make_handler(stream=True, cancel_scope=CancelScope())
+
+    def create(**kwargs):
+        request = httpx2.Request("POST", "http://fake/v1/responses")
+        raise InternalServerError(
+            "image input is not supported - hint: if this is unexpected, you may need to provide the mmproj",
+            response=httpx2.Response(500, request=request),
+            body=None,
+        )
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    cfg = _make_runtime_config(chat_size=10)
+    cfg.chat.add_item(
+        RealtimeConversationItemUserMessage(
+            type="message",
+            role="user",
+            content=[UserContent(type="input_image", image_url="data:image/jpeg;base64,abc")],
+        )
+    )
+    request = GenerateResponseRequest(runtime_config=cfg)
+    request.prefetch_transaction = ResponsePrefetchTransaction()
+
+    outputs = list(drive_llm(handler, request))
+
+    assert not any(isinstance(o, LLMResponseChunk) for o in outputs)
+    assert "image input is not supported" in outputs[-1].error
+    assert cfg.chat.image_message_ids()
+
+
+@pytest.mark.parametrize("private", [False, True])
+def test_image_rejection_after_partial_output_does_not_restart_or_change_private_context(private):
+    handler = _make_handler(stream=True)
+    calls = []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        return _make_stream(
+            [
+                _make_text_delta_event("Partial response."),
+                ResponseErrorEvent(
+                    type="error",
+                    sequence_number=1,
+                    code="invalid_image",
+                    message="image input is not supported",
+                    param=None,
+                ),
+            ]
+        )
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    request = _make_request("Inspect this")
+    request.response = RealtimeResponseCreateParams(
+        conversation="none" if private else "auto",
+        output_modalities=["text"],
+    )
+    chat = request.runtime_config.chat
+    chat.add_item(
+        RealtimeConversationItemUserMessage(
+            type="message",
+            role="user",
+            content=[UserContent(type="input_image", image_url="data:image/jpeg;base64,abc")],
+        )
+    )
+    outputs = list(drive_llm(handler, request))
+    assert len(calls) == 1
+    assert [o.text for o in outputs if isinstance(o, LLMResponseChunk)] == ["Partial response."]
+    assert "image input is not supported" in outputs[-1].error
+    assert bool(chat.image_message_ids()) is private
+
+
 def test_discarded_prefetch_does_not_block_on_provider_connect():
     request_started = Event()
     release_request = Event()
@@ -666,7 +853,9 @@ def test_process_records_hosted_llm_latency():
     assert tracker.llm_ttft_s < tail_delay_s
 
 
-@pytest.mark.parametrize("mode,first_tts_s", [("stream", 0.4), ("trailing", 0.9), ("nonstream", 0.4), ("failed", 0.4)])
+@pytest.mark.parametrize(
+    "mode,first_tts_s", [("stream", 0.4), ("trailing", 0.9), ("nonstream", 0.4), ("failed", 0.4), ("recovered", 0.9)]
+)
 def test_first_tts_batch_latency_uses_hosted_generation_start(monkeypatch, mode, first_tts_s):
     clock = [10.0]
     monkeypatch.setattr(base_openai_compatible_language_model, "perf_counter", lambda: clock[0])
@@ -674,7 +863,7 @@ def test_first_tts_batch_latency_uses_hosted_generation_start(monkeypatch, mode,
     handler = _make_handler(stream=mode != "nonstream")
 
     def events():
-        clock[0] = 10.1
+        clock[0] = 10.5 if mode == "recovered" else 10.1
         yield _make_text_delta_event("Hello")
         clock[0] = 10.4
         if mode == "stream":
@@ -683,6 +872,15 @@ def test_first_tts_batch_latency_uses_hosted_generation_start(monkeypatch, mode,
         yield _make_output_item_done_event(content="Hello. How are you?" if mode == "stream" else "Hello")
 
     def create(**kwargs):
+        if mode == "recovered" and any(
+            p.get("type") == "input_image" for i in kwargs["input"] for p in i.get("content", []) if isinstance(p, dict)
+        ):
+            clock[0] = 10.4
+            raise InternalServerError(
+                "image input is not supported",
+                response=httpx2.Response(500, request=httpx2.Request("POST", "http://fake/v1/responses")),
+                body=None,
+            )
         if mode == "failed":
             clock[0] = 10.4
             raise httpx2.ReadTimeout("synthetic provider timeout")
@@ -700,6 +898,14 @@ def test_first_tts_batch_latency_uses_hosted_generation_start(monkeypatch, mode,
 
     handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
     request = _make_request()
+    if mode == "recovered":
+        request.runtime_config.chat.add_item(
+            RealtimeConversationItemUserMessage(
+                type="message",
+                role="user",
+                content=[UserContent(type="input_image", image_url="data:image/jpeg;base64,abc")],
+            )
+        )
     store = handler.turn_latency_store = TurnLatencyStore()
     tracker = store.get_or_create_response(request.response_key, turn_id="turn_1", turn_revision=0)
     processor = object.__new__(LMOutputProcessor)
@@ -710,7 +916,9 @@ def test_first_tts_batch_latency_uses_hosted_generation_start(monkeypatch, mode,
 
     assert tracker.llm_first_tts_s == pytest.approx(first_tts_s)
     assert tracker.llm_s == pytest.approx(0.4 if mode in ("nonstream", "failed") else 0.9)
-    assert tracker.llm_ttft_s == (None if mode in ("nonstream", "failed") else pytest.approx(0.1))
+    assert tracker.llm_ttft_s == (
+        None if mode in ("nonstream", "failed") else pytest.approx(0.5 if mode == "recovered" else 0.1)
+    )
 
 
 def test_text_only_streams_raw_deltas_without_sentence_trimming():

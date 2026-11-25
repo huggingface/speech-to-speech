@@ -4,6 +4,7 @@ import asyncio
 import ipaddress
 import logging
 import os
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator, Iterator
 from queue import Empty, Full, Queue
@@ -17,6 +18,7 @@ import httpx2
 from nltk import sent_tokenize
 from openai import (
     DEFAULT_CONNECTION_LIMITS,
+    APIStatusError,
     APITimeoutError,
     AsyncOpenAI,
     DefaultAsyncHttpx2Client,
@@ -84,6 +86,23 @@ PREFETCH_WORKER_ACQUIRE_TIMEOUT_S = 0.05
 # A streaming prefetch worker notices cancellation within one 0.05 s poll.
 PREFETCH_WORKER_RELEASE_TIMEOUT_S = 0.5
 PROVIDER_FAILURE_FALLBACK = "I'm having trouble responding right now. Please try again."
+# Provider wording for a deployment that cannot take image input, e.g. llama.cpp
+# without an mmproj ("image input is not supported"), vLLM ("is not a multimodal
+# model") or OpenAI ("image_url is only supported by certain models").
+_IMAGE_INPUT_UNSUPPORTED_RE = re.compile(
+    r"image[^.]*\b(?:not supported|unsupported|only supported)\b"
+    r"|does not support (?:image|vision)|not a multimodal model",
+    re.IGNORECASE,
+)
+
+
+def _is_image_input_rejection(exc: Exception) -> bool:
+    """Whether the provider refused the request because it cannot process images."""
+    return isinstance(exc, (APIStatusError, _ProviderResponseError)) and bool(
+        _IMAGE_INPUT_UNSUPPORTED_RE.search(str(exc))
+    )
+
+
 # How long an idle provider connection stays open for the next request. The
 # SDK's 5 s is shorter than the pause between two turns of a conversation, so
 # every turn would open a new connection.
@@ -112,6 +131,10 @@ def _read_timed_out(exc: Exception) -> bool:
     """Whether a provider read timed out; the SDK raises it as ``APITimeoutError``."""
     cause = exc.__cause__ if isinstance(exc, APITimeoutError) else exc
     return isinstance(cause, httpx2.ReadTimeout)
+
+
+class _ProviderResponseError(RuntimeError):
+    """An error reported inside a provider response rather than by HTTP status."""
 
 
 class TextDelta(BaseModel):
@@ -824,7 +847,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if isinstance(event, ProviderResponseEnd):
                 state.ending = event
                 if event.status == "failed":
-                    raise RuntimeError(event.error or "The language model provider reported a failed response.")
+                    raise _ProviderResponseError(
+                        event.error or "The language model provider reported a failed response."
+                    )
             elif isinstance(event, AssistantMessage):
                 state.history_items.append(event.to_chat_item())
             elif isinstance(event, ResponseReasoningItem):
@@ -915,7 +940,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if isinstance(event, ProviderResponseEnd):
                 state.ending = event
                 if event.status == "failed":
-                    raise RuntimeError(event.error or "The language model provider reported a failed response.")
+                    raise _ProviderResponseError(
+                        event.error or "The language model provider reported a failed response."
+                    )
             elif isinstance(event, AssistantMessage):
                 state.history_items.append(event.to_chat_item())
             elif isinstance(event, ResponseReasoningItem):
@@ -964,6 +991,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         input_history: SupportedItem | None = None,
         audio_history_turns: int | None = None,
         consumed_audio_items: list[RealtimeConversationItemUserMessage] | None = None,
+        generation_started_at_s: float | None = None,
     ) -> Generator[LLMOut, None, bool]:
         api_response: Any = None
         events: Iterator[ProviderEvent] | None = None
@@ -977,6 +1005,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         )
         provider_request_started = False
         consumed_image_ids: set[str] = set()
+        image_input_error: str | None = None
         store = getattr(self, "turn_latency_store", None)
         tracker = store.get_response(turn.response_key) if store else None
         trace_context = HttpRequestContext(
@@ -988,7 +1017,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         )
 
         try:
-            generation_started_at_s = perf_counter()
+            if generation_started_at_s is None:
+                generation_started_at_s = perf_counter()
             if tracker is not None:
                 tracker.record_llm_start(generation_started_at_s)
             try:
@@ -1064,6 +1094,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     log_exception(logger, "LLM generation failed; ending the current response", exc)
                     if error_message is None:
                         error_message = f"Language model generation failed: {exc}"
+                if consumed_image_ids and _is_image_input_rejection(exc):
+                    image_input_error = str(exc)
             finally:
                 self._close_response(events)
                 self._close_response(api_response)
@@ -1071,6 +1103,33 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 # the response on the service thread.
                 if tracker is not None and provider_request_started:
                     tracker.record_llm(perf_counter() - generation_started_at_s)
+
+            if (
+                image_input_error is not None
+                and (turn.prefetch_transaction is None or turn.prefetch_transaction.claimed)
+                and not self._generation_is_stale(turn.gen)
+                and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
+            ):
+                active_chat.strip_images(consumed_image_ids, error=image_input_error)
+                if not is_out_of_band(turn.response):
+                    original_chat.strip_images(consumed_image_ids, error=image_input_error)
+                if not state.output_emitted:
+                    # No images remain in this snapshot, so recovery cannot repeat.
+                    # Disable tools for the explanation; generation failure must not replay actions.
+                    generation_completed = yield from self._generate(
+                        active_chat,
+                        original_chat,
+                        turn,
+                        {**optional_kwargs, "tool_choice": "none"},
+                        serialize_fn=serialize_fn,
+                        request_fn=request_fn,
+                        event_iterator_fn=event_iterator_fn,
+                        input_history=input_history,
+                        audio_history_turns=audio_history_turns,
+                        consumed_audio_items=consumed_audio_items,
+                        generation_started_at_s=generation_started_at_s,
+                    )
+                    return generation_completed
 
             if (
                 provider_request_started
