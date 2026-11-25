@@ -59,15 +59,23 @@ class SessionHandler(RealtimeBaseHandler):
             else:
                 if not language:
                     return self.make_error(message="Language must not be empty.", _type="invalid_request_error")
-                for backend, supported in (
-                    ("STT", self._service.stt_supported_languages),
-                    ("TTS", self._service.tts_supported_languages),
+                for backend, supported, capabilities in (
+                    ("STT", self._service.stt_supported_languages, self._service.stt_language_capabilities),
+                    ("TTS", self._service.tts_supported_languages, self._service.tts_language_capabilities),
                 ):
                     if supported is not None and language not in supported:
-                        return self.make_error(
-                            message=f"Language {language!r} is not supported by the active {backend} backend.",
-                            _type="invalid_request_error",
-                        )
+                        message = f"Language {language!r} is not supported by the active {backend} backend."
+                        # A backend can cover a language it cannot be steered to.
+                        if not capabilities.supports_language_selection and (
+                            capabilities.languages is None or language in capabilities.languages
+                        ):
+                            guidance = "change its startup configuration to change the language."
+                            if self._service.stt_auto_reset_supported:
+                                guidance = 'send "auto" to use its configured language behavior.'
+                            message = (
+                                f"The active {backend} backend cannot accept a per-session language hint; {guidance}"
+                            )
+                        return self.make_error(message=message, _type="invalid_request_error")
                 transcription.language = language
 
         model = getattr(s, "model", None)
