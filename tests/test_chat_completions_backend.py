@@ -184,6 +184,69 @@ def _drive(
     return text, tools_out, usage, chat, end
 
 
+# ── Empty completions ────────────────────────────────────────────────────────
+
+
+def _finish(reason):
+    return SimpleNamespace(
+        choices=[SimpleNamespace(delta=SimpleNamespace(content=None, tool_calls=None), finish_reason=reason)],
+        usage=None,
+    )
+
+
+def _empty_completion_logs(caplog):
+    return [record.getMessage() for record in caplog.records if "LLM completed without output" in record.getMessage()]
+
+
+def test_empty_completion_logs_the_provider_terminal_but_no_conversation_text(caplog):
+    handler = _make_handler(stream=True)
+    handler.client.chat.completions.next_result = _FakeStream([_finish("stop")])
+
+    with caplog.at_level("WARNING"):
+        text, tools, _, _, end = _drive(handler, user="secret question", instructions="secret instructions")
+
+    assert (text, tools, end.error, end.status) == ("", [], None, "completed")
+    [message] = _empty_completion_logs(caplog)
+    assert "finish_reason=stop" in message
+    assert "last_item=user" in message
+    assert "secret" not in message
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        [_chunk(content="Hello."), _finish("stop")],
+        [_chunk(tool_calls=[_tc_delta(0, id="c1", name="f", arguments="{}")]), _finish("tool_calls")],
+    ],
+    ids=["text", "tool_only"],
+)
+def test_completion_with_output_is_not_reported_empty(caplog, chunks):
+    handler = _make_handler(stream=True)
+    handler.client.chat.completions.next_result = _FakeStream(chunks)
+
+    with caplog.at_level("WARNING"):
+        _drive(handler)
+
+    assert _empty_completion_logs(caplog) == []
+
+
+def test_cancelled_generation_is_not_reported_empty(caplog):
+    handler = _make_handler(stream=True)
+    scope = CancelScope()
+    handler.cancel_scope = scope
+
+    def cancel_then_finish():
+        scope.cancel()
+        yield _finish("stop")
+
+    handler.client.chat.completions.next_result = _FakeStream(cancel_then_finish())
+
+    with caplog.at_level("WARNING"):
+        _drive(handler)
+
+    assert _empty_completion_logs(caplog) == []
+
+
 # ── Converter tests ──────────────────────────────────────────────────────────
 
 
