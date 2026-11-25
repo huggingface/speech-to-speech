@@ -19,7 +19,10 @@ from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel
 
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
-from speech_to_speech.LLM.tool_call.signature_from_schema import signature_from_schema
+from speech_to_speech.LLM.tool_call.signature_from_schema import (
+    parameter_names_from_schema,
+    signature_from_schema,
+)
 from speech_to_speech.pipeline.transcript_logging import transcript_for_log
 from speech_to_speech.utils.utils import _generate_id
 
@@ -194,6 +197,8 @@ class FunctionToolCall(BaseModel):
     parameters: Dict[str, Any]
     original_string: str
     description: str = ""
+    # True for ``<tool_call>{json}</tool_call>`` calls, keyed by the raw schema names.
+    json_call: bool = False
 
     def to_realtime_function_tool_call(
         self,
@@ -240,6 +245,13 @@ class FunctionToolCall(BaseModel):
                         )
                     bound[name] = self.parameters[key]
                 arguments = {**bound, **arguments}
+
+            # The prompt shows aliases for property names that are not Python
+            # identifiers; map a Python-style call's names back to the schema keys.
+            # JSON tool calls already use the schema keys.
+            if not self.json_call:
+                original_names = {alias: name for name, alias in parameter_names_from_schema(schema).items()}
+                arguments = {original_names.get(key, key): value for key, value in arguments.items()}
 
             undeclared = {k for k in arguments if k not in properties}
             if undeclared:
@@ -324,7 +336,9 @@ def parse_json_tool_call_block(block: str) -> List[FunctionToolCall]:
                 continue
         if not isinstance(args, dict):
             continue
-        calls.append(FunctionToolCall(function_name=item["name"], parameters=args, original_string=block))
+        calls.append(
+            FunctionToolCall(function_name=item["name"], parameters=args, original_string=block, json_call=True)
+        )
     return calls
 
 
