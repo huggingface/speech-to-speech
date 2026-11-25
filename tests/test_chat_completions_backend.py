@@ -40,13 +40,14 @@ from speech_to_speech.LLM.chat_completions_language_model import (
 )
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.events import ResponseFailedEvent
+from speech_to_speech.pipeline.events import AssistantOutputEvent, ResponseFailedEvent
 from speech_to_speech.pipeline.messages import (
     EndOfResponse,
     GenerateResponseRequest,
     LLMResponseChunk,
     ResponsePrefetchTransaction,
     TokenUsage,
+    TTSInput,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from tests.llm_history import close_llm_runners as close_llm_runners
@@ -989,7 +990,7 @@ def test_generation_error_emits_failed_end_of_response():
     text, tools, usage, chat, end = _drive(h)
     assert end is not None and end.error is not None
     assert "kaboom" in end.error
-    assert text == ""
+    assert text == base_mod.PROVIDER_FAILURE_FALLBACK
 
 
 def _api_error_response(status_code):
@@ -1005,7 +1006,7 @@ def _api_error_response(status_code):
         (InternalServerError("server failed", response=_api_error_response(500), body=None), "server failed"),
     ],
 )
-def test_provider_failure_before_output_fails_without_speech_or_history(error, message):
+def test_provider_failure_before_output_speaks_fallback_then_fails_without_history(error, message):
     h = _make_handler(stream=True)
 
     def fail(**kwargs):
@@ -1027,14 +1028,18 @@ def test_provider_failure_before_output_fails_without_speech_or_history(error, m
 
     outputs = list(h.process(request))
 
-    assert [type(output) for output in outputs] == [EndOfResponse]
-    assert outputs[0].error is not None and message in outputs[0].error
+    assert [type(output) for output in outputs] == [LLMResponseChunk, EndOfResponse]
+    assert outputs[0].text == base_mod.PROVIDER_FAILURE_FALLBACK
+    assert outputs[0].language_code is None
+    assert outputs[1].error is not None and message in outputs[1].error
     assert [getattr(item, "role", None) for item in chat.buffer] == ["user"]
 
     processor = LMOutputProcessor.__new__(LMOutputProcessor)
     processor.setup()
     pipeline_outputs = [processed for output in outputs for processed in processor.process(output)]
     assert [type(output) for output in pipeline_outputs] == [
+        AssistantOutputEvent,
+        TTSInput,
         ResponseFailedEvent,
         EndOfResponse,
     ]

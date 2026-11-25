@@ -325,7 +325,7 @@ def test_failed_prefetch_is_discarded_before_terminal_is_yielded():
     generation.close()
 
 
-def test_claimed_failed_prefetch_ends_without_canned_speech():
+def test_claimed_failed_prefetch_emits_transactional_fallback():
     handler = _make_handler(stream=True, cancel_scope=CancelScope())
 
     def fail_create(**kwargs):
@@ -339,9 +339,11 @@ def test_claimed_failed_prefetch_ends_without_canned_speech():
 
     outputs = list(handler.process(request))
 
-    assert len(outputs) == 1
-    assert isinstance(outputs[0], EndOfResponse)
-    assert outputs[0].error == "Language model generation failed: provider failed"
+    assert isinstance(outputs[0], LLMResponseChunk)
+    assert outputs[0].text == base_openai_compatible_language_model.PROVIDER_FAILURE_FALLBACK
+    assert outputs[0].prefetch_transaction is transaction
+    assert isinstance(outputs[1], EndOfResponse)
+    assert outputs[1].error == "Language model generation failed: provider failed"
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -428,7 +430,10 @@ def test_camera_image_rejected_by_text_only_backend_keeps_later_turns_working(st
 
     assert len(inputs) == 2
     if recovery_fails:
-        assert not any(isinstance(o, LLMResponseChunk) for o in outputs)
+        # A failed explanation is an ordinary provider failure: the user still hears the fallback.
+        assert [o.text for o in outputs if isinstance(o, LLMResponseChunk)] == [
+            base_openai_compatible_language_model.PROVIDER_FAILURE_FALLBACK
+        ]
         assert "explanation request failed" in outputs[-1].error
     else:
         assert outputs[0].text == "The server could not process the photo."
@@ -848,7 +853,7 @@ def test_process_records_hosted_llm_latency():
 
 
 @pytest.mark.parametrize(
-    "mode,first_tts_s", [("stream", 0.4), ("trailing", 0.9), ("nonstream", 0.4), ("failed", None), ("recovered", 0.9)]
+    "mode,first_tts_s", [("stream", 0.4), ("trailing", 0.9), ("nonstream", 0.4), ("failed", 0.4), ("recovered", 0.9)]
 )
 def test_first_tts_batch_latency_uses_hosted_generation_start(monkeypatch, mode, first_tts_s):
     clock = [10.0]
@@ -908,7 +913,7 @@ def test_first_tts_batch_latency_uses_hosted_generation_start(monkeypatch, mode,
     for output in drive_llm(handler, request):
         list(processor.process(output))
 
-    assert tracker.llm_first_tts_s == (None if first_tts_s is None else pytest.approx(first_tts_s))
+    assert tracker.llm_first_tts_s == pytest.approx(first_tts_s)
     assert tracker.llm_s == pytest.approx(0.4 if mode in ("nonstream", "failed") else 0.9)
     assert tracker.llm_ttft_s == (
         None if mode in ("nonstream", "failed") else pytest.approx(0.5 if mode == "recovered" else 0.1)
@@ -1427,7 +1432,7 @@ def test_setup_does_not_inject_dummy_key_for_remote_custom_url(monkeypatch):
     }
 
 
-def test_process_read_timeout_preserves_failure_without_canned_speech():
+def test_process_read_timeout_speaks_fallback_and_preserves_failure():
     handler = _make_handler()
 
     def make_timeout_stream():
@@ -1440,9 +1445,11 @@ def test_process_read_timeout_preserves_failure_without_canned_speech():
     request = _make_request("Hi")
     outputs = list(handler.process(request))
 
-    assert len(outputs) == 1
-    assert isinstance(outputs[0], EndOfResponse)
-    assert outputs[0].error is not None and "timed out" in outputs[0].error
+    assert len(outputs) == 2
+    assert isinstance(outputs[0], LLMResponseChunk)
+    assert outputs[0].text == base_openai_compatible_language_model.PROVIDER_FAILURE_FALLBACK
+    assert isinstance(outputs[1], EndOfResponse)
+    assert outputs[1].error is not None and "timed out" in outputs[1].error
     assert [getattr(item, "role", None) for item in request.runtime_config.chat.buffer] == ["user"]
 
 
@@ -1514,7 +1521,7 @@ def test_generation_error_emits_failed_end_of_response():
     assert eors[0].error is not None
     assert "input must not be empty" in eors[0].error
     chunks = [o for o in outputs if isinstance(o, LLMResponseChunk)]
-    assert chunks == []
+    assert [chunk.text for chunk in chunks] == [base_openai_compatible_language_model.PROVIDER_FAILURE_FALLBACK]
     assert [getattr(item, "role", None) for item in request.runtime_config.chat.buffer] == ["user"]
 
 
@@ -1928,8 +1935,9 @@ def test_failed_audio_request_rolls_back_provisional_history():
 
     outputs = list(handler.process(_make_audio_request(cfg)))
 
-    assert [type(output) for output in outputs] == [EndOfResponse]
-    assert outputs[0].error is not None and "provider rejected audio" in outputs[0].error
+    assert [type(output) for output in outputs] == [LLMResponseChunk, EndOfResponse]
+    assert outputs[0].text == base_openai_compatible_language_model.PROVIDER_FAILURE_FALLBACK
+    assert outputs[1].error is not None and "provider rejected audio" in outputs[1].error
     assert cfg.chat.buffer == []
     assert cfg.chat._user_turn_count == 0
 

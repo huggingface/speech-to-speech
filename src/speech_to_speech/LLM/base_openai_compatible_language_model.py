@@ -85,6 +85,7 @@ PREFETCH_STREAM_QUEUE_MAXSIZE = 16
 PREFETCH_WORKER_ACQUIRE_TIMEOUT_S = 0.05
 # A streaming prefetch worker notices cancellation within one 0.05 s poll.
 PREFETCH_WORKER_RELEASE_TIMEOUT_S = 0.5
+PROVIDER_FAILURE_FALLBACK = "I'm having trouble responding right now. Please try again."
 # Provider wording for a deployment that cannot take image input, e.g. llama.cpp
 # without an mmproj ("image input is not supported"), vLLM ("is not a multimodal
 # model") or OpenAI ("image_url is only supported by certain models").
@@ -1129,6 +1130,28 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         generation_started_at_s=generation_started_at_s,
                     )
                     return generation_completed
+
+            if (
+                provider_request_started
+                and error_message is not None
+                and not state.output_emitted
+                and (turn.prefetch_transaction is None or turn.prefetch_transaction.claimed)
+                and not self._generation_is_stale(turn.gen)
+                and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
+            ):
+                state.output_emitted = True
+                yield LLMResponseChunk(
+                    parts=[*self._take_reasoning(state), AssistantTextPart(text=PROVIDER_FAILURE_FALLBACK)],
+                    selected_language=turn.selected_language,
+                    runtime_config=turn.runtime_config,
+                    response=turn.response,
+                    turn_id=turn.turn_id,
+                    turn_revision=turn.turn_revision,
+                    speech_stopped_at_s=turn.speech_stopped_at_s,
+                    cancel_generation=turn.gen,
+                    response_key=turn.response_key,
+                    prefetch_transaction=turn.prefetch_transaction,
+                )
 
             proposal_allowed = (
                 error_message is None
