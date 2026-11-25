@@ -235,12 +235,14 @@ def heartbeat(session_id: str) -> bool:
         elapsed = now - grant_ts
 
         # Grow the reservation one chunk at a time until it covers elapsed + a
-        # one-chunk lookahead, or the budget runs dry.
+        # one-chunk lookahead, or the budget runs dry. The last chunk is clamped
+        # to what's left so a session never reserves past the daily budget.
         while reserved < elapsed + CHUNK_SEC:
-            if _spent_max(con, keys, day) >= budget:
+            chunk = min(CHUNK_SEC, budget - _spent_max(con, keys, day))
+            if chunk <= 0:
                 break
-            _add(con, keys, day, CHUNK_SEC)
-            reserved += CHUNK_SEC
+            _add(con, keys, day, chunk)
+            reserved += chunk
 
         alive = reserved > elapsed  # could we cover the time already elapsed?
         con.execute(

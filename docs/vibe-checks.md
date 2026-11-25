@@ -1,11 +1,18 @@
-# Big Bench Audio system tests
+# Vibe checks
+
+Two system tests that run through the engine's Realtime WebSocket API:
+
+- [Big Bench Audio](#big-bench-audio): spoken questions end to end (VAD, STT, LLM, TTS), scored for accuracy and latency.
+- [Tool-use conversations](#tool-use-conversations): scripted text conversations that need tools, scored for whether the LLM calls them, speaks first, and handles long-running results. Use it for changes to history, prompts, tool handling, chat templates or the LLM backend.
+
+## Big Bench Audio
 
 Run pinned [Big Bench Audio](https://huggingface.co/datasets/ArtificialAnalysis/big_bench_audio)
 recordings through the engine's Realtime WebSocket API, exercising VAD, STT,
 the LLM, and TTS. Each question uses a fresh session. Reports contain answer
 accuracy, audio latency, and protocol failures.
 
-## Local use
+### Local use
 
 Install the evaluator's dependencies into your existing engine environment:
 
@@ -33,7 +40,7 @@ Use `--url` instead of `--spawn` to connect to an existing engine. See
 `run --help` for all options, including custom prompts and an optional
 OpenAI-compatible answer-extraction judge.
 
-## Question selection
+### Question selection
 
 - `vibe` generates a 40-question sample, stratified by category and official
   answer with seed `0`. It contains ten questions per category, interleaved so
@@ -57,7 +64,7 @@ Pass that path as `--subset /tmp/deep.json`. Use `--size 40 --name vibe --seed 0
 to export the default sample. In containers, include or mount a custom
 manifest and use its container path.
 
-## Build and run with Docker
+### Build and run with Docker
 
 From the repository root, build the committed source with its revision recorded:
 
@@ -92,7 +99,7 @@ Copy `/output` before removing it, including after failure, to retain the report
 and redacted server log. The settings below also work with `docker run -e`.
 For all questions, add `-e S2S_SUBSET=full` and remove `-e S2S_LIMIT=4`.
 
-## Hugging Face Jobs
+### Hugging Face Jobs
 
 Use an existing registry image, or commit your changes and build one in a private
 personal Docker Space:
@@ -132,7 +139,7 @@ Parakeet TDT, `Qwen/Qwen3.5-9B:together` through HF Inference Providers, and
 Qwen3-TTS GGML. `HF_TOKEN` needs Jobs, repository-write, and Inference Providers
 permissions for this configuration.
 
-## Container settings
+### Container settings
 
 | Environment variable | Default | Purpose |
 |---|---|---|
@@ -176,7 +183,7 @@ extraction; the report records the prompt. Argument strings use shell-style
 quoting, with no shell execution or variable expansion inside their values.
 Model and prompt changes need no rebuild; installing another backend does.
 
-## Reading results
+### Reading results
 
 Reports include transcripts, generated audio byte counts, per-category accuracy,
 parse rates, errors, runtime versions, and latency. Accuracy grades the assistant
@@ -212,7 +219,7 @@ Use matched question sets, judge settings, and engine configurations; pinned
 questions do not make hosted models/providers immutable. Inspect individual
 failures before claiming an improvement.
 
-## Tests
+### Tests
 
 ```bash
 python -m pytest tests/evals -q
@@ -220,3 +227,74 @@ python -m pytest tests/evals -q
 
 Tests use synthetic metadata and protocol events, without downloading models or
 starting paid Jobs. GPU smoke runs are separate integration checks.
+
+## Tool-use conversations
+
+`speech_to_speech.evals.tool_conversations` sends scripted conversations to a running server as
+text, answers the tool calls itself, and reports what the LLM did. The scenarios are desk-robot
+requests (weather, timers, camera, search, memory, dances and emotions, a question that needs no
+tool). `research_report` is long-running: its result arrives two user turns later, with its own
+`response.create`, which exercises the running-tool path.
+
+Two scenario sets, chosen with `--set`:
+
+- `conversations` (default): three conversations of 8 to 10 turns.
+- `first-turns`: 24 opening requests, the first call of a conversation with no history.
+
+### Text-only runs
+
+Only the LLM needs to be real. `fake-speech` stands in for the STT and TTS services, and
+`server-config` writes a server config for any OpenAI-compatible model with speech pointed at it:
+
+```bash
+python -m speech_to_speech.evals.tool_conversations fake-speech --port 8090 &
+python -m speech_to_speech.evals.tool_conversations server-config --out cfg.json \
+    --backend chat-completions --model google/gemma-4-31B-it \
+    --base-url https://router.huggingface.co/v1 --api-key-env HF_TOKEN
+speech-to-speech serve cfg.json &
+
+python -m speech_to_speech.evals.tool_conversations run --out main.json --label main --reps 20
+python -m speech_to_speech.evals.tool_conversations run --out first.json --set first-turns --reps 10
+```
+
+`--api-key-env` writes the key into the config, which is created with mode 600. For router models
+that reason by default, add `--reasoning-effort none`. Keep `run --concurrency` below the
+server's `num_pipelines` (`server-config --pipelines`, default 4).
+
+To test a change, start one server from `main` and one from the change on different ports (or
+change the LLM endpoint, model or template between runs), run the same set against each with
+`--label`, and compare:
+
+```bash
+python -m speech_to_speech.evals.tool_conversations compare main.json change.json
+```
+
+### Reading results
+
+Reports are JSON holding every turn, so every number can be recomputed. `compare` prints one
+column per report, with a two-sided Fisher exact p-value against the first:
+
+- **Right tool called** and **Said it, no call** (the reply speaks but makes no call), with the
+  first-turn share split out. Opening requests have identical prompts in any setup, so a
+  difference there is noise.
+- **Schema-valid arguments** checks each call to the expected tool against its parameter schema.
+  **Expected argument values matched** counts schema-valid calls that also match every specified
+  value, out of all calls to the expected tool on turns with a specified city, direction or timer
+  duration. Both rates count each attempt, including repeated calls. A ten-minute timer needs a
+  string label and ten minutes to pass both checks. The label wording is free. Strings match
+  exactly after trimming whitespace and ignoring case. A turn can list several accepted values:
+  "Quebec" accepts "Quebec City", which most models send. Other aliases still miss. Older
+  summaries show a dash for both rates.
+- **Spoke before calling**, overall and before expression tools (dance, emotion, head moves).
+- **Call markup in spoken text**: call syntax the server did not parse. The check is a regex over
+  known formats, so read unusual misses by hand.
+- **Call when none was needed**, **Late result spoken**, **Long-running tool called again**.
+
+Differences of a few cases out of hundreds are usually not significant; run more `--reps` before
+drawing conclusions, and read the individual turns behind any miss.
+
+### Changing the scenarios
+
+Tools, tool results and conversations live in `src/speech_to_speech/evals/tool_conversations/scenarios.py`.
+Add a set to `SCENARIO_SETS` to make it available to `--set`. Changing a set changes what its
+numbers mean, so compare only reports made with the same set.

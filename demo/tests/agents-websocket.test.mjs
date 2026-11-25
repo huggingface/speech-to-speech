@@ -19,14 +19,14 @@ test("browser RealtimeSession negotiates the stock WebSocket subprotocol", async
   const page = await browser.newPage();
   await page.goto(`${server.http}/test/sdk-page`);
 
-  const result = await page.evaluate(async ({ config, ws }) => {
+  const result = await page.evaluate(async ({ config, ws, http }) => {
     const { OpenAIRealtimeWebSocket, RealtimeAgent, RealtimeSession } = window.OpenAIAgentsRealtime;
     const rawEvents = [];
     const errors = [];
     const transport = new OpenAIRealtimeWebSocket({ useInsecureApiKey: true });
     const session = new RealtimeSession(
       new RealtimeAgent({ name: "browser-websocket-test", instructions: "Be concise." }),
-      { transport, model: "s2s-local", config, tracingDisabled: true },
+      { transport, model: "s2s-local", config: { ...config, providerData: { extensions: ["speech_to_speech.reasoning.delta"] } }, tracingDisabled: true },
     );
     transport.on("*", (event) => rawEvents.push(event));
     session.on("error", (event) => errors.push(String(event?.error?.message || event?.error || event)));
@@ -41,17 +41,30 @@ test("browser RealtimeSession negotiates the stock WebSocket subprotocol", async
     try {
       await session.connect({ apiKey: "test-key", url: ws });
       await waitForEvent("session.updated");
+      transport.sendEvent({ type: "session.update", session: { type: "realtime", reasoning: { effort: "high" } } });
+      const deadline = Date.now() + 10_000;
+      while (!rawEvents.some((event) => event.type === "session.updated" && event.session?.reasoning?.effort === "high")) {
+        if (Date.now() > deadline) throw new Error("Server did not echo reasoning effort");
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      await fetch(`${http}/test/reasoning`, { method: "POST" });
+      await waitForEvent("speech_to_speech.reasoning.delta");
+      await waitForEvent("response.done");
       return {
         errors,
         protocol: transport.connectionState.websocket?.protocol,
+        reasoning: rawEvents.find((event) => event.type === "session.updated" && event.session?.reasoning?.effort === "high").session.reasoning,
+        reasoningText: rawEvents.find((event) => event.type === "speech_to_speech.reasoning.delta").delta,
       };
     } finally {
       session.close();
     }
-  }, { config: SDK_CONFIG, ws: server.ws });
+  }, { config: SDK_CONFIG, ws: server.ws, http: server.http });
 
   assert.equal(result.protocol, "realtime");
   assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.reasoning, { effort: "high" });
+  assert.equal(result.reasoningText, "Compare the choices first.");
 });
 
 test("RealtimeSession covers the core GA flow over the stock WebSocket transport", async (t) => {
@@ -110,11 +123,37 @@ test("RealtimeSession covers the core GA flow over the stock WebSocket transport
   await waitFor(async () => (await state(server.http)).inputChunks > 0);
 
   await post(server.http, "/test/voice");
-  await waitFor(() => rawEvents.some((event) => event.type === "conversation.item.input_audio_transcription.completed"));
+  const transcribed = await waitFor(() => rawEvents.find(
+    (event) => event.type === "conversation.item.input_audio_transcription.completed",
+  ));
+  // The SDK refreshes each transcribed user item with conversation.item.retrieve.
+  const retrieved = await waitFor(() => rawEvents.find(
+    (event) => event.type === "conversation.item.retrieved" && event.item?.id === transcribed.item_id,
+  ));
+  assert.deepEqual(
+    retrieved.item.content.map((part) => [part.type, part.transcript]),
+    [["input_audio", transcribed.transcript]],
+  );
+  await waitFor(() => session.history.some(
+    (item) => item.itemId === transcribed.item_id && item.content?.[0]?.transcript === transcribed.transcript,
+  ));
   await waitFor(() => rawEvents.some((event) => event.type === "response.output_audio_transcript.done"));
   await waitFor(() => rawEvents.some((event) => event.type === "response.output_audio.delta"));
   await waitFor(() => audio.length > 0);
-  await waitFor(() => rawEvents.some((event) => event.type === "response.done" && event.response?.status === "completed"));
+  const firstDone = await waitFor(() => rawEvents.find(
+    (event) => event.type === "response.done" && event.response?.status === "completed",
+  ));
+  // Retrieving a finished audio reply must keep it an audio entry in history.
+  const reply = firstDone.response.output.find((item) => item.type === "message");
+  transport.sendEvent({ type: "conversation.item.retrieve", item_id: reply.id });
+  const retrievedReply = await waitFor(() => rawEvents.find(
+    (event) => event.type === "conversation.item.retrieved" && event.item?.id === reply.id,
+  ));
+  assert.deepEqual(retrievedReply.item.content.map((part) => part.type), ["output_audio"]);
+  const replyHistory = await waitFor(() => session.history.find(
+    (item) => item.itemId === reply.id && item.content?.[0]?.type === "output_audio",
+  ));
+  assert.ok(replyHistory.content[0].transcript);
 
   const completedBeforeInterrupt = rawEvents.filter((event) => event.type === "response.done").length;
   const audioBeforeInterrupt = audio.length;

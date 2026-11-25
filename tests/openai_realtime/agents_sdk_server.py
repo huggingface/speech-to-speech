@@ -27,6 +27,7 @@ from speech_to_speech.pipeline.events import (
 from speech_to_speech.pipeline.history import ResponseHistory
 from speech_to_speech.pipeline.messages import (
     AUDIO_RESPONSE_DONE,
+    AssistantReasoningPart,
     AssistantTextPart,
     AssistantToolCallPart,
     AudioOutput,
@@ -44,11 +45,13 @@ def _audio(samples: int = 3_200) -> bytes:
     return wave.tobytes()
 
 
-def _queue_completed_response(env: _ServerEnv, response_key: str, text: str) -> None:
+def _queue_completed_response(
+    env: _ServerEnv, response_key: str, text: str, *, reasoning: list[AssistantReasoningPart] | None = None
+) -> None:
     env.output_queue.put(
         AssistantOutputEvent(
             response_key=response_key,
-            parts=[AssistantTextPart(text=text)],
+            parts=[*(reasoning or []), AssistantTextPart(text=text)],
         )
     )
     env.output_queue.put(AudioOutput(audio=_audio(), response_key=response_key))
@@ -115,6 +118,17 @@ def main() -> None:
         env.text_output_queue.put(SpeechStoppedEvent())
         env.text_output_queue.put(TranscriptionCompletedEvent(transcript="hello"))
         _queue_completed_response(env, _response_key(env, "voice"), "Hello from the compatibility test.")
+        return {"ok": True}
+
+    @env.app.post("/test/reasoning")
+    async def reasoning():
+        response_key = _response_key(env, "reasoning")
+        _queue_completed_response(
+            env,
+            response_key,
+            "Option A is the better fit.",
+            reasoning=[AssistantReasoningPart(text="Compare the choices first.")],
+        )
         return {"ok": True}
 
     @env.app.post("/test/start-audio")

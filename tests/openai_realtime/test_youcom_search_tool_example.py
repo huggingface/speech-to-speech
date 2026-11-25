@@ -29,7 +29,7 @@ class FakeAsyncClient:
 
 def _patch_client(monkeypatch, response, captured):
     monkeypatch.setattr(
-        realtime_youcom_search_tool.httpx,
+        realtime_youcom_search_tool.httpx2,
         "AsyncClient",
         lambda **kwargs: FakeAsyncClient(response, captured, **kwargs),
     )

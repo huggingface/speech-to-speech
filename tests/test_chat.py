@@ -8,6 +8,7 @@ functions (make_user_message, make_assistant_message, make_system_message).
 
 from __future__ import annotations
 
+import json
 import threading
 
 import pytest
@@ -31,6 +32,8 @@ from openai.types.realtime.realtime_response_create_params import RealtimeRespon
 
 from speech_to_speech.LLM.chat import (
     AUDIO_INPUT_HISTORY_PLACEHOLDER,
+    PENDING_TOOL_OUTPUT,
+    RUNNING_TOOL_STATUS,
     Chat,
     ChatItemError,
     CompactionResult,
@@ -335,12 +338,10 @@ class TestAppendToolOutput:
             "function_call_output",
             "message",
         ]
-        assert [item["role"] for item in chat.to_transformers_chat()] == [
-            "assistant",
-            "assistant",
-            "tool",
-            "assistant",
-        ]
+        transformers_chat = chat.to_transformers_chat()
+        assert [item["role"] for item in transformers_chat] == ["assistant", "tool", "assistant"]
+        assert transformers_chat[0]["content"] == "before"
+        assert [call["id"] for call in transformers_chat[0]["tool_calls"]] == ["call_c1"]
 
     def test_reinjection_path(self):
         chat = Chat(size=1)
@@ -997,6 +998,42 @@ class TestToTransformersChat:
         rendered = template.render(messages=chat.to_transformers_chat())
         assert "assistant:\n" in rendered
 
+    def test_text_then_call_is_one_assistant_turn(self):
+        """Speech and the call it led into stay one assistant message.
+
+        As two messages, the text ends the assistant turn in chat templates, and
+        models reading that history answer later requests with text alone.
+        """
+        chat = Chat(size=10)
+        chat.add_item(_user("Set a timer for rice"))
+        chat.add_item(_assistant("I'll set that."))
+        chat.add_item(_fc("c1", "set_timer", '{"minutes": 20}'))
+        chat.add_item(_fco("c1", "set"))
+        chat.add_item(_assistant("Your rice timer is running."))
+
+        result = chat.to_transformers_chat()
+
+        assert [m["role"] for m in result] == ["user", "assistant", "tool", "assistant"]
+        assert result[1]["content"] == "I'll set that."
+        assert [call["function"]["name"] for call in result[1]["tool_calls"]] == ["set_timer"]
+        assert result[2]["tool_call_id"] == "call_c1"
+        assert result[3] == {"role": "assistant", "content": "Your rice timer is running."}
+
+    def test_call_after_a_tool_result_starts_a_new_assistant_message(self):
+        """Only text directly before a call joins it; a call after a result is a new message."""
+        chat = Chat(size=10)
+        chat.add_item(_user("Look it up twice"))
+        chat.add_item(_fc("c1", "lookup"))
+        chat.add_item(_fco("c1", "first"))
+        chat.add_item(_fc("c2", "lookup"))
+        chat.add_item(_fco("c2", "second"))
+
+        result = chat.to_transformers_chat()
+
+        assert [m["role"] for m in result] == ["user", "assistant", "tool", "assistant", "tool"]
+        assert [call["id"] for call in result[1]["tool_calls"]] == ["call_c1"]
+        assert [call["id"] for call in result[3]["tool_calls"]] == ["call_c2"]
+
 
 # ===================================================================
 # 9. TestCopyAndReset
@@ -1103,7 +1140,8 @@ class TestStripImages:
         img_msg = chat.add_item(_user_msg_with_parts(("text", "b"), ("image", "url2")))
         assert chat.image_message_ids() == {img_msg.id}
 
-    def test_strip_images_only_ids_spares_concurrent_image(self):
+    @pytest.mark.parametrize("error", [None, "image input is not supported"])
+    def test_strip_images_only_ids_spares_concurrent_image(self, error):
         """Regression: an image injected for the *next* turn (not in the set the
         finished response consumed) must survive the write-back strip."""
         chat = Chat(size=10)
@@ -1113,12 +1151,16 @@ class TestStripImages:
         # a fast client injects the next turn's image mid-generation
         fresh = chat.add_item(_user_msg_with_parts(("text", "b"), ("image", "new")))
 
-        chat.strip_images(consumed_ids)
+        chat.strip_images(consumed_ids, error=error)
 
         consumed_after = next(i for i in chat.buffer if i.id == consumed.id)
         fresh_after = next(i for i in chat.buffer if i.id == fresh.id)
         assert all(p.type != "input_image" for p in consumed_after.content)  # consumed → stripped
         assert any(p.type == "input_image" for p in fresh_after.content)  # next turn's image → kept
+        if error is not None:
+            assert json.loads(consumed_after.content[-1].text)["input_error"]["message"] == error
+            chat.strip_images(consumed_ids, error=error)
+            assert len(consumed_after.content) == 2
 
 
 # ===================================================================
@@ -1638,7 +1680,7 @@ class TestTurnOrdering:
 
         assert [item.type for item in chat.buffer] == ["message", "function_call", "message"]
 
-    def test_unpaired_ordered_call_hides_its_own_turn_but_not_later_speech(self):
+    def test_unpaired_ordered_call_is_shown_with_a_pending_output(self):
         chat = Chat(size=5)
         chat.add_item(_user("A"))
         anchor = chat.history_anchor_id()
@@ -1650,18 +1692,29 @@ class TestTurnOrdering:
             after_item_id=anchor,
         )
 
-        # The unpaired call and the text emitted after it are not serializable
-        # yet, but the newer user turn still has to reach the provider.
-        assert [(item["role"], item["content"][0]["text"]) for item in chat.to_responses_api_chat()] == [
+        # The newer user turn can be answered while the tool runs: the call stays
+        # visible, paired with a stand-in output every provider accepts.
+        replay = chat.to_responses_api_chat()
+        assert [item["type"] for item in replay] == [
+            "message",
+            "message",
+            "function_call",
+            "function_call_output",
+            "message",
+            "message",
+        ]
+        assert replay[3]["call_id"] == replay[2]["call_id"] == "call_a"
+        assert replay[3]["output"] == PENDING_TOOL_OUTPUT
+        transformers_chat = chat.to_transformers_chat()
+        assert [call["id"] for call in transformers_chat[1]["tool_calls"]] == ["call_a"]
+        assert [(item["role"], item["content"]) for item in transformers_chat] == [
             ("user", "A"),
             ("assistant", "before the call"),
-            ("user", "B"),
+            ("tool", PENDING_TOOL_OUTPUT),
+            ("assistant", "after the call"),
+            ("user", "B\n" + RUNNING_TOOL_STATUS.format(calls="my_func({})")),
         ]
-        assert [(item["role"], item["content"]) for item in chat.to_transformers_chat()] == [
-            ("user", "A"),
-            ("assistant", "before the call"),
-            ("user", "B"),
-        ]
+        assert [item.type for item in chat.buffer] == ["message", "message", "function_call", "message", "message"]
 
     def test_paired_call_is_serialized_once_its_output_arrives_after_later_speech(self):
         chat = Chat(size=5)
