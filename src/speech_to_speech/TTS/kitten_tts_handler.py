@@ -22,25 +22,6 @@ logger = logging.getLogger(__name__)
 
 # Legacy Kitten ONNX checkpoints have 512 positions, including boundary tokens.
 KITTEN_MAX_TOKENS = 512
-KITTEN_SAMPLE_RATE = 24000
-# Keep a short lead-in before speech so checkpoint chunks do not add long pauses.
-LEADING_SILENCE_DB = -40.0
-LEADING_SILENCE_KEEP_S = 0.04
-
-
-def trim_leading_silence(audio: np.ndarray, sample_rate: int = KITTEN_SAMPLE_RATE) -> np.ndarray:
-    """Drop quiet leading 10 ms frames while keeping a short lead-in before speech."""
-    samples = np.asarray(audio, dtype=np.float32).reshape(-1)
-    frame = sample_rate // 100
-    usable = len(samples) // frame * frame
-    if not usable:
-        return samples
-    rms = np.sqrt(np.mean(samples[:usable].reshape(-1, frame) ** 2, axis=1))
-    loud = np.flatnonzero(20 * np.log10(rms + 1e-9) > LEADING_SILENCE_DB)
-    if not len(loud):
-        return samples
-    start = max(0, loud[0] * frame - int(LEADING_SILENCE_KEEP_S * sample_rate))
-    return samples[start:]
 
 
 class KittenTTSHandler(BaseTTSHandler):
@@ -129,7 +110,7 @@ class KittenTTSHandler(BaseTTSHandler):
                     raise ValueError("KittenTTS text cannot fit the checkpoint's token limit")
                 pending.extend(reversed(parts))
                 continue
-            yield trim_leading_silence(self.model.generate_single_chunk(text=chunk, voice=voice))
+            yield self.model.generate_single_chunk(text=chunk, voice=voice)
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         if isinstance(tts_input, EndOfResponse):

@@ -72,30 +72,3 @@ def test_chunks_share_partial_blocks_and_only_the_final_tail_is_padded() -> None
     assert [len(block) for block in blocks] == [4, 4]
     assert np.all(np.concatenate(blocks)[:6] > 0)
     np.testing.assert_array_equal(blocks[-1][-2:], np.zeros(2, dtype=np.int16))
-
-
-def test_leading_silence_is_trimmed_with_a_short_lead_in() -> None:
-    rate = kitten_module.KITTEN_SAMPLE_RATE
-    audio = np.concatenate([np.zeros(rate // 2, dtype=np.float32), np.full(rate // 10, 0.1, dtype=np.float32)])
-
-    trimmed = kitten_module.trim_leading_silence(audio)
-
-    lead_in = int(kitten_module.LEADING_SILENCE_KEEP_S * rate)
-    assert len(trimmed) == rate // 10 + lead_in
-    assert np.all(trimmed[:lead_in] == 0)
-    assert np.all(trimmed[lead_in:] == pytest.approx(0.1))
-    silent = np.zeros(rate // 10, dtype=np.float32)
-    np.testing.assert_array_equal(kitten_module.trim_leading_silence(silent), silent)
-
-
-def test_each_synthesis_chunk_has_its_leading_silence_trimmed() -> None:
-    handler = make_handler(blocksize=4)
-    handler._chunk_text = lambda text: ["Hi."]
-    rate = kitten_module.KITTEN_SAMPLE_RATE
-    handler.model.generate_single_chunk = lambda *, text, voice: np.concatenate(
-        [np.zeros(rate, dtype=np.float32), np.full(rate // 100, 0.1, dtype=np.float32)]
-    )
-
-    (chunk,) = list(handler._generate_chunks("Hi.", "Bruno"))
-
-    assert len(chunk) == rate // 100 + int(kitten_module.LEADING_SILENCE_KEEP_S * rate)
