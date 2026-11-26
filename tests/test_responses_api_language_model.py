@@ -2176,10 +2176,25 @@ def test_responses_backend_keeps_injected_context_with_session_instructions():
 
     for _ in range(2):
         list(drive_llm(handler, request))
-        prompt = captured[-1]["input"][0]["content"][0]["text"]
+        items = captured[-1]["input"]
+        prompt = items[0]["content"][0]["text"]
+        assert items[0]["role"] == "system"
         assert "SESSION INSTRUCTIONS" in prompt
-        assert prompt.count("CURRENT CHAT SNAPSHOT") == 1
-        assert request.runtime_config.chat.init_chat_message is snapshot
+        # The snapshot arrived after a user turn, so it stays in history
+        # order instead of becoming the leading prompt.
+        assert "CURRENT CHAT SNAPSHOT" not in prompt
+        system_texts = [
+            part["text"]
+            for item in items
+            if item.get("role") == "system"
+            for part in item.get("content", [])
+            if isinstance(part, dict) and part.get("text")
+        ]
+        assert system_texts.count("CURRENT CHAT SNAPSHOT") == 1
+        assert items[-1]["role"] == "system"
+        assert items[-1]["content"][0]["text"] == "CURRENT CHAT SNAPSHOT"
+        assert request.runtime_config.chat.init_chat_message is None
+        assert request.runtime_config.chat.buffer[-1] is snapshot
         assert snapshot.content[0].text == "CURRENT CHAT SNAPSHOT"
 
 

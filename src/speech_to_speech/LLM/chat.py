@@ -156,8 +156,10 @@ class Chat:
     """Manages conversation history with bounded size to avoid OOM issues.
 
     The buffer stores conversation messages, function calls/outputs, and opaque
-    Responses reasoning items. System messages are
-    stored separately in ``init_chat_message`` and never placed in the buffer.
+    Responses reasoning items. A system message that arrives before any
+    conversation item is the leading prompt in ``init_chat_message``. A system
+    message that arrives after conversation items stays in the buffer at that
+    position, so a later request does not fold it into the leading prompt.
 
     History bounding is decided per ``add_item`` call via the ``compactor``
     argument:
@@ -398,8 +400,19 @@ class Chat:
 
         if isinstance(item, RealtimeConversationItemSystemMessage):
             item.id = _ensure_id(item.id, "sys")
-            self.init_chat_message = item
-            logger.debug("Set system message via conversation item")
+            # Only a system item before any conversation content is the prompt.
+            # A later one, such as a task announcement after an assistant turn,
+            # stays where it arrived. Folding it into the prompt leaves the
+            # chat ending on that assistant turn, which llama.cpp continues.
+            if not self.buffer and insert_at in (None, 0):
+                self.init_chat_message = item
+                logger.debug("Set system message via conversation item")
+            else:
+                item.content = [part for part in item.content if part.type == "input_text" and part.text]
+                if not item.content:
+                    return item
+                self._place_locked(item, insert_at)
+                logger.debug("Added system message to chat at its conversation position")
 
         elif isinstance(item, RealtimeConversationItemUserMessage):
             item.id = _ensure_id(item.id, "msg")
@@ -523,9 +536,18 @@ class Chat:
         that call no longer holds back a reply.
         """
         with self._lock:
-            # A message the user did not speak, such as a camera frame sent
-            # after the result, neither answers the batch nor ends the wait.
-            newest = next((item for item in reversed(self.buffer) if not _is_unspoken_user_message(item)), None)
+            # A message the user did not speak, such as a camera frame or a
+            # system item sent after the result, neither answers the batch nor
+            # ends the wait.
+            newest = next(
+                (
+                    item
+                    for item in reversed(self.buffer)
+                    if not _is_unspoken_user_message(item)
+                    and not isinstance(item, RealtimeConversationItemSystemMessage)
+                ),
+                None,
+            )
             if not isinstance(newest, RealtimeConversationItemFunctionCallOutput):
                 return False
             unanswered: set[str] = set()
@@ -1193,6 +1215,9 @@ class Chat:
         answered: set[str] = set()  # The model has replied to that input.
         seen: set[str] = set()  # Calls so far. A reply cannot be past a call that comes after it.
         for item in items:
+            if isinstance(item, RealtimeConversationItemSystemMessage):
+                # Not a user turn and not a model reply, so it leaves tool state alone.
+                continue
             if isinstance(item, RealtimeConversationItemFunctionCallOutput) and item.call_id in calls:
                 if (item.call_id in answered or item.call_id in replied_past) and item.call_id not in outputs:
                     late.add(item.call_id)
@@ -1336,6 +1361,12 @@ class Chat:
                 if item.status is not None:
                     function_call["status"] = item.status
                 result.append(function_call)
+            elif isinstance(item, RealtimeConversationItemSystemMessage):
+                content = [
+                    ResponseInputTextParam(text=part.text, type="input_text") for part in item.content if part.text
+                ]
+                if content:
+                    result.append(ResponseMessage(content=content, role="system", type="message"))
             elif isinstance(item, RealtimeConversationItemFunctionCallOutput):
                 function_call_output = FunctionCallOutput(
                     call_id=provider_call_ids.get(item.call_id, item.call_id),
@@ -1362,7 +1393,11 @@ class Chat:
                 text = " ".join(p.text for p in self.init_chat_message.content if p.text)
                 messages.append(TransformersSystemMessage(content=text))
             for item in self._model_history_locked(self.buffer):
-                if isinstance(item, RealtimeConversationItemUserMessage):
+                if isinstance(item, RealtimeConversationItemSystemMessage):
+                    text = " ".join(part.text for part in item.content if part.text)
+                    if text:
+                        messages.append(TransformersSystemMessage(content=text))
+                elif isinstance(item, RealtimeConversationItemUserMessage):
                     has_media = any(p.type in {"input_image", "input_audio"} for p in item.content)
                     content: str | list[dict[str, Any]]
                     if has_media:
@@ -1598,7 +1633,14 @@ class Chat:
                     break
 
         items_to_compact = self.buffer[:end_idx]
-        marker_ids = {entry.id for entry in items_to_compact if entry.id is not None}
+        # Mid-conversation system items stay in the buffer. They are not a
+        # compactable turn, and dropping them would lose operator context
+        # that the transcript renderer also skips.
+        marker_ids = {
+            entry.id
+            for entry in items_to_compact
+            if entry.id is not None and not isinstance(entry, RealtimeConversationItemSystemMessage)
+        }
         # A completed result can appear after this turn-aligned prefix. Leave
         # its call out of the summarizer input; _apply_compaction keeps that
         # call in the live buffer so the pair remains intact after the splice.
