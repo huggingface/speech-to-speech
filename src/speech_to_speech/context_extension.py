@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from importlib.metadata import distribution
 from pathlib import Path
 from threading import Event
-from time import monotonic
+from time import monotonic, perf_counter
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
@@ -47,7 +47,7 @@ class ContextRequest:
     scope: ContextScope | None
     selected_language: str | None
     input_language: str | None
-    deadline: float
+    deadline: float  # time.perf_counter() in this process
     max_bytes: int
     anchor_id: str
     input_generation: int
@@ -173,7 +173,7 @@ class ContextDispatcher:
         if not text or len(text) > 2048 or len(text.encode("utf-8", errors="surrogatepass")) > 2048:
             queue.put(request)
             return
-        deadline = monotonic() + self.wait_seconds
+        deadline = perf_counter() + self.wait_seconds
         query = ContextRequest(
             session,
             request.response_key,
@@ -211,7 +211,7 @@ class ContextDispatcher:
         async def dispatch():
             # Some asyncio timer implementations wake one clock tick early.
             while not lookup.done():
-                remaining = deadline - monotonic()
+                remaining = deadline - perf_counter()
                 if remaining <= 0:
                     break
                 await asyncio.wait({lookup}, timeout=remaining)
@@ -221,8 +221,8 @@ class ContextDispatcher:
             del self.pending[session]
             if self.closed or not current():
                 return
-            logger.debug("Context preparation finished on time=%s completed=%s", monotonic() <= deadline, bool(done))
-            if done and monotonic() <= deadline and not lookup.cancelled() and lookup.exception() is None:
+            logger.debug("Context preparation finished on time=%s completed=%s", perf_counter() <= deadline, bool(done))
+            if done and perf_counter() <= deadline and not lookup.cancelled() and lookup.exception() is None:
                 block = render_records(lookup.result(), query.max_bytes)
                 logger.debug("Context provider supplied a usable block=%s", block is not None)
                 if block and (scope is None or scope.valid()):
