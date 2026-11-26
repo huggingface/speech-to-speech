@@ -19,7 +19,11 @@ from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel
 
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
-from speech_to_speech.LLM.tool_call.signature_from_schema import signature_from_schema
+from speech_to_speech.LLM.tool_call.signature_from_schema import (
+    parameter_names_from_schema,
+    signature_from_schema,
+)
+from speech_to_speech.pipeline.transcript_logging import transcript_for_log
 from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
@@ -193,6 +197,8 @@ class FunctionToolCall(BaseModel):
     parameters: Dict[str, Any]
     original_string: str
     description: str = ""
+    # True for ``<tool_call>{json}</tool_call>`` calls, keyed by the raw schema names.
+    json_call: bool = False
 
     def to_realtime_function_tool_call(
         self,
@@ -240,6 +246,13 @@ class FunctionToolCall(BaseModel):
                     bound[name] = self.parameters[key]
                 arguments = {**bound, **arguments}
 
+            # The prompt shows aliases for property names that are not Python
+            # identifiers; map a Python-style call's names back to the schema keys.
+            # JSON tool calls already use the schema keys.
+            if not self.json_call:
+                original_names = {alias: name for name, alias in parameter_names_from_schema(schema).items()}
+                arguments = {original_names.get(key, key): value for key, value in arguments.items()}
+
             undeclared = {k for k in arguments if k not in properties}
             if undeclared:
                 logger.warning(
@@ -264,6 +277,69 @@ class FunctionToolCall(BaseModel):
 
 
 # ── Public API ───────────────────────────────────────────────────────
+
+# Many open models (Qwen, Hermes-style fine-tunes, ...) have a native tool-call
+# syntax, ``<tool_call>{"name": ..., "arguments": {...}}</tool_call>``. They
+# tend to fall back to it once earlier tool calls appear in the chat history,
+# because chat templates render past calls that way. Recognising it keeps those
+# calls from being spoken aloud as text.
+JSON_TOOL_CALL_ENTER = "<tool_call>"
+JSON_TOOL_CALL_END = "</tool_call>"
+
+
+def find_json_tool_call_end(block: str) -> int | None:
+    """Return the closing tag's end offset, ignoring tags inside JSON strings."""
+    in_string = False
+    escaped = False
+    for index, char in enumerate(block):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif block.startswith(JSON_TOOL_CALL_END, index):
+            return index + len(JSON_TOOL_CALL_END)
+    return None
+
+
+def parse_json_tool_call_block(block: str) -> List[FunctionToolCall]:
+    """Parse one ``<tool_call>{json}</tool_call>`` block into function calls.
+
+    Accepts a single object or a list of objects, each with ``name`` and
+    ``arguments`` (or ``parameters``); ``arguments`` may itself be a JSON string.
+    Returns an empty list when the block isn't valid JSON of that shape.
+    """
+    inner = block.strip()
+    if inner.startswith(JSON_TOOL_CALL_ENTER):
+        inner = inner[len(JSON_TOOL_CALL_ENTER) :]
+    if inner.endswith(JSON_TOOL_CALL_END):
+        inner = inner[: -len(JSON_TOOL_CALL_END)]
+    try:
+        payload = json.loads(inner.strip())
+    except json.JSONDecodeError:
+        logger.warning("Ignoring malformed <tool_call> block: %s", transcript_for_log(block[:200]))
+        return []
+    items = payload if isinstance(payload, list) else [payload]
+    calls: List[FunctionToolCall] = []
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            continue
+        args = item.get("arguments", item.get("parameters", {}))
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                continue
+        if not isinstance(args, dict):
+            continue
+        calls.append(
+            FunctionToolCall(function_name=item["name"], parameters=args, original_string=block, json_call=True)
+        )
+    return calls
 
 
 def parse_function_call(function_string: str, pattern_to_match: list[str] = []) -> List[FunctionToolCall]:

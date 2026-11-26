@@ -377,20 +377,22 @@ class _FakeTransformers:
     def __init__(self) -> None:
         self.processor = _FakeProcessor()
         self.model = _FakeModel()
-        self.loaded: list[tuple[str, Any]] = []
+        self.loaded: list[tuple[str, str, str | None]] = []
+        self.model_dtype: torch.dtype | None = None
 
         outer = self
 
         class AutoProcessor:
             @staticmethod
-            def from_pretrained(name: str) -> _FakeProcessor:
-                outer.loaded.append(("processor", name))
+            def from_pretrained(name: str, *, revision: str | None) -> _FakeProcessor:
+                outer.loaded.append(("processor", name, revision))
                 return outer.processor
 
         class AutoModelForMultimodalLM:
             @staticmethod
-            def from_pretrained(name: str, **kwargs: Any) -> _FakeModel:
-                outer.loaded.append(("model", kwargs.get("dtype")))
+            def from_pretrained(name: str, *, revision: str | None, dtype: torch.dtype) -> _FakeModel:
+                outer.loaded.append(("model", name, revision))
+                outer.model_dtype = dtype
                 return outer.model
 
         self.AutoProcessor = AutoProcessor
@@ -405,8 +407,8 @@ def test_setup_loads_model_warms_up_and_logs(monkeypatch: pytest.MonkeyPatch, ca
     with caplog.at_level(logging.INFO, logger="speech_to_speech.STT.qwen3_asr_handler"):
         handler.setup(model_name="Qwen/Qwen3-ASR-0.6B-hf", device="cpu", torch_dtype="float32", language="auto")
 
-    assert ("processor", "Qwen/Qwen3-ASR-0.6B-hf") in fake.loaded
-    assert ("model", torch.float32) in fake.loaded
+    assert fake.loaded == [("processor", "Qwen/Qwen3-ASR-0.6B-hf", None), ("model", "Qwen/Qwen3-ASR-0.6B-hf", None)]
+    assert fake.model_dtype == torch.float32
     assert len(fake.model.generate_calls) == 1, "setup must run one warmup generation"
     assert "Loading Qwen3-ASR STT model: Qwen/Qwen3-ASR-0.6B-hf" in caplog.text
     assert handler.last_language is None
@@ -446,7 +448,22 @@ def _context() -> HandlerContext:
 def test_cli_builds_a_qwen3_asr_handler_from_its_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeTransformers()
     monkeypatch.setattr(qwen3_asr_handler, "transformers", fake)
-    args = parse_arguments(["--stt", "qwen3-asr", "--qwen3_asr_language", "fr", "--qwen3_asr_gen_max_new_tokens", "64"])
+    model_id = "org/fine-tuned-asr"
+    revision = "1234567890abcdef1234567890abcdef12345678"
+    args = parse_arguments(
+        [
+            "--stt",
+            "qwen3-asr",
+            "--qwen3_asr_model_name",
+            model_id,
+            "--qwen3_asr_revision",
+            revision,
+            "--qwen3_asr_language",
+            "fr",
+            "--qwen3_asr_gen_max_new_tokens",
+            "64",
+        ]
+    )
     context = _context()
 
     handler = create_backend_handler(args.stt_backend, context)
@@ -455,7 +472,7 @@ def test_cli_builds_a_qwen3_asr_handler_from_its_flags(monkeypatch: pytest.Monke
     assert handler.speculative_turns is context.speculative_turns
     assert handler.forced_language == "fr"
     assert handler.gen_kwargs == {"max_new_tokens": 64}
-    assert ("processor", "Qwen/Qwen3-ASR-0.6B-hf") in fake.loaded
+    assert fake.loaded == [("processor", model_id, revision), ("model", model_id, revision)]
 
 
 def test_registry_normalizes_qwen3_asr_arguments() -> None:

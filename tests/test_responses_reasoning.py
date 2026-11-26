@@ -3,7 +3,7 @@
 import json
 from types import SimpleNamespace
 
-import httpx
+import httpx2
 import pytest
 from openai import OpenAI
 from openai.types.realtime import RealtimeConversationItemFunctionCall, RealtimeConversationItemFunctionCallOutput
@@ -16,7 +16,13 @@ from openai.types.responses import (
     ResponseReasoningItem,
 )
 
-from speech_to_speech.LLM.chat import Chat, CompactionResult, ResponsesFunctionCall, make_user_message
+from speech_to_speech.LLM.chat import (
+    PENDING_TOOL_OUTPUT,
+    Chat,
+    CompactionResult,
+    ResponsesFunctionCall,
+    make_user_message,
+)
 from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
 from speech_to_speech.pipeline.messages import EndOfResponse, LLMResponseChunk, ResponsePrefetchTransaction
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -342,7 +348,7 @@ def test_fast_output_does_not_allow_eviction_before_late_stream_reasoning_commit
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("completed_prefix", [False, True])
 @pytest.mark.parametrize("with_message", [None, "mixed", "empty"])
-def test_out_of_band_snapshot_omits_reasoning_for_unresolved_call(stream, completed_prefix, with_message):
+def test_out_of_band_snapshot_pairs_unresolved_call_with_pending_output(stream, completed_prefix, with_message):
     handler = _make_handler(stream=stream)
     request = _make_request(chat_size=5)
     responses = [_items("1"), _items("2")] if completed_prefix else [_items("2")]
@@ -372,9 +378,18 @@ def test_out_of_band_snapshot_omits_reasoning_for_unresolved_call(stream, comple
     request.response = RealtimeResponseCreateParams(conversation="none")
     outputs = list(drive_llm(handler, request))
     assert next(item for item in outputs if isinstance(item, EndOfResponse)).error is None
-    assert not any(item.get("id") in {"rs_2", "fc_2", "msg_provider"} for item in captured[-1])
+    # The running call keeps its reasoning and gets a stand-in output, so the
+    # provider sees a complete chain without any stored item being rewritten.
+    unresolved = [item.model_dump(exclude_unset=True) for item in responses[-2]]
+    assert captured[-1][-len(unresolved) - 1 : -1] == unresolved
+    assert captured[-1][-1]["type"] == "function_call_output"
+    assert captured[-1][-1]["call_id"] == "call_2"
+    assert captured[-1][-1]["output"] == PENDING_TOOL_OUTPUT
+    # The user message, not the provider's chain, carries the status line.
+    assert "[Tool status, not said by the user]" in captured[-1][1]["content"][-1]["text"]
     if completed_prefix:
-        completed = [item for item in captured[-1][2:] if item["type"] != "function_call_output"]
+        earlier = captured[-1][2 : -len(unresolved) - 1]
+        completed = [item for item in earlier if item["type"] != "function_call_output"]
         assert completed == [item.model_dump(exclude_unset=True) for item in responses[0]]
     assert request.runtime_config.chat.buffer == canonical.buffer
 
@@ -541,7 +556,7 @@ def test_pinned_sdk_pending_snapshot_preserves_previous_completed_response(strea
             "usage": None,
         }
         if not stream:
-            return httpx.Response(200, json=response)
+            return httpx2.Response(200, json=response)
         indexes = list(range(len(output)))
         if reverse_done:
             indexes.reverse()
@@ -555,7 +570,7 @@ def test_pinned_sdk_pending_snapshot_preserves_previous_completed_response(strea
             for sequence, index in enumerate(indexes)
         ]
         events.append({"type": "response.completed", "sequence_number": len(events), "response": response})
-        return httpx.Response(
+        return httpx2.Response(
             200,
             headers={"content-type": "text/event-stream"},
             content="".join(f"data: {json.dumps(event)}\n\n" for event in events),
@@ -564,7 +579,7 @@ def test_pinned_sdk_pending_snapshot_preserves_previous_completed_response(strea
     handler = _make_handler(stream=stream)
     request = _make_request(chat_size=5)
     chat = request.runtime_config.chat
-    with OpenAI(api_key="test", http_client=httpx.Client(transport=httpx.MockTransport(respond))) as client:
+    with OpenAI(api_key="test", http_client=httpx2.Client(transport=httpx2.MockTransport(respond))) as client:
         handler.client = client
         for key in ["response-A", "response-B"]:
             request.response_key = key
@@ -579,7 +594,9 @@ def test_pinned_sdk_pending_snapshot_preserves_previous_completed_response(strea
         request.response = RealtimeResponseCreateParams(conversation="none")
         outputs = list(drive_llm(handler, request))
         assert next(item for item in outputs if isinstance(item, EndOfResponse)).error is None
-        assert requests[2]["input"][2:] == first
+        assert requests[2]["input"][2:-1] == first + pending
+        assert requests[2]["input"][-1]["call_id"] == "call_B"
+        assert requests[2]["input"][-1]["output"] == PENDING_TOOL_OUTPUT
         assert chat.buffer == canonical.buffer
         _finish(chat, "call_B")
         request.response_key = "continuation"
@@ -628,7 +645,7 @@ def test_pinned_sdk_parses_and_serializes_reasoning_tool_continuation(stream, re
             assert body["input"][2:end] == originals
             assert body["input"][end]["call_id"] == "call_1"
         if not stream:
-            return httpx.Response(200, json=response)
+            return httpx2.Response(200, json=response)
         indexes = list(range(len(output)))
         if reverse_done:
             indexes.reverse()
@@ -643,11 +660,11 @@ def test_pinned_sdk_parses_and_serializes_reasoning_tool_continuation(stream, re
         ]
         events.append({"type": "response.completed", "sequence_number": len(events), "response": response})
         data = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=data)
+        return httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=data)
 
     handler = _make_handler(stream=stream)
     request = _make_request(chat_size=5)
-    with OpenAI(api_key="test", http_client=httpx.Client(transport=httpx.MockTransport(respond))) as client:
+    with OpenAI(api_key="test", http_client=httpx2.Client(transport=httpx2.MockTransport(respond))) as client:
         handler.client = client
         first = list(drive_llm(handler, request))
         assert any(isinstance(item, LLMResponseChunk) and item.tools for item in first)

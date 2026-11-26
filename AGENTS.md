@@ -6,6 +6,11 @@
 - Keep release pull requests focused on version metadata and release documentation.
 - Do not commit local build artifacts such as `dist/`, `build/`, or generated wheel/sdist files.
 
+## Evals
+
+- Changes to conversation history, prompts, tool handling, chat templates or the LLM backend: run the tool-use conversation eval (`python -m speech_to_speech.evals.tool_conversations`) against `main` and against the change, then `compare` the reports. Setup, text-only runs and how to read results are in `docs/vibe-checks.md#tool-use-conversations`.
+- Changes to the audio path (VAD, STT, TTS, latency): Big Bench Audio, in the same document.
+
 ## Publishing to PyPI
 
 PyPI publishing is handled by GitHub Actions in `.github/workflows/publish.yml`. The workflow runs on pushed tags that match `v*`, builds the package with `uv build`, checks the artifacts with `twine check --strict`, and publishes through the configured `pypi` environment.

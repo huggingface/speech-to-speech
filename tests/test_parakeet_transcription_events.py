@@ -122,6 +122,32 @@ def test_process_yields_partial_tagged_tuple(monkeypatch):
     assert result[0].text == "partial text"
 
 
+def test_progressive_update_skips_busy_mlx_lock_without_warning(monkeypatch, caplog):
+    from threading import Lock
+
+    from speech_to_speech.utils import mlx_lock
+
+    lock = Lock()
+    monkeypatch.setattr(mlx_lock, "_mlx_lock", lock)
+    handler = object.__new__(ParakeetTDTSTTHandler)
+    handler.enable_live_transcription = True
+    handler.processing_final = False
+    handler.backend = "mlx"
+    handler._show_progressive_transcription = lambda audio: pytest.fail("progressive STT ran without the lock")
+
+    with lock, caplog.at_level(logging.DEBUG):
+        result = list(handler.process(VADAudio(audio=np.zeros(16000, dtype=np.float32), mode="progressive")))
+        with mlx_lock.MLXLockContext(handler_name="ParakeetSTT-Final", timeout=0.01) as acquired:
+            assert not acquired
+
+    assert result == []
+    assert "ParakeetSTT-Progressive: Failed to acquire MLX lock" in caplog.text
+    # Callers that cannot skip their work still report a busy lock as a warning.
+    assert [record.getMessage().split(":")[0] for record in caplog.records if record.levelno >= logging.WARNING] == [
+        "ParakeetSTT-Final"
+    ]
+
+
 def test_process_yields_final_transcript(monkeypatch):
     handler = object.__new__(ParakeetTDTSTTHandler)
     handler.enable_live_transcription = False

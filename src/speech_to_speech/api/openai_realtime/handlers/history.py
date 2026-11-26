@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable
 
 from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandler
 from speech_to_speech.pipeline.events import (
@@ -33,13 +33,17 @@ class _ResponseHistoryState:
 
 
 class HistoryHandler(RealtimeBaseHandler):
-    """The only writer of model output to a session's chat.
+    """The only writer of model proposals to a session's chat.
+
+    Interrupted speech is written from the audio the client heard instead, by
+    :meth:`ResponseHandler.finish_response` and conversation item truncation.
 
     Models attach cumulative :class:`ResponseHistory` proposals to their
     output. ``hold`` keeps the newest proposal per response. ``accept`` runs
     after the turn gate commits a response and writes what it holds; later
     proposals for that response are written as they arrive. ``close`` undoes
-    whatever a response wrote unless ``finalize`` made it permanent first.
+    whatever a response wrote unless ``finalize`` made it permanent first;
+    ``keep_delivered_calls`` exempts function calls the client already received.
     """
 
     def __init__(self, service: RealtimeService) -> None:
@@ -77,9 +81,18 @@ class HistoryHandler(RealtimeBaseHandler):
         if proposal is not None:
             proposal.resolve()
 
+    def anchor(self, conn_id: str, key: str | None) -> str | None:
+        """Return the history position a response's output follows, if known."""
+        state = self._responses.get((conn_id, key)) if key is not None else None
+        return state.proposal.after_item_id if state is not None and state.proposal is not None else None
+
     def finalize(self, conn_id: str, key: str | None) -> None:
         """Make a completed response's history permanent."""
         self._state(conn_id).runtime_config.chat.finalize_provisional_generation(key)
+
+    def keep_delivered_calls(self, conn_id: str, key: str | None, call_ids: Iterable[str]) -> set[str]:
+        """Keep a cancelled response's delivered function calls when it closes; return the kept ones."""
+        return self._state(conn_id).runtime_config.chat.keep_delivered_calls(key, call_ids)
 
     def close(self, conn_id: str, key: str | None) -> None:
         """Forget a closed response and undo any history it did not finalize."""

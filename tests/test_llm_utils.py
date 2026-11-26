@@ -245,3 +245,61 @@ def test_remove_markdown_is_streaming_safe_across_split_deltas() -> None:
 
 def test_sentence_tokenization_preserves_complete_emphasis_pairs() -> None:
     assert sent_tokenize_preserving_markdown_code("**Let me check.**", sent_tokenize) == ["**Let me check.**"]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("你好。我很好。今天天气很好。", ["你好。", "我很好。", "今天天气很好。"]),
+        ("你好！我很好？谢谢。", ["你好！", "我很好？", "谢谢。"]),
+        ("こんにちは。元気ですか？はい。", ["こんにちは。", "元気ですか？", "はい。"]),
+        ("本当ですか！？すごいですね。", ["本当ですか！？", "すごいですね。"]),
+        ("नमन। आप कैसे हैं? मैं ठीक हूँ।", ["नमन।", "आप कैसे हैं?", "मैं ठीक हूँ।"]),
+        ("مرحبا؟ كيف حالك؟ أنا بخير.", ["مرحبا؟", "كيف حالك؟", "أنا بخير."]),
+        ("Hello. How are you? 你好。再见。", ["Hello.", "How are you?", "你好。", "再见。"]),
+        # Closing quotes and brackets stay with the sentence they close.
+        ('他说："今天很好。"然后走了。', ['他说："今天很好。"', "然后走了。"]),
+        ("他说：「你好。」然后走了。", ["他说：「你好。」", "然后走了。"]),
+        ("你好。(see note) 再见。", ["你好。", "(see note) 再见。"]),
+        ("(unclosed note 你好。再见。", ["(unclosed note 你好。", "再见。"]),
+        ("（注：これは例です。）次に進みます。", ["（注：これは例です。）", "次に進みます。"]),
+        ("他说：“今天很好。”然后走了。", ["他说：“今天很好。”", "然后走了。"]),
+        ("こんにちは。今日はいい天気ですね。", ["こんにちは。", "今日はいい天気ですね。"]),
+    ],
+)
+def test_sentence_tokenization_splits_after_non_latin_terminators(text: str, expected: list[str]) -> None:
+    assert sent_tokenize_preserving_markdown_code(text, sent_tokenize) == expected
+
+
+def test_sentence_tokenization_keeps_unfinished_cjk_sentence_as_remainder() -> None:
+    assert sent_tokenize_preserving_markdown_code("你好。我很", sent_tokenize) == ["你好。", "我很"]
+
+
+def test_sentence_tokenization_does_not_split_markdown_code_on_cjk_terminators() -> None:
+    text = "运行 `print('a。b')` 即可。然后重启。"
+    assert sent_tokenize_preserving_markdown_code(text, sent_tokenize) == ["运行 `print('a。b')` 即可。", "然后重启。"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "你好。运行 `print('a。b",
+        "你好。运行 ``print('a。b')`",
+        "你好。**重要。",
+        "你好。**重要。**です。然后",
+    ],
+)
+def test_sentence_tokenization_leaves_unmatched_markdown_to_punkt(text: str) -> None:
+    """A leftover delimiter may open a span that is still streaming, so the sentence
+    stays whole, exactly as it did before the non-Latin pass existed."""
+    assert sent_tokenize_preserving_markdown_code(text, sent_tokenize) == [text]
+
+
+@pytest.mark.parametrize("text", ["كيف حالك؟", "नमन।", "॥", "ｺﾝﾆﾁﾊ｡"])
+def test_remove_unspeechable_keeps_arabic_devanagari_and_halfwidth_terminators(text: str) -> None:
+    assert remove_unspeechable(text) == text
+
+
+@pytest.mark.parametrize("text", ["  Hello there. How are you?", "He said (hello. Then left. Bye.", "Wow!😊 Next."])
+def test_sentence_tokenization_is_unchanged_for_latin_text(text: str) -> None:
+    assert sent_tokenize_preserving_markdown_code(text, sent_tokenize) == sent_tokenize(text)

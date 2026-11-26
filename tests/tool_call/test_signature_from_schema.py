@@ -1,5 +1,9 @@
+import json
 from typing import Any, Literal, Optional, Union
 
+import pytest
+
+from speech_to_speech.LLM.tool_call.function_call import parse_function_call, parse_json_tool_call_block
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.LLM.tool_call.signature_from_schema import _annotation_from_spec, signature_from_schema
 
@@ -188,6 +192,216 @@ class TestSignatureFromSchema:
         }
         sig = signature_from_schema(schema)
         assert str(sig) == "(x: float = None, y: float = None)"
+
+    def test_invalid_identifier_hyphen(self):
+        """Property name with hyphen should be sanitized to underscore."""
+        schema = {
+            "type": "object",
+            "properties": {"user-name": {"type": "string"}},
+            "required": ["user-name"],
+        }
+        sig = signature_from_schema(schema)
+        # Hyphen replaced with underscore
+        assert str(sig) == "(user_name: str)"
+
+    def test_invalid_identifier_space(self):
+        """Property name with space should be sanitized to underscore."""
+        schema = {
+            "type": "object",
+            "properties": {"first name": {"type": "string"}},
+            "required": ["first name"],
+        }
+        sig = signature_from_schema(schema)
+        assert str(sig) == "(first_name: str)"
+
+    def test_python_keyword(self):
+        """Python keyword as property name should get trailing underscore."""
+        schema = {
+            "type": "object",
+            "properties": {"class": {"type": "string"}},
+            "required": ["class"],
+        }
+        sig = signature_from_schema(schema)
+        assert str(sig) == "(class_: str)"
+
+    def test_starts_with_digit(self):
+        """Property name starting with digit should get leading underscore."""
+        schema = {
+            "type": "object",
+            "properties": {"123abc": {"type": "string"}},
+            "required": ["123abc"],
+        }
+        sig = signature_from_schema(schema)
+        assert str(sig) == "(_123abc: str)"
+
+    def test_collision_handling(self):
+        """Multiple properties sanitizing to same name should be disambiguated."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "user-name": {"type": "string"},
+                "user.name": {"type": "integer"},
+            },
+            "required": ["user-name", "user.name"],
+        }
+        sig = signature_from_schema(schema)
+        # Both sanitize to user_name, second gets _2 suffix
+        params = list(sig.parameters.keys())
+        assert params == ["user_name", "user_name_2"]
+        assert sig.parameters["user_name"].annotation is str
+        assert sig.parameters["user_name_2"].annotation is int
+
+    def test_empty_property_name(self):
+        """Empty property name should become underscore."""
+        schema = {
+            "type": "object",
+            "properties": {"": {"type": "string"}},
+            "required": [""],
+        }
+        sig = signature_from_schema(schema)
+        assert str(sig) == "(_: str)"
+
+    def test_valid_unicode_identifier_is_unchanged(self):
+        schema = {
+            "type": "object",
+            "properties": {"città": {"type": "string"}},
+            "required": ["città"],
+        }
+        assert str(signature_from_schema(schema)) == "(città: str)"
+
+    def test_alias_skips_a_literal_property_with_the_suffixed_name(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "user-name": {"type": "string"},
+                "user.name": {"type": "string"},
+                "user_name_2": {"type": "string"},
+            },
+        }
+        params = list(signature_from_schema(schema).parameters)
+        assert params == ["user_name", "user_name_3", "user_name_2"]
+
+
+# --- Calls against sanitized parameter names ---
+
+
+def _tool(name: str, parameters: dict) -> FunctionTool:
+    return FunctionTool(type="function", name=name, parameters=parameters)
+
+
+# Optional "user-name" comes first in properties, required "user.name" second, so
+# the signature puts the required parameter first.
+COLLIDING_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "user-name": {"type": "string"},
+        "user.name": {"type": "integer"},
+    },
+    "required": ["user.name"],
+}
+
+
+class TestSanitizedNameCalls:
+    def test_colliding_names_prompt(self):
+        tool = _tool("lookup", COLLIDING_SCHEMA)
+        assert tool.to_code_prompt(include_args_doc=False).startswith(
+            "def lookup(user_name_2: int, user_name: str = None)"
+        )
+
+    def test_colliding_names_named_call(self):
+        tool = _tool("lookup", COLLIDING_SCHEMA)
+        (call,) = parse_function_call("lookup(user_name_2=5, user_name='bob')")
+        result = call.to_realtime_function_tool_call([tool])
+        assert json.loads(result.arguments) == {"user.name": 5, "user-name": "bob"}
+
+    def test_colliding_names_positional_call(self):
+        tool = _tool("lookup", COLLIDING_SCHEMA)
+        (call,) = parse_function_call("lookup(5, 'bob')")
+        result = call.to_realtime_function_tool_call([tool])
+        assert json.loads(result.arguments) == {"user.name": 5, "user-name": "bob"}
+
+    def test_missing_required_aliased_parameter_raises(self):
+        tool = _tool("lookup", COLLIDING_SCHEMA)
+        (call,) = parse_function_call("lookup(user_name='bob')")
+        with pytest.raises(ValueError, match="Missing required"):
+            call.to_realtime_function_tool_call([tool])
+
+    def test_colliding_names_json_call_keeps_schema_keys(self):
+        tool = _tool("lookup", COLLIDING_SCHEMA)
+        (call,) = parse_json_tool_call_block(
+            '<tool_call>{"name": "lookup", "arguments": {"user.name": 5, "user-name": "bob"}}</tool_call>'
+        )
+        result = call.to_realtime_function_tool_call([tool])
+        assert json.loads(result.arguments) == {"user.name": 5, "user-name": "bob"}
+
+    def test_json_call_does_not_remap_a_key_equal_to_an_alias(self):
+        # "user-name" renders as user_name_2 because "user_name" is a property too.
+        tool = _tool(
+            "lookup",
+            {
+                "type": "object",
+                "properties": {"user-name": {"type": "string"}, "user_name": {"type": "string"}},
+            },
+        )
+        (call,) = parse_json_tool_call_block(
+            '<tool_call>{"name": "lookup", "arguments": {"user_name": "a", "user_name_2": "b"}}</tool_call>'
+        )
+        result = call.to_realtime_function_tool_call([tool])
+        assert json.loads(result.arguments) == {"user_name": "a"}
+
+    def test_literal_property_equal_to_a_suffix_alias(self):
+        tool = _tool(
+            "lookup",
+            {
+                "type": "object",
+                "properties": {
+                    "user-name": {"type": "string"},
+                    "user.name": {"type": "string"},
+                    "user_name_2": {"type": "string"},
+                },
+            },
+        )
+        (call,) = parse_function_call("lookup(user_name='a', user_name_3='b', user_name_2='c')")
+        result = call.to_realtime_function_tool_call([tool])
+        assert json.loads(result.arguments) == {"user-name": "a", "user.name": "b", "user_name_2": "c"}
+
+    def test_required_property_with_default_is_still_required(self):
+        tool = _tool(
+            "lookup",
+            {
+                "type": "object",
+                "properties": {"page-size": {"type": "integer", "default": 10}},
+                "required": ["page-size"],
+            },
+        )
+        (call,) = parse_function_call("lookup()")
+        with pytest.raises(ValueError, match="Missing required"):
+            call.to_realtime_function_tool_call([tool])
+
+    def test_empty_property_name_maps_back_and_stays_required(self):
+        tool = _tool(
+            "lookup",
+            {
+                "type": "object",
+                "properties": {"_": {"type": "string"}, "": {"type": "string"}},
+                "required": [""],
+            },
+        )
+        assert str(signature_from_schema(tool.parameters)) == "(__2: str, _: str = None)"
+        (call,) = parse_function_call("lookup(__2='x')")
+        assert json.loads(call.to_realtime_function_tool_call([tool]).arguments) == {"": "x"}
+        (call,) = parse_function_call("lookup(_='y')")
+        with pytest.raises(ValueError, match="Missing required"):
+            call.to_realtime_function_tool_call([tool])
+
+    def test_unicode_identifier_call(self):
+        tool = _tool(
+            "lookup",
+            {"type": "object", "properties": {"città": {"type": "string"}}, "required": ["città"]},
+        )
+        (call,) = parse_function_call("lookup(città='Roma')")
+        result = call.to_realtime_function_tool_call([tool])
+        assert json.loads(result.arguments) == {"città": "Roma"}
 
 
 # --- Tool.to_code_prompt tests ---

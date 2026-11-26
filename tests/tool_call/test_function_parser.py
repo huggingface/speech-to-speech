@@ -1,4 +1,5 @@
 import json
+import logging
 
 import pytest
 
@@ -9,6 +10,7 @@ from speech_to_speech.LLM.tool_call.function_call import (
     parse_function_call,
 )
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
+from speech_to_speech.pipeline.transcript_logging import set_log_transcripts
 
 # ---------------------------------------------------------------------------
 # parse_function_call – single calls
@@ -392,3 +394,65 @@ class TestPositionalArgumentBinding:
         (call,) = parse_function_call("ping('now')")
         with pytest.raises(ValueError, match="Too many positional arguments"):
             call.to_realtime_function_tool_call([tool])
+
+
+class TestJsonToolCallBlocks:
+    """Native ``<tool_call>{json}</tool_call>`` blocks (Qwen, Hermes-style)."""
+
+    def test_single_call(self):
+        from speech_to_speech.LLM.tool_call.function_call import parse_json_tool_call_block
+
+        block = '<tool_call>\n{"name": "step_forward", "arguments": {"steps": 1}}\n</tool_call>'
+        (fc,) = parse_json_tool_call_block(block)
+        assert fc.function_name == "step_forward"
+        assert fc.parameters == {"steps": 1}
+
+    def test_list_and_string_arguments(self):
+        from speech_to_speech.LLM.tool_call.function_call import parse_json_tool_call_block
+
+        block = '<tool_call>[{"name": "a", "arguments": "{\\"x\\": 2}"}, {"name": "b", "parameters": {}}]</tool_call>'
+        calls = parse_json_tool_call_block(block)
+        assert [(c.function_name, c.parameters) for c in calls] == [("a", {"x": 2}), ("b", {})]
+
+    def test_malformed_json_returns_nothing(self):
+        from speech_to_speech.LLM.tool_call.function_call import parse_json_tool_call_block
+
+        assert parse_json_tool_call_block("<tool_call>{not json}</tool_call>") == []
+        assert parse_json_tool_call_block('<tool_call>{"arguments": {}}</tool_call>') == []
+
+    def test_malformed_json_warning_respects_transcript_logging(self, caplog, monkeypatch):
+        private_value = "account-number-8675309"
+        block = '<tool_call>{"name":"remember","arguments":{"note":"' + private_value + '"},}</tool_call>'
+        monkeypatch.setattr("speech_to_speech.pipeline.transcript_logging._log_transcripts", False)
+        with caplog.at_level(logging.WARNING, logger=function_call_module.__name__):
+            assert function_call_module.parse_json_tool_call_block(block) == []
+        assert "Ignoring malformed <tool_call> block" in caplog.text
+        assert private_value not in caplog.text
+
+        caplog.clear()
+        set_log_transcripts(True)
+        with caplog.at_level(logging.WARNING, logger=function_call_module.__name__):
+            assert function_call_module.parse_json_tool_call_block(block) == []
+        assert private_value in caplog.text
+
+    @pytest.mark.parametrize("arguments", ["{not json}", [99], None, "", "[]", "null", 42])
+    def test_invalid_arguments_do_not_become_empty_calls(self, arguments):
+        from speech_to_speech.LLM.tool_call.function_call import parse_json_tool_call_block
+
+        block = "<tool_call>" + json.dumps({"name": "dance", "arguments": arguments}) + "</tool_call>"
+        assert parse_json_tool_call_block(block) == []
+
+    @pytest.mark.parametrize("arguments", [{}, "{}"])
+    def test_valid_empty_arguments_are_preserved(self, arguments):
+        from speech_to_speech.LLM.tool_call.function_call import parse_json_tool_call_block
+
+        block = "<tool_call>" + json.dumps({"name": "dance", "arguments": arguments}) + "</tool_call>"
+        (call,) = parse_json_tool_call_block(block)
+        assert call.parameters == {}
+
+    def test_invalid_list_item_does_not_drop_valid_sibling(self):
+        from speech_to_speech.LLM.tool_call.function_call import parse_json_tool_call_block
+
+        block = '<tool_call>[{"name":"bad","arguments":"{broken}"},{"name":"dance","arguments":{}}]</tool_call>'
+        calls = parse_json_tool_call_block(block)
+        assert [(call.function_name, call.parameters) for call in calls] == [("dance", {})]

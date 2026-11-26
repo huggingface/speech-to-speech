@@ -73,34 +73,20 @@ name and the API key.
 
 ## Verification
 
-Tested on 9 October 2026 on Apple Silicon (macOS 26.6) with speech-to-speech at
-`1e9bd0a`, `livekit-agents` 1.8.5 and `livekit-server` 1.13.9: spoken round trip
-and interruption work; tool calls fail as described below.
+Tested on 12 October 2026 on Apple Silicon (macOS 26.6) with speech-to-speech at
+`14f9e33`, `livekit-agents` 1.8.5 and `livekit-server` 1.13.9: spoken round trip
+and the `get_current_time` tool work by voice with `lk agent console` (LiveKit CLI
+2.19.0) and with a scripted participant in a local LiveKit room. Interruption was
+tested with the scripted participant.
 
 ## Known limitations
 
-- **Function tools failed at the tested revision (`1e9bd0a`).** That revision
-  generates `call_id`s of 37 characters (`call_` plus a UUID). The plugin
-  shortens any `call_id` longer than 32 characters to a SHA-256 prefix before sending the
-  `function_call_output`. The server finds no matching function call, rejects
-  the output and then the follow-up `response.create` with
-  `function_call_output_pending`, so the agent stays silent after running the
-  tool. With the shortening disabled in a local diagnostic run, the same tool
-  call completed. The server now generates `call_` IDs of at most 32 characters
-  to avoid this mismatch ([#695](https://github.com/huggingface/speech-to-speech/issues/695));
-  the live voice test has not been repeated with this fix. `agent.py` defines no tools. Related:
-  [#686](https://github.com/huggingface/speech-to-speech/issues/686). To
-  reproduce, add this tool to the `Assistant` class (with
-  `from datetime import datetime` and `function_tool` imported from
-  `livekit.agents`) and ask "What time is it?":
-
-  ```python
-  @function_tool
-  async def get_current_time(self) -> str:
-      """Return the current local time."""
-      return datetime.now().strftime("%H:%M")
-  ```
-
+- **Answers after a tool call start about 5 seconds late.** The server
+  acknowledges the `function_call_output` with `conversation.item.created`,
+  but the plugin only handles the newer `conversation.item.added` event. It
+  waits 5 seconds for that event, logs `failed to update chat context before
+  generating the function calls results` with `update_chat_ctx timed out.`, and
+  then sends `response.create`. The answer itself is correct.
 - **The server owns turn detection and STT.** speech-to-speech always
   runs its own VAD; from `turn_detection` it reads only `threshold`,
   `silence_duration_ms`, `create_response` and `interrupt_response`. The

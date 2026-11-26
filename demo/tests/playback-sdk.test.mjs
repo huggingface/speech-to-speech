@@ -13,11 +13,17 @@ async function fixture(bufferMs = 1200, sampleRate = 48_000) {
     close() { this.dispatchEvent(new Event("close")); }
     receive(data) { this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(data) })); }
   }();
+  globalThis.WebSocket = class {
+    constructor(...args) {
+      assert.equal(args.length, 1, "Space socket must omit WebSocket subprotocols");
+      return socket;
+    }
+  };
   globalThis.OpenAIAgentsRealtime = {
     ...realtime,
     OpenAIRealtimeWebSocket: class extends realtime.OpenAIRealtimeWebSocket {
       constructor(options) {
-        super({ ...options, createWebSocket: () => socket, skipOpenEventListeners: true });
+        super({ ...options, skipOpenEventListeners: true });
       }
     },
   };
@@ -221,6 +227,19 @@ test("SDK preserves terminal server timings through its WebSocket parser", async
   assert.deepEqual(finished[0].latency, timing);
 });
 
+test("the pinned SDK forwards readable reasoning without adding it to audio or transcripts", async (t) => {
+  const f = await fixture();
+  t.after(() => f.client.close());
+  const reasoning = [];
+  const transcripts = [];
+  f.client.addEventListener("reasoning-text", (event) => reasoning.push(event.detail));
+  f.client.addEventListener("transcript", (event) => transcripts.push(event.detail));
+  f.start();
+  f.receive({ type: "speech_to_speech.reasoning.delta", response_id: "a", delta: "Think first.", kind: "reasoning" });
+  assert.deepEqual(reasoning, [{ responseId: "a", delta: "Think first.", kind: "reasoning" }]);
+  assert.deepEqual(transcripts, []);
+});
+
 test("the pinned SDK forwards viseme extension events to avatar consumers", async (t) => {
   const f = await fixture(0);
   t.after(() => f.client.close());
@@ -234,4 +253,60 @@ test("the pinned SDK forwards viseme extension events to avatar consumers", asyn
   });
   assert.equal(detail?.response_id, "a");
   assert.deepEqual(detail?.visemes, [{ viseme: 21, start_s: 0, end_s: 0.1 }]);
+});
+
+/** Stream one assistant transcript item, then interrupt before it plays. */
+async function interruptedReply(t) {
+  const f = await fixture();
+  t.after(() => f.client.close());
+  const heard = [];
+  const errors = [];
+  f.client.addEventListener("assistant-heard", (event) => heard.push(event.detail));
+  f.client.addEventListener("server-error", (event) => errors.push(event.detail.error.message));
+  f.start();
+  const transcript = { response_id: "a", item_id: "item-a", output_index: 0, content_index: 2 };
+  f.receive({ type: "response.output_audio_transcript.delta", ...transcript, delta: "Sure, here are five ways." });
+  f.receive({ type: "response.output_audio_transcript.done", ...transcript, transcript: "Sure, here are five ways." });
+  f.audio(24000);
+  f.interrupt();
+  f.acknowledge();
+  return { ...f, heard, errors };
+}
+
+test("after a truncate the client asks for the heard text and reports it", async (t) => {
+  const f = await interruptedReply(t);
+
+  assert.deepEqual(f.sent.filter((e) => e.type.startsWith("conversation.item.")), [
+    { type: "conversation.item.truncate", item_id: "item-a", content_index: 2, audio_end_ms: 0 },
+    { type: "conversation.item.retrieve", event_id: "heard_text_item-a", item_id: "item-a" },
+  ]);
+  f.receive({ type: "conversation.item.retrieved", item: {
+    id: "item-a", object: "realtime.item", type: "message", role: "assistant", status: "incomplete",
+    content: [{ type: "output_audio", transcript: "Sure, here" }],
+  } });
+  assert.deepEqual(f.heard, [{ responseId: "a", text: "Sure, here" }]);
+});
+
+test("a removed reply is reported as nothing heard, not as a server error", async (t) => {
+  const f = await interruptedReply(t);
+  // Node's emitter throws an unhandled session error; the browser build does not.
+  f.client._session.on("error", () => {});
+
+  f.receive({ type: "error", error: {
+    type: "conversation_item_not_found", message: "No conversation item with id 'item-a' found.",
+    event_id: "heard_text_item-a",
+  } });
+  assert.deepEqual(f.heard, [{ responseId: "a", text: "" }]);
+  assert.deepEqual(f.errors, []);
+});
+
+test("a reply nobody heard comes back empty and is reported as nothing heard", async (t) => {
+  const f = await interruptedReply(t);
+
+  f.receive({ type: "conversation.item.retrieved", item: {
+    id: "item-a", object: "realtime.item", type: "message", role: "assistant", status: "incomplete",
+    content: [{ type: "output_audio", transcript: "" }],
+  } });
+  assert.deepEqual(f.heard, [{ responseId: "a", text: "" }]);
+  assert.deepEqual(f.errors, []);
 });
