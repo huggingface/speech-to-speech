@@ -259,7 +259,7 @@ def topics() -> dict[str, Any]:
 
 
 class ResearchRequest(BaseModel):
-    topic: str = Field(min_length=2, max_length=160)
+    topic: str = Field(min_length=2, max_length=200)
     difficulty: str = "pro"
     count: int = Field(default=8, ge=3, le=12)
 

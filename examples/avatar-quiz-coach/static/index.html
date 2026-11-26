@@ -52,7 +52,7 @@
     <!-- Lobby -->
     <section class="view" id="view-lobby">
       <h1 class="title">Get quizzed <em>out loud.</em></h1>
-      <p class="lead">Pick any topic. <span class="coach-name">Your coach</span> reads up on it, asks you questions out loud and, when you get stuck, gives you clues until you find the answer yourself.</p>
+      <p class="lead">Pick any topic, paper or codebase. <span class="coach-name">Your coach</span> reads up on it, asks you questions out loud and, when you get stuck, gives you clues until you find the answer yourself.</p>
       <div class="coach-pick" id="coach-pick">
         <span class="coach-pick-label">Your coach</span>
         <button type="button" data-coach="max">Max</button>
@@ -60,7 +60,7 @@
       </div>
 
       <form id="topic-form" class="topic-form" autocomplete="off">
-        <input id="topic-input" name="topic" maxlength="160" placeholder="e.g. RLHF vs DPO, black holes, the French Revolution…" aria-label="Quiz topic">
+        <input id="topic-input" name="topic" maxlength="200" placeholder="A topic, a paper or a GitHub link…" aria-label="Quiz topic">
         <button type="submit" class="btn primary" id="topic-go">Quiz me</button>
       </form>
       <div class="row-between">

@@ -35,8 +35,12 @@ avatar ◀─ lip-synced audio ◀─ speech-to-speech backend (TTS) ◀─ scri
   most two sentences at a time with few-shot read-aloud examples, which kept
   24 of 24 test lines word for word on Qwen3.5-4B and Gemma 4 31B (a plain
   "repeat this" prompt made the model answer the quiz questions itself).
-- **Brain**: `server.py` researches topics (Wikipedia, plus Google results when
-  `SERPER_API_KEY` is set) into eight spoken-friendly questions with reference
+- **Brain**: `server.py` researches topics into eight spoken-friendly
+  questions. A GitHub link or a paper (an arXiv or Hugging Face Papers link, or
+  a paper named by title) is read first-hand: the README, design docs and an
+  outline of the main source files, or the paper's full text. Other topics use
+  Wikipedia, plus Google results when `SERPER_API_KEY` is set. The writer lists
+  the key concepts first and writes spares, so repeats are dropped. Questions come with reference
   answers and key points (marked as required when the question asks for them,
   context otherwise), then grades every transcript and writes clues with a
   fast model on Hugging Face Inference Providers. Grading starts speculatively
@@ -93,6 +97,7 @@ regenerates the featured topics.
 | `GRADER_MODELS`, `WRITER_MODELS` | Comma-separated Inference Providers fallback chains (defaults: Qwen3.8-27B on Cerebras with reasoning off for grading, GLM-5.3 for writing; `model@effort` sets a model's reasoning effort) |
 | `COACH_VOICE` | Overrides the TTS voice (by default Max uses `en-arthur_m` and Ada `en-maya_f`, voices of the hosted stack; a Qwen3-TTS CustomVoice backend needs e.g. `Aiden` / `Serena`) |
 | `SERPER_API_KEY` | Adds Google results to research |
+| `GITHUB_TOKEN` | Optional, for reading GitHub repositories past the anonymous API limit (60 requests an hour per IP) |
 | `LEADERBOARD_REPO` | Dataset repo that mirrors the leaderboard so it survives restarts |
 | `RESEARCH_PER_HOUR` | New topics per visitor per hour (default 8) |
 
