@@ -605,6 +605,10 @@ generating. Then:
   transcription, or no transcript within `timeout_ms` after the speech stops
   means the speech was not an interruption. The client never sees that turn,
   it does not enter the conversation, and the reply carries on.
+- **Unless the reply is ending.** A short transcript such as "Yes." that
+  arrives when the reply is fully generated and has at most a second of audio
+  left to play answers it rather than backchannels over it, so it becomes an
+  ordinary user turn.
 
 The built-in list of ignored words is English: hesitations ("uh", "um",
 "hmm", "mm-hmm"), backchannels ("yeah", "okay", "right", "I see", "got it")

@@ -444,8 +444,8 @@ class WebRTCSession(SessionTransport):
             await self.send_events(events)
         self._track.write(self._out_resampler.resample_pcm(pcm, PIPELINE_SAMPLE_RATE))
 
-    def has_unplayed_audio(self) -> bool:
-        return self._track.buffered_bytes > 0
+    def unplayed_audio_ms(self) -> float:
+        return self._track.buffered_bytes / 2 / WEBRTC_SAMPLE_RATE * 1000
 
     def set_playback(self, state: PlaybackState) -> None:
         if state == "pause":

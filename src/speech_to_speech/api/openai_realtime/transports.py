@@ -61,9 +61,12 @@ class SessionTransport(ABC):
         Returns the duration of unplayed audio in milliseconds.
         """
 
+    def unplayed_audio_ms(self) -> float:
+        """Assistant audio sent so far that may still be playing, without discarding it."""
+        return 0.0
+
     def has_unplayed_audio(self) -> bool:
-        """Whether assistant audio sent so far may still be playing."""
-        return False
+        return self.unplayed_audio_ms() > 0
 
     def set_playback(self, state: PlaybackState) -> None:
         """Pause, duck, or resume assistant playback while barge-in is undecided.
@@ -149,8 +152,8 @@ class WebSocketTransport(SessionTransport):
         if seconds and discards == self._discards:
             self._playback_end = max(self._playback_end, self._now()) + seconds
 
-    def has_unplayed_audio(self) -> bool:
-        return self._playback_end > self._now() or self._sending_seconds > 0
+    def unplayed_audio_ms(self) -> float:
+        return (max(0.0, self._playback_end - self._now()) + self._sending_seconds) * 1000
 
     def set_playback(self, state: PlaybackState) -> None:
         # The client's player does the pausing, after the opt-in

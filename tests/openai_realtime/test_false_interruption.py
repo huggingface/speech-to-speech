@@ -498,6 +498,39 @@ def test_reply_that_ended_is_still_protected_while_its_audio_plays(call):
     assert turn_3 == ("turn_3", 0)
 
 
+def test_short_answer_as_the_reply_ends_is_a_turn(call):
+    """'Yes.' to the question the coach is just finishing must not be thrown away."""
+    call.configure()
+    turn, key = call.user_says("Let's start.")
+    call.reply(turn, key, "Ready for the first question?", seconds=0.5)
+    call.finish(key)
+
+    answer = call.speech()
+    _wait_for(lambda: _pending(call) is not None)
+    call.stop(answer, 0.3)
+    call.final(answer, "Yes.")
+
+    request = call.service.text_prompt_queue.get(timeout=2)
+    assert (request.turn_id, request.turn_revision) == answer
+    assert call.user_messages() == ["Let's start.", "Yes."]
+    call.receive_until("input_audio_buffer.speech_started", lambda event: event["audio_start_ms"] == 1000)
+
+
+def test_backchannel_with_seconds_of_reply_left_is_ignored(call):
+    call.configure()
+    turn, key = call.user_says("Explain attention.")
+    call.reply(turn, key, "Attention weighs every token against every other token.", seconds=4.0)
+    call.finish(key)
+
+    backchannel = call.speech()
+    call.stop(backchannel, 0.3)
+    call.final(backchannel, "Yeah.")
+    _wait_for(lambda: call.tracker.current_turn() == turn)
+
+    assert call.user_messages() == ["Explain attention."]
+    assert call.service.text_prompt_queue.empty()
+
+
 def test_speech_while_the_assistant_is_silent_is_a_normal_turn(call):
     call.configure()
     call.speech()

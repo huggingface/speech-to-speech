@@ -636,6 +636,18 @@ def _interruption_playback(transport: SessionTransport, st: Any, config: FalseIn
     return "pause" if config.playback == "pause" else "duck"
 
 
+# A short transcript that arrives this close to the end of the reply's audio
+# answers it ("Yes.") rather than backchanneling over it. It also absorbs the
+# WebSocket playback estimate's error, which ignores client latency.
+_REPLY_ENDING_MS = 1000.0
+
+
+def _assistant_still_speaking(transport: SessionTransport, st: Any) -> bool:
+    if st.in_response or st.response_pending:
+        return True
+    return transport.unplayed_audio_ms() > _REPLY_ENDING_MS
+
+
 def _holds_interruption(unit: PipelineUnit, transport: SessionTransport, st: Any, event: SpeechStartedEvent) -> bool:
     """Whether this speech start may be noise to hold instead of a barge-in to apply now."""
     cfg = st.runtime_config
@@ -752,6 +764,16 @@ async def _gate_interruption(
     if pending is not None:
         if pending.owns(event):
             verdict = pending.observe(event)
+            if (
+                verdict is Verdict.DISMISS
+                and isinstance(event, TranscriptionCompletedEvent)
+                and event.transcript.strip()
+                and not _assistant_still_speaking(transport, st)
+            ):
+                # "Yes." to the question the reply just finished asking is an
+                # answer, not a backchannel: only speech over a reply that
+                # still has a while to go is ignored.
+                verdict = Verdict.CONFIRM
             if verdict is Verdict.CONFIRM:
                 await _confirm_interruption(unit, session, transport, session_id)
             elif verdict is Verdict.DISMISS:
