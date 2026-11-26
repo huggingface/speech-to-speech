@@ -563,6 +563,7 @@ async def handle_turn(game: Game, transcript: str, intent: str | None = None) ->
 
     if resolved:
         res.feedback = say
+        out["feedback"] = say
         out["reveal"] = _reveal(game, res)
         game.position += 1
         game.attempt = 1

@@ -44,6 +44,8 @@ export class Avatar extends EventTarget {
     this.voiceDelay = null;
     /** @type {number[]} */
     this.lineTimers = [];
+    /** Audible start (ms, avatar clock) of each response's audio. @type {Map<string, number>} */
+    this.lineStarts = new Map();
   }
 
   /** @param {(ev: ProgressEvent) => void} [onProgress] */
@@ -225,6 +227,7 @@ export class Avatar extends EventTarget {
     const r0 = (this.responseSamples / this.inRate) * 1000;
     const start = Math.max(head.animClock + latencyMs, this.cursor);
     this.cursor = start + durMs;
+    this.lineStarts.set(responseId, this.lineStarts.get(responseId) ?? start);
     if (this.responseSamples === 0) {
       // Tell the page when this line becomes audible (it may queue behind the
       // previous line), so captions appear with the voice, not before it.
@@ -249,6 +252,16 @@ export class Avatar extends EventTarget {
   /** The reply's audio is complete; let the player end when it drains. */
   endResponse() {
     this.head?.streamNotifyEnd();
+  }
+
+  /**
+   * How much of a response the student has heard (ms of its audio), or -1.
+   * @param {string} responseId
+   */
+  heardMs(responseId) {
+    const start = this.lineStarts.get(responseId);
+    if (start === undefined) return -1;
+    return Math.max(0, this.head.animClock - start);
   }
 
   /** Barge-in or skip: drop queued audio and close the mouth now. */

@@ -116,6 +116,8 @@ export class SplatAvatar extends EventTarget {
     this.stoppedAt = 0;
     /** @type {number[]} */
     this.lineTimers = [];
+    /** Audible start (ms, avatar clock) of each response's audio. @type {Map<string, number>} */
+    this.lineStarts = new Map();
     // Face state
     this.mode = "Idle";
     this.mood = "happy";
@@ -254,6 +256,7 @@ export class SplatAvatar extends EventTarget {
     const r0 = (this.responseSamples / this.inRate) * 1000;
     const start = Math.max(now + latencyMs, this.cursor);
     this.cursor = start + durMs;
+    this.lineStarts.set(responseId, this.lineStarts.get(responseId) ?? start);
     if (this.responseSamples === 0) {
       const id = responseId;
       this.lineTimers.push(
@@ -287,6 +290,16 @@ export class SplatAvatar extends EventTarget {
 
   endResponse() {
     this.player?.port.postMessage({ type: "no-more-data" });
+  }
+
+  /**
+   * How much of a response the student has heard (ms of its audio), or -1.
+   * @param {string} responseId
+   */
+  heardMs(responseId) {
+    const start = this.lineStarts.get(responseId);
+    if (start === undefined) return -1;
+    return Math.max(0, (this.ctx?.currentTime ?? 0) * 1000 - start);
   }
 
   interrupt() {

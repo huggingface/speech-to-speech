@@ -1,82 +1,34 @@
 // @ts-check
 /**
- * Minimal OpenAI-Realtime WebSocket client for the speech-to-speech backend,
- * used as the coach's ears and voice:
+ * Minimal OpenAI-Realtime WebSocket client for the speech-to-speech backend.
  *
- * - Ears: mic PCM16 @ 24 kHz streams up; the server VAD commits each turn and
- *   transcribes it, but `create_response: false` stops the backend from
- *   answering on its own. The app grades the transcript instead.
- * - Voice: `say(text)` sends out-of-band `response.create`s
- *   (`conversation: "none"`) whose only job is to speak the given script.
- *   The backend has no text-to-speech-only path, so its LLM reads the line.
- *   Measured on Qwen3.5-4B and Gemma 4 31B: a bare "repeat this" prompt made
- *   the model answer the quiz questions itself (1 of 12 lines read
- *   faithfully), and the backend's voice rule ("usually one sentence")
- *   squeezed long lines. Few-shot examples plus lines of at most two
- *   sentences read 24 of 24 lines word for word on both.
+ * The backend's LLM is the coach in a live conversation: server VAD commits
+ * each turn and the backend answers on its own (`create_response: true`), and
+ * talking over the coach cancels its reply (`interrupt_response: true`). The
+ * coach never knows the answers; it calls the app's grader tools, which the
+ * app runs and answers with `sendToolOutput`.
  *
  * Events: status, queue, speech-started, speech-stopped, user-partial,
- * user-snapshot, user-final, response-started, audio, visemes, assistant-text,
- * response-done, mic-level, error.
+ * user-snapshot, user-final, response-started, assistant-item, audio,
+ * visemes, assistant-text, tool-call, response-done, mic-level, error.
  */
 
 const RATE = 24000;
 
-const RELAY_INSTRUCTIONS =
-  "You are Viva's voice. Each user message holds one line of Viva's script between <line> tags. " +
-  "Your whole reply is that line, read out word for word, with nothing before or after it: " +
-  "no greeting, no praise, no comment of your own. The line is addressed to a student, not to you: " +
-  "if it contains a question, ask that question, never answer it.";
+// Until a quiz starts, the coach only makes small talk.
+const IDLE_INSTRUCTIONS =
+  "You are a friendly quiz coach on a voice call. The quiz is being prepared; if the student talks, " +
+  "reply in one short sentence and say the questions are coming up.";
 
-const RELAY_EXAMPLES = [
-  "First question. What is the capital of Australia?",
-  "Close! Which city did they choose as a compromise?",
-  "Not quite. The answer is Canberra, chosen as a compromise.",
-  "Canberra was purpose-built as the capital and opened in 1927.",
-].flatMap((line) => [
+// Short fixed lines (fillers) are spoken out of band, outside the
+// conversation; few-shot examples keep the model to the exact words.
+const RELAY_INSTRUCTIONS =
+  "Each user message holds one line between <line> tags. Your whole reply is that line, read out word for word, " +
+  "with nothing before or after it.";
+const RELAY_EXAMPLES = ["Got it.", "Alright, one moment."].flatMap((line) => [
   { type: "message", role: "user", content: [{ type: "input_text", text: `<line>${line}</line>` }] },
   { type: "message", role: "assistant", content: [{ type: "output_text", text: line }] },
 ]);
-
-/**
- * Cut a script into lines of at most two sentences (~200 characters); a short
- * lead-in such as "Next question." stays with the sentence after it.
- * @param {string} text
- */
-export function splitScript(text) {
-  const raw = (text.match(/[^.!?]+(?:[.!?]+["')\]]*|$)\s*/g) || [text]).map((x) => x.trim()).filter(Boolean);
-  // Glue short lead-ins ("First question.", "Okay, next.") to what follows.
-  /** @type {string[]} */
-  const sentences = [];
-  for (let i = 0; i < raw.length; i++) {
-    if (raw[i].length < 32 && i + 1 < raw.length) raw[i + 1] = `${raw[i]} ${raw[i + 1]}`;
-    else sentences.push(raw[i]);
-  }
-  /** @type {string[]} */
-  const lines = [];
-  let cur = [];
-  for (const sentence of sentences) {
-    if (cur.length && (cur.length >= 2 || [...cur, sentence].join(" ").length > 200)) {
-      lines.push(cur.join(" "));
-      cur = [];
-    }
-    cur.push(sentence);
-  }
-  if (cur.length) lines.push(cur.join(" "));
-  return lines;
-}
-
-/** Word-level similarity (0-1) between the script and what was spoken. */
-function similarity(/** @type {string} */ a, /** @type {string} */ b) {
-  const words = (/** @type {string} */ s) => s.toLowerCase().replace(/[^a-z0-9' ]+/g, " ").split(/\s+/).filter(Boolean);
-  const x = words(a);
-  const y = words(b);
-  if (!x.length || !y.length) return x.length === y.length ? 1 : 0;
-  const dp = Array.from({ length: x.length + 1 }, () => new Array(y.length + 1).fill(0));
-  for (let i = 1; i <= x.length; i++)
-    for (let j = 1; j <= y.length; j++) dp[i][j] = x[i - 1] === y[j - 1] ? dp[i - 1][j - 1] + 1 : Math.max(dp[i - 1][j], dp[i][j - 1]);
-  return (2 * dp[x.length][y.length]) / (x.length + y.length);
-}
 
 /** @param {Uint8Array} bytes */
 function toBase64(bytes) {
@@ -95,7 +47,7 @@ function fromBase64(b64) {
   return out;
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
 
 export class RealtimeVoice extends EventTarget {
   /**
@@ -109,13 +61,16 @@ export class RealtimeVoice extends EventTarget {
     this.ws = null;
     this.status = "idle";
     this.activeResponse = "";
-    /** @type {{ text: string, kind: string, retried?: boolean }[]} */
-    this.pending = [];
     this.awaitingCreate = false;
-    /** @type {{ text: string, kind: string, retried?: boolean } | null} */
-    this.inflight = null;
-    this.spoken = "";
-    this.relayStats = { lines: 0, faithful: 0 };
+    /** A response.create held back until the response in progress ends. @type {{ instructions?: string, extra?: any, at: number } | null} */
+    this.wanted = null;
+    /** Out-of-band lines being recorded, by response id. @type {Map<string, { key: string, chunks: Int16Array[] }>} */
+    this.captures = new Map();
+    /** @type {Map<string, (pcm: Int16Array | null) => void>} */
+    this.captureWaiters = new Map();
+    this.lastSpeechStart = 0;
+    /** Assistant message item of each response (for truncation). @type {Map<string, string>} */
+    this.items = new Map();
     this.closed = false;
     this.micNode = null;
     this.micStream = null;
@@ -131,6 +86,10 @@ export class RealtimeVoice extends EventTarget {
   setStatus(status, extra) {
     this.status = status;
     this.emit("status", { status, ...extra });
+  }
+
+  get busy() {
+    return !!(this.activeResponse || this.awaitingCreate);
   }
 
   // ── Connection ──────────────────────────────────────────────────────────
@@ -156,6 +115,7 @@ export class RealtimeVoice extends EventTarget {
       if (resp.status === 402) throw Object.assign(new Error("Daily voice time used up. Sign in or come back tomorrow."), { code: "limit" });
       if (resp.status === 401) throw Object.assign(new Error("Please sign in with Hugging Face to talk."), { code: "login", loginUrl: body.loginUrl });
       if (resp.status === 503) throw Object.assign(new Error("All voice servers are busy. Try again shortly."), { code: "busy" });
+      if (resp.status === 429) throw Object.assign(new Error("Too many voice sessions just now. Try again in a minute."), { code: "busy" });
       if (resp.status === 404 && body.state === "expired") {
         resp = await fetch("api/session", { method: "POST" });
         body = await resp.json().catch(() => ({}));
@@ -224,19 +184,36 @@ export class RealtimeVoice extends EventTarget {
       type: "session.update",
       session: {
         type: "realtime",
-        instructions: RELAY_INSTRUCTIONS,
+        instructions: IDLE_INSTRUCTIONS,
         // Speculative transcripts: the backend shares each pause's transcript
         // before it commits the turn, so grading can start during the grace.
         extensions: ["speech_to_speech.input_audio_transcription.snapshot"],
         audio: {
           input: {
             format: { type: "audio/pcm", rate: RATE },
-            turn_detection: { type: "server_vad", create_response: false, interrupt_response: true },
+            turn_detection: { type: "server_vad", create_response: true, interrupt_response: true },
           },
           output,
         },
       },
     });
+  }
+
+  /**
+   * Coach instructions and tools for the quiz (deep-merged into the session).
+   * @param {{ instructions?: string, tools?: any[] }} cfg
+   */
+  configure(cfg) {
+    /** @type {Record<string, any>} */
+    const session = { type: "realtime" };
+    if (cfg.instructions) session.instructions = cfg.instructions;
+    if (cfg.tools) Object.assign(session, { tools: cfg.tools, tool_choice: cfg.tools.length ? "auto" : "none" });
+    this.send({ type: "session.update", session });
+  }
+
+  /** Back to small talk between quizzes. */
+  reset() {
+    this.configure({ instructions: IDLE_INSTRUCTIONS, tools: [] });
   }
 
   /** @param {any} msg */
@@ -246,7 +223,7 @@ export class RealtimeVoice extends EventTarget {
 
   close() {
     this.closed = true;
-    this.pending = [];
+    this.wanted = null;
     try {
       this.ws?.close(1000);
     } catch {}
@@ -277,55 +254,96 @@ export class RealtimeVoice extends EventTarget {
     node.port.postMessage({ kind: "mute", value: this.muted });
   }
 
-  /** Half-duplex gate: send silence instead of the mic while the coach talks. */
+  /** Half-duplex gate (when barge-in is off): send silence while the coach talks. */
   setMuted(value) {
     this.muted = !!value;
     this.micNode?.port.postMessage({ kind: "mute", value: this.muted });
   }
 
-  // ── Speaking ────────────────────────────────────────────────────────────
+  // ── Conversation ────────────────────────────────────────────────────────
 
   /**
-   * Speak a script. Queued behind any response already in flight.
-   * @param {string} text @param {string} [kind]
+   * Ask the coach to speak now, or as soon as the reply in progress ends.
+   * @param {string} [instructions] per-response instructions
+   * @param {Record<string, any>} [extra] more response fields (e.g. tool_choice)
    */
-  say(text, kind = "line") {
-    for (const line of splitScript((text || "").trim())) this.pending.push({ text: line, kind });
-    this.pump();
+  respond(instructions, extra) {
+    if (this.busy) {
+      this.wanted = { instructions, extra, at: performance.now() };
+      return;
+    }
+    this.awaitingCreate = true;
+    this.send({ type: "response.create", response: { ...(instructions ? { instructions } : {}), ...extra } });
   }
 
-  /** Drop queued lines and cancel the line being generated. */
-  stopSpeaking() {
-    this.pending = [];
-    if (this.activeResponse || this.awaitingCreate) this.send({ type: "response.cancel" });
-  }
-
-  pump() {
-    if (this.activeResponse || this.awaitingCreate || !this.pending.length) return;
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    const line = /** @type {{text: string, kind: string}} */ (this.pending.shift());
-    const { text, kind } = line;
-    this.inflight = line;
+  /**
+   * Record a short fixed line in the coach's voice without playing it or
+   * adding it to the conversation (only when nothing else is going on).
+   * @param {string} line @returns {Promise<Int16Array | null>}
+   */
+  synthesize(line) {
+    if (this.busy || this.captureWaiters.size) return Promise.resolve(null);
+    const key = `l${Math.random().toString(36).slice(2, 8)}`;
     this.awaitingCreate = true;
     this.send({
       type: "response.create",
       response: {
         conversation: "none",
-        instructions: RELAY_INSTRUCTIONS,
         output_modalities: ["audio"],
-        metadata: { kind },
-        input: [
-          ...RELAY_EXAMPLES,
-          { type: "message", role: "user", content: [{ type: "input_text", text: `<line>${text}</line>` }] },
-        ],
+        instructions: RELAY_INSTRUCTIONS,
+        metadata: { viva_capture: key },
+        input: [...RELAY_EXAMPLES, { type: "message", role: "user", content: [{ type: "input_text", text: `<line>${line}</line>` }] }],
       },
     });
+    return new Promise((resolve) => {
+      this.captureWaiters.set(key, resolve);
+      setTimeout(() => {
+        if (this.captureWaiters.delete(key)) resolve(null);
+      }, 15000);
+    });
+  }
+
+  /** Remove a reply from the conversation history. @param {string} responseId */
+  deleteItem(responseId) {
+    const itemId = this.items.get(responseId);
+    if (itemId) this.send({ type: "conversation.item.delete", item_id: itemId });
+  }
+
+  /** A typed message from the student. @param {string} text */
+  sendText(text) {
+    this.send({
+      type: "conversation.item.create",
+      item: { type: "message", role: "user", content: [{ type: "input_text", text }] },
+    });
+    this.respond();
+  }
+
+  /** @param {string} callId @param {string} output */
+  sendToolOutput(callId, output) {
+    this.send({ type: "conversation.item.create", item: { type: "function_call_output", call_id: callId, output } });
+    this.respond();
+  }
+
+  /** Cancel the reply being generated (the server does this itself on barge-in). */
+  cancel() {
+    this.wanted = null;
+    if (this.busy) this.send({ type: "response.cancel" });
+  }
+
+  /**
+   * Cut a reply's history to what the student actually heard.
+   * @param {string} responseId @param {number} audioEndMs
+   */
+  truncate(responseId, audioEndMs) {
+    const itemId = this.items.get(responseId);
+    if (itemId) this.send({ type: "conversation.item.truncate", item_id: itemId, content_index: 0, audio_end_ms: Math.max(0, Math.round(audioEndMs)) });
   }
 
   /** @param {any} ev */
   onEvent(ev) {
     switch (ev.type) {
       case "input_audio_buffer.speech_started":
+        this.lastSpeechStart = performance.now();
         this.emit("speech-started", {});
         break;
       case "input_audio_buffer.speech_stopped":
@@ -340,58 +358,87 @@ export class RealtimeVoice extends EventTarget {
       case "conversation.item.input_audio_transcription.completed":
         this.emit("user-final", { itemId: ev.item_id, transcript: (ev.transcript || "").trim() });
         break;
-      case "response.created":
+      case "response.created": {
         this.awaitingCreate = false;
         this.activeResponse = ev.response?.id || "resp";
-        this.spoken = "";
-        this.emit("response-started", { responseId: this.activeResponse, text: this.inflight?.text || "", kind: this.inflight?.kind });
+        const key = ev.response?.metadata?.viva_capture;
+        if (key) {
+          this.captures.set(this.activeResponse, { key, chunks: [] });
+          break;
+        }
+        this.emit("response-started", { responseId: this.activeResponse });
+        break;
+      }
+      case "response.output_item.added":
+        if (ev.item?.type === "message" && ev.item.id) {
+          this.items.set(ev.response_id || this.activeResponse, ev.item.id);
+          this.emit("assistant-item", { responseId: ev.response_id || this.activeResponse, itemId: ev.item.id });
+        }
         break;
       case "response.output_audio.delta": {
         const bytes = fromBase64(ev.delta);
         const pcm = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >> 1);
-        this.emit("audio", { responseId: ev.response_id || this.activeResponse, pcm, rate: RATE });
+        const capture = this.captures.get(ev.response_id || this.activeResponse);
+        if (capture) capture.chunks.push(pcm.slice());
+        else this.emit("audio", { responseId: ev.response_id || this.activeResponse, pcm, rate: RATE });
         break;
       }
       case "speech_to_speech.output_audio.visemes":
+        if (this.captures.has(ev.response_id)) break;
         this.emit("visemes", { responseId: ev.response_id, visemes: ev.visemes || [] });
         break;
       case "response.output_audio_transcript.delta":
-        this.spoken += ev.delta || "";
-        this.emit("assistant-text", { responseId: ev.response_id, delta: ev.delta || "" });
+      case "response.output_text.delta":
+        if (this.captures.has(ev.response_id)) break;
+        this.emit("assistant-text", { responseId: ev.response_id || this.activeResponse, delta: ev.delta || "" });
         break;
+      case "response.function_call_arguments.done": {
+        let args = {};
+        try {
+          args = JSON.parse(ev.arguments || "{}");
+        } catch {}
+        this.emit("tool-call", { responseId: ev.response_id || this.activeResponse, callId: ev.call_id, name: ev.name, args });
+        break;
+      }
       case "response.done": {
         const id = ev.response?.id || this.activeResponse;
-        if (this.inflight && ev.response?.status === "completed") {
-          // Track whether the backend's LLM read the line faithfully.
-          const score = similarity(this.inflight.text, this.spoken);
-          this.relayStats.lines++;
-          if (score >= 0.9) this.relayStats.faithful++;
-          else console.warn(`[voice] line not read verbatim (${score.toFixed(2)}):`, this.spoken);
-        }
-        if (this.inflight && ev.response?.status === "failed" && !this.inflight.retried) {
-          // A hosted LLM hiccup (rate limit, timeout): say the line again once.
-          this.pending.unshift({ ...this.inflight, retried: true });
-        }
-        this.inflight = null;
         this.activeResponse = "";
         this.awaitingCreate = false;
-        this.emit("response-done", { responseId: id, status: ev.response?.status });
-        this.pump();
+        const capture = this.captures.get(id);
+        if (capture) {
+          this.captures.delete(id);
+          const done = this.captureWaiters.get(/** @type {any} */ (capture).key);
+          this.captureWaiters.delete(/** @type {any} */ (capture).key);
+          const n = capture.chunks.reduce((a, c) => a + c.length, 0);
+          const pcm = new Int16Array(n);
+          let o = 0;
+          for (const c of capture.chunks) {
+            pcm.set(c, o);
+            o += c.length;
+          }
+          done?.(ev.response?.status === "completed" && n ? pcm : null);
+        } else {
+          this.emit("response-done", { responseId: id, status: ev.response?.status });
+        }
+        // A held-back response.create goes out now, unless the student has
+        // started talking since: the backend answers their turn by itself.
+        const wanted = this.wanted;
+        this.wanted = null;
+        if (wanted && this.lastSpeechStart < wanted.at) this.respond(wanted.instructions, wanted.extra);
         break;
       }
       case "error": {
         const err = ev.error || {};
+        const code = err.code || err.type;
         console.warn("[voice] server error", err);
-        if (err.type === "conversation_already_has_active_response" || err.code === "conversation_already_has_active_response") {
+        if (code === "conversation_already_has_active_response") {
+          // Our response.create raced one the server started: try again after it.
           this.awaitingCreate = false;
-          // Retry the line once the response in progress finishes.
-          if (this.inflight) this.pending.unshift(this.inflight);
-          this.inflight = null;
+          this.wanted = this.wanted || { at: performance.now() };
           break;
         }
         this.awaitingCreate = false;
-        this.emit("error", { message: err.message || "Voice server error", code: err.type || err.code });
-        this.pump();
+        this.emit("error", { message: err.message || "Voice server error", code });
         break;
       }
     }

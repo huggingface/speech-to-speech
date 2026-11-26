@@ -27,7 +27,7 @@ from typing import Any
 
 import httpx
 from coach import game as game_mod
-from coach import llm, research
+from coach import llm, research, voice
 from coach.leaderboard import Leaderboard
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -347,6 +347,9 @@ def start_game(req: StartRequest, request: Request) -> dict[str, Any]:
         "say": opening,
         "question": game.public_question(),
         "state": game.state(),
+        # The speech backend's LLM holds the conversation: its instructions,
+        # the grader tools it calls, and the words that start the call.
+        "voice": {"instructions": voice.instructions(game), "tools": voice.TOOLS, "opening": voice.opening(game)},
     }
 
 
@@ -368,7 +371,11 @@ async def turn(game_id: str, req: TurnRequest) -> dict[str, Any]:
     if not req.transcript.strip() and req.intent not in game_mod.BUTTON_INTENTS:
         raise HTTPException(status_code=422, detail="Empty answer.")
     async with game.lock:
-        return await game_mod.handle_turn(game, req.transcript or f"({req.intent})", req.intent)
+        out = await game_mod.handle_turn(game, req.transcript or f"({req.intent})", req.intent)
+        # For a tool call from the backend's LLM: its result, and the session
+        # instructions updated to the new question state.
+        out["voice"] = {"instructions": voice.instructions(game), "output": voice.tool_output(game, out)}
+        return out
 
 
 @app.post("/api/game/{game_id}/prefetch")

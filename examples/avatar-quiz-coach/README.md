@@ -21,20 +21,29 @@ answer is explained only after the last try or when you say “skip”. Streaks,
 badges and a leaderboard keep score.
 
 ```
-mic ─▶ speech-to-speech backend (VAD + STT) ─▶ transcript ─▶ coach server (grade, clue, score)
-                                                                   │
-avatar ◀─ lip-synced audio ◀─ speech-to-speech backend (TTS) ◀─ script to say
+mic ─▶ speech-to-speech backend: VAD + STT ─▶ LLM (the coach) ─▶ TTS ─▶ lip-synced avatar
+                                                   │  ▲
+                              check_answer, give_hint, skip_question, end_quiz
+                                                   ▼  │
+                                  coach server: grade, clue, score (via the browser)
 ```
 
-- **Ears and voice**: the browser speaks the OpenAI Realtime protocol to a
-  [speech-to-speech](https://github.com/huggingface/speech-to-speech) server.
-  `turn_detection.create_response: false` stops the backend from answering on
-  its own; each line the coach says is an out-of-band `response.create`
-  (`conversation: "none"`) carrying the exact script. The backend has no
-  text-to-speech-only path, so its LLM reads the line aloud: lines are sent at
-  most two sentences at a time with few-shot read-aloud examples, which kept
-  24 of 24 test lines word for word on Qwen3.5-4B and Gemma 4 31B (a plain
-  "repeat this" prompt made the model answer the quiz questions itself).
+- **Conversation**: the browser speaks the OpenAI Realtime protocol to a
+  [speech-to-speech](https://github.com/huggingface/speech-to-speech) server,
+  whose LLM is the coach: it answers on its own after each turn, chats,
+  repeats or explains a question, and stops when you talk over it (server VAD
+  with `interrupt_response`; the browser flushes its audio and truncates the
+  reply to what you heard). Session instructions (`coach/voice.py`) carry the
+  quiz state but never the answers. When you attempt one, the LLM calls
+  `check_answer`; the browser runs the grader on your actual transcript and
+  returns the verdict and what to say (a clue, or the result and the next
+  question). A short "let's see", recorded once per session in the coach's
+  voice, plays while the grader works. In 44 scripted text turns (four quizzes)
+  on the dev stack's Gemma 4 31B, the coach picked the right tool, or none for
+  small talk and "repeat that", every time, leaked no answers, and read 16 of
+  16 next questions word for word. In one voice test it wrote a call out as
+  text instead; such a reply is cut from playback and history and retried
+  with a tool call required.
 - **Brain**: `server.py` researches topics into eight spoken-friendly
   questions. A GitHub link or a paper (an arXiv or Hugging Face Papers link, or
   a paper named by title) is read first-hand: the README, design docs and an
@@ -42,10 +51,10 @@ avatar ◀─ lip-synced audio ◀─ speech-to-speech backend (TTS) ◀─ scri
   Wikipedia, plus Google results when `SERPER_API_KEY` is set. The writer lists
   the key concepts first and writes spares, so repeats are dropped. Questions come with reference
   answers and key points (marked as required when the question asks for them,
-  context otherwise), then grades every transcript and writes clues with a
-  fast model on Hugging Face Inference Providers. Grading starts speculatively
-  from the backend's transcript snapshot as soon as the student pauses, so it
-  runs during the backend's reopen grace instead of after it. A check rejects clues that
+  context otherwise), then grades answers and writes clues with a fast model
+  on Hugging Face Inference Providers. Grading starts as soon as the
+  transcript arrives (or from the backend's transcript snapshot while it waits
+  out the reopen grace), so it is often done when the coach calls for it. A check rejects clues that
   contain answer phrases the student hasn't said yet. Points, streaks and badges
   are computed with plain rules in `coach/game.py`.
 - **Face**: a [TalkingHead](https://github.com/met4citizen/TalkingHead) avatar (Max)

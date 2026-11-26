@@ -2,9 +2,10 @@
 /**
  * Viva app controller: lobby → research → quiz → results.
  *
- * The speech backend is the coach's ears and mouth (see realtime.js); the
- * Python server researches topics, grades every answer and keeps score.
- * The browser glues them together and drives the avatar's body language.
+ * The speech backend's LLM is the coach in a live conversation (see
+ * realtime.js): it talks, can be interrupted, and calls grader tools that the
+ * browser runs against the Python server, which researches topics, grades
+ * every answer and keeps score. The browser also drives the avatar.
  */
 
 import { COACHES } from "./coaches.js";
@@ -35,8 +36,17 @@ const S = {
   /** @type {any} */ cfg: { mode: "manual" },
   /** Latest speculative transcript, the one already prefetched, and when the mic was last loud. */
   snap: { text: "", sent: "", lastLoud: 0 },
-  /** Line text by response id, shown when that line's audio starts. */
+  /** Spoken text by response id (it streams in ahead of the audio). */
   lineText: new Map(),
+  /** What the student said since the coach last spoke, graded when the coach calls check_answer. */
+  heard: /** @type {string[]} */ ([]),
+  /** Responses that called a tool, and ones that wrote a tool call as text instead. */
+  toolResponses: new Set(),
+  badResponses: new Set(),
+  retriedCall: false,
+  /** Short fillers in the coach's voice, played while the grader works. @type {Int16Array[]} */
+  fillers: [],
+  /** @type {RealtimeVoice | null} */ fillersFor: null,
   /** Seconds of audio received per response id, and ids whose audio is complete. */
   lineAudio: new Map(),
   lineDone: new Set(),
@@ -52,7 +62,7 @@ const S = {
   avatarReady: /** @type {Promise<void> | null} */ (null),
   /** @type {RealtimeVoice | null} */ voice: null,
   voiceOk: false,
-  bargeIn: store.get("bargein") === "1",
+  bargeIn: store.get("bargein", "1") === "1",
   coachTalking: false,
   responseActive: false,
   responseHadAudio: false,
@@ -285,7 +295,9 @@ function setPhase(phase) {
 function backToLobby() {
   S.runId++;
   S.researchAbort?.abort();
-  S.voice?.stopSpeaking();
+  S.voice?.cancel();
+  S.voice?.reset();
+  S.game = null;
   S.avatar?.interrupt();
   hideCaption();
   setPhase("lobby");
@@ -316,8 +328,10 @@ async function startRun(opts) {
     if (ok && run === S.runId && S.phase === "research" && !opts.packId) {
       greeted = true;
       const topic = opts.topic || "";
-      const intro = topic.length <= 40 && !/[:;/]/.test(topic) ? `Ooh, ${topic}!` : "Ooh, great topic!";
-      say(`${intro} Give me a few seconds to read up on it.`, "greeting");
+      const what = topic.length <= 60 && !/https?:/.test(topic) ? `"${topic}"` : "the topic the student picked";
+      S.voice?.respond(
+        `In one short, upbeat sentence, react to ${what} as a quiz topic and say you need a few seconds to read up on it.`,
+      );
     }
   });
 
@@ -362,7 +376,14 @@ async function startRun(opts) {
     toast(`Voice isn't available, so ${S.coach.name}'s lines appear as captions and you can type your answers.`, "info");
   }
   S.avatar?.setMood("happy");
-  say(greeted ? `Okay, I'm ready! ${game.say}` : game.say, "opening");
+  S.heard = [];
+  if (S.voice && S.voiceOk) {
+    // From here the backend's LLM runs the quiz, with the grader as its tools.
+    S.voice.configure({ instructions: game.voice.instructions, tools: game.voice.tools });
+    S.voice.respond(greeted ? `${game.voice.opening}\n\nYou already said hello while reading up, so skip the greeting.` : game.voice.opening);
+  } else {
+    showCaption(game.say);
+  }
 }
 
 /** @param {string} stage */
@@ -509,9 +530,30 @@ function wireVoice(voice) {
     const id = /** @type {any} */ (e).detail.responseId;
     S.responseActive = true;
     S.responseHadAudio = false;
-    setCoachTalking(true);
     avatar.beginResponse(id);
-    S.lineText.set(id, /** @type {any} */ (e).detail.text || "");
+    S.lineText.set(id, "");
+  });
+  voice.addEventListener("assistant-text", (e) => {
+    const d = /** @type {any} */ (e).detail;
+    const text = (S.lineText.get(d.responseId) || "") + d.delta;
+    S.lineText.set(d.responseId, text);
+    if (CALL_MARKUP.test(text) && !S.badResponses.has(d.responseId)) {
+      // The model wrote its tool call as text: don't say it, redo the turn (see response-done).
+      console.warn("[voice] tool call written as text:", text);
+      S.badResponses.add(d.responseId);
+      voice.cancel();
+      S.avatar?.interrupt();
+      subtitlesStop();
+      return;
+    }
+    if (SUB.id === d.responseId) subtitlesUpdate(text);
+  });
+  voice.addEventListener("tool-call", (e) => {
+    const d = /** @type {any} */ (e).detail;
+    S.toolResponses.add(d.responseId);
+    // Grading takes a moment: say "let's see" right away if the coach hasn't spoken.
+    if (d.name === "check_answer" && !S.responseHadAudio && !avatar.playing) playFiller();
+    runTool(d);
   });
   voice.addEventListener("visemes", (e) => {
     const d = /** @type {any} */ (e).detail;
@@ -519,6 +561,7 @@ function wireVoice(voice) {
   });
   voice.addEventListener("audio", (e) => {
     const d = /** @type {any} */ (e).detail;
+    if (!S.responseHadAudio) setCoachTalking(true);
     S.responseHadAudio = true;
     S.lineAudio.set(d.responseId, (S.lineAudio.get(d.responseId) || 0) + d.pcm.length / d.rate);
     avatar.feed(d.responseId, d.pcm);
@@ -531,25 +574,32 @@ function wireVoice(voice) {
     S.lineDone.add(id);
     const secs = S.lineAudio.get(id) || 0;
     if (id === SUB.id && secs > 0.5) SUB.cps = SUB.total / secs;
+    if (S.badResponses.has(id) && !S.toolResponses.has(id)) {
+      // Drop the garbled reply from history (the model would copy it) and ask
+      // again with a tool call required, once per student turn.
+      voice.deleteItem(id);
+      if (!S.retriedCall) {
+        S.retriedCall = true;
+        voice.respond(undefined, { tool_choice: "required" });
+      }
+      return;
+    }
+    // The coach replied without grading: what the student said before is
+    // answered; the next attempt starts fresh.
+    if (/** @type {any} */ (e).detail.status === "completed" && S.responseHadAudio && !S.toolResponses.has(id)) S.heard = [];
+    if (S.phase === "quiz" && S.fillersFor !== voice) prepareFillers(voice);
     if (!S.responseHadAudio || !avatar.playing) scheduleCoachDone();
   });
   avatar.addEventListener("line-start", (e) => {
     const id = /** @type {any} */ (e).detail.responseId;
-    const text = S.lineText.get(id);
-    S.lineText.delete(id);
-    if (text) subtitlesStart(text, id);
+    subtitlesStart(S.lineText.get(id) || "", id);
   });
   avatar.addEventListener("playback", (e) => {
     if (!(/** @type {any} */ (e).detail.playing) && !S.responseActive) scheduleCoachDone();
   });
   voice.addEventListener("speech-started", () => {
+    if (S.coachTalking && S.bargeIn) bargeIn();
     if (S.phase !== "quiz") return;
-    if (S.coachTalking && S.bargeIn) {
-      voice.stopSpeaking();
-      avatar.interrupt();
-      subtitlesStop();
-      setCoachTalking(false);
-    }
     S.partial = "";
     if ($("#verdict").classList.contains("previous")) hideVerdict();
     setMic("hearing", "Hearing you…", "Pause when you're done");
@@ -574,7 +624,12 @@ function wireVoice(voice) {
       if (S.phase === "quiz") setMicIdle();
       return;
     }
-    submitTurn(text);
+    // The coach decides what to do with it; grade it early in case it's an answer.
+    S.retriedCall = false;
+    S.heard.push(text);
+    $("#answer-text").textContent = text;
+    prefetchGrade(answerSoFar());
+    setMic("thinking", `${S.coach.name} is thinking…`, "");
   });
   voice.addEventListener("mic-level", (e) => {
     const rms = /** @type {any} */ (e).detail.rms;
@@ -606,6 +661,17 @@ function maybeSpeculate() {
   if (!text || text === S.snap.sent || S.phase !== "quiz" || !S.game || S.coachTalking) return;
   if (performance.now() - S.snap.lastLoud < 250) return;
   S.snap.sent = text;
+  prefetchGrade(answerSoFar(text));
+}
+
+/** The answer check_answer would grade: the student's last two utterances. @param {string} [pending] */
+function answerSoFar(pending) {
+  return [...S.heard, ...(pending ? [pending] : [])].slice(-2).join(" ");
+}
+
+/** @param {string} text */
+function prefetchGrade(text) {
+  if (!SPECULATE || !text || !S.game) return;
   fetch(`api/game/${S.game.game_id}/prefetch`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -613,10 +679,50 @@ function maybeSpeculate() {
   }).catch(() => {});
 }
 
+// A tool call the model wrote out as text instead of calling it.
+const CALL_MARKUP = /<\s*\|?\s*(?:tool_call|call)\b|\bcall:(?:check_answer|give_hint|skip_question|end_quiz)\b/i;
+const FILLER_LINES = ["Let's see.", "Okay, let me check.", "Hmm, let's see."];
+
+/** Record the fillers once per voice session, between turns. @param {RealtimeVoice} voice */
+async function prepareFillers(voice) {
+  S.fillersFor = voice;
+  S.fillers = [];
+  for (const line of FILLER_LINES) {
+    // Only while nothing else is going on; give up on a line rather than wait long.
+    for (let i = 0; i < 20 && (voice.busy || S.coachTalking); i++) await sleep(500);
+    const pcm = await voice.synthesize(line);
+    if (S.voice !== voice) return;
+    if (pcm) S.fillers.push(pcm);
+  }
+}
+
+function playFiller() {
+  const avatar = S.avatar;
+  if (!avatar || !S.fillers.length) return;
+  const pcm = S.fillers[Math.floor(Math.random() * S.fillers.length)];
+  const id = `filler-${performance.now()}`;
+  avatar.beginResponse(id);
+  avatar.feed(id, pcm);
+  avatar.endResponse();
+  setCoachTalking(true);
+}
+
+/** The student talked over the coach: stop the voice now and keep history to what they heard. */
+function bargeIn() {
+  const id = SUB.id;
+  const heard = id && S.avatar?.heardMs ? S.avatar.heardMs(id) : -1;
+  S.avatar?.interrupt();
+  // The backend cancels a reply still being generated by itself; a finished
+  // one that was still playing here gets cut to what was heard.
+  if (id && heard >= 0 && S.lineDone.has(id)) S.voice?.truncate(id, heard);
+  subtitlesStop();
+  setCoachTalking(false);
+}
+
 function scheduleCoachDone() {
   clearTimeout(S.unmuteTimer);
   S.unmuteTimer = window.setTimeout(() => {
-    if (!S.responseActive && !S.avatar?.playing && !S.voice?.pending.length) {
+    if (!S.responseActive && !S.avatar?.playing && !S.voice?.busy) {
       setCoachTalking(false);
       subtitlesStop(S.phase === "results" ? 6000 : 3500);
     }
@@ -634,7 +740,7 @@ function setCoachTalking(on) {
 
 function setMicIdle() {
   if (!S.voiceOk) setMic("off", "Voice offline", "Type your answer below");
-  else setMic("listening", "Your turn", "Answer out loud, or say hint, repeat or skip");
+  else setMic("listening", "Your turn", `Answer out loud, or just talk to ${S.coach.name}`);
 }
 
 function applyMicGate() {
@@ -648,14 +754,9 @@ function setMic(state, title, sub) {
   $("#mic-sub").textContent = sub;
 }
 
-/** Speak a line (or just caption it when there is no voice). */
-function say(/** @type {string} */ text, kind = "line") {
-  if (!text) return;
-  if (S.voice && S.voiceOk) {
-    S.voice.say(text, kind);
-  } else {
-    showCaption(text);
-  }
+/** Without a voice connection, the coach's words appear as captions. */
+function say(/** @type {string} */ text) {
+  if (text && !(S.voice && S.voiceOk)) showCaption(text);
 }
 
 /**
@@ -666,6 +767,23 @@ const SUB = { id: "", chunks: /** @type {string[]} */ ([]), ends: /** @type {num
 
 /** @param {string} text @param {string} [id] response id, to pace by its audio length */
 function subtitlesStart(text, id = "") {
+  Object.assign(SUB, { id, idx: -1, playAt: performance.now() });
+  subtitlesUpdate(text);
+  clearInterval(SUB.timer);
+  SUB.timer = window.setInterval(() => {
+    if (!SUB.playAt) return;
+    const chars = ((performance.now() - SUB.playAt) / 1000) * SUB.cps;
+    let i = SUB.ends.findIndex((end) => chars < end);
+    if (i < 0) i = SUB.chunks.length - 1;
+    if (i !== SUB.idx) {
+      SUB.idx = i;
+      showCaption(SUB.chunks[i]);
+    }
+  }, 120);
+}
+
+/** (Re)cut the line into caption chunks; the text keeps growing while the coach speaks. @param {string} text */
+function subtitlesUpdate(text) {
   const sentences = text.match(/[^.!?]+(?:[.!?]+["')\]]*|$)\s*/g) || [text];
   const chunks = [];
   let cur = "";
@@ -679,20 +797,12 @@ function subtitlesStart(text, id = "") {
   if (cur.trim()) chunks.push(cur.trim());
   let acc = 0;
   const ends = chunks.map((c) => (acc += c.length + 1));
-  const secs = S.lineDone.has(id) ? S.lineAudio.get(id) || 0 : 0;
-  Object.assign(SUB, { id, chunks, ends, idx: 0, total: acc, cps: secs > 0.5 ? acc / secs : 14, playAt: performance.now() });
-  showCaption(chunks[0] || text);
-  clearInterval(SUB.timer);
-  SUB.timer = window.setInterval(() => {
-    if (!SUB.playAt) return;
-    const chars = ((performance.now() - SUB.playAt) / 1000) * SUB.cps;
-    let i = SUB.ends.findIndex((end) => chars < end);
-    if (i < 0) i = SUB.chunks.length - 1;
-    if (i !== SUB.idx) {
-      SUB.idx = i;
-      showCaption(SUB.chunks[i]);
-    }
-  }, 120);
+  const secs = S.lineDone.has(SUB.id) ? S.lineAudio.get(SUB.id) || 0 : 0;
+  Object.assign(SUB, { chunks, ends, total: acc, cps: secs > 0.5 ? acc / secs : 14 });
+  if (SUB.idx < 0 && chunks.length) {
+    SUB.idx = 0;
+    showCaption(chunks[0]);
+  }
 }
 
 function subtitlesStop(delay = 0) {
@@ -718,9 +828,31 @@ function hideCaption(delay = 0) {
 
 // ── Quiz turns ───────────────────────────────────────────────────────────
 
-/** @param {string} text @param {string} [intent] */
+const BUTTON_WORDS = {
+  hint: "Can I get a hint?",
+  repeat: "Can you repeat the question?",
+  skip: "Let's skip this one.",
+  stop: "Let's end the quiz here.",
+};
+
+/**
+ * A typed answer or a button. With voice, it goes to the coach like speech
+ * (the coach then calls the grader); without, straight to the grader.
+ * @param {string} text @param {string} [intent]
+ */
 function submitTurn(text, intent) {
   if (S.phase !== "quiz" || !S.game) return;
+  if (S.voice && S.voiceOk) {
+    if (S.coachTalking) bargeIn();
+    const words = intent ? BUTTON_WORDS[/** @type {keyof typeof BUTTON_WORDS} */ (intent)] || intent : text;
+    if (!intent) {
+      S.heard.push(text);
+      $("#answer-text").textContent = text;
+      prefetchGrade(answerSoFar());
+    }
+    S.voice.sendText(words);
+    return;
+  }
   S.turnChain = S.turnChain.then(() => doTurn(text, intent)).catch((err) => {
     console.error(err);
     toast(err.message || "Something went wrong.");
@@ -733,7 +865,6 @@ async function doTurn(text, intent) {
   const game = S.game;
   if (!game || game.state?.finished) return;
   if (S.coachTalking && (intent || S.bargeIn)) {
-    S.voice?.stopSpeaking();
     S.avatar?.interrupt();
     subtitlesStop();
   }
@@ -747,6 +878,54 @@ async function doTurn(text, intent) {
   if (S.game !== game) return;
   $("#answer-box").classList.remove("grading");
   handleOutcome(out);
+}
+
+const TOOL_INTENTS = { check_answer: null, give_hint: "hint", skip_question: "skip", end_quiz: "stop" };
+
+/**
+ * The coach called a grader tool: run it, update the screen, and hand the
+ * result back so the coach can tell the student.
+ * @param {{ callId: string, name: string, args: any }} call
+ */
+function runTool(call) {
+  S.turnChain = S.turnChain
+    .then(async () => {
+      const game = S.game;
+      const voice = S.voice;
+      if (!voice) return;
+      if (!game || !(call.name in TOOL_INTENTS) || game.state?.finished) {
+        voice.sendToolOutput(call.callId, JSON.stringify({ error: "No quiz question is open right now." }));
+        return;
+      }
+      const intent = TOOL_INTENTS[/** @type {keyof typeof TOOL_INTENTS} */ (call.name)];
+      // Grade the student's own words, not the coach's paraphrase of them.
+      let transcript = "";
+      if (call.name === "check_answer") {
+        transcript = answerSoFar() || String(call.args?.answer || "") || "(no answer)";
+        S.heard = [];
+      }
+      $("#answer-box").classList.add("grading");
+      setMic("thinking", "Checking…", `${S.coach.name} is checking your answer`);
+      if (!intent) S.avatar?.think();
+      let out;
+      try {
+        out = await postJson(`api/game/${game.game_id}/turn`, { transcript, intent });
+      } catch (err) {
+        voice.sendToolOutput(call.callId, JSON.stringify({ error: "The grader is unavailable.", next: "Ask them to say their answer again." }));
+        throw err;
+      } finally {
+        $("#answer-box").classList.remove("grading");
+      }
+      if (S.game !== game) return;
+      handleOutcome(out);
+      voice.configure({ instructions: out.voice.instructions });
+      voice.sendToolOutput(call.callId, out.voice.output);
+    })
+    .catch((err) => {
+      console.error(err);
+      toast(err.message || "Something went wrong.");
+      setMicIdle();
+    });
 }
 
 /** @param {any} out */
@@ -768,7 +947,7 @@ function handleOutcome(out) {
     if (!out.reveal) updateStakes(st);
   }
 
-  say(out.say, out.intent);
+  say(out.say);
 
   if (out.finished) {
     S.game.state = st;
@@ -827,7 +1006,7 @@ function renderDots() {
 /** @param {boolean} [keepVerdict] keep the previous question's verdict visible */
 function resetAnswer(keepVerdict = false) {
   S.partial = "";
-  $("#answer-text").innerHTML = `<span class="muted">Answer out loud when ${S.coach.name} finishes asking.</span>`;
+  $("#answer-text").innerHTML = `<span class="muted">Answer out loud, any time. You can cut ${S.coach.name} off.</span>`;
   $("#answer-box").classList.remove("grading");
   if (keepVerdict && !$("#verdict").hidden) {
     $("#verdict").classList.add("previous");
@@ -986,7 +1165,7 @@ async function showResults(summary) {
     $("#r-placement").hidden = false;
     $("#r-placement").textContent = "Practice round: not counted on the leaderboard";
   }
-  say(report.coaching.say, "wrapup");
+  say(report.coaching.say);
   const rows = await fetchBoard(S.pack.slug, "all", 10);
   renderBoard($("#r-board"), rows, { me: game.player });
 }
