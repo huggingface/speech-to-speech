@@ -81,11 +81,13 @@ RUNNING_TOOL_STATUS = (
 # it, so nothing announces it later. Asking in the line not to repeat the result
 # makes small models leave it out, so the line goes once the model has spoken.
 # Asking for an answer first makes them speak instead of calling the tool the
-# new request needs, so the line asks for the request to be handled as usual.
+# new request needs, and naming tool calls makes Gemma 4 31B call one when none
+# is needed, so the line only asks for the request to be handled as usual. Even
+# so, small models skip that call more often while the line is present.
 UNSPOKEN_TOOL_RESULT = (
     "[Tool status, not said by the user] Finished, with a result the user has not heard: {calls}. Handle what "
-    "they just said as usual, with a tool call if it needs one, and also tell them that result in a sentence. "
-    "Skip it only if it holds nothing they are waiting for."
+    "they just said as usual, and also tell them that result in a sentence. Skip it only if it holds nothing "
+    "they are waiting for."
 )
 
 # Anchor returned by :meth:`Chat.history_anchor_id` for an empty conversation,
