@@ -6,6 +6,8 @@
   "dependencies": {
     "@met4citizen/headaudio": "1.1.0",
     "@met4citizen/talkinghead": "1.8.2",
+    "@myned-ai/gsplat-flame-avatar-renderer": "1.4.0",
+    "jszip": "3.10.1",
     "three": "0.186.0"
   }
 }

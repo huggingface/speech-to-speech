@@ -7,9 +7,11 @@
  * The browser glues them together and drives the avatar's body language.
  */
 
-import { Avatar, COACHES } from "./avatar.js";
+import { COACHES } from "./coaches.js";
 import { RealtimeVoice } from "./realtime.js";
 import { confetti } from "./confetti.js";
+
+/** @typedef {import("./avatar.js").Avatar | import("./splat-avatar.js").SplatAvatar} Avatar */
 
 const $ = (/** @type {string} */ sel) => /** @type {HTMLElement} */ (document.querySelector(sel));
 const LEVELS = { 1: ["Easy", "easy"], 2: ["Medium", ""], 3: ["Hard", "hard"] };
@@ -74,11 +76,16 @@ async function boot() {
   loadTopics();
   renderLobbyBoard();
 
-  const avatar = new Avatar($("#avatar"), /** @type {any} */ (S.coachKey));
-  S.avatar = avatar;
-  S.avatarReady = avatar
-    .init((ev) => {
-      if (ev.lengthComputable) $("#avatar-pct").textContent = `${Math.round((ev.loaded / ev.total) * 100)}%`;
+  // Each coach has its own renderer; load only the one on screen.
+  S.avatarReady = (S.coach.renderer === "splat"
+    ? import("./splat-avatar.js").then((m) => new m.SplatAvatar($("#avatar"), /** @type {any} */ (S.coach)))
+    : import("./avatar.js").then((m) => new m.Avatar($("#avatar"), /** @type {any} */ (S.coach)))
+  )
+    .then((avatar) => {
+      S.avatar = avatar;
+      return avatar.init((ev) => {
+        if (ev.lengthComputable) $("#avatar-pct").textContent = `${Math.round((ev.loaded / ev.total) * 100)}%`;
+      });
     })
     .then(() => {
       $("#avatar-loading").classList.add("done");

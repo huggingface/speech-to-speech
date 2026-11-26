@@ -144,10 +144,13 @@ def index() -> FileResponse:
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 # Browser libraries straight from node_modules (no bundler): three.js,
-# TalkingHead and HeadAudio, resolved through the page's import map.
+# TalkingHead, HeadAudio, the Gaussian-splat avatar renderer and JSZip,
+# resolved through the page's import map.
 app.mount("/vendor/three", StaticFiles(directory=NODE / "three"), name="three")
 app.mount("/vendor/talkinghead", StaticFiles(directory=NODE / "@met4citizen/talkinghead/modules"), name="talkinghead")
 app.mount("/vendor/headaudio", StaticFiles(directory=NODE / "@met4citizen/headaudio/dist"), name="headaudio")
+app.mount("/vendor/gsplat", StaticFiles(directory=NODE / "@myned-ai/gsplat-flame-avatar-renderer/dist"), name="gsplat")
+app.mount("/vendor/jszip", StaticFiles(directory=NODE / "jszip/dist"), name="jszip")
 
 
 @app.get("/api/config")

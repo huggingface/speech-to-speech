@@ -44,7 +44,8 @@ avatar ◀─ lip-synced audio ◀─ speech-to-speech backend (TTS) ◀─ scri
   runs during the backend's reopen grace instead of after it. A check rejects clues that
   contain answer phrases the student hasn't said yet. Points, streaks and badges
   are computed with plain rules in `coach/game.py`.
-- **Face**: a [TalkingHead](https://github.com/met4citizen/TalkingHead) avatar.
+- **Face**: a [TalkingHead](https://github.com/met4citizen/TalkingHead) avatar (Max)
+  or a photoreal Gaussian-splat head (Ada).
   When the backend runs with `--enable_visemes`, its phoneme-based visemes drive
   the mouth, merged into held, blended shapes and scheduled against the audio
   player; otherwise [HeadAudio](https://github.com/met4citizen/HeadAudio)
@@ -57,7 +58,8 @@ From this folder, with a speech-to-speech server on port 8765
 
 ```bash
 npm ci
-for a in avatarsdk avaturn; do curl -L -o static/avatars/$a.glb https://raw.githubusercontent.com/met4citizen/TalkingHead/1563de184c19b310de4b636664d5835e2c74dbba/avatars/$a.glb; done
+curl -L -o static/avatars/avatarsdk.glb https://raw.githubusercontent.com/met4citizen/TalkingHead/1563de184c19b310de4b636664d5835e2c74dbba/avatars/avatarsdk.glb
+curl -L -o static/avatars/nyx.zip https://cdn.jsdelivr.net/npm/@myned-ai/avatar-chat-widget@1.15.0/public/asset/nyx.zip
 pip install -r requirements.txt
 HF_TOKEN=hf_... SPEECH_TO_SPEECH_URL=ws://localhost:8765/v1/realtime uvicorn server:app --port 7860
 ```
@@ -94,6 +96,10 @@ regenerates the featured topics.
 | `LEADERBOARD_REPO` | Dataset repo that mirrors the leaderboard so it survives restarts |
 | `RESEARCH_PER_HOUR` | New topics per visitor per hour (default 8) |
 
-The avatars are TalkingHead's samples, made with [Avatar SDK](https://avatarsdk.com)
-(Max) and [Avaturn](https://avaturn.me) (Ada), both free for non-commercial use.
-The Docker build downloads them from a pinned commit.
+Max is TalkingHead's [Avatar SDK](https://avatarsdk.com) sample (free for
+non-commercial use). Ada is "Nyx", a photoreal Gaussian-splat head made with
+[LAM](https://github.com/aigc3d/LAM) and shipped (MIT) with
+[avatar-chat-widget](https://github.com/myned-ai/avatar-chat-widget); it is drawn by
+[gsplat-flame-avatar-renderer](https://github.com/myned-ai/gsplat-flame-avatar-renderer)
+and driven with ARKit blendshapes, head and shoulders only. The Docker build
+downloads both from pinned, checksummed URLs.

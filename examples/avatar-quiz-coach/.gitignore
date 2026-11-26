@@ -1,5 +1,6 @@
 node_modules/
 data/
 static/avatars/*.glb
+static/avatars/*.zip
 __pycache__/
 static/_test/
