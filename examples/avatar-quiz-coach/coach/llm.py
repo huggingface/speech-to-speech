@@ -33,6 +33,23 @@ GRADER_MODELS = _models(
     "GRADER_MODELS",
     "openai/gpt-oss-120b:cerebras,openai/gpt-oss-120b:groq,Qwen/Qwen3.8-27B:cerebras,zai-org/GLM-5.3-Flash",
 )
+# The grader can run on the speech backend's own model instead (any
+# OpenAI-compatible endpoint, e.g. the deployment's Gemma 4 31B), with the
+# hosted chain above as fallback. On the same tests Gemma 4 31B accepted as
+# many brief correct answers, leaked no answers, and took ~1.3 s per turn.
+Route = tuple[str, str, str | None]  # base URL, model, reasoning effort
+
+
+def _grader_routes() -> list[str | Route]:
+    base = os.environ.get("GRADER_BASE_URL", "").strip().rstrip("/")
+    model = os.environ.get("GRADER_MODEL", "").strip()
+    primary: list[str | Route] = []
+    if base and model:
+        primary.append((base, model, os.environ.get("GRADER_REASONING_EFFORT", "none").strip() or None))
+    return primary + list(GRADER_MODELS)
+
+
+GRADER_ROUTES = _grader_routes()
 # Question writing runs once per topic, so it favours quality.
 WRITER_MODELS = _models(
     "WRITER_MODELS",
@@ -105,12 +122,12 @@ def _http() -> httpx.AsyncClient:
 
 async def chat_json(
     messages: list[dict[str, str]],
-    models: list[str],
+    models: list[str] | list[str | Route],
     *,
     max_tokens: int,
     temperature: float = 0.4,
     timeout: float = 30.0,
-    reasoning_effort: str | None = "low",
+    reasoning_effort: str | None = os.environ.get("LLM_REASONING_EFFORT", "low") or None,
 ) -> tuple[dict[str, Any], str]:
     """Return ``(parsed_json, model)`` from the first model that answers well.
 
@@ -121,21 +138,23 @@ async def chat_json(
     token = api_token()
     if not token:
         raise LLMError("No HF_TOKEN configured for the coach's language model.")
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     errors: list[str] = []
-    for model in models:
+    for entry in models:
+        base_url, model, effort = entry if isinstance(entry, tuple) else (BASE_URL, entry, reasoning_effort)
+        key = (os.environ.get("GRADER_API_KEY") or token) if isinstance(entry, tuple) else token
+        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
         body: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        if reasoning_effort:
-            body["reasoning_effort"] = reasoning_effort
+        if effort:
+            body["reasoning_effort"] = effort
         for attempt in range(2):
             started = time.perf_counter()
             try:
-                resp = await _http().post(f"{BASE_URL}/chat/completions", json=body, headers=headers, timeout=timeout)
+                resp = await _http().post(f"{base_url}/chat/completions", json=body, headers=headers, timeout=timeout)
                 data = resp.json()
                 choices = data.get("choices") if isinstance(data, dict) else None
                 if resp.status_code == 400 and "reasoning_effort" in body:

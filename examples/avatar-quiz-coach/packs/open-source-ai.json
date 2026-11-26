@@ -14,7 +14,11 @@
    "fun_fact": "The company is named after the hugging face emoji, and it started out in 2016 as a chatbot app for teenagers.",
    "difficulty": 1,
    "source": 1,
-   "id": 0
+   "id": 0,
+   "required": [
+    0,
+    1
+   ]
   },
   {
    "question": "According to the Open Source Initiative, what four things can people do with an open-source AI system?",
@@ -29,7 +33,13 @@
    "fun_fact": "The Open Source Initiative spent two years consulting experts before publishing its definition of open-source AI in 2024.",
    "difficulty": 1,
    "source": 2,
-   "id": 1
+   "id": 1,
+   "required": [
+    0,
+    1,
+    2,
+    3
+   ]
   },
   {
    "question": "What is Hugging Face's Transformers library used for?",
@@ -43,7 +53,11 @@
    "fun_fact": "Many popular tools like Ollama and LM Studio can pull models directly from the Hugging Face Hub, so the library's ecosystem reaches far beyond Hugging Face itself.",
    "difficulty": 2,
    "source": 1,
-   "id": 2
+   "id": 2,
+   "required": [
+    1,
+    2
+   ]
   },
   {
    "question": "What is the key difference between a truly open-source model and one that is merely open-weight?",
@@ -57,7 +71,11 @@
    "fun_fact": "Artificial Analysis gives Nvidia's Nemotron family an openness score of eighty-three percent, while many Chinese frontier open-weight models score under fifty percent.",
    "difficulty": 2,
    "source": 2,
-   "id": 3
+   "id": 3,
+   "required": [
+    0,
+    1
+   ]
   },
   {
    "question": "Why has Meta's description of Llama as open-source been disputed?",
@@ -71,7 +89,10 @@
    "fun_fact": "The very first Llama model was restricted to researchers, and its weights leaked online through a torrent just weeks after release.",
    "difficulty": 2,
    "source": 3,
-   "id": 4
+   "id": 4,
+   "required": [
+    0
+   ]
   },
   {
    "question": "What is the design goal of Hugging Face's SmolLM family of language models?",
@@ -85,7 +106,11 @@
    "fun_fact": "SmolLM3, released in 2025, supports reasoning and six languages despite having only three billion parameters.",
    "difficulty": 2,
    "source": 1,
-   "id": 5
+   "id": 5,
+   "required": [
+    0,
+    1
+   ]
   },
   {
    "question": "Why have Chinese companies like DeepSeek embraced open-weight AI models?",
@@ -100,7 +125,10 @@
    "fun_fact": "DeepSeek's R1 reasoning model, released in January 2025 under the MIT license, made the world widely aware of China's open AI strategy.",
    "difficulty": 3,
    "source": 2,
-   "id": 6
+   "id": 6,
+   "required": [
+    0
+   ]
   },
   {
    "question": "What was the most controversial aspect of the Open Source Initiative's definition of open-source AI, and how did they resolve it?",
@@ -115,7 +143,12 @@
    "fun_fact": "The resulting definition, called OSAID version 1.0, was published in 2024 after two years of expert consultation.",
    "difficulty": 3,
    "source": 2,
-   "id": 7
+   "id": 7,
+   "required": [
+    0,
+    1,
+    3
+   ]
   }
  ],
  "id": "321da162fe64",

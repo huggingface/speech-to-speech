@@ -15,7 +15,11 @@
    "fun_fact": "The first speech recognition system, Audrey, was built by Bell Labs in 1952 and could only recognize spoken digits from a single speaker.",
    "difficulty": 1,
    "source": 1,
-   "id": 0
+   "id": 0,
+   "required": [
+    0,
+    1
+   ]
   },
   {
    "question": "What does a text-to-speech system do, and what two main parts is it typically composed of?",
@@ -29,7 +33,12 @@
    "fun_fact": "In 1968, researchers in Japan built the first general English text-to-speech system, and a 1978 Italian system could even sing a cappella.",
    "difficulty": 1,
    "source": 2,
-   "id": 1
+   "id": 1,
+   "required": [
+    0,
+    1,
+    2
+   ]
   },
   {
    "question": "What is voice activity detection, and why is it useful in voice over internet protocol applications?",
@@ -43,7 +52,12 @@
    "fun_fact": "Telemarketing firms use voice activity detection with predictive dialers to guess whether a person or an answering machine picked up the phone.",
    "difficulty": 1,
    "source": 3,
-   "id": 2
+   "id": 2,
+   "required": [
+    0,
+    1,
+    2
+   ]
   },
   {
    "question": "In a text-to-speech front-end, what is text normalization and why is it necessary?",
@@ -57,7 +71,11 @@
    "fun_fact": "The earliest operating system to include a speech synthesizer was Unix in 1974, through its speak utility.",
    "difficulty": 2,
    "source": 2,
-   "id": 3
+   "id": 3,
+   "required": [
+    0,
+    2
+   ]
   },
   {
    "question": "Describe the typical stages of a voice activity detection algorithm.",
@@ -72,7 +90,12 @@
    "fun_fact": "Voice activity detection is usually independent of language, so it works the same whether you speak English or Japanese.",
    "difficulty": 2,
    "source": 3,
-   "id": 4
+   "id": 4,
+   "required": [
+    0,
+    1,
+    2
+   ]
   },
   {
    "question": "What fundamental trade-off must every voice activity detector make, and how do mobile phones typically handle it?",
@@ -86,7 +109,11 @@
    "fun_fact": "The biggest challenge for VAD in mobile environments is very low signal-to-noise ratios, where speech can be buried below the background noise.",
    "difficulty": 2,
    "source": 3,
-   "id": 5
+   "id": 5,
+   "required": [
+    0,
+    2
+   ]
   },
   {
    "question": "How did hidden Markov models change speech recognition compared to the earlier dynamic time warping approach?",
@@ -100,7 +127,11 @@
    "fun_fact": "Linguists criticized HMMs as too simplistic to capture many features of human language, yet the approach still proved highly useful in practice.",
    "difficulty": 3,
    "source": 1,
-   "id": 6
+   "id": 6,
+   "required": [
+    0,
+    1
+   ]
   },
   {
    "question": "How do speech recognition, text-to-speech, and voice activity detection combine in a real-time voice assistant?",
@@ -115,7 +146,12 @@
    "fun_fact": "Apple's Siri relies on speech technology from Nuance, a company whose lineage traces back through Dragon Systems and Lernout and Hauspie.",
    "difficulty": 3,
    "source": 3,
-   "id": 7
+   "id": 7,
+   "required": [
+    0,
+    1,
+    2
+   ]
   }
  ],
  "id": "b697d9a8cba6",

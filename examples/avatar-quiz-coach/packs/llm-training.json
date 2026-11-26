@@ -15,7 +15,10 @@
    "fun_fact": "GPT stands for Generative Pre-trained Transformer, and the name literally describes this pretraining step.",
    "difficulty": 1,
    "source": 1,
-   "id": 0
+   "id": 0,
+   "required": [
+    0
+   ]
   },
   {
    "question": "After pretraining, what is instruction tuning meant to accomplish?",
@@ -29,7 +32,11 @@
    "fun_fact": "ChatGPT is a fine-tuned version of the GPT base models, tuned to be an assistant.",
    "difficulty": 1,
    "source": 1,
-   "id": 1
+   "id": 1,
+   "required": [
+    1,
+    2
+   ]
   },
   {
    "question": "In fine-tuning, what does it mean to freeze layers, and why might you do it?",
@@ -43,7 +50,10 @@
    "fun_fact": "With LoRA, a model with billions of parameters can be fine-tuned using only several million extra parameters.",
    "difficulty": 2,
    "source": 3,
-   "id": 2
+   "id": 2,
+   "required": [
+    0
+   ]
   },
   {
    "question": "In RLHF, how is the reward model built before the policy is trained?",
@@ -57,7 +67,12 @@
    "fun_fact": "Rankings from human annotators can be converted into scores using the Elo rating system, borrowed from ranking chess players.",
    "difficulty": 2,
    "source": 2,
-   "id": 3
+   "id": 3,
+   "required": [
+    0,
+    1,
+    2
+   ]
   },
   {
    "question": "Why is human feedback a practical training signal when the task itself is hard to specify?",
@@ -71,7 +86,11 @@
    "fun_fact": "RLHF gained much of its popularity when OpenAI reused it in their paper on InstructGPT.",
    "difficulty": 2,
    "source": 2,
-   "id": 4
+   "id": 4,
+   "required": [
+    0,
+    2
+   ]
   },
   {
    "question": "How does DPO differ from the classic RLHF pipeline at a high level?",
@@ -86,7 +105,12 @@
    "fun_fact": "RLHF reward models are typically optimized with algorithms like proximal policy optimization, the same family of methods used elsewhere in RL.",
    "difficulty": 2,
    "source": 2,
-   "id": 5
+   "id": 5,
+   "required": [
+    0,
+    1,
+    2
+   ]
   },
   {
    "question": "What are the main challenges of collecting preference data for RLHF?",
@@ -100,7 +124,11 @@
    "fun_fact": "Studies show that increasing the size of the reward model can matter more than proportionally increasing the amount of feedback data.",
    "difficulty": 3,
    "source": 2,
-   "id": 6
+   "id": 6,
+   "required": [
+    0,
+    1
+   ]
   },
   {
    "question": "Why can fine-tuning hurt a model, and what's one way to mitigate that?",
@@ -114,7 +142,11 @@
    "fun_fact": "This interpolation trick largely keeps the fine-tuned model's in-distribution performance while restoring out-of-distribution performance.",
    "difficulty": 3,
    "source": 3,
-   "id": 7
+   "id": 7,
+   "required": [
+    0,
+    1
+   ]
   }
  ],
  "id": "4d764493914f",

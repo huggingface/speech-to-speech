@@ -37,7 +37,8 @@ avatar ◀─ lip-synced audio ◀─ speech-to-speech backend (TTS) ◀─ scri
   "repeat this" prompt made the model answer the quiz questions itself).
 - **Brain**: `server.py` researches topics (Wikipedia, plus Google results when
   `SERPER_API_KEY` is set) into eight spoken-friendly questions with reference
-  answers and key points, then grades every transcript and writes clues with a
+  answers and key points (marked as required when the question asks for them,
+  context otherwise), then grades every transcript and writes clues with a
   fast model on Hugging Face Inference Providers. Grading starts speculatively
   from the backend's transcript snapshot as soon as the student pauses, so it
   runs during the backend's reopen grace instead of after it. A check rejects clues that
@@ -86,7 +87,8 @@ regenerates the featured topics.
 | `LOAD_BALANCER_URL`, `LB_HF_TOKEN` | Use a speech-to-speech load balancer instead (its address stays server-side) |
 | `LB_USER_TOKEN` | Local development only: stands in for the signed-in visitor's token when the load balancer requires a verified HF token. Never set it on a public Space. |
 | `SESSION_PROXY_URL` | Or piggyback another deployment's session API, e.g. `https://smolagents-hf-realtime-voice.hf.space/api` |
-| `GRADER_MODELS`, `WRITER_MODELS` | Comma-separated fallback chains (defaults: gpt-oss-120b on Cerebras for grading, GLM-5.3 for writing) |
+| `GRADER_BASE_URL`, `GRADER_MODEL` | Grade on the speech backend's own model through any OpenAI-compatible endpoint (e.g. the deployment's Gemma 4 31B); `GRADER_REASONING_EFFORT` (default `none`) and `GRADER_API_KEY` (default `HF_TOKEN`) go with it. The hosted chain below stays as fallback. |
+| `GRADER_MODELS`, `WRITER_MODELS` | Comma-separated Inference Providers fallback chains (defaults: gpt-oss-120b on Cerebras for grading, GLM-5.3 for writing) |
 | `COACH_VOICE` | Overrides the TTS voice (by default Max uses `en-smooth_m`, a voice of the hosted stack, and Ada uses `Serena`) |
 | `SERPER_API_KEY` | Adds Google results to research |
 | `LEADERBOARD_REPO` | Dataset repo that mirrors the leaderboard so it survives restarts |

@@ -15,7 +15,11 @@
    "fun_fact": "Turing introduced it as the 'imitation game' in his 1950 paper, which opens by asking, 'Can machines think?'",
    "difficulty": 1,
    "source": 2,
-   "id": 0
+   "id": 0,
+   "required": [
+    1,
+    2
+   ]
   },
   {
    "question": "What happened at the Dartmouth workshop of 1956, and why is it important?",
@@ -30,7 +34,12 @@
    "fun_fact": "Despite launching the whole field, the workshop was considered a failure because it did not deliver on bold predictions of human-level intelligence within a generation.",
    "difficulty": 1,
    "source": 1,
-   "id": 1
+   "id": 1,
+   "required": [
+    1,
+    2,
+    3
+   ]
   },
   {
    "question": "What is an AI winter?",
@@ -44,7 +53,11 @@
    "fun_fact": "The term first appeared in 1984, when researchers Roger Schank and John McDermott warned that the 1980s hype spiral would trigger a chain reaction like a 'nuclear winter' for AI.",
    "difficulty": 1,
    "source": 3,
-   "id": 2
+   "id": 2,
+   "required": [
+    0,
+    1
+   ]
   },
   {
    "question": "Why did the 1966 ALPAC report kill funding for machine translation research?",
@@ -58,7 +71,11 @@
    "fun_fact": "An apocryphal example of the problem translated 'the spirit is willing but the flesh is weak' back from Russian as 'the vodka is good but the meat is rotten.'",
    "difficulty": 2,
    "source": 3,
-   "id": 3
+   "id": 3,
+   "required": [
+    0,
+    2
+   ]
   },
   {
    "question": "Why did mainstream research into perceptrons stop around 1969?",
@@ -72,7 +89,12 @@
    "fun_fact": "The neural network winter ended in the mid-1980s thanks to work by John Hopfield and David Rumelhart, long after the criticism.",
    "difficulty": 2,
    "source": 3,
-   "id": 4
+   "id": 4,
+   "required": [
+    0,
+    1,
+    2
+   ]
   },
   {
    "question": "Why did governments cut funding for AI research in 1974?",
@@ -87,7 +109,13 @@
    "fun_fact": "Only seven years later, Japan's Fifth Generation initiative and the success of expert systems brought investment flooding back, growing AI into a billion-dollar industry.",
    "difficulty": 2,
    "source": 1,
-   "id": 5
+   "id": 5,
+   "required": [
+    0,
+    1,
+    2,
+    3
+   ]
   },
   {
    "question": "Why did machine learning take off in the early 2000s after the AI winters?",
@@ -102,7 +130,12 @@
    "fun_fact": "Research and funding actually kept growing during the winters, just under other names like 'machine learning.'",
    "difficulty": 2,
    "source": 1,
-   "id": 6
+   "id": 6,
+   "required": [
+    0,
+    1,
+    2
+   ]
   },
   {
    "question": "How did the transformer architecture lead to the rise of chatbots like ChatGPT and Claude?",
@@ -117,7 +150,12 @@
    "fun_fact": "Despite the boom, concerns about risks and ethics of advanced AI have sparked ongoing debate about its future impact on society.",
    "difficulty": 3,
    "source": 1,
-   "id": 7
+   "id": 7,
+   "required": [
+    0,
+    1,
+    2
+   ]
   }
  ],
  "id": "e8268da26983",

@@ -15,7 +15,11 @@
    "fun_fact": "The name 'diffusion' comes from thermodynamics, where particles spread out over time, just like noise spreading through an image.",
    "difficulty": 1,
    "source": 1,
-   "id": 0
+   "id": 0,
+   "required": [
+    0,
+    1
+   ]
   },
   {
    "question": "After training, how does a diffusion model create a brand new image?",
@@ -29,7 +33,11 @@
    "fun_fact": "Because the starting noise is random, the same prompt can produce a different image every single time.",
    "difficulty": 1,
    "source": 1,
-   "id": 1
+   "id": 1,
+   "required": [
+    0,
+    1
+   ]
   },
   {
    "question": "Why is the forward noising process designed so that the final result approaches a Gaussian distribution?",
@@ -43,7 +51,11 @@
    "fun_fact": "This mirrors physics: the Gaussian is the equilibrium distribution, like how gas particles spread until they fill a room evenly.",
    "difficulty": 2,
    "source": 1,
-   "id": 2
+   "id": 2,
+   "required": [
+    0,
+    2
+   ]
   },
   {
    "question": "What kinds of neural networks are typically used as the denoising backbone of a diffusion model?",
@@ -57,7 +69,11 @@
    "fun_fact": "Stable Diffusion 3 switched from a U-Net to a rectified flow transformer, mixing text and image encodings inside each block.",
    "difficulty": 2,
    "source": 1,
-   "id": 3
+   "id": 3,
+   "required": [
+    0,
+    1
+   ]
   },
   {
    "question": "How do text-to-image diffusion models use the text prompt to guide image generation?",
@@ -71,7 +87,12 @@
    "fun_fact": "Stable Diffusion used a frozen CLIP text encoder, a model originally built for matching images with captions.",
    "difficulty": 2,
    "source": 2,
-   "id": 4
+   "id": 4,
+   "required": [
+    0,
+    1,
+    2
+   ]
   },
   {
    "question": "What is a latent diffusion model, and why perform diffusion in latent space instead of pixel space?",
@@ -85,7 +106,12 @@
    "fun_fact": "Latent diffusion is why Stable Diffusion can run on consumer GPUs with as little as 2.4 gigabytes of memory.",
    "difficulty": 2,
    "source": 2,
-   "id": 5
+   "id": 5,
+   "required": [
+    0,
+    1,
+    2
+   ]
   },
   {
    "question": "In Stable Diffusion, what are the three main components of the architecture and what does each do?",
@@ -99,7 +125,12 @@
    "fun_fact": "The U-Net in Stable Diffusion has about 860 million parameters, which was considered lightweight by 2022 standards.",
    "difficulty": 3,
    "source": 2,
-   "id": 6
+   "id": 6,
+   "required": [
+    0,
+    1,
+    2
+   ]
   },
   {
    "question": "Why is randomness essential in the reverse diffusion process, rather than just doing pure denoising steps?",
@@ -113,7 +144,11 @@
    "fun_fact": "This mirrors thermodynamics: if particles only underwent gradient descent, they would all fall to the origin and the distribution would collapse.",
    "difficulty": 3,
    "source": 1,
-   "id": 7
+   "id": 7,
+   "required": [
+    0,
+    1
+   ]
   }
  ],
  "id": "9a5049b70649",

@@ -142,12 +142,22 @@ async def _fetch_page(http: httpx.AsyncClient, source: dict[str, str]) -> dict[s
 
 # ── Question writing ─────────────────────────────────────────────────────────
 
-WRITER_SYSTEM = """You are an expert examiner preparing a SPOKEN quiz. A voice avatar will read each question aloud and a student will answer out loud, so:
+REQUIRED_RULE = (
+    "A key point is required only if the question explicitly asks for it: a correct spoken answer must contain it. "
+    "Context the question does not ask about (who wrote it, where, extra facts or numbers) is not required. "
+    "Every question has at least one required key point."
+)
+
+WRITER_SYSTEM = (
+    """You are an expert examiner preparing a SPOKEN quiz. A voice avatar will read each question aloud and a student will answer out loud, so:
 - Ask open questions answerable in one or two spoken sentences. Never multiple choice, never "which of the following", no true/false.
 - No formulas, code, symbols, tables or long lists in questions or answers. Write numbers and acronyms the way people say them.
 - Each question tests one clear idea. Avoid trick questions and trivia about exact dates unless the date is the point.
 - Base every fact on the provided sources; prefer what multiple sources agree on.
 - Order questions from easiest to hardest.
+- """
+    + REQUIRED_RULE
+    + """
 
 Return ONLY a JSON object:
 {
@@ -159,6 +169,7 @@ Return ONLY a JSON object:
       "question": "the question, max 30 words",
       "answer": "the model answer, one or two sentences",
       "key_points": ["2 to 4 short atomic facts a complete answer contains"],
+      "required": [indices of the key points the question explicitly asks for],
       "hint": "a nudge that does not give the answer away",
       "fun_fact": "one short surprising related fact",
       "difficulty": 1,
@@ -166,6 +177,7 @@ Return ONLY a JSON object:
     }
   ]
 }"""
+)
 
 
 PLANNER_SYSTEM = """A student wants to be quizzed on a topic. Plan the research.
@@ -229,11 +241,16 @@ def normalize_pack(raw: dict[str, Any], *, topic: str, difficulty: str, count: i
             source = int(q.get("source", 0))
         except (TypeError, ValueError):
             source = 0
+        points = points or [answer]
+        required = sorted(
+            {int(i) for i in (q.get("required") or []) if str(i).isdigit() and int(i) < len(points)}
+        ) or list(range(len(points)))
         questions.append(
             {
                 "question": question,
                 "answer": answer,
-                "key_points": points or [answer],
+                "key_points": points,
+                "required": required,
                 "hint": str(q.get("hint", "")).strip(),
                 "fun_fact": str(q.get("fun_fact", "")).strip(),
                 "difficulty": level,

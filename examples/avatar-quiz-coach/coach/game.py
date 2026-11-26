@@ -51,7 +51,7 @@ GRADER_SYSTEM = """You are {coach}, a warm, encouraging quiz coach in a spoken c
 If they give an answer and also say something else, the intent is "answer".
 
 2. If the intent is "answer", grade everything the student has said about this question so far (earlier_attempts plus student_said):
-- "correct": answers what the question asks with the essential idea of the reference answer. Missing details from the reference answer or key points do not make it partial.
+- "correct": conveys every key point listed in required_point_indices (the parts the question asks for). The other key points and extra details in the reference answer are context: never require them, never ask for them as a follow-up.
 - "partial": right direction but misses an essential key point
 - "incorrect": wrong or off target
 Also give score 0-100 and points_hit, the indices of key_points they have covered.
@@ -304,6 +304,7 @@ def _grader_messages(game: Game, transcript: str) -> list[dict[str, str]]:
         "question": q["question"],
         "reference_answer": q["answer"],
         "key_points": q["key_points"],
+        "required_point_indices": q.get("required") or list(range(len(q["key_points"]))),
         "prepared_hint": q.get("hint", ""),
         "fun_fact": q.get("fun_fact", ""),
         "attempt": game.attempt,
@@ -331,7 +332,7 @@ async def _rewrite_clue(game: Game, transcript: str, decision: dict[str, Any], l
         },
     ]
     try:
-        raw, _ = await llm.chat_json(messages, llm.GRADER_MODELS, max_tokens=600, temperature=0.4, timeout=8)
+        raw, _ = await llm.chat_json(messages, llm.GRADER_ROUTES, max_tokens=600, temperature=0.4, timeout=8)
     except llm.LLMError:
         return None
     return " ".join(str(raw.get("say") or "").split()) or None
@@ -416,7 +417,7 @@ async def _decide(game: Game, transcript: str) -> tuple[dict[str, Any], str] | N
     res = game.result()
     try:
         raw, model = await llm.chat_json(
-            _grader_messages(game, transcript), llm.GRADER_MODELS, max_tokens=900, temperature=0.3, timeout=12
+            _grader_messages(game, transcript), llm.GRADER_ROUTES, max_tokens=900, temperature=0.3, timeout=12
         )
     except llm.LLMError as exc:
         logger.error("grader unavailable: %s", exc)
@@ -663,7 +664,7 @@ async def coaching_report(game: Game) -> dict[str, Any]:
                 {"role": "system", "content": REPORT_SYSTEM.replace("{coach}", game.coach)},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
-            llm.GRADER_MODELS,
+            llm.GRADER_ROUTES,
             max_tokens=1200,
             temperature=0.5,
             timeout=15,

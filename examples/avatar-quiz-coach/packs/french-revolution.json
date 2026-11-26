@@ -15,7 +15,11 @@
    "fun_fact": "The Bastille was already scheduled for demolition before the revolutionaries got to it.",
    "difficulty": 1,
    "source": 3,
-   "id": 0
+   "id": 0,
+   "required": [
+    0,
+    1
+   ]
   },
   {
    "question": "What was the Estates General, and why was its 1789 meeting so significant?",
@@ -29,7 +33,12 @@
    "fun_fact": "The Estates General had not met for one hundred and seventy-five years before 1789.",
    "difficulty": 1,
    "source": 1,
-   "id": 1
+   "id": 1,
+   "required": [
+    0,
+    1,
+    2
+   ]
   },
   {
    "question": "What main factors caused the French Revolution?",
@@ -44,7 +53,13 @@
    "fun_fact": "France's debt level was actually not that high compared with Britain's, but its chaotic tax system caused far more resentment.",
    "difficulty": 2,
    "source": 1,
-   "id": 2
+   "id": 2,
+   "required": [
+    0,
+    1,
+    2,
+    3
+   ]
   },
   {
    "question": "How did the voting structure of the Estates General anger the Third Estate?",
@@ -58,7 +73,11 @@
    "fun_fact": "Campaigners called the Society of Thirty pushed to double Third Estate representation and count votes by head.",
    "difficulty": 2,
    "source": 1,
-   "id": 3
+   "id": 3,
+   "required": [
+    0,
+    1
+   ]
   },
   {
    "question": "How did the Reign of Terror end?",
@@ -72,7 +91,11 @@
    "fun_fact": "By the Terror's end, about sixteen thousand people had been officially executed, with many more dying in prison without trial.",
    "difficulty": 2,
    "source": 2,
-   "id": 4
+   "id": 4,
+   "required": [
+    0,
+    1
+   ]
   },
   {
    "question": "How did the flight to Varennes in 1791 damage the French monarchy?",
@@ -86,7 +109,11 @@
    "fun_fact": "The monarchy was abolished in September 1792, and Louis the Sixteenth was executed by guillotine in January 1793.",
    "difficulty": 2,
    "source": 1,
-   "id": 5
+   "id": 5,
+   "required": [
+    0,
+    1
+   ]
   },
   {
    "question": "Why did Robespierre and the Jacobins believe terror was necessary?",
@@ -100,7 +127,11 @@
    "fun_fact": "One historian said terror began as an improvised response to defeat but, once organized, became an instrument of victory.",
    "difficulty": 3,
    "source": 2,
-   "id": 6
+   "id": 6,
+   "required": [
+    0,
+    2
+   ]
   },
   {
    "question": "How did the French Revolution end, and what is its lasting legacy?",
@@ -115,7 +146,13 @@
    "fun_fact": "The Directory lasted only four years before falling, after the Committee of Public Safety before it proved equally unable to stabilize France.",
    "difficulty": 3,
    "source": 1,
-   "id": 7
+   "id": 7,
+   "required": [
+    0,
+    1,
+    2,
+    3
+   ]
   }
  ],
  "id": "5b28be2560d7",

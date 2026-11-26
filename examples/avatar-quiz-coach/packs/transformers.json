@@ -15,7 +15,11 @@
    "fun_fact": "The attention mechanism was partly inspired by the cocktail party effect, a phenomenon studied in audition research back in 1953.",
    "difficulty": 1,
    "source": 2,
-   "id": 0
+   "id": 0,
+   "required": [
+    0,
+    1
+   ]
   },
   {
    "question": "What year was the transformer architecture introduced, and in which famous paper?",
@@ -29,7 +33,11 @@
    "fun_fact": "The paper has been cited more than 150,000 times, making it one of the top ten most-cited papers of the 21st century.",
    "difficulty": 1,
    "source": 3,
-   "id": 1
+   "id": 1,
+   "required": [
+    0,
+    1
+   ]
   },
   {
    "question": "Why do transformers need positional encodings or positional embeddings?",
@@ -43,7 +51,12 @@
    "fun_fact": "The original paper used sine and cosine wave functions for positional encoding, partly because they might allow the model to handle sequences longer than those seen during training.",
    "difficulty": 2,
    "source": 1,
-   "id": 2
+   "id": 2,
+   "required": [
+    0,
+    1,
+    2
+   ]
   },
   {
    "question": "Why did recurrent neural networks struggle to process long sentences, and how did LSTM help?",
@@ -57,7 +70,12 @@
    "fun_fact": "Even with LSTM, reversing the input sentence improved early translation systems, showing how poorly information from the start of a sentence was preserved.",
    "difficulty": 2,
    "source": 1,
-   "id": 3
+   "id": 3,
+   "required": [
+    0,
+    1,
+    2
+   ]
   },
   {
    "question": "What is the main computational advantage transformers have over recurrent networks during training?",
@@ -71,7 +89,11 @@
    "fun_fact": "The parallelizability of transformers is a key reason they became the main architecture of most modern large language models.",
    "difficulty": 2,
    "source": 1,
-   "id": 4
+   "id": 4,
+   "required": [
+    0,
+    1
+   ]
   },
   {
    "question": "In self-attention, what are the query, key, and value vectors, and where do they come from?",
@@ -85,7 +107,12 @@
    "fun_fact": "Self-attention was once called intra-attention or intra-sentence attention when it was first proposed for LSTMs.",
    "difficulty": 2,
    "source": 2,
-   "id": 5
+   "id": 5,
+   "required": [
+    0,
+    1,
+    2
+   ]
   },
   {
    "question": "What does multi-head attention add beyond a single attention mechanism?",
@@ -100,7 +127,12 @@
    "fun_fact": "The heads' outputs are concatenated and passed through a final learned linear transformation to produce the layer's output.",
    "difficulty": 2,
    "source": 3,
-   "id": 6
+   "id": 6,
+   "required": [
+    0,
+    1,
+    2
+   ]
   },
   {
    "question": "What is the main computational drawback of standard self-attention as sequences get longer?",
@@ -114,7 +146,11 @@
    "fun_fact": "This quadratic cost is why researchers have explored local attention with sliding windows, which was found to reduce translation time in early attention models.",
    "difficulty": 3,
    "source": 1,
-   "id": 7
+   "id": 7,
+   "required": [
+    0,
+    1
+   ]
   }
  ],
  "id": "7afe97751daf",
