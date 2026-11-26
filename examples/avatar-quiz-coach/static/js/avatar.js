@@ -60,7 +60,7 @@ export const COACHES = {
   },
   max: {
     name: "Max",
-    voice: "Aiden",
+    voice: "en-smooth_m",
     lipGain: 1.35,
     jawGain: 1,
     avatar: {
