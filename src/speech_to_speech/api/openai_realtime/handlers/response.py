@@ -887,6 +887,10 @@ class ResponseHandler(RealtimeBaseHandler):
             and followup_ids
             and turns is not None
             and turns.phase in {TurnPhase.LISTENING, TurnPhase.SOFT_ENDED}
+            # Speech that may be a cough or a backchannel does not block the
+            # follow-up: a dismissed turn never commits, so a client waiting
+            # for it would wait forever. A committed one cancels this reply.
+            and not turns.current_is_provisional()
         ):
             return self.make_error("User input has not committed yet.", TOOL_FOLLOWUP_WAIT)
         prefetch_request = st.tool_followup_prefetch_request if not st.in_response else None

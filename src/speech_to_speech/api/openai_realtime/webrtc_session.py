@@ -198,12 +198,13 @@ class PipelineAudioTrack(MediaStreamTrack):
 
             if self.readyState != "live":
                 raise MediaStreamError
-            if not self._buffer and not self._drain_remaining:
+            if (not self._buffer or self._paused) and not self._drain_remaining:
                 # clear() can discard audio while the paced read is asleep.
                 continue
 
             needed = WEBRTC_FRAME_SAMPLES * 2  # bytes of s16 mono
-            payload = bytes(self._buffer[:needed])
+            # A pause drains the codec lookahead with silence, then holds the buffer.
+            payload = b"" if self._paused else bytes(self._buffer[:needed])
             del self._buffer[: len(payload)]
             # Drain codec lookahead and receiver prefetch before sleeping.
             self._drain_remaining = WEBRTC_DRAIN_FRAMES if payload else self._drain_remaining - 1

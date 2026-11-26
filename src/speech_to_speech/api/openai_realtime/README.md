@@ -100,6 +100,7 @@ flowchart LR
 | `conversation.item.input_audio_transcription.delta` | Incremental transcript text for the active input-audio content part (when live transcription is enabled). |
 | `conversation.item.input_audio_transcription.completed` | Final transcript for the user turn (with duration usage). |
 | `speech_to_speech.input_audio_transcription.snapshot` | Cumulative, replaceable speculative transcript hypothesis for the active input item (opt-in via `session.extensions`). |
+| `speech_to_speech.interruption.pending` / `.resolved` | Speech during assistant audio is being checked for words, and the outcome (opt-in via `session.extensions`; see [Coughs and backchannels](#coughs-and-backchannels)). |
 | `response.created` | Emitted when an explicit response is accepted or before the first implicit text, tool, audio, or terminal event (response is `in_progress`). |
 | `response.output_audio.delta` | Base64 PCM audio chunk from TTS. |
 | `response.output_audio.done` | Audio stream complete for the current output item. |
@@ -557,6 +558,83 @@ sequenceDiagram
 6. **Discard guard**: while `cancel_scope.discarding` is True, the send loop drops audio chunks and assistant output whose `cancel_generation` is not current (see `_generation_is_discardable` above), while preserving provider-reported usage for billing. The guard clears when a `__RESPONSE_DONE__` with a matching generation arrives (via `cancel_scope.response_done(gen)`), or when an explicit `response.create` starts a new response (`cancel_scope.new_response()`).
 7. **Client-initiated cancel**: `response.cancel` calls `cancel_scope.cancel()` when a response is active or queued, removes queued model requests while preserving pipeline-control sentinels, flushes the output queues with the same preservation rules, clears pending response keys, triggers `finish_response(status="cancelled", reason="client_cancelled")` for an opened response, re-enables `should_listen`, and clears `response_playing`.
 8. **Spurious cancel safety**: if no response is active, `cancel_scope.cancel()` is not called, preventing the discard guard from being set without a `__RESPONSE_DONE__` to clear it.
+
+### Coughs and backchannels
+
+By default any speech VAD detects during a reply cancels it, even a cough, room
+noise, or a listener's "uh-huh". If the transcript of that speech is then
+empty, no new response is made and the assistant goes silent. A session can
+make barge-in wait for words instead:
+
+```json
+{
+  "type": "session.update",
+  "session": {
+    "type": "realtime",
+    "audio": {
+      "input": {
+        "turn_detection": {
+          "type": "server_vad",
+          "interrupt_response": true,
+          "false_interruption": {"min_words": 1, "playback": "continue", "timeout_ms": 2000}
+        }
+      }
+    }
+  }
+}
+```
+
+`"false_interruption": true` uses those defaults; `null` or `false` turns it
+off. The server flag `--false_interruption {off,continue,pause,duck}` (with
+`--false_interruption_min_words`) sets the default for sessions that leave the
+field unset. It is off by default.
+
+When speech starts while a reply is active, queued, or still playing, the
+server holds that user turn instead of cancelling the reply. The reply keeps
+generating. Then:
+
+- **Real words commit the interruption.** Once the transcript has `min_words`
+  words that are not fillers or backchannels, the barge-in happens exactly as
+  it would have at speech start: `response.done` (`cancelled`, `turn_detected`),
+  `input_audio_buffer.speech_started` with the original `audio_start_ms`, the
+  playback cut in history, and the rest of the user item. A partial transcript
+  counts once two consecutive hypotheses both have enough words; a final
+  transcript counts at once. With live transcription on (the default) a real
+  interruption is committed about 0.5 to 1 s after it starts.
+- **No words dismiss it.** An empty or filler-only transcript, a failed
+  transcription, or no transcript within `timeout_ms` after the speech stops
+  means the speech was not an interruption. The client never sees that turn,
+  it does not enter the conversation, and the reply carries on.
+
+The built-in list of ignored words is English: hesitations ("uh", "um",
+"hmm", "mm-hmm"), backchannels ("yeah", "okay", "right", "I see", "got it")
+and "thank you", which STT models often write for noise. Text in brackets or
+parentheses, such as `[coughs]`, never counts. `ignore_words` replaces the list,
+for example for another language.
+
+`playback` chooses what happens to the reply's audio while the decision is
+pending:
+
+| `playback` | WebRTC (server paces playback) | WebSocket (client owns its player) |
+|---|---|---|
+| `continue` | Keeps playing. | Keeps playing. |
+| `pause` | The server pauses its track and resumes from the same sample. | The client is told with `speech_to_speech.interruption.pending` and should pause; the playback estimate used for history stops meanwhile. |
+| `duck` | The server plays it at a quarter of the volume. | The client is told and may duck. |
+
+WebSocket clients that do not opt in to the events always get `continue`. To
+opt in, add `"speech_to_speech.interruption"` to `session.extensions`. The
+server then sends `speech_to_speech.interruption.pending`
+(`audio_start_ms`, `playback`) when it starts holding, and
+`speech_to_speech.interruption.resolved` (`interrupted`, `transcript`) when it
+decides. When `interrupted` is true, the usual cancellation events follow.
+
+Speech that continues the user's own unanswered turn (VAD reopens it) still
+cancels the stale reply at once. Speech while the assistant is silent is an
+ordinary turn. A tool follow-up `response.create` sent while the decision is
+pending goes ahead and is cancelled like any reply if the speech turns out to
+be an interruption. Pipelines that send audio straight to the model, with no
+STT, have no words to judge, so they commit the interruption when the speech
+ends.
 
 ### Turning off barge-in from a client
 

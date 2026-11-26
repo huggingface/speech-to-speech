@@ -17,6 +17,7 @@ import nltk
 import torch
 from transformers import HfArgumentParser
 
+from speech_to_speech.api.openai_realtime.false_interruption import FalseInterruptionConfig
 from speech_to_speech.api.openai_realtime.pipeline_unit import NotifyingQueue, OutputSignal, PipelineUnit
 from speech_to_speech.arguments_classes.language_model_arguments import MLX_DEFAULT_LM_MODEL
 from speech_to_speech.arguments_classes.local_audio_arguments import LocalAudioArguments
@@ -337,8 +338,20 @@ def apply_torch_num_threads(module_kwargs: ModuleArguments) -> None:
         torch.set_num_threads(module_kwargs.torch_num_threads)
 
 
+def _default_false_interruption(module_kwargs: ModuleArguments) -> FalseInterruptionConfig | None:
+    """Server default for sessions that leave turn_detection.false_interruption unset."""
+    mode = getattr(module_kwargs, "false_interruption", "off")
+    if mode == "off":
+        return None
+    return FalseInterruptionConfig(playback=mode, min_words=module_kwargs.false_interruption_min_words)
+
+
 def prepare_module_args(module_kwargs: ModuleArguments, llm_backend: BackendSelection) -> None:
     validate_torch_num_threads(module_kwargs.torch_num_threads)
+    if module_kwargs.false_interruption not in ("off", "continue", "pause", "duck"):
+        raise ValueError("--false_interruption must be one of: off, continue, pause, duck.")
+    if module_kwargs.false_interruption_min_words < 1:
+        raise ValueError("--false_interruption_min_words must be at least 1.")
     for kind in ("stt", "tts"):
         declared = getattr(module_kwargs, f"{kind}_supported_languages")
         if declared is not None:
@@ -648,6 +661,7 @@ def _build_pipeline_unit(
         speculative_turns=speculative_turns,
         turn_latency_store=turn_latency_store,
         default_instructions=default_instructions,
+        default_false_interruption=_default_false_interruption(module_kwargs),
     )
 
     if module_kwargs.enable_live_transcription and not stt_selection.spec.capabilities.streams_audio_chunks:

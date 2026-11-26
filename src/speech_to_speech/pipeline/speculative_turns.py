@@ -242,6 +242,15 @@ class SpeculativeTurnTracker:
             logger.debug("Speculative turn %s is provisional", turn_id)
             return True
 
+    def current_is_provisional(self) -> bool:
+        """Whether the open turn may still be dismissed as noise."""
+        with self._condition:
+            return (
+                self._provisional is not None
+                and self._current is not None
+                and self._current.turn_id == self._provisional
+            )
+
     def confirm_provisional(self, turn_id: str | None) -> None:
         """The provisional turn is real: the turn before it is superseded as usual."""
         with self._condition:

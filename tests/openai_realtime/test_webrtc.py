@@ -46,6 +46,7 @@ from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES  # noq
 from speech_to_speech.api.openai_realtime.transports import SessionTransport  # noqa: E402
 from speech_to_speech.api.openai_realtime.webrtc_session import (  # noqa: E402
     AUDIO_PTIME,
+    WEBRTC_DRAIN_FRAMES,
     WEBRTC_FRAME_SAMPLES,
     WEBRTC_SAMPLE_RATE,
     PcmResampler,
@@ -333,6 +334,40 @@ class TestPipelineAudioTrack:
 
         track.clear()
         assert track.buffered_bytes == 0
+        track.stop()
+
+    async def test_pause_holds_audio_and_resume_plays_it_from_the_same_sample(self):
+        """Barge-in that may be a cough pauses playback without losing the reply."""
+        track = PipelineAudioTrack()
+        frames = [(np.ones(WEBRTC_FRAME_SAMPLES, dtype=np.int16) * value).tobytes() for value in (1, 2, 3)]
+        track.write(b"".join(frames))
+        assert np.all((await track.recv()).to_ndarray() == 1)
+
+        track.pause()
+        # The codec lookahead drains with silence, then the track waits.
+        for _ in range(WEBRTC_DRAIN_FRAMES):
+            assert np.all((await asyncio.wait_for(track.recv(), timeout=RECV_TIMEOUT_S)).to_ndarray() == 0)
+        held = asyncio.create_task(track.recv())
+        try:
+            await asyncio.sleep(IDLE_RECV_OBSERVATION_S)
+            assert not held.done()
+            assert track.buffered_bytes == 2 * len(frames[0])
+
+            track.resume()
+            assert np.all((await asyncio.wait_for(held, timeout=RECV_TIMEOUT_S)).to_ndarray() == 2)
+            assert np.all((await track.recv()).to_ndarray() == 3)
+        finally:
+            held.cancel()
+            await asyncio.gather(held, return_exceptions=True)
+            track.stop()
+
+    async def test_duck_lowers_and_resume_restores_volume(self):
+        track = PipelineAudioTrack()
+        track.write((np.ones(WEBRTC_FRAME_SAMPLES * 2, dtype=np.int16) * 1000).tobytes())
+        track.set_gain(0.25)
+        assert np.all((await track.recv()).to_ndarray() == 250)
+        track.resume()
+        assert np.all((await track.recv()).to_ndarray() == 1000)
         track.stop()
 
     async def test_stop_wakes_pending_recv_and_raises(self):

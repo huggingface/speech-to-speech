@@ -136,6 +136,26 @@ class ModuleArguments(Wav2Vec2STVHandlerArguments):
         default=0.5,
         metadata={"help": "Update interval for live transcription in seconds (default: 0.5s = 500ms)"},
     )
+    false_interruption: str = field(
+        default="off",
+        metadata={
+            "choices": ("off", "continue", "pause", "duck"),
+            "help": "Realtime server default for turn_detection.false_interruption, for sessions that do not set "
+            "it. Anything but 'off' stops a cough, room noise or a backchannel ('uh-huh', 'yeah') from cancelling "
+            "the assistant's reply: speech during a reply interrupts only once its transcript has real words. "
+            "The value is what happens to the reply's audio meanwhile: 'continue' keeps playing, 'pause' "
+            "pauses and resumes, 'duck' plays it quieter ('pause' and 'duck' are applied by the server on "
+            "WebRTC and announced to WebSocket clients that opt in to speech_to_speech.interruption events). "
+            "Default is off.",
+        },
+    )
+    false_interruption_min_words: int = field(
+        default=1,
+        metadata={
+            "help": "With --false_interruption, words other than fillers and backchannels needed before speech "
+            "during a reply interrupts it. Default is 1."
+        },
+    )
     enable_llm_proxy: bool = field(
         default=False,
         metadata={
