@@ -404,3 +404,138 @@ def test_stt_does_not_restart_expired_tracker_processing_delay(monkeypatch):
     thread.join(timeout=1.0)
     assert completed_without_new_wait
     assert result == [True]
+
+
+class _SignalingSTTHandler(BaseSTTHandler):
+    def setup(
+        self,
+        speculative_turns: SpeculativeTurnTracker | None = None,
+        started: Event | None = None,
+        finished: Event | None = None,
+    ) -> None:
+        self.speculative_turns = speculative_turns
+        self.started = started or Event()
+        self.finished = finished or Event()
+        self.processed: list[tuple[str | None, int | None]] = []
+
+    def process(self, vad_audio: VADAudio) -> Iterator[Transcription]:
+        self.processed.append((vad_audio.turn_id, vad_audio.turn_revision))
+        self.started.set()
+        yield Transcription(
+            text="hello",
+            turn_id=vad_audio.turn_id,
+            turn_revision=vad_audio.turn_revision,
+        )
+        self.finished.set()
+
+
+def test_stt_runs_in_parallel_with_pending_smart_turn_and_emits_on_complete():
+    tracker = SpeculativeTurnTracker()
+    tracker.start_turn()
+    tracker.segment_finalized(1000, pending_smart_turn=True, smart_turn_hold_s=2.0)
+
+    started = Event()
+    finished = Event()
+    queue_in = Queue()
+    queue_out = Queue()
+    handler = _SignalingSTTHandler(
+        Event(),
+        queue_in=queue_in,
+        queue_out=queue_out,
+        setup_kwargs={"speculative_turns": tracker, "started": started, "finished": finished},
+    )
+
+    queue_in.put(_vad_audio(revision=0, mode="final"))
+    queue_in.put(PIPELINE_END)
+    thread = Thread(target=handler.run)
+    thread.start()
+
+    # STT begins transcribing immediately while Smart Turn is still pending,
+    # but holds emission of the final Transcription until Smart Turn resolves.
+    assert started.wait(1.0)
+    sleep(0.03)
+    assert queue_out.empty()
+
+    # Resolving Smart Turn as complete (0ms processing delay, 800ms reopen grace)
+    # releases the final Transcription immediately without waiting for reopen grace.
+    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=800, processing_delay_ms=0)
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert handler.processed == [("turn_1", 0)]
+    emitted = queue_out.get_nowait()
+    assert isinstance(emitted, Transcription)
+    assert emitted.text == "hello"
+    assert queue_out.get_nowait() == PIPELINE_END
+
+
+def test_stt_enforces_incomplete_delay_after_parallel_transcription_and_drops_on_reopen():
+    tracker = SpeculativeTurnTracker()
+    tracker.start_turn()
+    tracker.segment_finalized(1000, pending_smart_turn=True, smart_turn_hold_s=2.0)
+
+    started = Event()
+    queue_in = Queue()
+    queue_out = Queue()
+    handler = _SignalingSTTHandler(
+        Event(),
+        queue_in=queue_in,
+        queue_out=queue_out,
+        setup_kwargs={"speculative_turns": tracker, "started": started},
+    )
+
+    queue_in.put(_vad_audio(revision=0, mode="final"))
+    queue_in.put(PIPELINE_END)
+    thread = Thread(target=handler.run)
+    thread.start()
+
+    assert started.wait(1.0)
+    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=2000, processing_delay_ms=300)
+
+    # Transcription must remain held during the incomplete processing delay.
+    sleep(0.04)
+    assert queue_out.empty()
+
+    # User resumes speaking before incomplete delay expires -> dropped cleanly.
+    candidate = tracker.begin_reopen_candidate("turn_1", 0)
+    assert tracker.confirm_reopen_candidate("turn_1", 0, candidate)
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert queue_out.get_nowait() == PIPELINE_END
+
+
+def test_stt_emits_after_incomplete_delay_expires_and_records_vad_settle():
+    tracker = SpeculativeTurnTracker()
+    tracker.start_turn()
+    tracker.segment_finalized(1000, pending_smart_turn=True, smart_turn_hold_s=2.0)
+
+    started = Event()
+    queue_in = Queue()
+    queue_out = Queue()
+    handler = _SignalingSTTHandler(
+        Event(),
+        queue_in=queue_in,
+        queue_out=queue_out,
+        setup_kwargs={"speculative_turns": tracker, "started": started},
+    )
+    store = TurnLatencyStore()
+    handler.turn_latency_store = store
+
+    queue_in.put(_vad_audio(revision=0, mode="final"))
+    queue_in.put(PIPELINE_END)
+    thread = Thread(target=handler.run)
+    thread.start()
+
+    assert started.wait(1.0)
+    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=500, processing_delay_ms=70)
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    emitted = queue_out.get_nowait()
+    assert isinstance(emitted, Transcription)
+    assert queue_out.get_nowait() == PIPELINE_END
+    pending = store.pending_for_turn("turn_1", 0)
+    assert pending is not None
+    assert pending.vad_settle_s is not None
+    assert pending.vad_settle_s >= 0.05

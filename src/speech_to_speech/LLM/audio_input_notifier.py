@@ -33,6 +33,16 @@ class AudioInputNotifier(BaseHandler[VADAudio, LLMIn]):
             return False
         if item.turn_id is None or item.turn_revision is None:
             return True
+        store = getattr(self, "turn_latency_store", None)
+        if not self.speculative_turns.wait_for_gate(
+            item.turn_id,
+            item.turn_revision,
+            hold_for_grace=False,
+            hold_for_smart_turn=True,
+        ):
+            if store is not None:
+                store.discard_pending_turn(item.turn_id, item.turn_revision)
+            return False
         remaining_delay_s = max(0.0, item.processing_delay_s - (perf_counter() - item.created_at_s))
         processing_deadline = self.speculative_turns.processing_deadline(item.turn_id, item.turn_revision)
         if processing_deadline is not None:
@@ -44,7 +54,6 @@ class AudioInputNotifier(BaseHandler[VADAudio, LLMIn]):
             hold_for_grace=False,
             hold_until=monotonic() + remaining_delay_s,
         )
-        store = getattr(self, "turn_latency_store", None)
         if store is not None and remaining_delay_s > 0:
             store.record_smart_wait(
                 item.turn_id,
