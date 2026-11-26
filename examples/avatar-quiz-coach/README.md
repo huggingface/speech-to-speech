@@ -8,19 +8,20 @@ app_port: 7860
 pinned: false
 hf_oauth: true
 hf_oauth_expiration_minutes: 10080
-short_description: A 3D avatar that researches any topic and quizzes you aloud
+short_description: An avatar coach that researches any topic and quizzes you aloud
 ---
 
 # Viva: a voice quiz coach with a talking avatar
 
 Pick a topic, or type your own (“RLHF vs DPO”, “the French Revolution, focus
-on the Terror”). Viva reads up on it, then quizzes you out loud. You answer in
-your own words; she grades each answer, nudges you when you're halfway there,
-explains what you missed, and keeps score with streaks, badges and a
-leaderboard.
+on the Terror”). Your coach (Max or Ada) reads up on it, then quizzes you out
+loud. You answer in your own words. A wrong answer or “I don't know” gets a
+clue, not the answer: up to three tries, each clue more specific, and the
+answer is explained only after the last try or when you say “skip”. Streaks,
+badges and a leaderboard keep score.
 
 ```
-mic ─▶ speech-to-speech backend (VAD + STT) ─▶ transcript ─▶ Viva server (grade, score)
+mic ─▶ speech-to-speech backend (VAD + STT) ─▶ transcript ─▶ coach server (grade, clue, score)
                                                                    │
 avatar ◀─ lip-synced audio ◀─ speech-to-speech backend (TTS) ◀─ script to say
 ```
@@ -29,15 +30,21 @@ avatar ◀─ lip-synced audio ◀─ speech-to-speech backend (TTS) ◀─ scri
   [speech-to-speech](https://github.com/huggingface/speech-to-speech) server.
   `turn_detection.create_response: false` stops the backend from answering on
   its own; each line the coach says is an out-of-band `response.create`
-  (`conversation: "none"`) carrying the exact script.
+  (`conversation: "none"`) carrying the exact script. The backend has no
+  text-to-speech-only path, so its LLM reads the line aloud: lines are sent at
+  most two sentences at a time with few-shot read-aloud examples, which kept
+  24 of 24 test lines word for word on Qwen3.5-4B and Gemma 4 31B (a plain
+  "repeat this" prompt made the model answer the quiz questions itself).
 - **Brain**: `server.py` researches topics (Wikipedia, plus Google results when
   `SERPER_API_KEY` is set) into eight spoken-friendly questions with reference
-  answers and key points, then grades every transcript with a fast model on
-  Hugging Face Inference Providers. Points, streaks and badges are computed with
-  plain rules in `coach/game.py`, so the leaderboard never relies on model arithmetic.
+  answers and key points, then grades every transcript and writes clues with a
+  fast model on Hugging Face Inference Providers. A check rejects clues that
+  contain answer phrases the student hasn't said yet. Points, streaks and badges
+  are computed with plain rules in `coach/game.py`.
 - **Face**: a [TalkingHead](https://github.com/met4citizen/TalkingHead) avatar.
   When the backend runs with `--enable_visemes`, its phoneme-based visemes drive
-  the mouth; otherwise [HeadAudio](https://github.com/met4citizen/HeadAudio)
+  the mouth, merged into held, blended shapes and scheduled against the audio
+  player; otherwise [HeadAudio](https://github.com/met4citizen/HeadAudio)
   derives visemes from the audio in the browser.
 
 ## Run locally
@@ -47,7 +54,7 @@ From this folder, with a speech-to-speech server on port 8765
 
 ```bash
 npm ci
-curl -L -o static/avatars/avaturn.glb https://raw.githubusercontent.com/met4citizen/TalkingHead/1563de184c19b310de4b636664d5835e2c74dbba/avatars/avaturn.glb
+for a in avatarsdk avaturn; do curl -L -o static/avatars/$a.glb https://raw.githubusercontent.com/met4citizen/TalkingHead/1563de184c19b310de4b636664d5835e2c74dbba/avatars/$a.glb; done
 pip install -r requirements.txt
 HF_TOKEN=hf_... SPEECH_TO_SPEECH_URL=ws://localhost:8765/v1/realtime uvicorn server:app --port 7860
 ```
@@ -65,12 +72,12 @@ regenerates the featured topics.
 | `SPEECH_TO_SPEECH_URL` | Realtime WebSocket the browser dials directly |
 | `LOAD_BALANCER_URL`, `LB_HF_TOKEN` | Use a speech-to-speech load balancer instead (its address stays server-side) |
 | `SESSION_PROXY_URL` | Or piggyback another deployment's session API, e.g. `https://smolagents-hf-realtime-voice.hf.space/api` |
-| `GRADER_MODELS`, `WRITER_MODELS` | Comma-separated fallback chains (defaults: Qwen3.8-27B on Cerebras for grading, GLM-5.3 for writing) |
-| `COACH_VOICE` | TTS voice name sent to the backend (default `Serena`; empty keeps the backend's default) |
+| `GRADER_MODELS`, `WRITER_MODELS` | Comma-separated fallback chains (defaults: gpt-oss-120b on Cerebras for grading, GLM-5.3 for writing) |
+| `COACH_VOICE` | Overrides the TTS voice (by default Max uses `Aiden`, Ada uses `Serena`) |
 | `SERPER_API_KEY` | Adds Google results to research |
 | `LEADERBOARD_REPO` | Dataset repo that mirrors the leaderboard so it survives restarts |
 | `RESEARCH_PER_HOUR` | New topics per visitor per hour (default 8) |
 
-The sample avatar comes from the TalkingHead repository and was made with
-[Avaturn](https://avaturn.me), free for non-commercial use. The Docker build
-downloads it from a pinned commit.
+The avatars are TalkingHead's samples, made with [Avatar SDK](https://avatarsdk.com)
+(Max) and [Avaturn](https://avaturn.me) (Ada), both free for non-commercial use.
+The Docker build downloads them from a pinned commit.

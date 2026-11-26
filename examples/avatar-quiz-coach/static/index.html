@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Viva · voice quiz coach</title>
-  <meta name="description" content="Pick a topic. Viva researches it, quizzes you out loud, grades your answers and coaches you.">
+  <meta name="description" content="Pick a topic. Your coach researches it, quizzes you out loud, grades your answers and helps you find what you missed.">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎓</text></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -24,7 +24,7 @@
 <body data-phase="lobby">
   <div id="stage" aria-hidden="true">
     <div id="avatar"></div>
-    <div id="avatar-loading"><div class="ring"></div><span>Waking Viva up… <b id="avatar-pct">0%</b></span></div>
+    <div id="avatar-loading"><div class="ring"></div><span>Waking <span class="coach-name">your coach</span> up… <b id="avatar-pct">0%</b></span></div>
   </div>
 
   <header id="topbar">
@@ -49,7 +49,12 @@
     <!-- Lobby -->
     <section class="view" id="view-lobby">
       <h1 class="title">Get quizzed <em>out loud.</em></h1>
-      <p class="lead">Pick any topic. Viva reads up on it, asks you questions, grades what you say and coaches you through what you missed.</p>
+      <p class="lead">Pick any topic. <span class="coach-name">Your coach</span> reads up on it, asks you questions out loud and, when you get stuck, gives you clues until you find the answer yourself.</p>
+      <div class="coach-pick" id="coach-pick">
+        <span class="coach-pick-label">Your coach</span>
+        <button type="button" data-coach="max">Max</button>
+        <button type="button" data-coach="ada">Ada</button>
+      </div>
 
       <form id="topic-form" class="topic-form" autocomplete="off">
         <input id="topic-input" name="topic" maxlength="160" placeholder="e.g. RLHF vs DPO, black holes, the French Revolution…" aria-label="Quiz topic">
@@ -104,17 +109,18 @@
         <div class="dots" id="q-dots"></div>
       </div>
       <article class="q-card" id="q-card">
-        <div class="q-meta"><span class="pill" id="q-level">Medium</span><span class="pill gold" id="q-points">150 pts</span><span class="pill" id="q-attempt" hidden>2nd try ×0.75</span></div>
+        <div class="q-meta"><span class="pill" id="q-level">Medium</span><span class="pill gold" id="q-points">150 pts</span><span class="pill" id="q-attempt" hidden>Try 2 of 3</span></div>
         <p class="q-text" id="q-text"></p>
       </article>
 
       <div class="answer-box" id="answer-box">
         <div class="answer-label">You said</div>
-        <p class="answer-text" id="answer-text"><span class="muted">Answer out loud when Viva finishes asking.</span></p>
+        <p class="answer-text" id="answer-text"><span class="muted">Answer out loud when <span class="coach-name">your coach</span> finishes asking.</span></p>
       </div>
 
       <div class="verdict" id="verdict" hidden>
         <div class="verdict-head"><span class="verdict-chip" id="verdict-chip"></span><span class="verdict-points" id="verdict-points"></span></div>
+        <p class="clue" id="verdict-clue" hidden></p>
         <div class="reveal" id="reveal" hidden>
           <div class="reveal-answer" id="reveal-answer"></div>
           <ul class="keypoints" id="reveal-points"></ul>
@@ -126,7 +132,7 @@
           <span class="mic-ring" id="mic-ring"></span>
           <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path fill="currentColor" d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-2.08A7 7 0 0 0 19 12h-2Z"/></svg>
         </button>
-        <div class="mic-status"><b id="mic-title">Getting ready</b><span id="mic-sub">Viva will ask the first question</span></div>
+        <div class="mic-status"><b id="mic-title">Getting ready</b><span id="mic-sub">The first question is coming</span></div>
       </div>
 
       <form class="type-form" id="type-form" autocomplete="off">
@@ -135,7 +141,7 @@
       </form>
 
       <div class="q-actions">
-        <button class="btn small ghost" data-intent="hint" id="btn-hint">💡 Hint <span class="muted">−30%</span></button>
+        <button class="btn small ghost" data-intent="hint" id="btn-hint">💡 Hint <span class="muted">−20%</span></button>
         <button class="btn small ghost" data-intent="repeat">🔁 Repeat</button>
         <button class="btn small ghost" data-intent="skip">⏭ Skip</button>
         <button class="btn small ghost danger" data-intent="stop">End quiz</button>
@@ -159,7 +165,7 @@
       </div>
 
       <div class="coach-report" id="r-report">
-        <div class="report-loading"><div class="ring small"></div> Viva is writing your coaching notes…</div>
+        <div class="report-loading"><div class="ring small"></div> Writing your coaching notes…</div>
       </div>
 
       <div class="result-actions">
@@ -200,7 +206,7 @@
     </div>
     <label class="switch-row">
       <input type="checkbox" id="opt-bargein">
-      <span><b>Let me interrupt Viva</b><small>Talk over her to cut in. Use headphones, or she may hear herself.</small></span>
+      <span><b>Let me interrupt the coach</b><small>Talk over the coach to cut in. Use headphones, or the coach may hear itself.</small></span>
     </label>
     <label class="field" id="server-field" hidden>
       <span>Speech-to-speech server</span>

@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -24,48 +25,54 @@ logger = logging.getLogger(__name__)
 
 BASE_POINTS = {1: 100, 2: 150, 3: 200}
 PARTIAL_FRACTION = 0.5
-RETRY_FACTOR = 0.75
-HINT_FACTOR = 0.7
+# Points for a correct answer on the first, second and third try. The coach
+# never reveals the answer before the last try unless the student asks.
+ATTEMPT_FACTORS = (1.0, 0.6, 0.35)
+MAX_ATTEMPTS = len(ATTEMPT_FACTORS)
+HINT_FACTOR = 0.8
 STREAK_STEP = 0.1
 STREAK_CAP = 1.5
 PERFECT_BONUS = 250
 MAX_TURNS = 120
-INTENTS = {"answer", "hint", "repeat", "skip", "clarify", "chitchat", "stop"}
+INTENTS = {"answer", "stuck", "hint", "repeat", "skip", "clarify", "chitchat", "stop"}
 VERDICTS = {"correct", "partial", "incorrect"}
 
-GRADER_SYSTEM = """You are Viva, a warm, upbeat quiz coach having a spoken conversation with a student. You get the current question, its reference answer and key points, and what the student just said. The student's words come from speech recognition: expect misheard words, missing punctuation and garbled technical terms. Judge the meaning, never the wording or spelling.
+GRADER_SYSTEM = """You are {coach}, a warm, encouraging quiz coach in a spoken conversation with a student. Your job is to help the student find each answer themselves, not to tell them. You get the current question, its reference answer and key points, the attempt number, what the student said earlier on this question, and what they just said. Their words come from speech recognition: expect misheard words and garbled technical terms. Judge the meaning, never the wording.
 
-1. Decide the intent of what the student said:
+1. Decide the intent of what the student just said:
 - "answer": any attempt to answer, even wrong, partial or hedged ("I think it's...")
-- "hint": asks for a hint or help
-- "repeat": asks you to repeat or rephrase the question, or did not hear it
-- "skip": does not know, gives up, or asks to skip or reveal the answer
+- "stuck": they don't know or aren't sure, without asking to move on ("no idea", "hmm, I'm not sure")
+- "hint": asks for a hint or for help
+- "skip": explicitly wants to move on or hear the answer ("skip", "just tell me", "next question")
+- "repeat": asks to repeat or rephrase the question, or didn't hear it
 - "clarify": asks what the question means or about its scope
-- "stop": wants to end the quiz now
-- "chitchat": anything else (small talk, noise, filler like "um", unrelated words)
-If the student says an answer AND something else (for example an answer followed by "can I get a hint?"), the intent is "answer": grade what they said.
-Grade student_said. On attempt 2, grade it together with previous_answer_this_question (the student is completing their first try). Other earlier messages in the conversation were already graded.
+- "stop": wants to end the quiz
+- "chitchat": anything else (small talk, filler, noise)
+If they give an answer and also say something else, the intent is "answer".
 
-2. If intent is "answer", grade it:
-- "correct": conveys the essential idea of the reference answer; small omissions are fine
-- "partial": right direction but misses an essential key point, or too vague to be sure
-- "incorrect": wrong, or does not address the question
-Also give score 0-100 and points_hit, the indices of key_points the answer covered.
+2. If the intent is "answer", grade everything the student has said about this question so far (earlier_attempts plus student_said):
+- "correct": answers what the question asks with the essential idea of the reference answer. Missing details from the reference answer or key points do not make it partial.
+- "partial": right direction but misses an essential key point
+- "incorrect": wrong or off target
+Also give score 0-100 and points_hit, the indices of key_points they have covered.
 
-3. Write "say": your next spoken words, one or two short sentences, at most 40 words. It is read aloud by text-to-speech: plain words only, no markdown, lists, emojis, parentheses, slashes or symbols; spell out abbreviations that sound awkward. Never repeat the question itself; the app reads questions.
-- correct: praise specifically and vary it; you may add the fun fact in a few words.
-- partial and retry_available is true: say what was right, then ask one short nudge question toward a missing key point WITHOUT revealing it.
-- partial without a retry, or incorrect: be kind and brief, then give the correct answer in one sentence.
-- skip: be encouraging, then give the answer in one sentence.
-- hint: write an empty string; the app reads the hint.
-- repeat: write an empty string.
-- clarify: clarify the question without giving away the answer.
-- chitchat: reply in a few words and invite them to answer.
+3. Write "say", your next spoken words: at most two sentences and 40 words, plain speech for text-to-speech (no markdown, lists, emojis, parentheses, slashes or symbols). Never read the question itself; the app does that.
+- correct: praise something specific they said; optionally add the fun fact in a few words.
+- partial or incorrect with attempts_left above 0: in a few words, acknowledge anything right, then give ONE clue or guiding question that leads toward a missing key point.
+- stuck with attempts_left above 0: reassure them, then give a clue or an easier question that gets them started.
+- A clue must leave the answer for the student to say: never say the answer, the missing key point, or its key term. With attempts_left 2, point in the right direction. With attempts_left 1, be very direct, for example a sentence with a blank where the key term goes ("at every step the model guesses the blank word"), but still never say the key term. When the question has several parts (a year and a title, two components), never say any part the student has not said yet; give clues for each part instead.
+- partial or incorrect with attempts_left 0: be kind, then explain the answer simply, linking it to what they said.
+- stuck with attempts_left 0, or skip: give the answer in one encouraging sentence.
+- hint: a clue that does not give the answer away (used when the prepared hint was already given).
+- repeat: an empty string.
+- clarify: explain what is being asked without giving the answer away.
+- chitchat: reply in a few words and invite their answer.
 - stop: a short friendly goodbye.
+Each clue must build on the clues already given and be more specific than them.
 
 Return ONLY a JSON object: {"intent": "...", "verdict": "correct|partial|incorrect or null", "score": number or null, "points_hit": [indices], "say": "..."}"""
 
-REPORT_SYSTEM = """You are Viva, a supportive quiz coach. Given a student's quiz results, write a short coaching report. Be specific to the questions, honest and encouraging.
+REPORT_SYSTEM = """You are {coach}, a supportive quiz coach. Given a student's quiz results, write a short coaching report. Be specific to the questions, honest and encouraging.
 Return ONLY JSON:
 {"headline": "max 8 words", "strengths": ["one or two things they clearly know"], "review": ["up to three concrete concepts to review, phrased as study tips"], "say": "two or three spoken sentences wrapping up: mention the score naturally, one strength, one thing to review. It is read aloud by text-to-speech: no lists, markdown, slashes or symbols."}"""
 
@@ -76,6 +83,51 @@ STREAK_CALLOUTS = {
     7: ["Seven in a row. Legendary!"],
 }
 HINT_REPEAT = "That was my only hint. Give it your best shot!"
+GENERIC_CLUE = "Not quite yet. Take another look at what the question is really asking, and give it one more try."
+
+_STOPWORDS = set(
+    """a an the and or but of to in on at by for from with without into onto over under about as is are was were be been
+    being it its this that these those they them their there here what which who whom whose when where why how do does did
+    can could would should will shall may might must not no so than then too very just also only each every any all some one
+    you your we our us he she his her him i me my mine yours itself themselves that's it's""".split()
+)
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", text.lower().replace("-", " "))
+
+
+def _content(text: str) -> list[str]:
+    return [w for w in _words(text) if w not in _STOPWORDS]
+
+
+def leaked_terms(clue: str, q: dict[str, Any], said: list[str]) -> list[str]:
+    """Answer phrases a clue gives away that the student has not said yet.
+
+    Secrets are pairs of adjacent content words from the reference answer and
+    key points (``next word``, ``attention need``) plus any number (a year),
+    leaving out what the question itself or the student already said.
+    """
+    known = set(_content(q["question"])) | {w for text in said for w in _content(text)}
+    secrets: set[tuple[str, ...]] = set()
+    for source in [q["answer"], *q["key_points"]]:
+        words = _content(source)
+        for w in words:
+            if w.isdigit() and w not in known:
+                secrets.add((w,))
+        for a, b in zip(words, words[1:]):
+            if a != b and not (a in known and b in known):
+                secrets.add((a, b))
+        # Three-word phrases keep titles made of short words ("all you need").
+        raw = _words(source)
+        for gram in zip(raw, raw[1:], raw[2:]):
+            if any(w not in _STOPWORDS and w not in known for w in gram):
+                secrets.add(gram)
+    clue_words = _content(clue)
+    raw_clue = _words(clue)
+    grams = set(zip(clue_words, clue_words[1:])) | {(w,) for w in clue_words}
+    grams |= set(zip(raw_clue, raw_clue[1:], raw_clue[2:]))
+    return [" ".join(g) for g in secrets if g in grams]
 
 
 def rank_for(accuracy: float) -> dict[str, str]:
@@ -106,6 +158,7 @@ class QuestionResult:
     hint_used: bool = False
     points_hit: list[int] = field(default_factory=list)
     answers: list[str] = field(default_factory=list)
+    clues: list[str] = field(default_factory=list)
     feedback: str = ""
 
 
@@ -117,6 +170,7 @@ class Game:
     verified: bool
     practice: bool
     question_ids: list[int]
+    coach: str = "Max"
     created: float = field(default_factory=time.time)
     position: int = 0
     attempt: int = 1
@@ -177,6 +231,9 @@ class Game:
             "position": self.position,
             "total": self.total,
             "attempt": self.attempt,
+            "max_attempts": MAX_ATTEMPTS,
+            "attempt_factor": ATTEMPT_FACTORS[min(self.attempt, MAX_ATTEMPTS) - 1],
+            "hint_used": bool(self.position < self.total and self.result().hint_used),
             "finished": self.finished,
             "max_score": self.max_score(),
             "results": [
@@ -201,7 +258,7 @@ class Game:
         if self.practice:
             intro = f"Let's drill the {n} question{'s' if n != 1 else ''} you missed."
         else:
-            intro = f"{brief} I have {n} questions for you. Ask for a hint anytime, but it costs points."
+            intro = f"{brief} I have {n} questions for you. If you get stuck, I'll give you clues."
         return f"{intro} {self.ask_current('First question.')}".strip()
 
 
@@ -244,17 +301,37 @@ def _grader_messages(game: Game, transcript: str) -> list[dict[str, str]]:
         "question": q["question"],
         "reference_answer": q["answer"],
         "key_points": q["key_points"],
+        "prepared_hint": q.get("hint", ""),
         "fun_fact": q.get("fun_fact", ""),
         "attempt": game.attempt,
-        "retry_available": game.attempt == 1,
-        "previous_answer_this_question": res.answers[-1] if res.answers else None,
+        "attempts_left": MAX_ATTEMPTS - game.attempt,
+        "earlier_attempts": res.answers,
+        "clues_given": res.clues,
         "recent_conversation": game.history[-6:],
         "student_said": transcript,
     }
     return [
-        {"role": "system", "content": GRADER_SYSTEM},
+        {"role": "system", "content": GRADER_SYSTEM.replace("{coach}", game.coach)},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
+
+
+async def _rewrite_clue(game: Game, transcript: str, decision: dict[str, Any], leaks: list[str]) -> str | None:
+    messages = _grader_messages(game, transcript) + [
+        {"role": "assistant", "content": json.dumps(decision, ensure_ascii=False)},
+        {
+            "role": "user",
+            "content": (
+                f"Your say gives the answer away (it says: {', '.join(leaks)}). Rewrite say as a clue that leaves "
+                'the answer for the student to find, without those words. Return ONLY JSON: {"say": "..."}'
+            ),
+        },
+    ]
+    try:
+        raw, _ = await llm.chat_json(messages, llm.GRADER_MODELS, max_tokens=600, temperature=0.4, timeout=8)
+    except llm.LLMError:
+        return None
+    return " ".join(str(raw.get("say") or "").split()) or None
 
 
 def _clean_decision(raw: dict[str, Any], n_points: int) -> dict[str, Any]:
@@ -285,9 +362,7 @@ def _clean_decision(raw: dict[str, Any], n_points: int) -> dict[str, Any]:
 def _award(game: Game, res: QuestionResult, verdict: str) -> tuple[int, float]:
     q = game.question()
     base = BASE_POINTS[q["difficulty"]]
-    factor = 1.0
-    if game.attempt > 1:
-        factor *= RETRY_FACTOR
+    factor = ATTEMPT_FACTORS[min(game.attempt, MAX_ATTEMPTS) - 1]
     if res.hint_used:
         factor *= HINT_FACTOR
     multiplier = 1.0
@@ -351,23 +426,40 @@ async def handle_turn(game: Game, transcript: str, intent: str | None = None) ->
                 "question": game.public_question(),
             }
         decision = _clean_decision(raw, len(q["key_points"]))
+        said = [*res.answers, transcript]
+        gives_clue = game.attempt < MAX_ATTEMPTS and (
+            (decision["intent"] == "answer" and decision["verdict"] != "correct") or decision["intent"] == "stuck"
+        )
+        if (gives_clue or decision["intent"] == "hint") and (leaks := leaked_terms(decision["say"], q, said)):
+            # Models sometimes hand over the answer inside a "clue": ask once
+            # for a rewrite; coach_again falls back to the hint if it still leaks.
+            fixed = await _rewrite_clue(game, transcript, decision, leaks)
+            if fixed and not leaked_terms(fixed, q, said):
+                decision["say"] = fixed
     intent, verdict, say = decision["intent"], decision["verdict"], decision["say"]
     game.history.append({"role": "student", "text": transcript})
 
     out: dict[str, Any] = {"intent": intent, "verdict": None, "points": 0, "model": model}
     resolved = False
 
+    def coach_again(fallback: str) -> None:
+        """Keep the question open: one more try, with a clue instead of the answer."""
+        nonlocal say
+        game.attempt += 1
+        say = say or fallback
+        if leaked_terms(say, q, [*res.answers, transcript]):
+            say = fallback if fallback not in " ".join(res.clues) else GENERIC_CLUE
+        res.clues.append(say)
+        out.update({"retry": True, "clue": say, "attempt": game.attempt, "attempts_left": MAX_ATTEMPTS - game.attempt})
+
     if intent == "answer":
         res.answers.append(transcript)
         res.attempts += 1
         res.score = decision["score"]
         res.points_hit = sorted(set(res.points_hit) | set(decision["points_hit"]))
-        if verdict == "partial" and game.attempt == 1:
-            game.attempt = 2
-            out["verdict"] = "partial"
-            out["retry"] = True
-            if not say:
-                say = "You're on the right track. Can you add a bit more?"
+        if verdict != "correct" and game.attempt < MAX_ATTEMPTS:
+            out["verdict"] = verdict
+            coach_again(q.get("hint") or "Not quite yet. Think about it from another angle.")
         else:
             points, multiplier = _award(game, res, verdict or "incorrect")
             out.update({"verdict": res.verdict, "points": points, "multiplier": multiplier})
@@ -375,17 +467,34 @@ async def handle_turn(game: Game, transcript: str, intent: str | None = None) ->
             if res.verdict == "correct" and game.streak in STREAK_CALLOUTS:
                 out["callout"] = random.choice(STREAK_CALLOUTS[game.streak])
                 say = f"{say} {out['callout']}".strip()
+    elif intent == "hint" and not res.hint_used and q.get("hint"):
+        # The prepared hint first: it is written to nudge without giving away.
+        res.hint_used = True
+        out["hint"] = q["hint"]
+        say = f"Here's a hint: {q['hint']}"
+        res.clues.append(say)
     elif intent == "hint":
-        if res.hint_used or not q.get("hint"):
-            say = HINT_REPEAT
+        # More help after the prepared hint: a fresh clue from the coach, if any.
+        if say and leaked_terms(say, q, [*res.answers, transcript]):
+            say = ""
+        if say:
+            res.clues.append(say)
+            out["clue"] = say
         else:
-            res.hint_used = True
-            out["hint"] = q["hint"]
-            say = f"Here's a hint: {q['hint']}"
+            say = HINT_REPEAT
+    elif intent == "stuck":
+        if game.attempt < MAX_ATTEMPTS:
+            out["verdict"] = "stuck"
+            coach_again(q.get("hint") or "No problem. Think about what the question is really asking.")
+        else:
+            game.streak = 0
+            res.verdict = "skipped"
+            out["verdict"] = "skipped"
+            resolved = True
+            say = say or f"No worries. The answer is: {q['answer']}"
     elif intent == "repeat":
         say = f"Sure. {q['question']}"
     elif intent == "skip":
-        res.answers.append(transcript)
         game.streak = 0
         res.verdict = "skipped"
         resolved = True
@@ -502,7 +611,7 @@ async def coaching_report(game: Game) -> dict[str, Any]:
     try:
         raw, _ = await llm.chat_json(
             [
-                {"role": "system", "content": REPORT_SYSTEM},
+                {"role": "system", "content": REPORT_SYSTEM.replace("{coach}", game.coach)},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
             llm.GRADER_MODELS,

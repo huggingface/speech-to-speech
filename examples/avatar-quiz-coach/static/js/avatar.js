@@ -18,6 +18,15 @@ import { TalkingHead } from "talkinghead";
 import { HeadAudio } from "headaudio";
 
 const VOWELS = new Set(["aa", "E", "I", "O", "U"]);
+// Peak strength per mouth shape. Real speakers fully form only lip closures
+// (p, b, m, f, v) and open vowels; tongue sounds barely show on the lips, so
+// driving every phoneme at full strength made the mouth flap.
+const VISEME_LEVEL = /** @type {Record<string, number>} */ ({
+  PP: 0.9, FF: 0.8, aa: 0.7, O: 0.7, U: 0.65, E: 0.6, I: 0.55,
+  CH: 0.5, SS: 0.4, TH: 0.4, RR: 0.35, DD: 0.3, nn: 0.3, kk: 0.3,
+});
+// Vowels also open the jaw; the visemes alone barely part the lips on some rigs.
+const JAW_LEVEL = /** @type {Record<string, number>} */ ({ aa: 0.3, O: 0.22, E: 0.15, U: 0.12, I: 0.1, CH: 0.05 });
 
 // Microsoft viseme IDs (as emitted by the backend's STV stage) to Oculus names.
 const MS_TO_OCULUS = [
@@ -28,17 +37,67 @@ const MS_TO_OCULUS = [
 // `?lipsync=headaudio` ignores server visemes (for comparing the two sources).
 const FORCE_HEADAUDIO = new URLSearchParams(location.search).get("lipsync") === "headaudio";
 
-export const AVATAR = {
-  url: "static/avatars/avaturn.glb",
-  body: "F",
-  avatarMood: "neutral",
-  retarget: {
-    Hips: { y: 0.03 }, Spine: { y: 0.02 }, Spine1: { y: 0.02, z: 0.01 }, Spine2: { y: 0.02, z: 0.01 },
-    Neck: { z: 0.02, y: 0.01 }, Head: { z: 0.02 }, LeftShoulder: { rx: -0.5 }, RightShoulder: { rx: -0.5 },
-    scaleToHipsLevel: 1.0,
+/** Coaches: TalkingHead sample avatars (free for non-commercial use) and their tuning. */
+export const COACHES = {
+  ada: {
+    name: "Ada",
+    voice: "Serena",
+    // How strongly this rig's blendshapes read: Avaturn's are strong.
+    lipGain: 0.85,
+    jawGain: 0.4,
+    avatar: {
+      url: "static/avatars/avaturn.glb",
+      body: "F",
+      avatarMood: "happy",
+      retarget: {
+        Hips: { y: 0.03 }, Spine: { y: 0.02 }, Spine1: { y: 0.02, z: 0.01 }, Spine2: { y: 0.02, z: 0.01 },
+        Neck: { z: 0.02, y: 0.01 }, Head: { z: 0.02 }, LeftShoulder: { rx: -0.5 }, RightShoulder: { rx: -0.5 },
+        scaleToHipsLevel: 1.0,
+      },
+      // Eyes open and on the student: the stock "look down" reads as sleepy.
+      baseline: { headRotateX: -0.05, eyeBlinkLeft: 0, eyeBlinkRight: 0, eyesLookDown: 0 },
+    },
   },
-  baseline: { headRotateX: -0.05, eyeBlinkLeft: 0.15, eyeBlinkRight: 0.15 },
+  max: {
+    name: "Max",
+    voice: "Aiden",
+    lipGain: 1.35,
+    jawGain: 1,
+    avatar: {
+      url: "static/avatars/avatarsdk.glb",
+      body: "M",
+      avatarMood: "happy",
+      retarget: {
+        Neck: { z: -0.01, rx: -0.15 }, Neck1: { z: -0.01, rx: -0.15 }, Neck2: { z: -0.01, rx: -0.15 },
+        LeftShoulder: { rz: -0.3 }, RightShoulder: { rz: 0.3 }, scaleToEyesLevel: 1.0, origin: { y: -0.1 },
+      },
+      baseline: { headRotateX: -0.04, eyeBlinkLeft: 0.05, eyeBlinkRight: 0.05, eyesLookDown: 0 },
+    },
+  },
 };
+
+/**
+ * The phoneme recognizer emits each phoneme as a 20-40 ms blip with a
+ * silence cue between neighbours, so played as-is the mouth snaps shut
+ * between sounds of the same word. Drop the short in-word silences and hold
+ * each shape until the next one starts (at most 300 ms); real pauses of
+ * 150 ms or more still close the mouth.
+ * @param {{ viseme: number, start_s: number, end_s: number }[]} cues
+ */
+export function coarticulate(cues) {
+  const kept = [...cues]
+    .sort((a, b) => a.start_s - b.start_s)
+    .filter((c) => c.viseme !== 0 || c.end_s - c.start_s >= 0.15)
+    .map((c) => ({ ...c }));
+  for (let i = 0; i < kept.length; i++) {
+    const c = kept[i];
+    if (c.viseme === 0) continue;
+    const next = kept[i + 1];
+    const until = next ? next.start_s : c.start_s + 0.12;
+    c.end_s = Math.max(c.end_s, Math.min(until, c.start_s + 0.3));
+  }
+  return kept.filter((c) => c.viseme !== 0);
+}
 
 class Upsampler {
   /** @param {number} inRate @param {number} outRate */
@@ -70,10 +129,11 @@ class Upsampler {
 }
 
 export class Avatar extends EventTarget {
-  /** @param {HTMLElement} container */
-  constructor(container) {
+  /** @param {HTMLElement} container @param {keyof typeof COACHES} [coach] */
+  constructor(container, coach = "max") {
     super();
     this.container = container;
+    this.coach = COACHES[coach] || COACHES.max;
     /** @type {any} */
     this.head = null;
     /** @type {any} */
@@ -120,7 +180,8 @@ export class Avatar extends EventTarget {
       avatarSpeakingHeadMove: 0.6,
     });
     this.head = head;
-    await head.showAvatar(AVATAR, onProgress ?? null);
+    await head.showAvatar(this.coach.avatar, onProgress ?? null);
+    this.polishMaterials();
     this.upsampler = new Upsampler(this.inRate, head.audioCtx.sampleRate);
     await this.initStream();
     await this.initHeadAudio();
@@ -131,6 +192,19 @@ export class Avatar extends EventTarget {
       } else {
         this.headaudio?.stop();
         head.stop();
+      }
+    });
+  }
+
+  /** The AvatarSDK sample outfit carries the vendor's logo: plain fabric instead. */
+  polishMaterials() {
+    if (this.coach !== COACHES.max) return;
+    this.head.armature?.traverse((/** @type {any} */ obj) => {
+      if (!obj.isMesh || !obj.name.startsWith("outfit_")) return;
+      for (const m of Array.isArray(obj.material) ? obj.material : [obj.material]) {
+        m.map = null;
+        m.color.set(obj.name === "outfit_top" ? 0x2d3a4f : 0x1d2230);
+        m.needsUpdate = true;
       }
     });
   }
@@ -168,20 +242,21 @@ export class Avatar extends EventTarget {
 
   /**
    * Queue one mouth shape on TalkingHead's animation clock (same envelope as
-   * its own stream lip-sync, but stronger: at its fixed 0.6 level Avaturn's
-   * lips barely move).
+   * its own stream lip-sync, with per-shape strength).
    * @param {{ viseme: number, start_s: number, end_s: number }} cue @param {number} t
    */
   scheduleCue(cue, t) {
     const v = MS_TO_OCULUS[cue.viseme];
     if (!v || v === "sil") return;
     const d = Math.max(40, (cue.end_s - cue.start_s) * 1000);
-    const level = v === "PP" || v === "FF" ? 1 : VOWELS.has(v) ? 0.95 : 0.75;
-    this.head.animQueue.push({
-      template: { name: "viseme" },
-      ts: [t - (2 * d) / 3, t + d / 2, t + d + d / 2],
-      vs: { ["viseme_" + v]: [null, level, 0] },
-    });
+    // Short vowels open the jaw less than long ones.
+    const length = VOWELS.has(v) ? Math.min(1, Math.max(0.6, d / 120)) : 1;
+    const level = Math.min(1, (VISEME_LEVEL[v] ?? 0.4) * this.coach.lipGain * length);
+    /** @type {Record<string, (number | null)[]>} */
+    const vs = { ["viseme_" + v]: [null, level, 0] };
+    const jaw = (JAW_LEVEL[v] ?? 0) * this.coach.jawGain * length;
+    if (jaw > 0) vs.jawOpen = [null, jaw, 0];
+    this.head.animQueue.push({ template: { name: "viseme" }, ts: [t - (2 * d) / 3, t + d / 2, t + d + d / 2], vs });
   }
 
   async initHeadAudio() {
@@ -226,7 +301,7 @@ export class Avatar extends EventTarget {
   addVisemes(responseId, cues) {
     if (FORCE_HEADAUDIO) return;
     this.beginResponse(responseId);
-    this.pendingCues.push(...cues);
+    this.pendingCues.push(...coarticulate(cues));
     if (!this.serverVisemes) {
       this.serverVisemes = true;
       this.lipsyncSource = "server";
@@ -322,7 +397,12 @@ export class Avatar extends EventTarget {
         break;
       case "incorrect":
         this.setMood("neutral");
-        this.express("😬");
+        this.express("🙂");
+        break;
+      case "clue":
+      case "hint":
+        this.setMood("neutral");
+        this.gesture("index", 1.6);
         break;
       case "skipped":
         this.setMood("neutral");

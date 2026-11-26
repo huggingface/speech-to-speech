@@ -7,7 +7,7 @@
  * The browser glues them together and drives the avatar's body language.
  */
 
-import { Avatar } from "./avatar.js";
+import { Avatar, COACHES } from "./avatar.js";
 import { RealtimeVoice } from "./realtime.js";
 import { confetti } from "./confetti.js";
 
@@ -31,6 +31,8 @@ const store = {
 
 const S = {
   /** @type {any} */ cfg: { mode: "manual" },
+  coachKey: "max",
+  /** @type {any} */ coach: null,
   phase: "lobby",
   difficulty: "pro",
   /** @type {any} */ pack: null,
@@ -46,7 +48,6 @@ const S = {
   responseActive: false,
   responseHadAudio: false,
   unmuteTimer: 0,
-  /** @type {string[]} */ captions: [],
   turnChain: Promise.resolve(),
   researchAbort: /** @type {AbortController | null} */ (null),
   partial: "",
@@ -58,11 +59,15 @@ const S = {
 
 async function boot() {
   S.cfg = await fetch("api/config").then((r) => r.json()).catch(() => ({ mode: "manual" }));
+  const wanted = new URLSearchParams(location.search).get("coach") || store.get("coach", "max");
+  S.coachKey = wanted in COACHES ? wanted : "max";
+  S.coach = COACHES[/** @type {keyof typeof COACHES} */ (S.coachKey)];
+  document.querySelectorAll(".coach-name").forEach((el) => (el.textContent = S.coach.name));
   setupUi();
   loadTopics();
   renderLobbyBoard();
 
-  const avatar = new Avatar($("#avatar"));
+  const avatar = new Avatar($("#avatar"), /** @type {any} */ (S.coachKey));
   S.avatar = avatar;
   S.avatarReady = avatar
     .init((ev) => {
@@ -79,6 +84,17 @@ async function boot() {
 }
 
 function setupUi() {
+  $("#coach-pick").querySelectorAll("button").forEach((b) => {
+    const key = /** @type {HTMLElement} */ (b).dataset.coach || "max";
+    b.classList.toggle("on", key === S.coachKey);
+    b.addEventListener("click", () => {
+      if (key === S.coachKey) return;
+      store.set("coach", key);
+      const url = new URL(location.href);
+      url.searchParams.delete("coach");
+      location.href = url.toString();
+    });
+  });
   $("#btn-signin").hidden = !S.cfg.oauth || !!S.cfg.user;
   const nameInput = /** @type {HTMLInputElement} */ ($("#player-name"));
   if (S.cfg.user) {
@@ -307,6 +323,7 @@ async function startRun(opts) {
     game = await postJson("api/game", {
       pack_id: pack.id,
       player: playerName(),
+      coach: S.coach.name,
       question_ids: opts.questionIds || null,
     });
   } catch (err) {
@@ -328,7 +345,7 @@ async function startRun(opts) {
   resetAnswer();
   setPhase("quiz");
   if (!S.voiceOk) {
-    toast("Voice isn't available, so Viva will show her lines and you can type your answers.", "info");
+    toast(`Voice isn't available, so ${S.coach.name}'s lines appear as captions and you can type your answers.`, "info");
   }
   S.avatar?.setMood("happy");
   say(greeted ? `Okay, I'm ready! ${game.say}` : game.say, "opening");
@@ -416,7 +433,7 @@ async function ensureVoice() {
       : await navigator.mediaDevices.getUserMedia({
           audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
         });
-    const voice = new RealtimeVoice({ audioCtx: ctx, voice: S.cfg.voice });
+    const voice = new RealtimeVoice({ audioCtx: ctx, voice: S.cfg.voice || S.coach.voice });
     wireVoice(voice);
     S.voice = voice;
     const wsUrl = S.cfg.mode === "manual" ? store.get("server", "ws://localhost:8765/v1/realtime") : S.cfg.wsUrl;
@@ -436,7 +453,7 @@ async function ensureVoice() {
     setVoiceLine(msg || "Voice unavailable", "bad");
     if (e?.code === "login") {
       $("#btn-signin").hidden = false;
-      toast("Sign in with Hugging Face (top right) to talk with Viva. You can still type your answers.", "info");
+      toast(`Sign in with Hugging Face (top right) to talk with ${S.coach.name}. You can still type your answers.`, "info");
     }
     return false;
   }
@@ -480,8 +497,8 @@ function wireVoice(voice) {
     S.responseHadAudio = false;
     setCoachTalking(true);
     avatar.beginResponse(id);
-    const caption = S.captions.shift();
-    if (caption) subtitlesStart(caption);
+    const text = /** @type {any} */ (e).detail.text;
+    if (text) subtitlesStart(text);
   });
   voice.addEventListener("visemes", (e) => {
     const d = /** @type {any} */ (e).detail;
@@ -510,7 +527,6 @@ function wireVoice(voice) {
     if (S.coachTalking && S.bargeIn) {
       voice.stopSpeaking();
       avatar.interrupt();
-      S.captions = [];
       subtitlesStop();
       setCoachTalking(false);
     }
@@ -549,7 +565,7 @@ function wireVoice(voice) {
 function scheduleCoachDone() {
   clearTimeout(S.unmuteTimer);
   S.unmuteTimer = window.setTimeout(() => {
-    if (!S.responseActive && !S.avatar?.playing && !S.captions.length) {
+    if (!S.responseActive && !S.avatar?.playing && !S.voice?.pending.length) {
       setCoachTalking(false);
       subtitlesStop(S.phase === "results" ? 6000 : 3500);
     }
@@ -561,7 +577,7 @@ function setCoachTalking(on) {
   S.coachTalking = on;
   applyMicGate();
   if (S.phase !== "quiz") return;
-  if (on) setMic("speaking", "Viva is talking", S.bargeIn ? "Talk over her to interrupt" : "Your turn is next");
+  if (on) setMic("speaking", `${S.coach.name} is talking`, S.bargeIn ? "Talk over to interrupt" : "Your turn is next");
   else setMicIdle();
 }
 
@@ -585,7 +601,6 @@ function setMic(state, title, sub) {
 function say(/** @type {string} */ text, kind = "line") {
   if (!text) return;
   if (S.voice && S.voiceOk) {
-    S.captions.push(text);
     S.voice.say(text, kind);
   } else {
     showCaption(text);
@@ -667,13 +682,12 @@ async function doTurn(text, intent) {
   if (S.coachTalking && (intent || S.bargeIn)) {
     S.voice?.stopSpeaking();
     S.avatar?.interrupt();
-    S.captions = [];
     subtitlesStop();
   }
   if (text) $("#answer-text").textContent = text;
   if ($("#verdict").classList.contains("previous")) hideVerdict();
   $("#answer-box").classList.add("grading");
-  setMic("thinking", "Grading…", "Viva is checking your answer");
+  setMic("thinking", "Checking…", `${S.coach.name} is listening to your answer`);
   if (!intent) S.avatar?.think();
 
   const out = await postJson(`api/game/${game.game_id}/turn`, { transcript: text, intent: intent || null });
@@ -686,17 +700,19 @@ async function doTurn(text, intent) {
 function handleOutcome(out) {
   const st = out.state;
   const avatar = S.avatar;
-  if (out.verdict) {
+  if (out.retry || out.hint || out.clue) {
+    // Still on this question: show the coach's clue, never the answer.
+    showClue(out);
+    avatar?.react(out.retry ? "clue" : "hint");
+  } else if (out.verdict) {
     showVerdict(out);
     avatar?.react(out.verdict, { streak: st?.streak });
     if (out.points > 0) pop(`+${out.points}`, out.multiplier > 1 ? `streak ×${out.multiplier.toFixed(1)}` : "", out.verdict === "correct");
     if (out.verdict === "correct" && (st?.streak ?? 0) >= 3) confetti({ count: 60 });
-  } else if (out.intent === "hint" && out.hint) {
-    $("#q-points").textContent = `${Math.round((S.question?.points || 0) * 0.7)} pts`;
   }
-  if (st) updateHud(st);
-  if (out.retry) {
-    $("#q-attempt").hidden = false;
+  if (st) {
+    updateHud(st);
+    if (!out.reveal) updateStakes(st);
   }
 
   say(out.say, out.intent);
@@ -758,7 +774,7 @@ function renderDots() {
 /** @param {boolean} [keepVerdict] keep the previous question's verdict visible */
 function resetAnswer(keepVerdict = false) {
   S.partial = "";
-  $("#answer-text").innerHTML = '<span class="muted">Answer out loud when Viva finishes asking.</span>';
+  $("#answer-text").innerHTML = `<span class="muted">Answer out loud when ${S.coach.name} finishes asking.</span>`;
   $("#answer-box").classList.remove("grading");
   if (keepVerdict && !$("#verdict").hidden) {
     $("#verdict").classList.add("previous");
@@ -776,15 +792,46 @@ function hideVerdict() {
 
 const VERDICT_LABEL = { correct: "✓ Correct", partial: "◐ Partly there", incorrect: "✗ Not quite", skipped: "⏭ Skipped" };
 
+/**
+ * Points still on the table for the current question (tries and hints cost).
+ * @param {any} st
+ */
+function updateStakes(st) {
+  const q = S.question;
+  if (!q) return;
+  const factor = st.attempt_factor ?? 1;
+  $("#q-points").textContent = `${Math.round(q.points * factor * (st.hint_used ? 0.8 : 1))} pts`;
+  const pill = $("#q-attempt");
+  pill.hidden = (st.attempt ?? 1) <= 1;
+  pill.textContent = `Try ${st.attempt} of ${st.max_attempts}`;
+}
+
+const CLUE_LABEL = { partial: "◐ Almost there", incorrect: "✗ Not yet", stuck: "💡 Let's work it out" };
+
+/** @param {any} out */
+function showClue(out) {
+  const v = $("#verdict");
+  v.hidden = false;
+  v.classList.remove("previous");
+  v.dataset.v = "clue";
+  $("#verdict-chip").textContent = out.retry
+    ? CLUE_LABEL[/** @type {keyof typeof CLUE_LABEL} */ (out.verdict)] || "💡 Keep going"
+    : "💡 Hint";
+  $("#verdict-points").textContent = !out.retry ? "" : out.attempts_left === 0 ? "Last try" : `${out.attempts_left + 1} tries left`;
+  $("#verdict-clue").hidden = false;
+  $("#verdict-clue").textContent = out.clue || out.say;
+  $("#reveal").hidden = true;
+}
+
 /** @param {any} out */
 function showVerdict(out) {
   const v = $("#verdict");
   v.hidden = false;
   v.classList.remove("previous");
   v.dataset.v = out.verdict;
-  $("#verdict-chip").textContent =
-    out.retry ? "◐ Almost! One more try" : VERDICT_LABEL[/** @type {keyof typeof VERDICT_LABEL} */ (out.verdict)] || out.verdict;
-  $("#verdict-points").textContent = out.points ? `+${out.points}` : out.retry ? "" : "+0";
+  $("#verdict-chip").textContent = VERDICT_LABEL[/** @type {keyof typeof VERDICT_LABEL} */ (out.verdict)] || out.verdict;
+  $("#verdict-points").textContent = out.points ? `+${out.points}` : "+0";
+  $("#verdict-clue").hidden = true;
   const reveal = out.reveal;
   $("#reveal").hidden = !reveal;
   if (reveal) {
@@ -861,7 +908,7 @@ async function showResults(summary) {
   });
   $("#btn-drill").hidden = !summary.missed.length;
   $("#r-placement").hidden = true;
-  $("#r-report").innerHTML = '<div class="report-loading"><div class="ring small"></div> Viva is writing your coaching notes…</div>';
+  $("#r-report").innerHTML = '<div class="report-loading"><div class="ring small"></div> Writing your coaching notes…</div>';
   renderReview(summary.review);
   $("#r-board-topic").textContent = S.pack.title;
   if (summary.accuracy >= 0.6) {

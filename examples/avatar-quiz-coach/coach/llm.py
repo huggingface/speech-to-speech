@@ -25,11 +25,13 @@ def _models(env: str, default: str) -> list[str]:
     return [m.strip() for m in raw.split(",") if m.strip()]
 
 
-# Grading runs on every spoken answer, so it favours speed: Qwen3.8-27B on
-# Cerebras returns a graded turn in ~0.8 s.
+# Grading runs on every spoken answer, so it favours speed, and its clues
+# must not give answers away: in a leak test over 12 guided dialogues
+# gpt-oss-120b on Cerebras leaked once at ~0.5 s per turn, against 4 to 5
+# leaks for Qwen3.8-27B, GLM-5.3 and GLM-5.3-Flash.
 GRADER_MODELS = _models(
     "GRADER_MODELS",
-    "Qwen/Qwen3.8-27B:cerebras,openai/gpt-oss-120b:cerebras,zai-org/GLM-5.3-Flash",
+    "openai/gpt-oss-120b:cerebras,openai/gpt-oss-120b:groq,Qwen/Qwen3.8-27B:cerebras,zai-org/GLM-5.3-Flash",
 )
 # Question writing runs once per topic, so it favours quality.
 WRITER_MODELS = _models(

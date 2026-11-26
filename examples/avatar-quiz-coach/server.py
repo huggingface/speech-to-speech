@@ -50,8 +50,8 @@ SESSION_PROXY_URL = (
 )
 LB_HF_TOKEN = os.environ.get("LB_HF_TOKEN", "").strip()
 RESEARCH_PER_HOUR = int(os.environ.get("RESEARCH_PER_HOUR", "8"))
-# Qwen3-TTS has no native-English female preset; Serena ("warm, gentle") fits the avatar.
-VOICE = os.environ.get("COACH_VOICE", "Serena").strip()
+# Empty: each coach uses its own voice (Max: Aiden, Ada: Serena; see static/js/avatar.js).
+VOICE = os.environ.get("COACH_VOICE", "").strip()
 
 app = FastAPI(title="Viva quiz coach")
 
@@ -313,6 +313,7 @@ def _client_pack(pack: dict[str, Any]) -> dict[str, Any]:
 class StartRequest(BaseModel):
     pack_id: str
     player: str = ""
+    coach: str = Field(default="Max", max_length=20)
     question_ids: list[int] | None = None
 
 
@@ -327,6 +328,7 @@ def start_game(req: StartRequest, request: Request) -> dict[str, Any]:
         ids = [i for i in dict.fromkeys(req.question_ids) if i in valid] or None
     player, verified = _player(request, req.player)
     game = GAMES.create(pack, player, verified, ids)
+    game.coach = re.sub(r"[^A-Za-z ]", "", req.coach)[:20] or "Max"
     opening = game.opening()
     game.history.append({"role": "coach", "text": opening})
     return {

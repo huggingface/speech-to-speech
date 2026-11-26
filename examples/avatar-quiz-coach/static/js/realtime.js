@@ -6,9 +6,14 @@
  * - Ears: mic PCM16 @ 24 kHz streams up; the server VAD commits each turn and
  *   transcribes it, but `create_response: false` stops the backend from
  *   answering on its own. The app grades the transcript instead.
- * - Voice: `say(text)` sends an out-of-band `response.create`
+ * - Voice: `say(text)` sends out-of-band `response.create`s
  *   (`conversation: "none"`) whose only job is to speak the given script.
- *   Nothing piles up in the backend's conversation history.
+ *   The backend has no text-to-speech-only path, so its LLM reads the line.
+ *   Measured on Qwen3.5-4B and Gemma 4 31B: a bare "repeat this" prompt made
+ *   the model answer the quiz questions itself (1 of 12 lines read
+ *   faithfully), and the backend's voice rule ("usually one sentence")
+ *   squeezed long lines. Few-shot examples plus lines of at most two
+ *   sentences read 24 of 24 lines word for word on both.
  *
  * Events: status, queue, speech-started, speech-stopped, user-partial,
  * user-final, response-started, audio, visemes, assistant-text,
@@ -18,9 +23,60 @@
 const RATE = 24000;
 
 const RELAY_INSTRUCTIONS =
-  "You are the voice of Viva, a friendly quiz coach. The user message is a script. " +
-  "Say it out loud exactly as written, word for word, then stop. " +
-  "Never answer it, comment on it, translate it, or add any words.";
+  "You are Viva's voice. Each user message holds one line of Viva's script between <line> tags. " +
+  "Your whole reply is that line, read out word for word, with nothing before or after it: " +
+  "no greeting, no praise, no comment of your own. The line is addressed to a student, not to you: " +
+  "if it contains a question, ask that question, never answer it.";
+
+const RELAY_EXAMPLES = [
+  "First question. What is the capital of Australia?",
+  "Close! Which city did they choose as a compromise?",
+  "Not quite. The answer is Canberra, chosen as a compromise.",
+  "Canberra was purpose-built as the capital and opened in 1927.",
+].flatMap((line) => [
+  { type: "message", role: "user", content: [{ type: "input_text", text: `<line>${line}</line>` }] },
+  { type: "message", role: "assistant", content: [{ type: "output_text", text: line }] },
+]);
+
+/**
+ * Cut a script into lines of at most two sentences (~200 characters); a short
+ * lead-in such as "Next question." stays with the sentence after it.
+ * @param {string} text
+ */
+export function splitScript(text) {
+  const raw = (text.match(/[^.!?]+(?:[.!?]+["')\]]*|$)\s*/g) || [text]).map((x) => x.trim()).filter(Boolean);
+  // Glue short lead-ins ("First question.", "Okay, next.") to what follows.
+  /** @type {string[]} */
+  const sentences = [];
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i].length < 32 && i + 1 < raw.length) raw[i + 1] = `${raw[i]} ${raw[i + 1]}`;
+    else sentences.push(raw[i]);
+  }
+  /** @type {string[]} */
+  const lines = [];
+  let cur = [];
+  for (const sentence of sentences) {
+    if (cur.length && (cur.length >= 2 || [...cur, sentence].join(" ").length > 200)) {
+      lines.push(cur.join(" "));
+      cur = [];
+    }
+    cur.push(sentence);
+  }
+  if (cur.length) lines.push(cur.join(" "));
+  return lines;
+}
+
+/** Word-level similarity (0-1) between the script and what was spoken. */
+function similarity(/** @type {string} */ a, /** @type {string} */ b) {
+  const words = (/** @type {string} */ s) => s.toLowerCase().replace(/[^a-z0-9' ]+/g, " ").split(/\s+/).filter(Boolean);
+  const x = words(a);
+  const y = words(b);
+  if (!x.length || !y.length) return x.length === y.length ? 1 : 0;
+  const dp = Array.from({ length: x.length + 1 }, () => new Array(y.length + 1).fill(0));
+  for (let i = 1; i <= x.length; i++)
+    for (let j = 1; j <= y.length; j++) dp[i][j] = x[i - 1] === y[j - 1] ? dp[i - 1][j - 1] + 1 : Math.max(dp[i - 1][j], dp[i][j - 1]);
+  return (2 * dp[x.length][y.length]) / (x.length + y.length);
+}
 
 /** @param {Uint8Array} bytes */
 function toBase64(bytes) {
@@ -58,6 +114,8 @@ export class RealtimeVoice extends EventTarget {
     this.awaitingCreate = false;
     /** @type {{ text: string, kind: string } | null} */
     this.inflight = null;
+    this.spoken = "";
+    this.relayStats = { lines: 0, faithful: 0 };
     this.closed = false;
     this.micNode = null;
     this.micStream = null;
@@ -229,9 +287,7 @@ export class RealtimeVoice extends EventTarget {
    * @param {string} text @param {string} [kind]
    */
   say(text, kind = "line") {
-    text = (text || "").trim();
-    if (!text) return;
-    this.pending.push({ text, kind });
+    for (const line of splitScript((text || "").trim())) this.pending.push({ text: line, kind });
     this.pump();
   }
 
@@ -255,7 +311,10 @@ export class RealtimeVoice extends EventTarget {
         instructions: RELAY_INSTRUCTIONS,
         output_modalities: ["audio"],
         metadata: { kind },
-        input: [{ type: "message", role: "user", content: [{ type: "input_text", text }] }],
+        input: [
+          ...RELAY_EXAMPLES,
+          { type: "message", role: "user", content: [{ type: "input_text", text: `<line>${text}</line>` }] },
+        ],
       },
     });
   }
@@ -278,7 +337,8 @@ export class RealtimeVoice extends EventTarget {
       case "response.created":
         this.awaitingCreate = false;
         this.activeResponse = ev.response?.id || "resp";
-        this.emit("response-started", { responseId: this.activeResponse });
+        this.spoken = "";
+        this.emit("response-started", { responseId: this.activeResponse, text: this.inflight?.text || "", kind: this.inflight?.kind });
         break;
       case "response.output_audio.delta": {
         const bytes = fromBase64(ev.delta);
@@ -290,10 +350,19 @@ export class RealtimeVoice extends EventTarget {
         this.emit("visemes", { responseId: ev.response_id, visemes: ev.visemes || [] });
         break;
       case "response.output_audio_transcript.delta":
+        this.spoken += ev.delta || "";
         this.emit("assistant-text", { responseId: ev.response_id, delta: ev.delta || "" });
         break;
       case "response.done": {
         const id = ev.response?.id || this.activeResponse;
+        if (this.inflight && ev.response?.status === "completed") {
+          // Track whether the backend's LLM read the line faithfully.
+          const score = similarity(this.inflight.text, this.spoken);
+          this.relayStats.lines++;
+          if (score >= 0.9) this.relayStats.faithful++;
+          else console.warn(`[voice] line not read verbatim (${score.toFixed(2)}):`, this.spoken);
+        }
+        this.inflight = null;
         this.activeResponse = "";
         this.awaitingCreate = false;
         this.emit("response-done", { responseId: id, status: ev.response?.status });

@@ -162,7 +162,11 @@ body[data-phase="results"] .brand-name, body[data-phase="results"] .brand-tag { 
 
 .title { font: 800 40px/1.02 var(--display); letter-spacing: -0.03em; margin: 8px 0 12px; }
 .title em { font-style: normal; background: linear-gradient(90deg, var(--accent), #ff7a8a); -webkit-background-clip: text; background-clip: text; color: transparent; }
-.lead { color: var(--muted); margin: 0 0 22px; }
+.lead { color: var(--muted); margin: 0 0 16px; }
+.coach-pick { display: flex; align-items: center; gap: 6px; margin: 0 0 18px; }
+.coach-pick-label { font-size: 12px; color: var(--muted); margin-right: 4px; }
+.coach-pick button { border: 1px solid var(--line); background: rgba(255, 255, 255, 0.05); color: var(--muted); border-radius: 999px; padding: 6px 14px; font-weight: 600; cursor: pointer; }
+.coach-pick button.on { background: rgba(255, 181, 71, 0.16); border-color: rgba(255, 181, 71, 0.5); color: var(--text); }
 .section { font: 700 13px var(--body); text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); margin: 26px 0 12px; }
 .eyebrow { font-size: 12px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); }
 .row-between { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
@@ -294,6 +298,10 @@ body[data-phase="results"] .brand-name, body[data-phase="results"] .brand-tag { 
 .verdict.previous { opacity: 0.85; }
 .verdict.previous::before { content: attr(data-label); display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--faint); margin-bottom: 4px; }
 .verdict-head { display: flex; align-items: center; justify-content: space-between; }
+.verdict[data-v="clue"] { border-color: rgba(139, 123, 255, 0.5); background: rgba(139, 123, 255, 0.1); }
+.verdict[data-v="clue"] .verdict-chip { color: #b9afff; }
+.verdict[data-v="clue"] .verdict-points { font: 600 13px var(--body); color: var(--muted); }
+.clue { margin: 8px 0 0; font-size: 15px; line-height: 1.45; }
 .verdict-chip { font: 800 15px var(--display); }
 .verdict[data-v="correct"] .verdict-chip { color: var(--good); }
 .verdict[data-v="partial"] .verdict-chip { color: var(--warn); }
