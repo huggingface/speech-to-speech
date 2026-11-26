@@ -74,6 +74,19 @@ RUNNING_TOOL_STATUS = (
     "[Tool status, not said by the user] Still running: {calls}. Each result will arrive on its own, so do "
     "not repeat a running call. New requests can still use tools as usual."
 )
+# Added to the newest user message when the user spoke after a result that no
+# reply has followed, typically a tool that finished while they were talking.
+# The result and their words then reach the model in one request. Models answer
+# the words and leave the result out, and the reply still counts as having used
+# it, so nothing announces it later. Asking in the line not to repeat the result
+# makes small models leave it out, so the line goes once the model has spoken.
+# Asking for an answer first makes them speak instead of calling the tool the
+# new request needs, so the line asks for the request to be handled as usual.
+UNSPOKEN_TOOL_RESULT = (
+    "[Tool status, not said by the user] Finished, with a result the user has not heard: {calls}. Handle what "
+    "they just said as usual, with a tool call if it needs one, and also tell them that result in a sentence. "
+    "Skip it only if it holds nothing they are waiting for."
+)
 
 # Anchor returned by :meth:`Chat.history_anchor_id` for an empty conversation,
 # so a generation that starts from empty history is still written before user
@@ -1175,6 +1188,10 @@ class Chat:
           it instead of relaying the result. It also lists running
           calls that are not among *items*: ones the client created itself, and
           ones whose turn was trimmed away.
+        - When the newest thing the user said follows results that no reply has
+          followed, :data:`UNSPOKEN_TOOL_RESULT` follows it too. Text the model
+          speaks before a call of its own counts as a reply, so the line is not
+          there to make it announce the result a second time after that call.
         """
         # Deleting a call does not delete its output from wire history, but the
         # remaining result cannot be submitted to a model without that call.
@@ -1216,8 +1233,12 @@ class Chat:
         # result is not the user, and an image on its own counts only until they speak.
         newest_user: int | None = None
         user_spoke = False
+        unanswered: list[str] = []  # Results no reply has followed.
+        unspoken: list[str] = []  # Those the user has spoken after, still with no reply.
         for item in items:
             if isinstance(item, RealtimeConversationItemFunctionCallOutput) and item.call_id in calls:
+                if item.call_id not in unanswered:
+                    unanswered.append(item.call_id)
                 if item.call_id in late:
                     late_result = _late_tool_result(calls[item.call_id], item)
                     history.append(late_result)
@@ -1229,7 +1250,12 @@ class Chat:
                     late_result.content[0].text = f"{late_result.content[0].text}\n{LATE_TOOL_RESULT_END}"
                 if spoken or not user_spoke:
                     newest_user = len(history)
+                if spoken:
+                    unspoken = list(unanswered)
                 user_spoke = user_spoke or spoken
+            elif isinstance(item, RealtimeConversationItemAssistantMessage):
+                unanswered.clear()
+                unspoken.clear()
             history.append(item)
             if isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None:
                 if item.call_id in late or item.call_id not in outputs:
@@ -1242,6 +1268,8 @@ class Chat:
                 *(call for call_id, call in self._pending_tool_calls.items() if call_id not in calls),
                 *still_running,
             ]
+        if unspoken and running_status and newest_user is not None:
+            history.insert(newest_user + 1, _unspoken_tool_results([calls[call_id] for call_id in unspoken]))
         if still_running and running_status:
             history.insert(
                 len(history) if newest_user is None else newest_user + 1, _running_tool_status(still_running)
@@ -1937,6 +1965,15 @@ def _running_tool_status(calls: Sequence[RealtimeConversationItemFunctionCall]) 
     listed = ", ".join(f"{call.name}({call.arguments})" for call in calls)
     message = make_user_message(RUNNING_TOOL_STATUS.format(calls=listed))
     message.id = _derived_id("msg", "running:" + ",".join(call.call_id or "" for call in calls))
+    return message
+
+
+def _unspoken_tool_results(
+    calls: Sequence[RealtimeConversationItemFunctionCall],
+) -> RealtimeConversationItemUserMessage:
+    listed = ", ".join(f"{call.name}({call.arguments})" for call in calls)
+    message = make_user_message(UNSPOKEN_TOOL_RESULT.format(calls=listed))
+    message.id = _derived_id("msg", "unspoken:" + ",".join(call.call_id or "" for call in calls))
     return message
 
 

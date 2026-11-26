@@ -18,6 +18,7 @@ from speech_to_speech.LLM.chat import (
     LATE_TOOL_RESULT_END,
     PENDING_TOOL_OUTPUT,
     RUNNING_TOOL_STATUS,
+    UNSPOKEN_TOOL_RESULT,
     Chat,
     ChatItemError,
     make_assistant_message,
@@ -57,6 +58,10 @@ def _late(output="the report", name="research_report", arguments=REPORT_ARGS):
 
 def _status(*calls):
     return RUNNING_TOOL_STATUS.format(calls=", ".join(calls))
+
+
+def _unspoken(*calls):
+    return UNSPOKEN_TOOL_RESULT.format(calls=", ".join(calls))
 
 
 def _shape(chat):
@@ -179,10 +184,67 @@ def test_late_result_and_the_next_user_message_form_one_user_turn():
     )
 
     # The two are merged for chat templates, so the result is closed before the user's words.
-    merged = f"{_late()}\n{LATE_TOOL_RESULT_END}\nanything new?"
+    # No reply has followed the result, so the model is told the user has not heard it.
+    merged = f"{_late()}\n{LATE_TOOL_RESULT_END}\nanything new?\n{_unspoken(REPORT_CALL)}"
     assert _shape(chat)[-1] == ("user", merged)
     assert chat.to_responses_api_chat()[-1]["content"][0]["text"] == merged
     _assert_every_call_has_an_output(chat)
+
+
+def test_result_the_user_spoke_after_is_marked_as_not_heard_until_the_model_speaks():
+    weather = _call("call_rome", "get_weather", '{"city": "Rome"}')
+    chat = Chat(10)
+    chat.add_item(make_user_message("make a report"))
+    chat.add_ordered_function_call(_call())
+    chat.add_item(_output())
+    chat.add_item(make_user_message("and the weather in Rome?"))
+    spoke_first = chat.copy(deep=True)
+
+    # The tool finished while the user was asking for something else.
+    asked = ("user", f"and the weather in Rome?\n{_unspoken(REPORT_CALL)}")
+    assert _shape(chat) == [
+        ("user", "make a report"),
+        ("call", "call_report"),
+        ("tool", "call_report", "the report"),
+        asked,
+    ]
+    assert [item.type for item in chat.buffer] == ["message", "function_call", "function_call_output", "message"]
+
+    # A call made without speaking keeps the line for the request that delivers
+    # its result, and the line never covers a result that came after the user spoke.
+    chat.add_ordered_function_call(weather)
+    chat.add_item(_output("call_rome", "sunny"))
+    assert _shape(chat)[3:] == [asked, ("call", "call_rome"), ("tool", "call_rome", "sunny")]
+    chat.add_item(make_assistant_message("Sunny, and your report is ready."))
+    chat.add_item(make_user_message("thanks"))
+    assert [row for row in _shape(chat) if row[0] == "user"][1:] == [
+        ("user", "and the weather in Rome?"),
+        ("user", "thanks"),
+    ]
+    _assert_every_call_has_an_output(chat)
+
+    # Text spoken before the call was the model's chance to say it, so the
+    # request that delivers that call's result does not ask for it again.
+    spoke_first.add_provisional_generation_items("response", [make_assistant_message("Let me check."), weather])
+    spoke_first.add_item(_output("call_rome", "sunny"))
+    assert _shape(spoke_first)[3:] == [
+        ("user", "and the weather in Rome?"),
+        ("assistant", "Let me check."),
+        ("call", "call_rome"),
+        ("tool", "call_rome", "sunny"),
+    ]
+
+
+def test_result_that_was_answered_before_the_user_spoke_is_not_marked_as_not_heard():
+    chat = _chat_with_running_call(_output(), make_assistant_message("The report is ready."))
+    chat.add_item(make_user_message("thanks"))
+    chat.add_ordered_function_call(_call("call_chips", arguments='{"topic": "chips"}'))
+    chat.add_item(make_user_message("how long?"))
+
+    # A call that is still running has no result to tell the user about.
+    still_running = _status('research_report({"topic": "chips"})')
+    assert _shape(chat)[-1] == ("user", f"how long?\n{still_running}")
+    assert "has not heard" not in str(_shape(chat))
 
 
 def test_parallel_results_before_any_reply_pair_with_their_calls():
@@ -509,6 +571,25 @@ def test_running_calls_outside_the_history_are_left_out_of_a_summary():
 
     assert summarized and "Tool status" not in str(summarized[0])
     assert _status(f"research_report({REPORT_ARGS})") in chat.to_transformers_chat()[-1]["content"]
+
+
+def test_result_the_user_has_not_heard_is_not_marked_in_a_summary():
+    chat = Chat(size=2)
+    summarized: list = []
+    chat.add_item(make_user_message("make a report"))
+    chat.add_ordered_function_call(_call())
+    chat.add_item(_output())
+    chat.add_item(make_user_message("question 0"))
+    assert chat.to_transformers_chat()[-1]["content"] == f"question 0\n{_unspoken(REPORT_CALL)}"
+    chat.add_item(make_assistant_message("answer 0"))
+    chat.add_item(make_user_message("latest"))
+
+    chat.trim_if_needed(_make_stub_compactor(captured=summarized))
+    _wait_thread(chat)
+
+    # The summarized history ends with the turn whose request carried the line.
+    assert "research_report" in str(summarized[0]) and "answer 0" in str(summarized[0])
+    assert "latest" not in str(summarized[0]) and "Tool status" not in str(summarized[0])
 
 
 def test_reply_from_a_later_response_makes_the_result_late_but_text_of_the_same_response_does_not():
