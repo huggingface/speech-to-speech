@@ -802,3 +802,28 @@ def test_server_flags_build_the_session_default():
     assert _default_false_interruption(flags) is None
     flags.false_interruption = "duck"
     assert _default_false_interruption(flags) == FalseInterruptionConfig(playback="duck", min_words=2, min_speech_ms=0)
+
+
+def test_router_pauses_playback_while_pending_and_resumes_after(call, monkeypatch):
+    states = []
+    original = WebSocketTransport.set_playback
+
+    def record(self, state):
+        states.append(state)
+        original(self, state)
+
+    monkeypatch.setattr(WebSocketTransport, "set_playback", record)
+    call.configure({"playback": "pause"}, extensions=["speech_to_speech.interruption"])
+    _, key = _coach_is_reading(call)
+
+    cough = call.speech()
+    call.stop(cough)
+    call.final(cough, "Uh.")
+    call.receive_until("speech_to_speech.interruption.resolved")
+    assert states == ["pause", "play"]
+
+    real = call.speech()
+    call.stop(real)
+    call.final(real, "Stop.")
+    call.receive_until("input_audio_buffer.speech_started")
+    assert states == ["pause", "play", "pause", "play"]
