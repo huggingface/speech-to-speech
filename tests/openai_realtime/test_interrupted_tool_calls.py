@@ -62,16 +62,20 @@ def _send_output(service, conn_id, call_id="call_dance", output="danced"):
 
 
 def _model_input(chat):
-    """What the model is shown: each message's role and its text, or the tool it calls."""
-    return [
-        (
-            message["role"],
-            message["tool_calls"][0]["function"]["name"]
-            if "tool_calls" in message
-            else message["content"].split("\n[Tool status")[0],
-        )
-        for message in chat.to_transformers_chat()
-    ]
+    """What the model is shown: each message's role and its text, or the tool it calls.
+
+    Spoken text and the call it led into share one assistant message; the text is
+    listed first.
+    """
+    shown = []
+    for message in chat.to_transformers_chat():
+        if "tool_calls" in message:
+            if message["content"]:
+                shown.append((message["role"], message["content"]))
+            shown.append((message["role"], message["tool_calls"][0]["function"]["name"]))
+        else:
+            shown.append((message["role"], message["content"].split("\n[Tool status")[0]))
+    return shown
 
 
 def test_barge_in_keeps_a_delivered_call_and_accepts_its_output(service, conn_id):

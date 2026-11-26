@@ -101,6 +101,7 @@ It listens at `ws://127.0.0.1:8765/v1/realtime`. Connect with:
 
 - the packaged audio client: `speech-to-speech talk --url ws://127.0.0.1:8765/v1/realtime`
 - the [browser demo](./demo/README.md#quick-start-local)
+- the optional [Open WebUI local example](./demo/openwebui/README.md), for saved text/voice chat with typed context updates during a call
 - any client using the core OpenAI Realtime events; the OpenAI Agents SDK is tested over both transports (see [Realtime API](#realtime-api))
 - [LiveKit Agents](./demo/livekit/README.md), as the agent's realtime model
 
@@ -931,7 +932,14 @@ per-category answer accuracy, audio latency, and protocol failures in JSON repor
 local GPU runs or Hugging Face Jobs;
 `scripts/prepare_eval_space.py` optionally builds the image in a private HF Space.
 Start with four questions, then compare reports across revisions. See
-[Big Bench Audio system tests](docs/vibe-checks.md).
+[Big Bench Audio system tests](docs/vibe-checks.md#big-bench-audio).
+
+## Tool-use conversation tests
+
+Run scripted tool-use conversations as text through a running server and count right calls,
+replies that promise a call without making it, speech before calls, and long-running results.
+A stand-in for the speech services makes it a quick check of any LLM backend. See
+[Tool-use conversations](docs/vibe-checks.md#tool-use-conversations).
 
 ## Contributing
 

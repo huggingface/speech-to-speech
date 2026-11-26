@@ -184,6 +184,69 @@ def _drive(
     return text, tools_out, usage, chat, end
 
 
+# ── Empty completions ────────────────────────────────────────────────────────
+
+
+def _finish(reason):
+    return SimpleNamespace(
+        choices=[SimpleNamespace(delta=SimpleNamespace(content=None, tool_calls=None), finish_reason=reason)],
+        usage=None,
+    )
+
+
+def _empty_completion_logs(caplog):
+    return [record.getMessage() for record in caplog.records if "LLM completed without output" in record.getMessage()]
+
+
+def test_empty_completion_logs_the_provider_terminal_but_no_conversation_text(caplog):
+    handler = _make_handler(stream=True)
+    handler.client.chat.completions.next_result = _FakeStream([_finish("stop")])
+
+    with caplog.at_level("WARNING"):
+        text, tools, _, _, end = _drive(handler, user="secret question", instructions="secret instructions")
+
+    assert (text, tools, end.error, end.status) == ("", [], None, "completed")
+    [message] = _empty_completion_logs(caplog)
+    assert "finish_reason=stop" in message
+    assert "last_item=user" in message
+    assert "secret" not in message
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        [_chunk(content="Hello."), _finish("stop")],
+        [_chunk(tool_calls=[_tc_delta(0, id="c1", name="f", arguments="{}")]), _finish("tool_calls")],
+    ],
+    ids=["text", "tool_only"],
+)
+def test_completion_with_output_is_not_reported_empty(caplog, chunks):
+    handler = _make_handler(stream=True)
+    handler.client.chat.completions.next_result = _FakeStream(chunks)
+
+    with caplog.at_level("WARNING"):
+        _drive(handler)
+
+    assert _empty_completion_logs(caplog) == []
+
+
+def test_cancelled_generation_is_not_reported_empty(caplog):
+    handler = _make_handler(stream=True)
+    scope = CancelScope()
+    handler.cancel_scope = scope
+
+    def cancel_then_finish():
+        scope.cancel()
+        yield _finish("stop")
+
+    handler.client.chat.completions.next_result = _FakeStream(cancel_then_finish())
+
+    with caplog.at_level("WARNING"):
+        _drive(handler)
+
+    assert _empty_completion_logs(caplog) == []
+
+
 # ── Converter tests ──────────────────────────────────────────────────────────
 
 
@@ -672,13 +735,10 @@ def test_streaming_preserves_text_tool_text_order():
         "message",
         "function_call_output",
     ]
-    assert [message["role"] for message in h._serialize(chat)] == [
-        "user",
-        "assistant",
-        "assistant",
-        "tool",
-        "assistant",
-    ]
+    messages = h._serialize(chat)
+    assert [message["role"] for message in messages] == ["user", "assistant", "tool", "assistant"]
+    assert messages[1]["content"] == "Before."
+    assert [tool_call["function"]["name"] for tool_call in messages[1]["tool_calls"]] == ["lookup"]
 
 
 def test_prefetch_defers_irreversible_chat_cleanup_until_claim():
@@ -1101,6 +1161,58 @@ def test_provider_failure_before_output_speaks_fallback_then_fails_without_histo
         ResponseFailedEvent,
         EndOfResponse,
     ]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_image_rejected_by_text_only_backend_does_not_break_later_turns(stream):
+    """A backend without vision rejects the image once; the image must not stay in
+    history, or every later text turn is rejected too."""
+    h = _make_handler(stream=stream)
+    requests = []
+
+    def create(**kwargs):
+        requests.append(kwargs)
+        if "image_url" in json.dumps(kwargs["messages"]):
+            raise InternalServerError(
+                "image input is not supported - hint: if this is unexpected, you may need to provide the mmproj",
+                response=_api_error_response(500),
+                body=None,
+            )
+        text = "The server could not process the photo." if len(requests) == 2 else "Dublin."
+        if stream:
+            return _FakeStream([_chunk(content=text)])
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=text, tool_calls=[]), finish_reason="stop")],
+            usage=None,
+        )
+
+    h.client.chat.completions.create = create
+    chat = Chat(10)
+    chat.add_item(make_user_message("Hello"))
+    chat.add_item(
+        RealtimeConversationItemUserMessage(
+            type="message",
+            role="user",
+            content=[UserContent(type="input_image", image_url="data:image/jpeg;base64,abc")],
+        )
+    )
+    text, _, _, _, end = _drive(h, user="How many fingers?", chat=chat)
+    assert text == "The server could not process the photo."
+    assert end is not None and end.error is None
+    assert len(requests) == 2
+    assert "image_url" not in json.dumps(requests[1]["messages"])
+    assert "image input is not supported" in json.dumps(requests[1]["messages"])
+    assert requests[1]["tool_choice"] == "none"
+
+    text, _, _, _, end = _drive(h, user="What is the capital of Ireland?", chat=chat)
+    assert end is not None and end.error is None
+    assert text == "Dublin."
+    assert len(requests) == 3
+    assert "image_url" not in json.dumps(requests[2]["messages"])
+    user_texts = [
+        p.text for i in chat.buffer if getattr(i, "role", None) == "user" for p in i.content if p.type == "input_text"
+    ]
+    assert "Hello" in user_texts
 
 
 def test_cancelled_provider_failure_does_not_emit_fallback():

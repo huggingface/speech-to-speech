@@ -1470,7 +1470,7 @@ async function doStart(audioContext = null) {
     localVad: settings.localVad,
     voice: settings.voice,
     language: settings.language,
-    capabilitiesUrl: pinnedUrl || undefined,
+    capabilitiesUrl: buildDirectWsUrl(pinnedUrl) || undefined,
     instructions: settings.instructions,
     startupGreeting,
     acquireMic: acquireMicStream,

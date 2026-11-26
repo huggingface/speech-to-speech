@@ -324,15 +324,26 @@ class LeaseBroker:
             (directory / "closed").touch()
             (directory / "finished").touch()
 
+    @staticmethod
+    def _raise_failure(directory):
+        """Raise the allocation's recorded error, if it has one.
+
+        The driver writes ``failure.json`` before ``closed`` and ``finished``. A waiter that
+        sees one of those markers checks again here, because the failure may have been
+        written after its last look.
+        """
+        failure = directory / "failure.json"
+        if failure.exists():
+            raise RuntimeError(json.loads(failure.read_text())["error"])
+
     def prepare(self):
         """Wait for actual model inference warmup in the shared allocation."""
         directory = self._ensure_lease()
         started = time.monotonic()
         while True:
-            failure = directory / "failure.json"
-            if failure.exists():
-                raise RuntimeError(json.loads(failure.read_text())["error"])
+            self._raise_failure(directory)
             if (directory / "closed").exists():
+                self._raise_failure(directory)
                 raise RuntimeError("GPU allocation ended before models were ready")
             ready = directory / "ready.json"
             if ready.exists():
@@ -390,16 +401,16 @@ class LeaseBroker:
                             if cancelled is not None and cancelled():
                                 return
                             yield event
-                    failure = directory / "failure.json"
-                    if failure.exists():
-                        raise RuntimeError(json.loads(failure.read_text())["error"])
+                    self._raise_failure(directory)
                     if (directory / "closed").exists() and not (directory / (ident + ".accepted")).exists():
+                        self._raise_failure(directory)
                         break  # Worker retired without starting this operation.
                     if (directory / "finished").exists():
                         # Events may have been written between the read above
                         # and the final marker. Read them before declaring loss.
                         if events.exists() and events.stat().st_size > cursor:
                             continue
+                        self._raise_failure(directory)
                         raise RuntimeError("GPU worker ended before completing an accepted operation")
                     if time.monotonic() - started > self.wait_timeout:
                         raise TimeoutError("Timed out waiting for shared ZeroGPU allocation")
