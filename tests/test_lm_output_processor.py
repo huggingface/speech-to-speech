@@ -790,13 +790,110 @@ def test_pending_reopen_holds_output_until_cancelled():
 def test_reopen_grace_holds_output_until_elapsed():
     tracker, processor = _tracked_processor()
     tracker.start_reopen_grace("turn_1", 0, grace_s=0.08)
-    done, outputs, thread = _process_in_thread(processor)
+    done = Event()
+    outputs = []
+
+    def run_processor():
+        outputs.extend(
+            processor.process(
+                LLMResponseChunk(
+                    text="hello",
+                    turn_id="turn_1",
+                    turn_revision=0,
+                    response=RealtimeResponseCreateParams(output_modalities=["text"]),
+                )
+            )
+        )
+        done.set()
+
+    thread = Thread(target=run_processor)
+    thread.start()
 
     assert not done.wait(0.02)
     assert done.wait(1.0)
     thread.join(timeout=1.0)
 
+    assert [type(output) for output in outputs] == [AssistantOutputEvent]
+
+
+def test_reopen_grace_forwards_spoken_audio_to_tts_speculatively():
+    tracker, processor = _tracked_processor()
+    tracker.start_reopen_grace("turn_1", 0, grace_s=0.12)
+    done, outputs, thread = _process_in_thread(processor)
+
+    # Spoken text flows immediately to TTS during reopen grace so synthesis can
+    # overlap while first-audio commit/emission waits in TTS/router.
+    assert done.wait(0.05)
+    thread.join(timeout=1.0)
+
     assert [type(output) for output in outputs] == [AssistantOutputEvent, TTSInput]
+    assert not tracker.is_committed("turn_1", 0)
+
+    # EndOfResponse still holds until reopen grace elapses.
+    end_done = Event()
+    end_outputs = []
+
+    def run_end():
+        end_outputs.extend(processor.process(EndOfResponse(turn_id="turn_1", turn_revision=0)))
+        end_done.set()
+
+    end_thread = Thread(target=run_end)
+    end_thread.start()
+    assert not end_done.wait(0.03)
+    assert end_done.wait(1.0)
+    end_thread.join(timeout=1.0)
+    assert [type(output) for output in end_outputs] == [AssistantResponseDoneEvent, EndOfResponse]
+
+
+def test_reopen_grace_holds_tool_calls_even_when_mixed_with_spoken_audio():
+    tracker = SpeculativeTurnTracker()
+    tracker.start_turn()
+    side_events: Queue = Queue()
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.setup(speculative_turns=tracker, text_output_queue=side_events)
+    tracker.start_reopen_grace("turn_1", 0, grace_s=0.1)
+
+    tool = ResponseFunctionToolCall(type="function_call", call_id="call_1", name="lookup", arguments="{}")
+    chunk = LLMResponseChunk(
+        parts=[AssistantTextPart(text="Let me check."), AssistantToolCallPart(tool=tool)],
+        turn_id="turn_1",
+        turn_revision=0,
+    )
+    done = Event()
+    outputs = []
+
+    def run_processor():
+        outputs.extend(processor.process(chunk))
+        done.set()
+
+    thread = Thread(target=run_processor)
+    thread.start()
+
+    # Tool-call side event must NEVER leak before reopen grace expires.
+    assert not done.wait(0.03)
+    assert side_events.empty()
+    assert done.wait(1.0)
+    thread.join(timeout=1.0)
+
+    assert isinstance(side_events.get_nowait(), AssistantToolCallReadyEvent)
+    assert [type(output) for output in outputs] == [AssistantOutputEvent, TTSInput, AssistantOutputEvent]
+
+
+def test_reopen_grace_end_of_response_after_audio_does_not_charge_hold_observer():
+    tracker, processor = _tracked_processor()
+    observed: list[tuple[str, int, float, float]] = []
+    tracker.wait_observer = lambda tid, rev, start, end: observed.append((tid, rev, start, end))
+    tracker.start_reopen_grace("turn_1", 0, grace_s=0.06)
+
+    outputs = list(processor.process(LLMResponseChunk(text="hello", turn_id="turn_1", turn_revision=0)))
+    assert [type(output) for output in outputs] == [AssistantOutputEvent, TTSInput]
+    assert observed == []
+
+    # EndOfResponse still waits for grace, but does not pollute hold_s while
+    # TTS owns the audio critical path.
+    end_outputs = list(processor.process(EndOfResponse(turn_id="turn_1", turn_revision=0)))
+    assert [type(output) for output in end_outputs] == [AssistantResponseDoneEvent, EndOfResponse]
+    assert observed == []
 
 
 def test_confirmed_reopen_drops_held_output():

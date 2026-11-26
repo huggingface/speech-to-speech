@@ -422,6 +422,33 @@ class TurnLatencyStore:
                 tracker.turn_revision = turn_revision
             return tracker
 
+    def record_smart_turn(
+        self,
+        turn_id: str | None,
+        turn_revision: int | None,
+        *,
+        status: Literal["disabled", "complete", "incomplete", "failed"],
+        analysis_s: float | None,
+        grace_s: float | None = None,
+        processing_delay_s: float | None = None,
+    ) -> None:
+        """Record Smart Turn's decision onto an existing turn or response tracker."""
+        if turn_id is None:
+            return
+        with self._lock:
+            key = self._turn_key(turn_id, turn_revision)
+            response_key = self._turn_responses.get(key)
+            tracker = self._trackers.get(response_key) if response_key is not None else self._pending_turn.get(key)
+            if tracker is None:
+                return
+            tracker.smart_turn_status = status
+            tracker.smart_turn_analysis_s = analysis_s
+            if status != "disabled":
+                tracker.smart_turn_grace_s = grace_s
+                tracker.smart_turn_processing_delay_s = processing_delay_s
+                if tracker.smart_turn_wait_s is None:
+                    tracker.smart_turn_wait_s = 0.0
+
     def record_smart_wait(
         self, turn_id: str | None, turn_revision: int | None, started_at_s: float, ended_at_s: float
     ) -> None:

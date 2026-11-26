@@ -69,7 +69,9 @@ that lock is not contended, and hold is omitted entirely when nothing held it.
 - `llm_first_tts` / `llm_first_tts_s` uses that same generation-start timestamp
   and ends immediately before the output processor yields its first nonempty,
   audio-enabled text input to TTS. It includes sentence batching or final flush,
-  the LLM-to-processor queue, speculative output gates, and language processing.
+  the LLM-to-processor queue, pending-reopen/Smart Turn output gates, and
+  language processing. Audio-enabled batches flow through the reopen grace window
+  so TTS can synthesize speculatively before first-audio commit.
   It excludes the downstream TTS queue, synthesis, and playback, so it is neither
   provider first-token time nor first-audio time. Nonstreaming replies measure
   the handoff after the complete reply. Failure fallback text also counts when
@@ -127,9 +129,12 @@ that lock is not contended, and hold is omitted entirely when nothing held it.
   existing timing. It is unavailable when no speech-end estimate exists; there
   is no fallback to the old handoff boundary. Later synthesis segments cannot
   overwrite first audio. This is generated audio, not browser playback.
-- `vad_settle` is the whole wait at the final STT input gate before a settled
-  revision is accepted, including revision stability and any remaining Smart
-  Turn processing delay. It can overlap the processing portion of `hold`.
+- `vad_settle` is the wait at the final STT gate before a settled revision is
+  forwarded to the LLM, including revision stability and any remaining Smart
+  Turn inference or incomplete processing delay. When Smart Turn runs in parallel
+  with STT, transcription begins immediately while `vad_settle` covers any wait
+  after transcription finishes before the final transcript is emitted. It can
+  overlap the processing portion of `hold`.
   It is recorded only past a 0.05s threshold, so an immediately returning gate
   does not add a permanent `vad_settle=0.00s` to every line. It is log-only and
   is never part of response metadata.
@@ -200,22 +205,33 @@ times. Stages can overlap; these fields are not an additive breakdown.
 
 ## Smart Turn timing
 
-For a speculative speech turn, both timers start when the pipeline records the
-finalized segment, after Smart Turn analysis and any audio enhancement. The
-output grace sets the earliest time the first assistant text can be sent to TTS
-for that uncommitted revision.
+For a speculative speech turn, both timers are anchored to when VAD records the
+finalized segment (after any audio enhancement). Smart Turn runs asynchronously
+on a dedicated worker thread in parallel with STT, so VAD keeps ingesting
+microphone audio and STT starts transcribing immediately instead of waiting for
+Smart Turn classification to finish.
 
-| Smart Turn result | Extra delay at the final speech input gate | Output grace before first text to TTS |
+Final STT emission still waits for Smart Turn's decision and any incomplete
+processing delay before triggering the LLM. Once the LLM produces spoken text,
+audio-enabled batches flow through the reopen grace window so TTS can synthesize
+speculatively in parallel; the output grace sets the earliest time the first
+audio block (and client output events) can commit and be emitted for that
+uncommitted revision.
+
+| Smart Turn result | Extra delay before final STT triggers LLM | Output grace before first audio commit/emission |
 | --- | --- | --- |
 | Complete, disabled, or failed | 0 ms | `--speculative_reopen_ms` (800 ms) |
 | Incomplete | `--smart_turn_incomplete_delay_ms` (600 ms), capped by `--smart_turn_max_wait_ms` | `--smart_turn_max_wait_ms` (2000 ms) |
 
 With the incomplete defaults, the processing delay expires at 600 ms and the
-output grace expires at 2000 ms from finalization. Processing can run during
-the grace. If the first text is ready early, it waits at the output gate.
-Shortening the processing delay gives STT and the LLM more time within the
-same grace. TTS synthesis and output buffering add time before the first audio
-block, and `e2e` also includes the time from estimated speech end to finalization.
+output grace expires at 2000 ms from segment finalization (Smart Turn inference
+overlaps inside those windows instead of adding on top). STT, the LLM, and TTS
+synthesis can all run during the grace window. If the first audio block is ready
+early, TTS holds it at the commit gate until grace expires and emits immediately;
+if the user resumes speaking before commit, synthesis aborts cleanly without
+exposing audio or assistant events. Shortening the processing delay gives the LLM
+and TTS more time within the same grace. `e2e` also includes the time from
+estimated speech end to finalization.
 
 Resumed speech can invalidate the revision before it produces a response.
 `--unanswered_reopen_ms` limits reopening by streamed audio time while the

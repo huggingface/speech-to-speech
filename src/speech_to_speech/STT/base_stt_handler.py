@@ -116,13 +116,60 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
             self._log_stale_turn_item(output, "output-after-final")
             return False
 
-        if not self._is_latest_turn_item(output, wait_for_pending_reopen=True, wait_for_stability=False):
+        is_partial = isinstance(output, PartialTranscription)
+        gate_start = perf_counter()
+        if is_partial:
+            is_latest = self._is_latest_turn_item(output, wait_for_pending_reopen=True, wait_for_stability=False)
+        else:
+            is_latest = self._wait_for_final_output_gate(output)
+        gate_wait_s = perf_counter() - gate_start
+        if is_latest and not is_partial and gate_wait_s >= self._GATE_WAIT_REPORT_S:
+            self._record_vad_settle(output, gate_wait_s)
+        if not is_latest:
             if isinstance(output, (Transcription, PartialTranscription)):
                 # Rejected output never reaches the service's final-STT cleanup.
                 self._discard_pending_latency(output)
             self._log_stale_turn_item(output, "output")
             return False
         return True
+
+    def _wait_for_final_output_gate(self, output: STTOut) -> bool:
+        """Wait for any background Smart Turn decision and incomplete delay before emitting final STT."""
+        if self.speculative_turns is None:
+            return True
+        turn_id = getattr(output, "turn_id", None)
+        turn_revision = getattr(output, "turn_revision", None)
+        if turn_id is None or turn_revision is None:
+            return True
+        if not self.speculative_turns.wait_for_gate(
+            turn_id,
+            turn_revision,
+            hold_for_grace=False,
+            hold_for_smart_turn=True,
+        ):
+            return False
+        processing_deadline = self.speculative_turns.processing_deadline(turn_id, turn_revision)
+        if processing_deadline is None:
+            return True
+        remaining_delay_s = max(0.0, processing_deadline - monotonic())
+        if remaining_delay_s <= 0.0:
+            return True
+        wait_started_at_s = perf_counter()
+        is_latest = self.speculative_turns.wait_for_gate(
+            turn_id,
+            turn_revision,
+            hold_for_grace=False,
+            hold_until=processing_deadline,
+        )
+        store = getattr(self, "turn_latency_store", None)
+        if store is not None:
+            store.record_smart_wait(
+                turn_id,
+                turn_revision,
+                wait_started_at_s,
+                min(perf_counter(), wait_started_at_s + remaining_delay_s),
+            )
+        return is_latest
 
     def before_emit_output(self, output: STTOut) -> None:
         if isinstance(output, Transcription):
@@ -143,6 +190,17 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
             return True
 
         if wait_for_stability:
+            if self.speculative_turns.has_pending_smart_turn(turn_id, turn_revision):
+                # Smart Turn runs in parallel with STT; start transcription immediately
+                # and enforce any incomplete processing delay before emitting the final text.
+                hold_until = monotonic() + self.final_revision_settle_s if self.final_revision_settle_s > 0 else None
+                return self.speculative_turns.wait_for_gate(
+                    turn_id,
+                    turn_revision,
+                    hold_for_grace=False,
+                    hold_for_smart_turn=False,
+                    hold_until=hold_until,
+                )
             item_delay_s = max(0.0, getattr(item, "processing_delay_s", 0.0) - self._item_age_s(item))
             processing_deadline = self.speculative_turns.processing_deadline(turn_id, turn_revision)
             if processing_deadline is not None:

@@ -298,17 +298,13 @@ class PocketTTSHandler(BaseTTSHandler):
 
         if self._response_identity(tts_input) in self._failed_responses:
             return
-        if not self._admit_input(tts_input):
+        if not self._admit_input(tts_input, commit=False, hold_for_grace=False):
             return
 
-        gen = tts_input.cancel_generation
-        if gen is None and self.cancel_scope is not None:
-            gen = self.cancel_scope.generation
+        gen = self._effective_cancel_generation(tts_input)
         language_code = tts_input.tts_language_code
         text = tts_input.text
         logger.debug(f"Received language code: {language_code}")
-
-        console.print(f"[green]ASSISTANT: {text}")
 
         # Generate audio stream
         logger.debug("Generating audio: %s", transcript_for_log(text))
@@ -318,7 +314,7 @@ class PocketTTSHandler(BaseTTSHandler):
         except Exception:
             if getattr(self, "phonemizer", None) is None:
                 raise
-            if self._is_stale(gen):
+            if self._is_synthesis_cancelled(tts_input, gen):
                 logger.info("TTS generation cancelled (interruption)")
                 return
             self._failed_responses.add(self._response_identity(tts_input))
@@ -344,23 +340,34 @@ class PocketTTSHandler(BaseTTSHandler):
         self._failed_responses.clear()
 
     def _stream_pcm(self, tts_input: TTSInput, text: str, gen: int | None) -> Iterator[TTSOut]:
-        timer = self._latency_timer(tts_input, gen)
+        timer = self._latency_timer(
+            tts_input,
+            gen,
+            also_cancelled=lambda: self._is_synthesis_cancelled(tts_input, gen),
+        )
 
         from speech_to_speech.api.openai_realtime.utils import StreamingPcm16Resampler
 
         resampler = StreamingPcm16Resampler(self.model.sample_rate, self.sample_rate)
         blocks = PCMBlockBuffer(self.blocksize)
+        committed = False
 
         def record_first_provider_audio(first_audio_at_s: float) -> None:
             if timer.first_provider_audio(first_audio_at_s):
                 logger.debug("Time to first audio: %.3fs", first_audio_at_s - timer.started_at_s)
 
         def emit(block: np.ndarray) -> Iterator[TTSOut]:
+            nonlocal committed
+            if not committed:
+                if not self._commit_first_audio(tts_input):
+                    return
+                committed = True
+                console.print(f"[green]ASSISTANT: {text}")
             timer.first_yield()
             yield block
 
         for audio_chunk in self._generate_audio(text, gen, record_first_provider_audio):
-            if self._is_stale(gen):
+            if self._is_synthesis_cancelled(tts_input, gen):
                 logger.info("TTS generation cancelled (interruption)")
                 return
             # Saturate before converting, so peaks cannot wrap around as int16.
@@ -370,14 +377,18 @@ class PocketTTSHandler(BaseTTSHandler):
             # playback block, which introduces periodic boundary artifacts.
             converted = np.frombuffer(resampler.push(pcm.tobytes()), dtype="<i2")
             for block in blocks.push(converted):
-                if self._is_stale(gen):
+                if self._is_synthesis_cancelled(tts_input, gen):
                     return
                 yield from emit(block)
+                if not committed:
+                    return
 
-        if self._is_stale(gen):
+        if self._is_synthesis_cancelled(tts_input, gen):
             return
         tail = np.frombuffer(resampler.flush(), dtype="<i2")
         for block in chain(blocks.push(tail), blocks.flush()):
-            if self._is_stale(gen):
+            if self._is_synthesis_cancelled(tts_input, gen):
                 return
             yield from emit(block)
+            if not committed:
+                return

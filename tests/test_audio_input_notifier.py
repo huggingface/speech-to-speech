@@ -125,3 +125,60 @@ def test_notifier_does_not_restart_expired_tracker_processing_delay(monkeypatch)
     thread.join(timeout=1.0)
     assert completed_without_new_wait
     assert result == [True]
+
+
+def test_audio_input_notifier_waits_for_pending_smart_turn_and_incomplete_delay():
+    tracker = SpeculativeTurnTracker()
+    tracker.start_turn()
+    tracker.segment_finalized(1000, pending_smart_turn=True, smart_turn_hold_s=2.0)
+    notifier = _notifier(speculative_turns=tracker)
+    item = VADAudio(
+        audio=np.zeros(1600, dtype=np.float32),
+        mode="final",
+        turn_id="turn_1",
+        turn_revision=0,
+    )
+    result: list[bool] = []
+    thread = Thread(target=lambda: result.append(notifier.should_process_input(item)))
+    thread.start()
+
+    sleep(0.03)
+    assert thread.is_alive()
+
+    # Resolve as incomplete with a 250ms processing delay; notifier must stay held.
+    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=2000, processing_delay_ms=250)
+    sleep(0.04)
+    assert thread.is_alive()
+
+    # Reopening during the delay drops the audio input cleanly.
+    candidate = tracker.begin_reopen_candidate("turn_1", 0)
+    assert tracker.confirm_reopen_candidate("turn_1", 0, candidate)
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert result == [False]
+
+
+def test_audio_input_notifier_proceeds_immediately_when_smart_turn_resolves_complete():
+    tracker = SpeculativeTurnTracker()
+    tracker.start_turn()
+    tracker.segment_finalized(1000, pending_smart_turn=True, smart_turn_hold_s=2.0)
+    notifier = _notifier(speculative_turns=tracker)
+    item = VADAudio(
+        audio=np.zeros(1600, dtype=np.float32),
+        mode="final",
+        turn_id="turn_1",
+        turn_revision=0,
+    )
+    result: list[bool] = []
+    thread = Thread(target=lambda: result.append(notifier.should_process_input(item)))
+    thread.start()
+
+    sleep(0.03)
+    assert thread.is_alive()
+
+    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=800, processing_delay_ms=0)
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert result == [True]

@@ -107,23 +107,26 @@ class IrodoriTTSHandler(BaseTTSHandler):
                 yield AUDIO_RESPONSE_DONE
             return
 
-        if not self._admit_input(tts_input):
+        if not self._admit_input(tts_input, commit=False, hold_for_grace=False):
             return
 
         text = tts_input.text
         if not text.strip():
             return
 
-        cancel_generation = self.cancel_scope.generation if self.cancel_scope else None
+        cancel_generation = self._effective_cancel_generation(tts_input)
 
-        console.print(f"[green]ASSISTANT: {text}")
         # Synthesis start: after the speculative gate, before provider work.
-        timer = self._latency_timer(tts_input, cancel_generation)
+        timer = self._latency_timer(
+            tts_input,
+            cancel_generation,
+            also_cancelled=lambda: self._is_synthesis_cancelled(tts_input, cancel_generation),
+        )
         result = self.runtime.synthesize(self._request(text=text))
 
         # Sampling and decoding are blocking. If the user interrupted while they ran,
         # discard the completed buffer before it reaches the output client.
-        if self._is_stale(cancel_generation):
+        if self._is_synthesis_cancelled(tts_input, cancel_generation):
             logger.info("Irodori TTS output cancelled (interruption)")
             return
 
@@ -144,20 +147,29 @@ class IrodoriTTSHandler(BaseTTSHandler):
             )
 
         audio_int16 = np.clip(audio * 32768, -32768, 32767).astype(np.int16)
+        committed = False
 
         def emit(block: np.ndarray) -> Iterator[TTSOut]:
+            nonlocal committed
+            if not committed:
+                if not self._commit_first_audio(tts_input):
+                    return
+                committed = True
+                console.print(f"[green]ASSISTANT: {text}")
             timer.first_yield()
             yield block
 
         full_block_samples = (len(audio_int16) // self.blocksize) * self.blocksize
         for offset in range(0, full_block_samples, self.blocksize):
-            if self._is_stale(cancel_generation):
+            if self._is_synthesis_cancelled(tts_input, cancel_generation):
                 logger.info("Irodori TTS output cancelled (interruption)")
                 return
             yield from emit(audio_int16[offset : offset + self.blocksize])
+            if not committed:
+                return
 
         if full_block_samples < len(audio_int16):
-            if self._is_stale(cancel_generation):
+            if self._is_synthesis_cancelled(tts_input, cancel_generation):
                 logger.info("Irodori TTS output cancelled (interruption)")
                 return
             tail = audio_int16[full_block_samples:]

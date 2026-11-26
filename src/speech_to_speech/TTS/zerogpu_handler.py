@@ -96,7 +96,7 @@ class ZeroGPUTTSHandler(BaseHandler[TTSIn, TTSOut]):
         generation = identity[0]
         if identity in self._failed_responses or not item.text.strip() or self._cancelled(item, generation):
             return
-        if tracker and not tracker.wait_for_gate(item.turn_id, item.turn_revision):
+        if tracker and not tracker.wait_for_gate(item.turn_id, item.turn_revision, hold_for_grace=False):
             return
         session_stopped = self._session_stopped
 

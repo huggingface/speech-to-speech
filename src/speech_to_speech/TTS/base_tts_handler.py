@@ -34,17 +34,70 @@ class BaseTTSHandler(BaseHandler[TTSIn, TTSOut]):
             end.cleanup_only = True
         return True
 
-    def _admit_input(self, tts_input: TTSInput, *, commit: bool = True) -> bool:
+    def _admit_input(
+        self,
+        tts_input: TTSInput,
+        *,
+        commit: bool = True,
+        hold_for_grace: bool = True,
+    ) -> bool:
         """Wait for the speculative turn gate and say whether to synthesize ``tts_input``.
 
-        ``commit=True`` marks the turn as having produced audio. Handlers that commit
-        on first audio instead pass ``commit=False``.
+        ``commit=True`` marks the turn as having produced audio. Handlers that
+        synthesize speculatively during the reopen grace pass
+        ``commit=False, hold_for_grace=False`` and call :meth:`_commit_first_audio`
+        before yielding their first audio block.
         """
         tracker = self.speculative_turns
-        if tracker and not tracker.wait_for_gate(tts_input.turn_id, tts_input.turn_revision, commit=commit):
+        if tracker is None:
+            return True
+        if hold_for_grace:
+            admitted = tracker.wait_for_gate(tts_input.turn_id, tts_input.turn_revision, commit=commit)
+        else:
+            admitted = tracker.wait_for_gate(
+                tts_input.turn_id,
+                tts_input.turn_revision,
+                hold_for_grace=False,
+                commit=commit,
+            )
+        if not admitted:
             logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
             return False
         return True
+
+    def _commit_first_audio(self, tts_input: TTSInput) -> bool:
+        """Wait for the reopen grace / Smart Turn gate and commit before yielding first audio."""
+        tracker = self.speculative_turns
+        if tracker is None or tts_input.turn_id is None or tts_input.turn_revision is None:
+            return True
+        if not tracker.wait_for_gate(tts_input.turn_id, tts_input.turn_revision, commit=True):
+            logger.debug(
+                "Dropping speculative TTS audio before commit for turn=%s rev=%s",
+                tts_input.turn_id,
+                tts_input.turn_revision,
+            )
+            return False
+        return True
+
+    def _effective_cancel_generation(self, tts_input: TTSInput) -> int | None:
+        if tts_input.cancel_generation is not None:
+            return tts_input.cancel_generation
+        return self.cancel_scope.generation if self.cancel_scope is not None else None
+
+    def _is_turn_stale(self, tts_input: TTSInput) -> bool:
+        tracker = self.speculative_turns
+        if tracker is None or tts_input.turn_id is None or tts_input.turn_revision is None:
+            return False
+        is_latest = getattr(tracker, "is_latest", None)
+        return callable(is_latest) and not is_latest(tts_input.turn_id, tts_input.turn_revision)
+
+    def _is_synthesis_cancelled(self, tts_input: TTSInput | None, generation: int | None) -> bool:
+        stop_event = getattr(self, "stop_event", None)
+        if stop_event is not None and stop_event.is_set():
+            return True
+        if self._is_stale(generation):
+            return True
+        return tts_input is not None and self._is_turn_stale(tts_input)
 
     def _is_stale(self, generation: int | None) -> bool:
         """True once an interruption has superseded ``generation``."""
@@ -59,12 +112,16 @@ class BaseTTSHandler(BaseHandler[TTSIn, TTSOut]):
     ) -> TTSResponseTimer:
         """Start timing one synthesis; call right before provider work begins.
 
-        Output counts as cancelled once ``generation`` is stale, or when
-        ``also_cancelled`` returns True (for handler-specific conditions).
+        Output counts as cancelled once ``generation`` is stale, the speculative
+        turn is superseded, or when ``also_cancelled`` returns True.
         """
 
         def cancelled() -> bool:
-            return self._is_stale(generation) or (also_cancelled is not None and also_cancelled())
+            return (
+                self._is_stale(generation)
+                or (tts_input is not None and self._is_turn_stale(tts_input))
+                or (also_cancelled is not None and also_cancelled())
+            )
 
         return TTSResponseTimer(
             self.turn_latency_store,

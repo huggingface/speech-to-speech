@@ -62,13 +62,12 @@ class ChatTTSHandler(BaseTTSHandler):
                 yield AUDIO_RESPONSE_DONE
             return
 
-        if not self._admit_input(tts_input):
+        if not self._admit_input(tts_input, commit=False, hold_for_grace=False):
             return
 
         text = tts_input.text
 
-        _cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
-        console.print(f"[green]ASSISTANT: {text}")
+        _cancel_gen = self._effective_cancel_generation(tts_input)
         if self.device == "mps":
             import time
 
@@ -78,7 +77,11 @@ class ChatTTSHandler(BaseTTSHandler):
             _ = time.time() - start  # Removing this line makes it fail more often. I'm looking into it.
 
         # Synthesis start: after speculative gate / MPS housekeeping, before provider work.
-        timer = self._latency_timer(tts_input, _cancel_gen)
+        timer = self._latency_timer(
+            tts_input,
+            _cancel_gen,
+            also_cancelled=lambda: self._is_synthesis_cancelled(tts_input, _cancel_gen),
+        )
         # ChatTTS >= 0.2.2 splits text into sentences by default and synthesizes them as one batch, so each
         # streamed chunk would hold one row per sentence and the loop below plays only the first row.
         # Streaming the text as a single row keeps every sentence; non-stream output already joins them.
@@ -87,8 +90,15 @@ class ChatTTSHandler(BaseTTSHandler):
         wavs_gen = self.model.infer(
             text, params_infer_code=self.params_infer_code, stream=self.stream, split_text=not self.stream
         )
+        committed = False
 
         def emit(block: np.ndarray) -> Iterator[TTSOut]:
+            nonlocal committed
+            if not committed:
+                if not self._commit_first_audio(tts_input):
+                    return
+                committed = True
+                console.print(f"[green]ASSISTANT: {text}")
             timer.first_yield()
             yield block
 
@@ -96,7 +106,7 @@ class ChatTTSHandler(BaseTTSHandler):
             resampler = soxr.ResampleStream(24000, 16000, 1, dtype="float32", quality="HQ")
             blocks = PCMBlockBuffer(self.chunk_size)
             for gen in wavs_gen:
-                if self._is_stale(_cancel_gen):
+                if self._is_synthesis_cancelled(tts_input, _cancel_gen):
                     logger.info("TTS generation cancelled (interruption)")
                     return
                 if gen[0] is None:
@@ -112,30 +122,38 @@ class ChatTTSHandler(BaseTTSHandler):
                 converted = resampler.resample_chunk(chunk)
                 converted = np.clip(converted * 32768, -32768, 32767).astype(np.int16)
                 for block in blocks.push(converted):
-                    if self._is_stale(_cancel_gen):
+                    if self._is_synthesis_cancelled(tts_input, _cancel_gen):
                         return
                     yield from emit(block)
+                    if not committed:
+                        return
 
-            if self._is_stale(_cancel_gen):
+            if self._is_synthesis_cancelled(tts_input, _cancel_gen):
                 return
             tail = resampler.resample_chunk(np.empty(0, dtype=np.float32), last=True)
             tail = np.clip(tail * 32768, -32768, 32767).astype(np.int16)
             for block in chain(blocks.push(tail), blocks.flush()):
-                if self._is_stale(_cancel_gen):
+                if self._is_synthesis_cancelled(tts_input, _cancel_gen):
                     return
                 yield from emit(block)
+                if not committed:
+                    return
         else:
             wavs = wavs_gen
-            if len(wavs[0]) == 0:
+            if self._is_synthesis_cancelled(tts_input, _cancel_gen) or len(wavs[0]) == 0:
                 return
             # Full utterance is available before local resample / block assembly.
             timer.first_provider_audio()
             audio_chunk = librosa.resample(wavs[0], orig_sr=24000, target_sr=16000)
             audio_chunk = np.clip(audio_chunk * 32768, -32768, 32767).astype(np.int16)
             for i in range(0, len(audio_chunk), self.chunk_size):
+                if self._is_synthesis_cancelled(tts_input, _cancel_gen):
+                    return
                 yield from emit(
                     np.pad(
                         audio_chunk[i : i + self.chunk_size],
                         (0, self.chunk_size - len(audio_chunk[i : i + self.chunk_size])),
                     )
                 )
+                if not committed:
+                    return

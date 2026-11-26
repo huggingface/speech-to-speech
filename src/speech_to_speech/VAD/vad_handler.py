@@ -5,8 +5,9 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from queue import Queue
-from threading import Event
-from typing import TYPE_CHECKING, Any
+from threading import Condition, Event, Thread
+from time import monotonic as _monotonic
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import torch
@@ -39,6 +40,132 @@ class _PendingShortSegment:
     end_ms: int
 
 
+@dataclass(frozen=True)
+class _SmartTurnJob:
+    session_generation: int
+    turn_id: str | None
+    turn_revision: int | None
+    audio: np.ndarray
+    sample_rate: int
+    analyzer: Any
+
+
+class _SmartTurnRunner:
+    """Single-worker background Smart Turn executor with latest-wins replacement."""
+
+    def __init__(self, handler: VADHandler) -> None:
+        self._handler = handler
+        self._condition = Condition()
+        self._pending: _SmartTurnJob | None = None
+        self._active = False
+        self._closed = False
+        self._session_generation = 0
+        self._thread = Thread(target=self._run, name="smart-turn-worker", daemon=True)
+        self._thread.start()
+
+    def submit(
+        self,
+        *,
+        turn_id: str | None,
+        turn_revision: int | None,
+        audio: np.ndarray,
+        sample_rate: int,
+        analyzer: Any,
+    ) -> None:
+        with self._condition:
+            if self._closed:
+                return
+            self._pending = _SmartTurnJob(
+                session_generation=self._session_generation,
+                turn_id=turn_id,
+                turn_revision=turn_revision,
+                audio=audio.copy(),
+                sample_rate=sample_rate,
+                analyzer=analyzer,
+            )
+            self._condition.notify_all()
+
+    def invalidate_session(self) -> None:
+        with self._condition:
+            self._session_generation += 1
+            self._pending = None
+            self._condition.notify_all()
+
+    def wait_idle(self, timeout: float = 5.0) -> bool:
+        deadline = _monotonic() + max(0.0, timeout)
+        with self._condition:
+            while self._pending is not None or self._active:
+                remaining = deadline - _monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(remaining)
+            return True
+
+    def close(self) -> None:
+        with self._condition:
+            if self._closed:
+                return
+            self._closed = True
+            self._session_generation += 1
+            self._pending = None
+            self._condition.notify_all()
+        if self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+
+    def _run(self) -> None:
+        while True:
+            with self._condition:
+                while self._pending is None and not self._closed:
+                    self._condition.wait()
+                if self._closed:
+                    return
+                job = self._pending
+                assert job is not None
+                self._pending = None
+                self._active = True
+            try:
+                self._execute(job)
+            finally:
+                with self._condition:
+                    self._active = False
+                    self._condition.notify_all()
+
+    def _execute(self, job: _SmartTurnJob) -> None:
+        if self._is_stale_session(job.session_generation):
+            return
+        if not self._handler.speculative_turns.is_latest(job.turn_id, job.turn_revision):
+            return
+        status, analysis_s, reopen_grace_ms, processing_delay_ms = self._handler._classify_smart_turn(
+            job.audio,
+            analyzer=job.analyzer,
+            sample_rate=job.sample_rate,
+        )
+        if self._is_stale_session(job.session_generation):
+            return
+        if not self._handler.speculative_turns.is_latest(job.turn_id, job.turn_revision):
+            return
+        store = getattr(self._handler, "turn_latency_store", None)
+        if store is not None:
+            store.record_smart_turn(
+                job.turn_id,
+                job.turn_revision,
+                status=status,
+                analysis_s=analysis_s,
+                grace_s=reopen_grace_ms / 1000.0 if status != "disabled" else None,
+                processing_delay_s=processing_delay_ms / 1000.0 if status != "disabled" else None,
+            )
+        self._handler.speculative_turns.resolve_smart_turn(
+            job.turn_id,
+            job.turn_revision,
+            output_hold_ms=reopen_grace_ms,
+            processing_delay_ms=processing_delay_ms,
+        )
+
+    def _is_stale_session(self, session_generation: int) -> bool:
+        with self._condition:
+            return self._closed or session_generation != self._session_generation
+
+
 # Fragments with less active speech than this are treated as noise and never
 # held for stitching, so sub-threshold bursts cannot sum past min_speech_ms
 # and fire a false barge-in.
@@ -57,6 +184,8 @@ except (ImportError, ModuleNotFoundError) as e:
 
 class VADHandler(BaseHandler[VADIn, VADOut]):
     """Emit speech audio at segment end, with optional cumulative snapshots during capture."""
+
+    _smart_turn_runner: _SmartTurnRunner | None = None
 
     def setup(
         self,
@@ -574,38 +703,41 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             and queued_item.turn_revision == latest.turn_revision
         )
 
-    def _smart_turn_timing_ms(self, audio: np.ndarray) -> tuple[int, int]:
-        """Return the response grace and pre-processing delay for this endpoint."""
-        analyzer = getattr(self, "smart_turn_analyzer", None)
+    def _classify_smart_turn(
+        self,
+        audio: np.ndarray,
+        *,
+        analyzer: Any = None,
+        sample_rate: int | None = None,
+    ) -> tuple[Literal["disabled", "complete", "incomplete", "failed"], float | None, int, int]:
+        """Classify turn completeness and return ``(status, analysis_s, reopen_grace_ms, processing_delay_ms)``."""
         if analyzer is None:
-            self._last_smart_turn_status = "disabled"
-            self._last_smart_turn_analysis_s = None
-            return self.speculative_reopen_ms, 0
+            analyzer = getattr(self, "smart_turn_analyzer", None)
+        if analyzer is None:
+            return "disabled", None, self.speculative_reopen_ms, 0
 
+        sr = self.sample_rate if sample_rate is None else sample_rate
         started_at_s = time.perf_counter()
         try:
-            result = analyzer.predict(audio, sample_rate=self.sample_rate)
+            result = analyzer.predict(audio, sample_rate=sr)
         except Exception:
-            self._last_smart_turn_status = "failed"
-            self._last_smart_turn_analysis_s = max(0.0, time.perf_counter() - started_at_s)
+            analysis_s = max(0.0, time.perf_counter() - started_at_s)
             # A transient classifier failure falls back to the ordinary short
             # speculative window instead of delaying the response for seconds.
             logger.exception("Smart Turn inference failed; using the default speculative reopen grace")
-            return self.speculative_reopen_ms, 0
+            return "failed", analysis_s, self.speculative_reopen_ms, 0
 
-        self._last_smart_turn_analysis_s = max(0.0, time.perf_counter() - started_at_s)
+        analysis_s = max(0.0, time.perf_counter() - started_at_s)
         if result.complete:
-            self._last_smart_turn_status = "complete"
             logger.info(
                 "Smart Turn: complete (p=%.3f, %.1fms); using %dms speculative reopen grace",
                 result.probability,
                 result.inference_ms,
                 self.speculative_reopen_ms,
             )
-            return self.speculative_reopen_ms, 0
+            return "complete", analysis_s, self.speculative_reopen_ms, 0
 
         processing_delay_ms = min(self.smart_turn_incomplete_delay_ms, self.smart_turn_max_wait_ms)
-        self._last_smart_turn_status = "incomplete"
         logger.info(
             "Smart Turn: incomplete (p=%.3f, %.1fms); using %dms speculative reopen grace "
             "and delaying processing by %dms",
@@ -614,7 +746,26 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             self.smart_turn_max_wait_ms,
             processing_delay_ms,
         )
-        return self.smart_turn_max_wait_ms, processing_delay_ms
+        return "incomplete", analysis_s, self.smart_turn_max_wait_ms, processing_delay_ms
+
+    def _smart_turn_timing_ms(self, audio: np.ndarray) -> tuple[int, int]:
+        """Return the response grace and pre-processing delay for this endpoint."""
+        status, analysis_s, reopen_grace_ms, processing_delay_ms = self._classify_smart_turn(audio)
+        self._last_smart_turn_status = status
+        self._last_smart_turn_analysis_s = analysis_s
+        return reopen_grace_ms, processing_delay_ms
+
+    def _get_smart_turn_runner(self) -> _SmartTurnRunner:
+        runner = getattr(self, "_smart_turn_runner", None)
+        if runner is None:
+            runner = _SmartTurnRunner(self)
+            self._smart_turn_runner = runner
+        return runner
+
+    def wait_for_smart_turn(self, timeout: float = 5.0) -> bool:
+        """Wait until any background Smart Turn classification has finished."""
+        runner = getattr(self, "_smart_turn_runner", None)
+        return True if runner is None else runner.wait_idle(timeout=timeout)
 
     def process(self, audio_chunk: VADIn) -> Iterator[VADOut]:
         runtime_config = None
@@ -922,7 +1073,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     turn_revision,
                 )
                 analysis_audio = self._combined_raw_turn_audio(array)
-                reopen_grace_ms, processing_delay_ms = self._smart_turn_timing_ms(analysis_audio)
+                analyzer = getattr(self, "smart_turn_analyzer", None)
                 store = getattr(self, "turn_latency_store", None)
                 tracker = store.get_or_create_for_turn(turn_id, turn_revision) if store is not None else None
                 speech_end_at_s = None
@@ -933,13 +1084,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     speech_end_at_s = received_at_s - max(0, self._total_samples - speech_end_sample) / self.sample_rate
                     if tracker is not None:
                         tracker.vad_decision_s = max(0.0, decision_at_s - speech_end_at_s)
-                if tracker is not None:
-                    tracker.smart_turn_status = self._last_smart_turn_status
-                    tracker.smart_turn_analysis_s = self._last_smart_turn_analysis_s
-                    if tracker.smart_turn_status != "disabled":
-                        tracker.smart_turn_grace_s = reopen_grace_ms / 1000.0
-                        tracker.smart_turn_processing_delay_s = processing_delay_ms / 1000.0
-                        tracker.smart_turn_wait_s = 0.0
+                if analyzer is None and tracker is not None:
+                    tracker.smart_turn_status = "disabled"
+                    tracker.smart_turn_analysis_s = None
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)
                 output_array = self._combined_turn_audio(array)
@@ -957,14 +1104,29 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 self._speculative_audio_prefix = output_array
                 self._speculative_speaker_prefix = speaker_pending
                 self._speculative_raw_audio_prefix = analysis_audio
-                # The grace only delays response commits. Resumed speech
-                # follows the existing candidate/revision flow and makes
-                # this revision stale before assistant output is released.
-                self.speculative_turns.segment_finalized(
-                    end_ms,
-                    output_hold_ms=reopen_grace_ms,
-                    processing_delay_ms=processing_delay_ms,
-                )
+                # When Smart Turn is enabled, run it in parallel with STT and
+                # hold turn commits / final STT emission until it resolves.
+                if analyzer is not None:
+                    self.speculative_turns.segment_finalized(
+                        end_ms,
+                        output_hold_ms=self.speculative_reopen_ms,
+                        processing_delay_ms=0,
+                        pending_smart_turn=True,
+                        smart_turn_hold_s=max(2.0, self.smart_turn_max_wait_ms / 1000.0),
+                    )
+                    self._get_smart_turn_runner().submit(
+                        turn_id=turn_id,
+                        turn_revision=turn_revision,
+                        audio=analysis_audio,
+                        sample_rate=self.sample_rate,
+                        analyzer=analyzer,
+                    )
+                else:
+                    self.speculative_turns.segment_finalized(
+                        end_ms,
+                        output_hold_ms=self.speculative_reopen_ms,
+                        processing_delay_ms=0,
+                    )
                 # Queue the provider boundary before yielding downstream. The
                 # next microphone chunk can then never overtake this commit.
                 self._commit_streaming_turn(turn_id, turn_revision)
@@ -975,7 +1137,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     mode="final",
                     turn_id=turn_id,
                     turn_revision=turn_revision,
-                    processing_delay_s=processing_delay_ms / 1000.0,
+                    processing_delay_s=0.0,
                     speech_end_at_s=speech_end_at_s,
                 )
                 self.last_process_time = 0.0
@@ -1019,6 +1181,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         return enhanced.numpy().squeeze()
 
     def on_session_end(self):
+        runner = getattr(self, "_smart_turn_runner", None)
+        if runner is not None:
+            runner.invalidate_session()
         worker = getattr(self, "diarization_worker", None)
         if worker is not None:
             worker.reset_session()
@@ -1045,6 +1210,12 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self.speculative_turns.reset()
         self.should_listen.set()
         logger.debug("VAD session state reset")
+
+    def cleanup(self) -> None:
+        runner = getattr(self, "_smart_turn_runner", None)
+        if runner is not None:
+            runner.close()
+            self._smart_turn_runner = None
 
     @property
     def min_time_to_debug(self) -> float:
