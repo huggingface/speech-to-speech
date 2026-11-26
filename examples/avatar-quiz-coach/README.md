@@ -38,7 +38,9 @@ avatar ◀─ lip-synced audio ◀─ speech-to-speech backend (TTS) ◀─ scri
 - **Brain**: `server.py` researches topics (Wikipedia, plus Google results when
   `SERPER_API_KEY` is set) into eight spoken-friendly questions with reference
   answers and key points, then grades every transcript and writes clues with a
-  fast model on Hugging Face Inference Providers. A check rejects clues that
+  fast model on Hugging Face Inference Providers. Grading starts speculatively
+  from the backend's transcript snapshot as soon as the student pauses, so it
+  runs during the backend's reopen grace instead of after it. A check rejects clues that
   contain answer phrases the student hasn't said yet. Points, streaks and badges
   are computed with plain rules in `coach/game.py`.
 - **Face**: a [TalkingHead](https://github.com/met4citizen/TalkingHead) avatar.

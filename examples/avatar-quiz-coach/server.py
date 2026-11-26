@@ -368,6 +368,13 @@ async def turn(game_id: str, req: TurnRequest) -> dict[str, Any]:
         return await game_mod.handle_turn(game, req.transcript or f"({req.intent})", req.intent)
 
 
+@app.post("/api/game/{game_id}/prefetch")
+async def prefetch(game_id: str, req: TurnRequest) -> dict[str, Any]:
+    """Grade a speculative transcript early; the matching /turn reuses the result."""
+    game = _game(game_id)
+    return {"started": game_mod.prefetch(game, req.transcript)}
+
+
 @app.post("/api/game/{game_id}/stop")
 async def stop(game_id: str) -> dict[str, Any]:
     game = _game(game_id)

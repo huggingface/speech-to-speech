@@ -184,6 +184,8 @@ class Game:
     history: list[dict[str, str]] = field(default_factory=list)
     summary: dict[str, Any] | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Grades started from speculative transcripts, keyed by question state and text.
+    speculative: dict[tuple[int, int, int, str], asyncio.Future[Any]] = field(default_factory=dict)
 
     # ── Views ────────────────────────────────────────────────────────────
 
@@ -397,6 +399,60 @@ def _reveal(game: Game, res: QuestionResult) -> dict[str, Any]:
 
 
 BUTTON_INTENTS = {"hint", "repeat", "skip", "stop"}
+MAX_PREFETCHES = 6
+
+
+def _normalize(text: str) -> str:
+    return " ".join(_words(text))
+
+
+def _speculation_key(game: Game, transcript: str) -> tuple[int, int, int, str]:
+    return (game.position, game.attempt, len(game.history), _normalize(transcript))
+
+
+async def _decide(game: Game, transcript: str) -> tuple[dict[str, Any], str] | None:
+    """Grade one utterance against the current question; no game state changes."""
+    q = game.question()
+    res = game.result()
+    try:
+        raw, model = await llm.chat_json(
+            _grader_messages(game, transcript), llm.GRADER_MODELS, max_tokens=900, temperature=0.3, timeout=12
+        )
+    except llm.LLMError as exc:
+        logger.error("grader unavailable: %s", exc)
+        return None
+    decision = _clean_decision(raw, len(q["key_points"]))
+    said = [*res.answers, transcript]
+    gives_clue = game.attempt < MAX_ATTEMPTS and (
+        (decision["intent"] == "answer" and decision["verdict"] != "correct") or decision["intent"] == "stuck"
+    )
+    if (gives_clue or decision["intent"] == "hint") and (leaks := leaked_terms(decision["say"], q, said)):
+        # Models sometimes hand over the answer inside a "clue": ask once
+        # for a rewrite; coach_again falls back to the hint if it still leaks.
+        fixed = await _rewrite_clue(game, transcript, decision, leaks)
+        if fixed and not leaked_terms(fixed, q, said):
+            decision["say"] = fixed
+    return decision, model
+
+
+def prefetch(game: Game, transcript: str) -> bool:
+    """Start grading a speculative transcript while the backend's turn is still open.
+
+    The speech backend shares each pause's transcript before it commits the
+    turn (reopen grace). Grading it now hides the grader's latency inside that
+    wait; the authoritative transcript reuses the result if it matches.
+    """
+    transcript = " ".join(transcript.split())[:600]
+    if game.finished or not _normalize(transcript):
+        return False
+    key = _speculation_key(game, transcript)
+    current = {k: t for k, t in game.speculative.items() if k[:3] == key[:3]}
+    if key in current or len(current) >= MAX_PREFETCHES:
+        game.speculative = current
+        return False
+    current[key] = asyncio.ensure_future(_decide(game, transcript))
+    game.speculative = current
+    return True
 
 
 async def handle_turn(game: Game, transcript: str, intent: str | None = None) -> dict[str, Any]:
@@ -414,29 +470,21 @@ async def handle_turn(game: Game, transcript: str, intent: str | None = None) ->
         model = "button"
         decision = {"intent": intent, "verdict": None, "score": 0, "points_hit": [], "say": ""}
     else:
-        try:
-            raw, model = await llm.chat_json(
-                _grader_messages(game, transcript), llm.GRADER_MODELS, max_tokens=900, temperature=0.3, timeout=12
-            )
-        except llm.LLMError as exc:
-            logger.error("grader unavailable: %s", exc)
+        # A grade prefetched from the speculative transcript is reused when the
+        # authoritative transcript matches and the question state is unchanged.
+        task = game.speculative.pop(_speculation_key(game, transcript), None)
+        game.speculative.clear()
+        decided = await task if task is not None else await _decide(game, transcript)
+        if decided is None:
             return {
                 "intent": "error",
                 "say": "Sorry, I lost my train of thought for a second. Could you say that again?",
                 "state": game.state(),
                 "question": game.public_question(),
             }
-        decision = _clean_decision(raw, len(q["key_points"]))
-        said = [*res.answers, transcript]
-        gives_clue = game.attempt < MAX_ATTEMPTS and (
-            (decision["intent"] == "answer" and decision["verdict"] != "correct") or decision["intent"] == "stuck"
-        )
-        if (gives_clue or decision["intent"] == "hint") and (leaks := leaked_terms(decision["say"], q, said)):
-            # Models sometimes hand over the answer inside a "clue": ask once
-            # for a rewrite; coach_again falls back to the hint if it still leaks.
-            fixed = await _rewrite_clue(game, transcript, decision, leaks)
-            if fixed and not leaked_terms(fixed, q, said):
-                decision["say"] = fixed
+        decision, model = decided
+        if task is not None:
+            model = f"{model} (prefetched)"
     intent, verdict, say = decision["intent"], decision["verdict"], decision["say"]
     game.history.append({"role": "student", "text": transcript})
 

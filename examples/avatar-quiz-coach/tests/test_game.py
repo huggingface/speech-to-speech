@@ -264,3 +264,33 @@ def test_leaking_clue_is_rewritten_or_replaced(grader):
     assert len(calls) == 2  # one rewrite attempt
     assert out["retry"] and "next word" not in out["say"]
     assert out["say"] == "Hint 0"  # fell back to the prepared hint
+
+
+def test_prefetched_grade_is_reused_by_the_matching_turn(grader):
+    replies, calls = grader
+    game = g.GameStore().create(make_pack((1, 1)), "ana", False)
+    replies += [answer("correct", "Yes!")]
+
+    async def flow():
+        assert g.prefetch(game, "It predicts the next word.")
+        assert not g.prefetch(game, "it predicts the next word")  # same text, already running
+        assert game.score == 0  # prefetching never changes the game
+        return await g.handle_turn(game, "It predicts the next word")
+
+    out = asyncio.run(flow())
+    assert len(calls) == 1 and out["verdict"] == "correct" and out["model"].endswith("(prefetched)")
+    assert game.speculative == {}
+
+
+def test_prefetch_for_other_text_is_ignored(grader):
+    replies, calls = grader
+    game = g.GameStore().create(make_pack((1, 1)), "ana", False)
+    replies += [answer("partial", "Half."), answer("correct", "Yes!")]
+
+    async def flow():
+        g.prefetch(game, "It predicts")
+        await asyncio.sleep(0)
+        return await g.handle_turn(game, "It predicts the next word")
+
+    out = asyncio.run(flow())
+    assert len(calls) == 2 and out["verdict"] == "correct"

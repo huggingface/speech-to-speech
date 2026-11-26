@@ -16,7 +16,7 @@
  *   sentences read 24 of 24 lines word for word on both.
  *
  * Events: status, queue, speech-started, speech-stopped, user-partial,
- * user-final, response-started, audio, visemes, assistant-text,
+ * user-snapshot, user-final, response-started, audio, visemes, assistant-text,
  * response-done, mic-level, error.
  */
 
@@ -225,6 +225,9 @@ export class RealtimeVoice extends EventTarget {
       session: {
         type: "realtime",
         instructions: RELAY_INSTRUCTIONS,
+        // Speculative transcripts: the backend shares each pause's transcript
+        // before it commits the turn, so grading can start during the grace.
+        extensions: ["speech_to_speech.input_audio_transcription.snapshot"],
         audio: {
           input: {
             format: { type: "audio/pcm", rate: RATE },
@@ -330,6 +333,9 @@ export class RealtimeVoice extends EventTarget {
         break;
       case "conversation.item.input_audio_transcription.delta":
         this.emit("user-partial", { itemId: ev.item_id, delta: ev.delta || "" });
+        break;
+      case "speech_to_speech.input_audio_transcription.snapshot":
+        this.emit("user-snapshot", { itemId: ev.item_id, transcript: (ev.transcript || "").trim() });
         break;
       case "conversation.item.input_audio_transcription.completed":
         this.emit("user-final", { itemId: ev.item_id, transcript: (ev.transcript || "").trim() });

@@ -31,6 +31,8 @@ const store = {
 
 const S = {
   /** @type {any} */ cfg: { mode: "manual" },
+  /** Latest speculative transcript, the one already prefetched, and when the mic was last loud. */
+  snap: { text: "", sent: "", lastLoud: 0 },
   /** Line text by response id, shown when that line's audio starts. */
   lineText: new Map(),
   /** Seconds of audio received per response id, and ids whose audio is complete. */
@@ -551,7 +553,15 @@ function wireVoice(voice) {
     S.partial += /** @type {any} */ (e).detail.delta;
     $("#answer-text").innerHTML = `<span class="partial">${escapeHtml(S.partial)}</span>`;
   });
+  voice.addEventListener("user-snapshot", (e) => {
+    if (S.phase !== "quiz") return;
+    S.snap.text = /** @type {any} */ (e).detail.transcript;
+    if (S.snap.text) $("#answer-text").innerHTML = `<span class="partial">${escapeHtml(S.snap.text)}</span>`;
+    maybeSpeculate();
+  });
   voice.addEventListener("user-final", (e) => {
+    S.snap.text = "";
+    S.snap.sent = "";
     const text = /** @type {any} */ (e).detail.transcript;
     if (S.phase !== "quiz" || !text) {
       if (S.phase === "quiz") setMicIdle();
@@ -561,6 +571,8 @@ function wireVoice(voice) {
   });
   voice.addEventListener("mic-level", (e) => {
     const rms = /** @type {any} */ (e).detail.rms;
+    if (rms > 0.02) S.snap.lastLoud = performance.now();
+    else if (S.snap.text) maybeSpeculate();
     $("#mic-ring").style.setProperty("--lvl", String(0.9 + Math.min(0.3, rms * 4)));
   });
   voice.addEventListener("error", (e) => {
@@ -571,6 +583,27 @@ function wireVoice(voice) {
       setMic("off", "Voice offline", "Type your answers below");
     }
   });
+}
+
+/**
+ * Grade early: once the student has gone quiet and the backend has shared the
+ * pause's transcript, the coach server starts grading it while the backend
+ * waits out its reopen grace. The authoritative transcript reuses the result
+ * if it matches; if the student keeps talking, the guess is simply unused.
+ */
+const SPECULATE = !new URLSearchParams(location.search).has("nospec");
+
+function maybeSpeculate() {
+  if (!SPECULATE) return;
+  const text = S.snap.text;
+  if (!text || text === S.snap.sent || S.phase !== "quiz" || !S.game || S.coachTalking) return;
+  if (performance.now() - S.snap.lastLoud < 250) return;
+  S.snap.sent = text;
+  fetch(`api/game/${S.game.game_id}/prefetch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ transcript: text }),
+  }).catch(() => {});
 }
 
 function scheduleCoachDone() {
