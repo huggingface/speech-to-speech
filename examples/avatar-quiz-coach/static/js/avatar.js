@@ -41,7 +41,7 @@ const FORCE_HEADAUDIO = new URLSearchParams(location.search).get("lipsync") === 
 export const COACHES = {
   ada: {
     name: "Ada",
-    voice: "Serena",
+    voice: "en-maya_f",
     // How strongly this rig's blendshapes read: Avaturn's are strong.
     lipGain: 0.85,
     jawGain: 0.4,
@@ -60,7 +60,7 @@ export const COACHES = {
   },
   max: {
     name: "Max",
-    voice: "en-smooth_m",
+    voice: "en-arthur_m",
     lipGain: 1.35,
     jawGain: 1,
     avatar: {

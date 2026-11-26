@@ -89,7 +89,7 @@ regenerates the featured topics.
 | `SESSION_PROXY_URL` | Or piggyback another deployment's session API, e.g. `https://smolagents-hf-realtime-voice.hf.space/api` |
 | `GRADER_BASE_URL`, `GRADER_MODEL` | Grade on the speech backend's own model through any OpenAI-compatible endpoint (e.g. the deployment's Gemma 4 31B); `GRADER_REASONING_EFFORT` (default `none`) and `GRADER_API_KEY` (default `HF_TOKEN`) go with it. The hosted chain below stays as fallback. |
 | `GRADER_MODELS`, `WRITER_MODELS` | Comma-separated Inference Providers fallback chains (defaults: Qwen3.8-27B on Cerebras with reasoning off for grading, GLM-5.3 for writing; `model@effort` sets a model's reasoning effort) |
-| `COACH_VOICE` | Overrides the TTS voice (by default Max uses `en-smooth_m`, a voice of the hosted stack, and Ada uses `Serena`) |
+| `COACH_VOICE` | Overrides the TTS voice (by default Max uses `en-arthur_m` and Ada `en-maya_f`, voices of the hosted stack; a Qwen3-TTS CustomVoice backend needs e.g. `Aiden` / `Serena`) |
 | `SERPER_API_KEY` | Adds Google results to research |
 | `LEADERBOARD_REPO` | Dataset repo that mirrors the leaderboard so it survives restarts |
 | `RESEARCH_PER_HOUR` | New topics per visitor per hour (default 8) |
