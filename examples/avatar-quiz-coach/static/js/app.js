@@ -836,9 +836,12 @@ async function prepareFillers(voice) {
   for (const line of FILLER_LINES) {
     // Only while nothing else is going on; give up on a line rather than wait long.
     for (let i = 0; i < 20 && (voice.busy || S.coachTalking); i++) await sleep(500);
-    const pcm = await voice.synthesize(line);
+    const rec = await voice.synthesize(line);
     if (S.voice !== voice) return;
-    if (pcm) S.fillers.push(pcm);
+    // Keep it only if the coach said that line (a model once "answered" the
+    // filler with "Take your time." and that played after every answer).
+    if (rec && wordsOf(rec.text).join(" ") === wordsOf(line).join(" ")) S.fillers.push(rec.pcm);
+    else if (rec) console.warn("[voice] filler not recorded as written:", line, "->", rec.text);
   }
 }
 

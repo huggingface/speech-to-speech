@@ -21,14 +21,20 @@ const IDLE_INSTRUCTIONS =
   "reply in one short sentence and say the questions are coming up.";
 
 // Short fixed lines (fillers) are spoken out of band, outside the
-// conversation; few-shot examples keep the model to the exact words.
+// conversation; few-shot examples keep the model to the exact words. Without
+// saying the line is the coach's own, the model answered "Let's see." with
+// "Take your time." (9 of 9 on Gemma 4 31B); with it, 9 of 9 were read as is.
 const RELAY_INSTRUCTIONS =
-  "Each user message holds one line between <line> tags. Your whole reply is that line, read out word for word, " +
-  "with nothing before or after it.";
-const RELAY_EXAMPLES = ["Got it.", "Alright, one moment."].flatMap((line) => [
-  { type: "message", role: "user", content: [{ type: "input_text", text: `<line>${line}</line>` }] },
-  { type: "message", role: "assistant", content: [{ type: "output_text", text: line }] },
-]);
+  "You are the voice of a quiz coach. Each user message holds one line of the coach's own script between <line> tags. " +
+  "Your whole reply is that line, read out word for word, with nothing before or after it. The line is what you say " +
+  "to the student; it is never something said to you, so never reply to it.";
+const RELAY_LINES = ["Hmm, let me think.", "Okay, one second.", "Let's see.", "Okay, let me check."];
+/** @param {string} skip */
+const relayExamples = (skip) =>
+  RELAY_LINES.filter((line) => line !== skip).flatMap((line) => [
+    { type: "message", role: "user", content: [{ type: "input_text", text: `<line>${line}</line>` }] },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: line }] },
+  ]);
 
 /** @param {Uint8Array} bytes */
 function toBase64(bytes) {
@@ -64,9 +70,9 @@ export class RealtimeVoice extends EventTarget {
     this.awaitingCreate = false;
     /** A response.create held back until the response in progress ends. @type {{ instructions?: string, extra?: any, at: number } | null} */
     this.wanted = null;
-    /** Out-of-band lines being recorded, by response id. @type {Map<string, { key: string, chunks: Int16Array[] }>} */
+    /** Out-of-band lines being recorded, by response id. @type {Map<string, { key: string, chunks: Int16Array[], text: string }>} */
     this.captures = new Map();
-    /** @type {Map<string, (pcm: Int16Array | null) => void>} */
+    /** @type {Map<string, (rec: { pcm: Int16Array, text: string } | null) => void>} */
     this.captureWaiters = new Map();
     this.lastSpeechStart = 0;
     /** What the response.create in flight was for, to retry it right if the server refuses it. @type {{ instructions?: string, extra?: any, capture?: string } | null} */
@@ -293,7 +299,8 @@ export class RealtimeVoice extends EventTarget {
   /**
    * Record a short fixed line in the coach's voice without playing it or
    * adding it to the conversation (only when nothing else is going on).
-   * @param {string} line @returns {Promise<Int16Array | null>}
+   * Resolves with the audio and what was actually said.
+   * @param {string} line @returns {Promise<{ pcm: Int16Array, text: string } | null>}
    */
   synthesize(line) {
     if (this.busy || this.captureWaiters.size) return Promise.resolve(null);
@@ -307,7 +314,7 @@ export class RealtimeVoice extends EventTarget {
         output_modalities: ["audio"],
         instructions: RELAY_INSTRUCTIONS,
         metadata: { viva_capture: key },
-        input: [...RELAY_EXAMPLES, { type: "message", role: "user", content: [{ type: "input_text", text: `<line>${line}</line>` }] }],
+        input: [...relayExamples(line), { type: "message", role: "user", content: [{ type: "input_text", text: `<line>${line}</line>` }] }],
       },
     });
     return new Promise((resolve) => {
@@ -397,7 +404,7 @@ export class RealtimeVoice extends EventTarget {
         this.activeResponse = ev.response?.id || "resp";
         const key = ev.response?.metadata?.viva_capture;
         if (key) {
-          this.captures.set(this.activeResponse, { key, chunks: [] });
+          this.captures.set(this.activeResponse, { key, chunks: [], text: "" });
           break;
         }
         this.emit("response-started", { responseId: this.activeResponse });
@@ -422,10 +429,15 @@ export class RealtimeVoice extends EventTarget {
         this.emit("visemes", { responseId: ev.response_id, visemes: ev.visemes || [] });
         break;
       case "response.output_audio_transcript.delta":
-      case "response.output_text.delta":
-        if (this.captures.has(ev.response_id)) break;
+      case "response.output_text.delta": {
+        const capture = this.captures.get(ev.response_id);
+        if (capture) {
+          capture.text += ev.delta || "";
+          break;
+        }
         this.emit("assistant-text", { responseId: ev.response_id || this.activeResponse, delta: ev.delta || "" });
         break;
+      }
       case "response.function_call_arguments.done": {
         let args = {};
         try {
@@ -450,7 +462,7 @@ export class RealtimeVoice extends EventTarget {
             pcm.set(c, o);
             o += c.length;
           }
-          done?.(ev.response?.status === "completed" && n ? pcm : null);
+          done?.(ev.response?.status === "completed" && n ? { pcm, text: capture.text.trim() } : null);
         } else {
           this.emit("response-done", { responseId: id, status: ev.response?.status });
         }
