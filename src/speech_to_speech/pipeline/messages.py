@@ -21,6 +21,7 @@ from openai.types.responses.response_function_tool_call import ResponseFunctionT
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.context_extension import PreparedContext
 from speech_to_speech.pipeline.history import ResponseHistory
 from speech_to_speech.pipeline.speaker_metadata import PendingSpeakerAttribution, SpeakerAttribution
 from speech_to_speech.pipeline.transcript_logging import log_exception
@@ -393,6 +394,8 @@ class GenerateResponseRequest(PipelineMessage):
     per-response value over the session default.
     """
 
+    context_current: Callable[[], bool] | None = Field(default=None, exclude=True, repr=False)
+    prepared_context: PreparedContext | None = Field(default=None, exclude=True, repr=False)
     tag: Literal["generate_response"] = "generate_response"
     response_key: str = Field(default_factory=lambda: uuid4().hex, exclude=True, repr=False)
     runtime_config: RuntimeConfig

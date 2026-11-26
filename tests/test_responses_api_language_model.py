@@ -1678,6 +1678,25 @@ def test_second_turn_flattens_assistant_history_for_responses():
     assert ai["content"][0]["text"] == "Hello."
 
 
+def test_audio_request_checks_session_before_model_call(monkeypatch):
+    handler = _make_handler(stream=False)
+    request = _make_audio_request()
+    live = [True]
+    request.context_current = lambda: live[0]
+    serialize = handler._serialize_audio
+
+    def revoke_after_render(chat):
+        payload = serialize(chat)
+        live[0] = False
+        return payload
+
+    calls = []
+    monkeypatch.setattr(handler, "_serialize_audio", revoke_after_render)
+    monkeypatch.setattr(handler, "_request_audio", lambda *args, **kwargs: calls.append(args))
+    list(handler.process(request))
+    assert not live[0] and not calls
+
+
 def test_audio_request_uses_chat_completions_input_audio_payload():
     handler = _make_handler(stream=False)
     captured = {}

@@ -650,6 +650,8 @@ def _build_pipeline_unit(
         default_instructions=default_instructions,
     )
 
+    service.supports_context = llm_selection.spec.name in {"transformers", "mlx-lm", "chat-completions", "responses-api"} and not llm_selection.config.get("is_vlm")
+
     if module_kwargs.enable_live_transcription and not stt_selection.spec.capabilities.streams_audio_chunks:
         vad_kw.enable_realtime_transcription = True
         vad_kw.realtime_processing_pause = module_kwargs.live_transcription_update_interval
@@ -751,6 +753,7 @@ def build_pipeline(
     stop_event: Event,
     *,
     host: str | None = None,
+    context_integration=None,
 ) -> ThreadManager:
     """Build a pool of pipeline units behind one server."""
     from speech_to_speech.api.openai_realtime.server import RealtimeServer
@@ -772,6 +775,7 @@ def build_pipeline(
     server = RealtimeServer(
         stop_event=stop_event,
         pool=pool,
+        context_integration=context_integration,
         host=host or args.realtime_server_kwargs.host,
         port=args.realtime_server_kwargs.port,
         llm_proxy_config=(
@@ -879,10 +883,15 @@ def _run_parsed_pipeline_command(command: Literal["serve", "local"], args: Parse
         args.module_kwargs.enable_live_transcription = False
 
     stop_event = Event()
+    from speech_to_speech.context_extension import configured_integration
+
     with model_startup_output(command == "local" and console.quiet):
-        pipeline_manager = (
-            build_local_pipeline(args, stop_event) if command == "local" else build_pipeline(args, stop_event)
-        )
+        if command == "local":
+            pipeline_manager = build_local_pipeline(args, stop_event)
+        else:
+            integration = configured_integration()
+            options = {"context_integration": integration} if integration is not None else {}
+            pipeline_manager = build_pipeline(args, stop_event, **options)
 
     # Set up graceful shutdown handler
     shutdown_requested = [False]  # Use list for nonlocal mutation
@@ -900,6 +909,9 @@ def _run_parsed_pipeline_command(command: Literal["serve", "local"], args: Parse
     try:
         pipeline_manager.start()
         pipeline_manager.wait()
+        for handler in getattr(pipeline_manager, "handlers", ()):
+            if isinstance(getattr(handler, "startup_error", None), RuntimeError):
+                raise handler.startup_error
     except KeyboardInterrupt:
         if not shutdown_requested[0]:
             console.print("\n[yellow]Shutting down gracefully...[/yellow]")

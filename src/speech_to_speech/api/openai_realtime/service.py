@@ -396,6 +396,10 @@ class RealtimeService:
         turn_latency_store: TurnLatencyStore | None = None,
         default_instructions: str | None = None,
     ) -> None:
+        self.context_dispatcher = None
+        self.context_scopes = {}
+        self.context_sessions = {}
+        self.supports_context = True
         self.text_prompt_queue = text_prompt_queue
         self.should_listen = should_listen
         self._chat_size = chat_size
@@ -492,7 +496,40 @@ class RealtimeService:
         self.total_usage.connections += 1
         return state.session_id
 
+    def enqueue_context(self, conn_id, request, queue, original_text=None, input_item_id=None, *, retrieve=True):
+        dispatcher = self.context_dispatcher
+        if dispatcher is None:
+            queue.put(request)
+            return
+        state = self._state(conn_id)
+        scope = self.context_scopes.get(conn_id)
+        key = request.response_key
+        retired = self.context_sessions.setdefault(conn_id, ThreadingEvent())
+        if retired.is_set():
+            return
+
+        def current():
+            return (
+                not retired.is_set()
+                and self._conns.get(conn_id) is state
+                and key not in state.closed_response_keys
+                and (key in state.pending_response_keys or (state.in_response and state.current_response_key == key))
+                and (scope is None or scope.valid())
+            )
+
+        request.context_current = current
+        dispatcher.submit(
+            conn_id, request, queue, scope, current, original_text, input_item_id, retrieve=retrieve and self.supports_context
+        )
+
+    def retire_context(self, conn_id: str) -> None:
+        if self.context_dispatcher is not None:
+            self.context_sessions.setdefault(conn_id, ThreadingEvent()).set()
+
     def unregister(self, conn_id: str) -> None:
+        self.retire_context(conn_id)
+        self.context_sessions.pop(conn_id, None)
+        self.context_scopes.pop(conn_id, None)
         self.history.close_session(conn_id)
         st = self._conns.pop(conn_id, None)
         if st is not None:
@@ -952,7 +989,7 @@ class RealtimeService:
                 turn_revision=event.turn_revision,
             )
             st.mark_response_pending(request.response_key)
-            queue.put(request)
+            self.enqueue_context(conn_id, request, queue, event.transcript, supplied_item_id)
         else:
             self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
 
@@ -1053,7 +1090,7 @@ class RealtimeService:
                 turn_revision=event.turn_revision,
             )
             st.mark_response_pending(request.response_key)
-            queue.put(request)
+            self.enqueue_context(conn_id, request, queue, retrieve=False)
         return self.audio.resolve_input_terminals(conn_id)
 
     # ── Metrics ────────────────────────────────────

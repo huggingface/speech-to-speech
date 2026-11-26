@@ -36,6 +36,9 @@ class ZeroGPULLMHandler(BaseLanguageModelHandler):
                 return True
             return self._check_stop(gen, ctx)
 
+        if ctx.context_current is not None and not ctx.context_current():
+            ctx.cancelled = True
+            return
         source = runtime.tokens(messages, self.gen_kwargs, cancelled=cancelled)
         if ctx.prefetch_transaction is not None:
             ctx.prefetch_transaction.register_abort(aborted.set)

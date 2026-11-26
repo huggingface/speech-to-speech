@@ -315,7 +315,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.tool_followup_prefetch_request = request
         st.tool_followup_prefetch_origin_response_key = origin_response_key
         st.mark_response_pending(request.response_key)
-        queue.put(request)
+        self._service.enqueue_context(conn_id, request, queue, retrieve=False)
         logger.debug("Started internal tool follow-up prefetch")
         return True
 
@@ -992,7 +992,8 @@ class ResponseHandler(RealtimeBaseHandler):
             # Out-of-band responses carry no turn identity: a null turn_id makes every
             # speculative-turn staleness gate treat them as always-latest, so a new user
             # turn mid-generation can never silently drop their output.
-            queue.put(request)
+            retrieve = not (out_of_band or followup_ids or replacing_prefetch or source == "tool")
+            self._service.enqueue_context(conn_id, request, queue, retrieve=retrieve)
         logger.debug("response.create received, LLM generation triggered")
         return ResponseCreatedEvent(
             type="response.created",

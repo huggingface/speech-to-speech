@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Iterator, Sized
+from collections.abc import Callable, Iterable, Iterator, Sized
 from queue import Empty
 from threading import Lock, Thread
 from time import perf_counter
@@ -35,6 +35,7 @@ from transformers import (
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.context_extension import PreparedContext
 from speech_to_speech.LLM.chat import (
     Chat,
     ChatItemError,
@@ -140,6 +141,8 @@ class StreamContext(BaseModel):
     can read back generation state after the iterator is exhausted."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+    context_current: Callable[[], bool] | None = Field(default=None, exclude=True, repr=False)
+    prepared_context: PreparedContext | None = Field(default=None, exclude=True, repr=False)
 
     stream_exhausted: bool = False
     cancelled: bool = False
@@ -500,6 +503,9 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
     def _check_stop(self, gen: int | None, ctx: StreamContext) -> bool:
         """Check whether generation should be aborted and mark the reason on *ctx*."""
+        if ctx.context_current is not None and not ctx.context_current():
+            ctx.cancelled = True
+            return True
         if ctx.prefetch_transaction is not None and ctx.prefetch_transaction.discarded:
             ctx.cancelled = True
             logger.info("LLM prefetch cancelled")
@@ -611,13 +617,16 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         if not isinstance(request, GenerateResponseRequest):
             raise TypeError(f"Unexpected request type: {type(request)}")
 
+        ctx.context_current = request.context_current
+        ctx.prepared_context = request.prepared_context
         ctx.turn_id = request.turn_id
         ctx.turn_revision = request.turn_revision
         ctx.speech_stopped_at_s = request.speech_stopped_at_s
         gen = self.cancel_scope.generation if self.cancel_scope else None
         ctx.cancel_generation = gen
         ctx.prefetch_transaction = request.prefetch_transaction
-        if not self._turn_is_latest(ctx.turn_id, ctx.turn_revision):
+        if ((ctx.context_current is not None and not ctx.context_current())
+                or not self._turn_is_latest(ctx.turn_id, ctx.turn_revision)):
             logger.info("Skipping stale LLM request for turn=%s rev=%s", ctx.turn_id, ctx.turn_revision)
             yield EndOfResponse(
                 turn_id=ctx.turn_id,
@@ -844,36 +853,51 @@ class LanguageModelHandler(BaseLanguageModelHandler):
                 **gen_kwargs,
             }
 
-    def _generate(
-        self,
-        chat: Chat,
-        language_code: Optional[str],
-        gen: int | None,
-        ctx: StreamContext,
-        runtime_config: RuntimeConfig | None = None,
-        response: RealtimeResponseCreateParams | None = None,
-    ) -> Iterator[LLMResponseChunk]:
+    def _render_prompt(self, chat: Chat):
         chat_messages = chat.to_transformers_chat()
         # Count the same prompt the model receives, generation prompt included.
         chat_input = self.tokenizer.apply_chat_template(
             chat_messages, tokenize=True, add_generation_prompt=True, enable_thinking=False
         )
-        ctx.input_tokens += len(chat_input if isinstance(chat_input, list) else chat_input["input_ids"])  # type: ignore[index]
-        logger.debug("Prompt token count: %d", ctx.input_tokens)
+        count = len(chat_input if isinstance(chat_input, list) else chat_input["input_ids"])  # type: ignore[index]
 
         chat_prompt = self.tokenizer.apply_chat_template(
             chat_messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
         )
+
+        return chat_prompt, count
+
+    def _generate(
+        self, chat: Chat, language_code: Optional[str], gen: int | None, ctx: StreamContext,
+        runtime_config: RuntimeConfig | None = None, response: RealtimeResponseCreateParams | None = None,
+    ) -> Iterator[LLMResponseChunk]:
+        plain = self._render_prompt(chat)
+        prepared = ctx.prepared_context
+        extended = None
+        if prepared is not None:
+            view = chat.copy(deep=True)
+            if prepared.project(view):
+                extended = self._render_prompt(view)
+
+        def admitted_prompt():
+            # The model lock can outlive the session or the authorized input.
+            prompt, count = extended if extended is not None and prepared.current() else plain
+            ctx.input_tokens += count
+            return prompt
 
         if self.backend == "mlx":
             with MLXLockContext(handler_name="MLX-LLM", timeout=10.0):
                 tracker = active_turn_latency_tracker()
                 if tracker is not None:
                     tracker.start_llm()
+                prompt = admitted_prompt()
+                if ctx.context_current is not None and not ctx.context_current():
+                    ctx.cancelled = True
+                    return
                 token_iter = mlx_stream_generate(
                     self.model,  # type: ignore[arg-type]
                     self.tokenizer,  # type: ignore[arg-type]
-                    chat_prompt,  # type: ignore[arg-type]
+                    prompt,  # type: ignore[arg-type]
                     max_tokens=self.gen_kwargs["max_new_tokens"],
                 )
                 if ctx.prefetch_transaction is not None:
@@ -906,7 +930,12 @@ class LanguageModelHandler(BaseLanguageModelHandler):
                 with lock:
                     if tracker is not None:
                         tracker.start_llm()
-                    self.pipe(chat_prompt, **self.gen_kwargs)
+                    prompt = admitted_prompt()
+                    if ctx.context_current is not None and not ctx.context_current():
+                        ctx.cancelled = True
+                        self.streamer.on_finalized_text("", stream_end=True)
+                        return
+                    self.pipe(prompt, **self.gen_kwargs)
 
             thread = Thread(target=_locked_pipe)
             thread.start()
@@ -1067,6 +1096,9 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
                 tracker = active_turn_latency_tracker()
                 if tracker is not None:
                     tracker.start_llm()
+                if ctx.context_current is not None and not ctx.context_current():
+                    ctx.cancelled = True
+                    return
                 token_iter = mlx_vlm_stream_generate(  # type: ignore[arg-type]
                     self.model,
                     self.processor,
@@ -1113,6 +1145,10 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
                 with lock:
                     if tracker is not None:
                         tracker.start_llm()
+                    if ctx.context_current is not None and not ctx.context_current():
+                        ctx.cancelled = True
+                        self.streamer.on_finalized_text("", stream_end=True)
+                        return
                     self.model.generate(**generate_kwargs)  # type: ignore[union-attr,operator]
 
             thread = Thread(target=_locked_generate)

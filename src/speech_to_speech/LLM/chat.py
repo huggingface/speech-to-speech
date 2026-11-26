@@ -174,6 +174,7 @@ class Chat:
 
     def __init__(self, size: int) -> None:
         self.size = size
+        self._input_generation = 0
         self.init_chat_message: RealtimeConversationItemSystemMessage | None = None
         # ``size`` is the number of user turns to keep.  When exceeded the
         # oldest complete turn (everything up to the next user message)
@@ -342,6 +343,22 @@ class Chat:
 
         raise ChatItemError(f"No function_call with call_id '{call_id}' found in conversation history.")
 
+    def context_anchor(self) -> tuple[int, str, tuple[str, ...]] | None:
+        """Capture an unambiguous text-only tail under the same lock as mutations."""
+        with self._lock:
+            tail = self.buffer[-1] if self.buffer else None
+            if not isinstance(tail, RealtimeConversationItemUserMessage) or not tail.id:
+                return None
+            if any(part.type != "input_text" for part in tail.content):
+                return None
+            if any(part.type == "input_audio" for item in self.buffer
+                   if isinstance(item, RealtimeConversationItemUserMessage) for part in item.content):
+                return None
+            parts = tuple(part.text for part in tail.content if part.text)
+            if not parts or sum(map(len, parts)) + len(parts) - 1 > 2048:
+                return None
+            return self._input_generation, tail.id, parts
+
     def history_anchor_id(self) -> str | None:
         """Anchor identifying the current end of the conversation.
 
@@ -416,6 +433,7 @@ class Chat:
                 )
             self._place_locked(item, insert_at)
             self._user_turn_count += 1
+            self._input_generation += 1
             logger.debug("Added user message to chat (%d parts)", len(item.content))
 
         elif isinstance(item, RealtimeConversationItemAssistantMessage):
@@ -573,6 +591,7 @@ class Chat:
             for item in self.buffer:
                 if not isinstance(item, RealtimeConversationItemUserMessage) or item.id != item_id:
                     continue
+                self._input_generation += 1
                 item.content = [UserContent(type="input_text", text=text)]
                 logger.debug("Replaced speculative user message %s", item_id)
                 return True
@@ -630,7 +649,10 @@ class Chat:
         with self._lock:
             # An explicit delete is final: a later playback report must not restore it.
             self._unheard_assistant_items.pop(item_id, None)
-            return self._delete_item_locked(item_id)
+            removed = self._delete_item_locked(item_id)
+            if isinstance(removed, RealtimeConversationItemUserMessage):
+                self._input_generation += 1
+            return removed
 
     def _delete_item_locked(self, item_id: str) -> SupportedItem | None:
         removed: SupportedItem | None = None
@@ -941,6 +963,7 @@ class Chat:
                 if not isinstance(item, RealtimeConversationItemUserMessage) or item.id != item_id:
                     continue
                 del self.buffer[index]
+                self._input_generation += 1
                 self._user_turn_count -= 1
                 logger.debug("Removed speculative user message %s", item_id)
                 return True
@@ -1417,6 +1440,7 @@ class Chat:
         """Return a snapshot safe for concurrent read access."""
         with self._lock:
             clone = Chat(self.size)
+            clone._input_generation = self._input_generation
             state = (
                 self.init_chat_message,
                 list(self.buffer),

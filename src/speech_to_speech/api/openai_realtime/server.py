@@ -27,18 +27,22 @@ class RealtimeServer:
         host: str = "0.0.0.0",
         port: int = 8765,
         llm_proxy_config: LLMProxyConfig | None = None,
+        context_integration=None,
     ) -> None:
         if not pool:
             raise ValueError("RealtimeServer requires at least one PipelineUnit in the pool")
         self.stop_event = stop_event
+        self.startup_error = None
         self.pool = pool
+        self.context_integration = context_integration
         self.host = host
         self.port = port
         self.llm_proxy_config = llm_proxy_config
 
     def run(self) -> None:
         """Start the FastAPI/uvicorn server (called from a ThreadManager thread)."""
-        app = create_app(pool=self.pool, stop_event=self.stop_event, llm_proxy_config=self.llm_proxy_config)
+        options = {"context_integration": self.context_integration} if self.context_integration is not None else {}
+        app = create_app(pool=self.pool, stop_event=self.stop_event, llm_proxy_config=self.llm_proxy_config, **options)
 
         logger.info(
             f"OpenAI Realtime API starting on ws://{self.host}:{self.port}/v1/realtime (pool size {len(self.pool)})"
@@ -63,6 +67,9 @@ class RealtimeServer:
 
         try:
             server.run()
+            if self.context_integration is not None and not server.started and not self.stop_event.is_set():
+                self.startup_error = RuntimeError("Context-enabled Realtime server failed to start")
+                raise self.startup_error
         finally:
             # A bind/startup failure must also stop the model threads. During a
             # normal shutdown the event is already set by ThreadManager.
