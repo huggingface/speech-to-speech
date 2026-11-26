@@ -576,7 +576,7 @@ make barge-in wait for words instead:
         "turn_detection": {
           "type": "server_vad",
           "interrupt_response": true,
-          "false_interruption": {"min_words": 1, "playback": "continue", "timeout_ms": 2000}
+          "false_interruption": {"min_words": 1, "min_speech_ms": 1200, "playback": "continue", "timeout_ms": 2000}
         }
       }
     }
@@ -586,8 +586,8 @@ make barge-in wait for words instead:
 
 `"false_interruption": true` uses those defaults; `null` or `false` turns it
 off. The server flag `--false_interruption {off,continue,pause,duck}` (with
-`--false_interruption_min_words`) sets the default for sessions that leave the
-field unset. It is off by default.
+`--false_interruption_min_words` and `--false_interruption_min_speech_ms`) sets
+the default for sessions that leave the field unset. It is off by default.
 
 When speech starts while a spoken reply is active, queued, or still playing,
 the server holds that user turn instead of cancelling the reply. The reply
@@ -600,8 +600,14 @@ protect: speech during them alone is handled as before. Then:
   `input_audio_buffer.speech_started` with the original `audio_start_ms`, the
   playback cut in history, and the rest of the user item. A partial transcript
   counts once two consecutive hypotheses both have enough words; a final
-  transcript counts at once. With live transcription on (the default) a real
-  interruption is committed about 0.5 to 1 s after it starts.
+  transcript counts at once.
+- **So does long speech.** `min_speech_ms` of active speech (1.2 s by default;
+  0 turns it off) commits the interruption before its words are known. Words
+  can come late: VAD splits "Wait, wait, can you..." into short segments, and
+  an STT that shares a GPU lock with the TTS may skip partial transcripts while
+  the reply is being synthesized. Coughs and backchannels are well under a
+  second of speech. A real interruption is typically committed 0.5 to 1.5 s
+  after it starts.
 - **No words dismiss it.** An empty or filler-only transcript, a failed
   transcription, or no transcript within `timeout_ms` after the speech stops
   means the speech was not an interruption. The client never sees that turn,

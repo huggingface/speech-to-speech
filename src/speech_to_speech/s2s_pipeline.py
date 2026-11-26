@@ -343,7 +343,11 @@ def _default_false_interruption(module_kwargs: ModuleArguments) -> FalseInterrup
     mode = getattr(module_kwargs, "false_interruption", "off")
     if mode == "off":
         return None
-    return FalseInterruptionConfig(playback=mode, min_words=module_kwargs.false_interruption_min_words)
+    return FalseInterruptionConfig(
+        playback=mode,
+        min_words=module_kwargs.false_interruption_min_words,
+        min_speech_ms=module_kwargs.false_interruption_min_speech_ms,
+    )
 
 
 def prepare_module_args(module_kwargs: ModuleArguments, llm_backend: BackendSelection) -> None:
@@ -352,6 +356,8 @@ def prepare_module_args(module_kwargs: ModuleArguments, llm_backend: BackendSele
         raise ValueError("--false_interruption must be one of: off, continue, pause, duck.")
     if module_kwargs.false_interruption_min_words < 1:
         raise ValueError("--false_interruption_min_words must be at least 1.")
+    if not 0 <= module_kwargs.false_interruption_min_speech_ms <= 30000:
+        raise ValueError("--false_interruption_min_speech_ms must be between 0 and 30000.")
     for kind in ("stt", "tts"):
         declared = getattr(module_kwargs, f"{kind}_supported_languages")
         if declared is not None:

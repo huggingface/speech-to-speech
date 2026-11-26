@@ -815,13 +815,21 @@ async def _gate_interruption(
     return True
 
 
-async def _expire_interruption(unit: PipelineUnit, transport: SessionTransport, session_id: str) -> None:
-    """Resume when speech stopped long ago and no transcript ever came."""
+async def _resolve_due_interruption(
+    unit: PipelineUnit,
+    session: SessionState,
+    transport: SessionTransport,
+    session_id: str,
+) -> None:
+    """Decide what time alone settles: speech long enough, or no transcript in time."""
     try:
         pending = unit.service._state(session_id).pending_interruption
     except KeyError:
         return
-    if pending is not None and pending.expired():
+    verdict = pending.due() if pending is not None else None
+    if verdict is Verdict.CONFIRM:
+        await _confirm_interruption(unit, session, transport, session_id)
+    elif verdict is Verdict.DISMISS:
         await _dismiss_interruption(unit, transport, session_id, "no transcript before timeout")
 
 
@@ -1237,7 +1245,7 @@ def create_app(
                 session_id = session.session_id if session is not None else None
 
                 if transport is not None and session is not None and session_id and session.released_at is None:
-                    await _expire_interruption(unit, transport, session_id)
+                    await _resolve_due_interruption(unit, session, transport, session_id)
 
                 # Text events first (speech_started cancels active response).
                 try:

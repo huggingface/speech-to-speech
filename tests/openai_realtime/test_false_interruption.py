@@ -119,6 +119,43 @@ def test_one_hypothesis_with_a_word_is_not_enough():
     )
 
 
+def test_speech_split_into_short_segments_commits_by_duration():
+    """VAD splits 'Wait, wait, can you say that again?'; no words may arrive in time."""
+    config = FalseInterruptionConfig(min_speech_ms=1200)
+    pending = PendingInterruption.begin(
+        SpeechStartedEvent(turn_id="turn_2", turn_revision=0, active_speech_ms=384), config
+    )
+    assert pending.observe(SpeechStoppedEvent(turn_id="turn_2", turn_revision=0, active_speech_ms=480)) is Verdict.HOLD
+    resumed = SpeechStartedEvent(turn_id="turn_2", turn_revision=1, reopened=True, active_speech_ms=192)
+    assert pending.observe(resumed) is Verdict.HOLD
+    assert pending.observe(SpeechStoppedEvent(turn_id="turn_2", turn_revision=1, active_speech_ms=416)) is Verdict.HOLD
+    third = SpeechStartedEvent(turn_id="turn_2", turn_revision=2, reopened=True, active_speech_ms=192)
+    assert pending.observe(third) is Verdict.HOLD
+    started = pending.speaking_since
+    assert pending.due(started + 0.05) is None
+    assert pending.deadline() == pytest.approx(started + (1200 - 480 - 416 - 192) / 1000)
+    assert pending.due(started + 0.2) is Verdict.CONFIRM
+
+
+def test_a_cough_is_too_short_to_commit_by_duration():
+    pending = PendingInterruption.begin(
+        SpeechStartedEvent(turn_id="turn_2", turn_revision=0, active_speech_ms=384), FalseInterruptionConfig()
+    )
+    assert pending.observe(SpeechStoppedEvent(turn_id="turn_2", turn_revision=0, active_speech_ms=480)) is Verdict.HOLD
+    assert pending.speech_ms() == 480
+    assert pending.due(pending.stopped_at + 1.0) is None
+    assert pending.due(pending.stopped_at + 2.0) is Verdict.DISMISS
+
+
+def test_duration_rule_can_be_turned_off():
+    pending = PendingInterruption.begin(
+        SpeechStartedEvent(turn_id="turn_2", turn_revision=0, active_speech_ms=5000),
+        FalseInterruptionConfig(min_speech_ms=0),
+    )
+    assert pending.due(pending.started_at + 10) is None
+    assert pending.deadline() is None
+
+
 def test_events_of_a_replaced_revision_are_dropped():
     pending = PendingInterruption.begin(
         SpeechStartedEvent(turn_id="turn_2", turn_revision=0), FalseInterruptionConfig()
@@ -478,6 +515,19 @@ def test_a_short_real_interruption_is_committed_by_its_final_transcript(call):
     assert types.index("response.done") < types.index("input_audio_buffer.speech_started")
     assert call.user_messages()[-1] == "No."
     assert call.service.text_prompt_queue.get(timeout=2).turn_id == interruption[0]
+
+
+def test_long_speech_without_words_yet_commits_the_interruption(call):
+    call.configure({"min_speech_ms": 300})
+    _, key = _coach_is_reading(call)
+    generation = call.unit.cancel_scope.generation
+
+    interruption = call.speech()
+    events = call.receive_until("input_audio_buffer.speech_started")
+
+    assert any(event["type"] == "response.done" and event["response"]["status"] == "cancelled" for event in events)
+    assert call.unit.cancel_scope.generation == generation + 1
+    assert call.tracker.current_turn() == interruption
 
 
 def test_reply_that_ended_is_still_protected_while_its_audio_plays(call):

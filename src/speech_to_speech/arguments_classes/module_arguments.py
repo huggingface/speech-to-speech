@@ -156,6 +156,13 @@ class ModuleArguments(Wav2Vec2STVHandlerArguments):
             "during a reply interrupts it. Default is 1."
         },
     )
+    false_interruption_min_speech_ms: int = field(
+        default=1200,
+        metadata={
+            "help": "With --false_interruption, active speech during a reply that interrupts it even before its "
+            "words are transcribed; 0 waits for words. Default is 1200."
+        },
+    )
     enable_llm_proxy: bool = field(
         default=False,
         metadata={

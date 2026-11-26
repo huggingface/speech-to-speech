@@ -131,6 +131,13 @@ class FalseInterruptionConfig(BaseModel):
 
     min_words: int = Field(default=1, ge=1, le=50)
     """Words that are not fillers or backchannels needed to commit an interruption."""
+    min_speech_ms: int = Field(default=1200, ge=0, le=30000)
+    """Active speech that commits an interruption even before its words are known; 0 turns it off.
+
+    Words can come late: VAD splits "Wait, wait, can you..." into short
+    segments, and a busy STT may skip partial transcripts while the reply is
+    being synthesized. A cough or a backchannel is well under a second.
+    """
     playback: PlaybackMode = "continue"
     """What happens to the assistant's audio while the decision is pending.
 
@@ -237,6 +244,10 @@ class PendingInterruption:
     stopped_at: float | None = None
     previous_words: int = 0
     transcript: str = ""
+    # Active speech of finished segments, and of the one in progress.
+    closed_speech_ms: float = 0.0
+    speaking_since: float | None = None
+    speaking_active_ms: float = 0.0
 
     @classmethod
     def begin(cls, event: SpeechStartedEvent, config: FalseInterruptionConfig) -> PendingInterruption:
@@ -249,20 +260,43 @@ class PendingInterruption:
         )
         pending.events.append(event)
         pending.revisions.add(event.turn_revision)
+        pending._speech_started(event, pending.started_at)
         return pending
+
+    def _speech_started(self, event: SpeechStartedEvent, now: float) -> None:
+        self.speaking_since = now
+        self.speaking_active_ms = event.active_speech_ms
+
+    def speech_ms(self, now: float | None = None) -> float:
+        """Active speech heard so far in this turn."""
+        if self.speaking_since is None:
+            return self.closed_speech_ms
+        now = time.monotonic() if now is None else now
+        return self.closed_speech_ms + self.speaking_active_ms + (now - self.speaking_since) * 1000
 
     def owns(self, event: PipelineEvent) -> bool:
         return getattr(event, "turn_id", None) == self.turn_id
 
-    def deadline(self) -> float | None:
-        """When to give up waiting for a transcript, once speech has stopped."""
-        if self.stopped_at is None:
-            return None
-        return self.stopped_at + self.config.timeout_ms / 1000.0
+    def _long_enough(self, now: float | None = None) -> bool:
+        return bool(self.config.min_speech_ms) and self.speech_ms(now) >= self.config.min_speech_ms
 
-    def expired(self, now: float | None = None) -> bool:
-        deadline = self.deadline()
-        return deadline is not None and (time.monotonic() if now is None else now) >= deadline
+    def deadline(self) -> float | None:
+        """When :meth:`due` next changes without a new event, if ever."""
+        if self.speaking_since is not None and self.config.min_speech_ms:
+            remaining_ms = self.config.min_speech_ms - self.speech_ms(self.speaking_since)
+            return self.speaking_since + max(0.0, remaining_ms) / 1000.0
+        if self.stopped_at is not None:
+            return self.stopped_at + self.config.timeout_ms / 1000.0
+        return None
+
+    def due(self, now: float | None = None) -> Verdict | None:
+        """A decision that time alone has made: long speech, or no transcript after the timeout."""
+        now = time.monotonic() if now is None else now
+        if self.speaking_since is not None:
+            return Verdict.CONFIRM if self._long_enough(now) else None
+        if self.stopped_at is not None and now >= self.stopped_at + self.config.timeout_ms / 1000.0:
+            return Verdict.DISMISS
+        return None
 
     def observe(self, event: PipelineEvent) -> Verdict:
         """Decide one event of this turn. The caller checks :meth:`owns` first."""
@@ -283,7 +317,8 @@ class PendingInterruption:
             self.stopped_at = None
             self.previous_words = 0
             self.events.append(event)
-            return Verdict.HOLD
+            self._speech_started(event, time.monotonic())
+            return Verdict.CONFIRM if self._long_enough() else Verdict.HOLD
         if revision != self.revision:
             return Verdict.DROP
         self.events.append(event)
@@ -294,8 +329,13 @@ class PendingInterruption:
             self.previous_words = words
             return Verdict.CONFIRM if confirmed else Verdict.HOLD
         if isinstance(event, SpeechStoppedEvent):
-            self.stopped_at = time.monotonic()
-            return Verdict.HOLD
+            now = time.monotonic()
+            if self.speaking_since is not None:
+                heard = self.speaking_active_ms + (now - self.speaking_since) * 1000
+                self.closed_speech_ms += event.active_speech_ms or heard
+                self.speaking_since = None
+            self.stopped_at = now
+            return Verdict.CONFIRM if self._long_enough(now) else Verdict.HOLD
         if isinstance(event, TranscriptionCompletedEvent):
             self.transcript = event.transcript
             if self.config.word_count(event.transcript) >= self.config.min_words:
