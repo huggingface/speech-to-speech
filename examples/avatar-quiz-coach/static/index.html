@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Viva · voice quiz coach</title>
+  <meta name="description" content="Pick a topic. Viva researches it, quizzes you out loud, grades your answers and coaches you.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎓</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="static/style.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./vendor/three/build/three.module.js",
+      "three/addons/": "./vendor/three/examples/jsm/",
+      "talkinghead": "./vendor/talkinghead/talkinghead.mjs",
+      "headaudio": "./vendor/headaudio/headaudio.min.mjs"
+    }
+  }
+  </script>
+</head>
+<body data-phase="lobby">
+  <div id="stage" aria-hidden="true">
+    <div id="avatar"></div>
+    <div id="avatar-loading"><div class="ring"></div><span>Waking Viva up… <b id="avatar-pct">0%</b></span></div>
+  </div>
+
+  <header id="topbar">
+    <div class="brand"><span class="brand-mark">V</span><span class="brand-name">Viva</span><span class="brand-tag">voice quiz coach</span></div>
+    <div id="hud" hidden>
+      <div class="hud-topic" id="hud-topic"></div>
+      <div class="hud-score"><span class="hud-label">Score</span><span id="hud-score">0</span></div>
+      <div class="hud-streak" id="hud-streak" data-level="0"><span class="flame">🔥</span><span id="hud-streak-n">0</span><span class="mult" id="hud-mult">×1.0</span></div>
+    </div>
+    <div class="top-actions">
+      <a class="btn small signin" id="btn-signin" href="oauth/huggingface/login" hidden>🤗 Sign in</a>
+      <button class="icon-btn" id="btn-board" title="Leaderboard" aria-label="Leaderboard">🏆</button>
+      <button class="icon-btn" id="btn-settings" title="Settings" aria-label="Settings">⚙︎</button>
+    </div>
+  </header>
+
+  <div id="caption" class="caption" hidden><span id="caption-text"></span></div>
+  <div id="pop-layer" aria-hidden="true"></div>
+  <canvas id="confetti" aria-hidden="true"></canvas>
+
+  <main id="panel">
+    <!-- Lobby -->
+    <section class="view" id="view-lobby">
+      <h1 class="title">Get quizzed <em>out loud.</em></h1>
+      <p class="lead">Pick any topic. Viva reads up on it, asks you questions, grades what you say and coaches you through what you missed.</p>
+
+      <form id="topic-form" class="topic-form" autocomplete="off">
+        <input id="topic-input" name="topic" maxlength="160" placeholder="e.g. RLHF vs DPO, black holes, the French Revolution…" aria-label="Quiz topic">
+        <button type="submit" class="btn primary" id="topic-go">Quiz me</button>
+      </form>
+      <div class="row-between">
+        <div class="seg" id="difficulty" role="radiogroup" aria-label="Difficulty">
+          <button type="button" data-v="rookie" role="radio">Rookie</button>
+          <button type="button" data-v="pro" role="radio" class="on">Pro</button>
+          <button type="button" data-v="expert" role="radio">Expert</button>
+        </div>
+        <label class="name-field" id="name-field">
+          <span>Leaderboard name</span>
+          <input id="player-name" maxlength="24" placeholder="Your name">
+        </label>
+      </div>
+
+      <h2 class="section">Featured topics</h2>
+      <div class="cards" id="featured"></div>
+
+      <div class="lobby-board">
+        <div class="row-between"><h2 class="section">Top players this week</h2><button class="link" id="lobby-board-more">Full leaderboard →</button></div>
+        <ol class="board compact" id="lobby-board"></ol>
+      </div>
+    </section>
+
+    <!-- Research -->
+    <section class="view" id="view-research" hidden>
+      <div class="research-head">
+        <div class="research-emoji" id="research-emoji">📚</div>
+        <div>
+          <div class="eyebrow">Preparing your quiz</div>
+          <h2 class="research-title" id="research-title"></h2>
+        </div>
+      </div>
+      <ol class="steps" id="research-steps">
+        <li data-stage="plan">Planning what to read</li>
+        <li data-stage="search">Searching sources</li>
+        <li data-stage="read">Reading</li>
+        <li data-stage="write">Writing your questions</li>
+      </ol>
+      <div class="sources" id="research-sources"></div>
+      <div class="voice-line" id="voice-line"><span class="dot"></span><span id="voice-status">Connecting voice…</span></div>
+      <p class="muted small" id="research-tip">Tip: answer in your own words. Say “hint”, “repeat” or “skip” anytime.</p>
+      <button class="btn ghost" id="research-cancel">Cancel</button>
+    </section>
+
+    <!-- Quiz -->
+    <section class="view" id="view-quiz" hidden>
+      <div class="q-progress">
+        <span id="q-count">Question 1 of 8</span>
+        <div class="dots" id="q-dots"></div>
+      </div>
+      <article class="q-card" id="q-card">
+        <div class="q-meta"><span class="pill" id="q-level">Medium</span><span class="pill gold" id="q-points">150 pts</span><span class="pill" id="q-attempt" hidden>2nd try ×0.75</span></div>
+        <p class="q-text" id="q-text"></p>
+      </article>
+
+      <div class="answer-box" id="answer-box">
+        <div class="answer-label">You said</div>
+        <p class="answer-text" id="answer-text"><span class="muted">Answer out loud when Viva finishes asking.</span></p>
+      </div>
+
+      <div class="verdict" id="verdict" hidden>
+        <div class="verdict-head"><span class="verdict-chip" id="verdict-chip"></span><span class="verdict-points" id="verdict-points"></span></div>
+        <div class="reveal" id="reveal" hidden>
+          <div class="reveal-answer" id="reveal-answer"></div>
+          <ul class="keypoints" id="reveal-points"></ul>
+        </div>
+      </div>
+
+      <div class="mic-row">
+        <button class="mic" id="mic" data-state="idle" aria-label="Microphone status">
+          <span class="mic-ring" id="mic-ring"></span>
+          <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path fill="currentColor" d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-2.08A7 7 0 0 0 19 12h-2Z"/></svg>
+        </button>
+        <div class="mic-status"><b id="mic-title">Getting ready</b><span id="mic-sub">Viva will ask the first question</span></div>
+      </div>
+
+      <form class="type-form" id="type-form" autocomplete="off">
+        <input id="type-input" maxlength="600" placeholder="…or type your answer" aria-label="Type your answer">
+        <button class="btn small" type="submit">Send</button>
+      </form>
+
+      <div class="q-actions">
+        <button class="btn small ghost" data-intent="hint" id="btn-hint">💡 Hint <span class="muted">−30%</span></button>
+        <button class="btn small ghost" data-intent="repeat">🔁 Repeat</button>
+        <button class="btn small ghost" data-intent="skip">⏭ Skip</button>
+        <button class="btn small ghost danger" data-intent="stop">End quiz</button>
+      </div>
+    </section>
+
+    <!-- Results -->
+    <section class="view" id="view-results" hidden>
+      <div class="result-hero">
+        <div class="rank-icon" id="r-rank-icon">🥇</div>
+        <div class="eyebrow" id="r-topic"></div>
+        <h2 class="rank-title" id="r-rank">Expert</h2>
+        <div class="big-score"><span id="r-score">0</span><small>pts</small></div>
+        <div class="stats">
+          <div><b id="r-correct">0/0</b><span>correct</span></div>
+          <div><b id="r-streak">0</b><span>best streak</span></div>
+          <div><b id="r-time">0:00</b><span>time</span></div>
+        </div>
+        <div class="badges" id="r-badges"></div>
+        <div class="placement" id="r-placement" hidden></div>
+      </div>
+
+      <div class="coach-report" id="r-report">
+        <div class="report-loading"><div class="ring small"></div> Viva is writing your coaching notes…</div>
+      </div>
+
+      <div class="result-actions">
+        <button class="btn primary" id="btn-drill" hidden>🎯 Drill my mistakes</button>
+        <button class="btn" id="btn-again">Play again</button>
+        <button class="btn ghost" id="btn-new">New topic</button>
+      </div>
+
+      <h3 class="section">Review</h3>
+      <ol class="review" id="r-review"></ol>
+
+      <h3 class="section">Leaderboard · <span id="r-board-topic"></span></h3>
+      <ol class="board" id="r-board"></ol>
+    </section>
+  </main>
+
+  <!-- Leaderboard drawer -->
+  <dialog id="board-dialog" class="sheet">
+    <div class="sheet-head">
+      <h2>🏆 Leaderboard</h2>
+      <button class="icon-btn" data-close aria-label="Close">✕</button>
+    </div>
+    <div class="row-between">
+      <div class="seg small" id="board-period">
+        <button type="button" data-v="week" class="on">This week</button>
+        <button type="button" data-v="all">All time</button>
+      </div>
+      <select id="board-topic" aria-label="Topic"><option value="">All topics</option></select>
+    </div>
+    <ol class="board" id="board-list"></ol>
+  </dialog>
+
+  <!-- Settings -->
+  <dialog id="settings-dialog" class="sheet">
+    <div class="sheet-head">
+      <h2>Settings</h2>
+      <button class="icon-btn" data-close aria-label="Close">✕</button>
+    </div>
+    <label class="switch-row">
+      <input type="checkbox" id="opt-bargein">
+      <span><b>Let me interrupt Viva</b><small>Talk over her to cut in. Use headphones, or she may hear herself.</small></span>
+    </label>
+    <label class="field" id="server-field" hidden>
+      <span>Speech-to-speech server</span>
+      <input id="opt-server" placeholder="ws://localhost:8765/v1/realtime">
+      <small>Run <code>speech-to-speech serve</code> locally and paste its address.</small>
+    </label>
+    <div class="muted small" id="lipsync-info"></div>
+  </dialog>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script type="module" src="static/js/app.js"></script>
+</body>
+</html>

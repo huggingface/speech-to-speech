@@ -1,0 +1,144 @@
+{
+ "title": "How LLMs Are Trained",
+ "emoji": "🧠",
+ "brief": "This quiz covers the pipeline that turns a raw text predictor into a helpful assistant: pretraining on next-token prediction, instruction tuning, and preference tuning with RLHF or DPO. Understanding these stages explains why modern chatbots behave the way they do.",
+ "questions": [
+  {
+   "question": "What objective are GPT-style language models pretrained on, before any fine-tuning happens?",
+   "answer": "They are pretrained to predict the next word, or token, in a sequence of text across a vast corpus.",
+   "key_points": [
+    "Next-token or next-word prediction",
+    "Done on a vast amount of text",
+    "Pretraining comes before fine-tuning"
+   ],
+   "hint": "Think about what the model guesses at every position in a sentence.",
+   "fun_fact": "GPT stands for Generative Pre-trained Transformer, and the name literally describes this pretraining step.",
+   "difficulty": 1,
+   "source": 1,
+   "id": 0
+  },
+  {
+   "question": "After pretraining, what is instruction tuning meant to accomplish?",
+   "answer": "It fine-tunes the model to follow instructions and behave as a useful assistant, rather than just continuing arbitrary text.",
+   "key_points": [
+    "Fine-tuning after pretraining",
+    "Following instructions",
+    "Behaving as an assistant"
+   ],
+   "hint": "A raw next-token predictor doesn't naturally answer questions politely.",
+   "fun_fact": "ChatGPT is a fine-tuned version of the GPT base models, tuned to be an assistant.",
+   "difficulty": 1,
+   "source": 1,
+   "id": 1
+  },
+  {
+   "question": "In fine-tuning, what does it mean to freeze layers, and why might you do it?",
+   "answer": "Frozen layers are kept unchanged during training, so only the remaining layers update. It saves computation and preserves lower-level features learned during pretraining.",
+   "key_points": [
+    "Frozen layers don't change during backpropagation",
+    "Saves compute",
+    "Earlier layers capture lower-level features"
+   ],
+   "hint": "It's about which parts of the network you allow to update.",
+   "fun_fact": "With LoRA, a model with billions of parameters can be fine-tuned using only several million extra parameters.",
+   "difficulty": 2,
+   "source": 3,
+   "id": 2
+  },
+  {
+   "question": "In RLHF, how is the reward model built before the policy is trained?",
+   "answer": "Humans rank or compare model outputs, and a reward model is trained in a supervised way to predict which responses are good or bad. It then serves as the reward function for reinforcement learning.",
+   "key_points": [
+    "Humans provide rankings of outputs",
+    "Reward model trained by supervised learning",
+    "It scores responses as high or low reward"
+   ],
+   "hint": "The reward isn't hand-coded; it's learned from people's judgments.",
+   "fun_fact": "Rankings from human annotators can be converted into scores using the Elo rating system, borrowed from ranking chess players.",
+   "difficulty": 2,
+   "source": 2,
+   "id": 3
+  },
+  {
+   "question": "Why is human feedback a practical training signal when the task itself is hard to specify?",
+   "answer": "Because some tasks are hard to define explicitly but easy to judge, like whether text is helpful and harmless. Humans can swiftly compare outputs, so their judgments become the reward.",
+   "key_points": [
+    "Hard to specify, easy to judge",
+    "Humans compare harmfulness or helpfulness quickly",
+    "Judgments become the training signal"
+   ],
+   "hint": "Think about writing safe text versus rating it.",
+   "fun_fact": "RLHF gained much of its popularity when OpenAI reused it in their paper on InstructGPT.",
+   "difficulty": 2,
+   "source": 2,
+   "id": 4
+  },
+  {
+   "question": "How does DPO differ from the classic RLHF pipeline at a high level?",
+   "answer": "DPO skips training a separate reward model and doing reinforcement learning, instead directly optimizing the policy on preference data. This makes preference tuning simpler and more stable than the RLHF loop.",
+   "key_points": [
+    "No separate reward model",
+    "No reinforcement learning step",
+    "Directly optimizes on preference pairs",
+    "Simpler and more stable"
+   ],
+   "hint": "It removes the middleman between human preferences and the policy update.",
+   "fun_fact": "RLHF reward models are typically optimized with algorithms like proximal policy optimization, the same family of methods used elsewhere in RL.",
+   "difficulty": 2,
+   "source": 2,
+   "id": 5
+  },
+  {
+   "question": "What are the main challenges of collecting preference data for RLHF?",
+   "answer": "High-quality preference data is expensive to source, and if it isn't collected from a representative sample of people, the trained model can exhibit unwanted biases.",
+   "key_points": [
+    "Expensive to source quality data",
+    "Non-representative annotators cause bias",
+    "Small datasets can work but diversity matters"
+   ],
+   "hint": "The problems come from who provides the feedback and how much it costs.",
+   "fun_fact": "Studies show that increasing the size of the reward model can matter more than proportionally increasing the amount of feedback data.",
+   "difficulty": 3,
+   "source": 2,
+   "id": 6
+  },
+  {
+   "question": "Why can fine-tuning hurt a model, and what's one way to mitigate that?",
+   "answer": "Fine-tuning can degrade robustness to distribution shifts, hurting out-of-distribution performance. Interpolating the fine-tuned weights with the original model's weights can recover much of that robustness.",
+   "key_points": [
+    "Fine-tuning reduces robustness to distribution shift",
+    "Weight interpolation with the original model",
+    "Restores out-of-distribution performance"
+   ],
+   "hint": "The fix involves blending the new model back toward its old self.",
+   "fun_fact": "This interpolation trick largely keeps the fine-tuned model's in-distribution performance while restoring out-of-distribution performance.",
+   "difficulty": 3,
+   "source": 3,
+   "id": 7
+  }
+ ],
+ "id": "4d764493914f",
+ "topic": "How large language models are trained",
+ "slug": "llm-training",
+ "difficulty": "pro",
+ "model": "zai-org/GLM-5.3",
+ "sources": [
+  {
+   "title": "Large language model",
+   "url": "https://en.wikipedia.org/wiki/Large_language_model",
+   "site": "wikipedia.org"
+  },
+  {
+   "title": "Reinforcement learning from human feedback",
+   "url": "https://en.wikipedia.org/wiki/Reinforcement_learning_from_human_feedback",
+   "site": "wikipedia.org"
+  },
+  {
+   "title": "Fine-tuning (deep learning)",
+   "url": "https://en.wikipedia.org/wiki/Fine-tuning_(deep_learning)",
+   "site": "wikipedia.org"
+  }
+ ],
+ "tagline": "Pretraining, fine-tuning, RLHF and DPO",
+ "order": 1
+}

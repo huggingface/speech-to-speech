@@ -1,0 +1,145 @@
+{
+ "title": "The French Revolution",
+ "emoji": "🇫🇷",
+ "brief": "This quiz covers the causes, key events, figures, and legacy of the French Revolution, from the Estates General to Napoleon's rise. It matters because many of its ideas, like popular sovereignty and rights of man, still shape liberal democracy today.",
+ "questions": [
+  {
+   "question": "Why was the Bastille stormed in July 1789, even though it held only seven prisoners?",
+   "answer": "The Bastille was a royal fortress and prison that symbolized the monarchy's abuse of power in the heart of Paris, so revolutionaries seized it as a political statement. Its fall became the flashpoint of the French Revolution.",
+   "key_points": [
+    "Symbol of royal authority",
+    "Only seven inmates inside",
+    "Flashpoint of the revolution"
+   ],
+   "hint": "Think about what the building represented rather than what it contained.",
+   "fun_fact": "The Bastille was already scheduled for demolition before the revolutionaries got to it.",
+   "difficulty": 1,
+   "source": 3,
+   "id": 0
+  },
+  {
+   "question": "What was the Estates General, and why was its 1789 meeting so significant?",
+   "answer": "It was a representative body of the three estates, clergy, nobility, and commoners, that had not met since 1614. It was summoned in 1789 to solve the financial crisis, but the Third Estate broke away to form the National Assembly, launching the revolution.",
+   "key_points": [
+    "Body of three estates",
+    "First meeting since 1614",
+    "Third Estate formed the National Assembly"
+   ],
+   "hint": "Consider how long France had gone without calling this body together.",
+   "fun_fact": "The Estates General had not met for one hundred and seventy-five years before 1789.",
+   "difficulty": 1,
+   "source": 1,
+   "id": 1
+  },
+  {
+   "question": "What main factors caused the French Revolution?",
+   "answer": "A combination of social, political, and economic problems: a debt crisis with unfair and inconsistent taxes, poor harvests and recession raising food prices, and resistance to reform by the nobility and parlements. Enlightenment ideas and the American Revolution also shaped public demands for change.",
+   "key_points": [
+    "Financial crisis and unfair taxation",
+    "Bad harvests and food prices",
+    "Elite resistance to reform",
+    "Enlightenment ideas"
+   ],
+   "hint": "Think about money, food, and ideas all failing at once.",
+   "fun_fact": "France's debt level was actually not that high compared with Britain's, but its chaotic tax system caused far more resentment.",
+   "difficulty": 2,
+   "source": 1,
+   "id": 2
+  },
+  {
+   "question": "How did the voting structure of the Estates General anger the Third Estate?",
+   "answer": "The Parlement of Paris ruled that the estates would meet and vote separately, with votes counted by estate rather than by head. Since the clergy and nobility were less than five percent of the population, they could always outvote the Third Estate together.",
+   "key_points": [
+    "Votes counted by estate, not by head",
+    "First two estates could outvote the Third",
+    "Clergy and nobility under five percent of population"
+   ],
+   "hint": "The issue was whether votes were counted per estate or per person.",
+   "fun_fact": "Campaigners called the Society of Thirty pushed to double Third Estate representation and count votes by head.",
+   "difficulty": 2,
+   "source": 1,
+   "id": 3
+  },
+  {
+   "question": "How did the Reign of Terror end?",
+   "answer": "It ended in July 1794 with the Thermidorian Reaction, the fall of Robespierre and his allies, who were executed. Power then moved away from the Committee of Public Safety.",
+   "key_points": [
+    "Thermidorian Reaction in July 1794",
+    "Fall and execution of Robespierre",
+    "Committee of Public Safety lost power"
+   ],
+   "hint": "The event is named after the month in the revolutionary calendar when it happened.",
+   "fun_fact": "By the Terror's end, about sixteen thousand people had been officially executed, with many more dying in prison without trial.",
+   "difficulty": 2,
+   "source": 2,
+   "id": 4
+  },
+  {
+   "question": "How did the flight to Varennes in 1791 damage the French monarchy?",
+   "answer": "King Louis the Sixteenth's attempted escape discredited the monarchy by showing he could not be trusted to support the revolution. Combined with military defeats after war broke out in 1792, it led to the insurrection of August 1792, the abolition of the monarchy, and the First Republic.",
+   "key_points": [
+    "Louis the Sixteenth's failed escape in June 1791",
+    "Monarchy further discredited",
+    "Led to the 1792 insurrection and the First Republic"
+   ],
+   "hint": "The king tried to leave the country, and it went badly.",
+   "fun_fact": "The monarchy was abolished in September 1792, and Louis the Sixteenth was executed by guillotine in January 1793.",
+   "difficulty": 2,
+   "source": 1,
+   "id": 5
+  },
+  {
+   "question": "Why did Robespierre and the Jacobins believe terror was necessary?",
+   "answer": "Drawing on Rousseau's idea of the general will and Montesquieu's idea of republican virtue, Robespierre argued that those who opposed the republic were tyrants blocking the people's true interests. With foreign armies invading and internal revolts, terror was seen as the only way to protect the revolution.",
+   "key_points": [
+    "Rousseau's general will",
+    "Enemies seen as tyrants against virtue",
+    "Foreign invasion and internal revolts justified drastic measures"
+   ],
+   "hint": "Think about how Enlightenment philosophy met the panic of war.",
+   "fun_fact": "One historian said terror began as an improvised response to defeat but, once organized, became an instrument of victory.",
+   "difficulty": 3,
+   "source": 2,
+   "id": 6
+  },
+  {
+   "question": "How did the French Revolution end, and what is its lasting legacy?",
+   "answer": "It ended with the coup of Eighteenth Brumaire in 1799, when Napoleon Bonaparte overthrew the unstable Directory and established the Consulate as First Consul. Its legacy includes ideas considered fundamental to liberal democracy, such as the Declaration of the Rights of Man, and its values remain central to French political debate today.",
+   "key_points": [
+    "Coup of Eighteenth Brumaire in 1799",
+    "Napoleon became First Consul",
+    "Ideas fundamental to liberal democracy",
+    "Declaration of the Rights of Man"
+   ],
+   "hint": "The revolution did not end with a king but with a general.",
+   "fun_fact": "The Directory lasted only four years before falling, after the Committee of Public Safety before it proved equally unable to stabilize France.",
+   "difficulty": 3,
+   "source": 1,
+   "id": 7
+  }
+ ],
+ "id": "5b28be2560d7",
+ "topic": "The French Revolution",
+ "slug": "french-revolution",
+ "difficulty": "pro",
+ "model": "zai-org/GLM-5.3",
+ "sources": [
+  {
+   "title": "French Revolution",
+   "url": "https://en.wikipedia.org/wiki/French_Revolution",
+   "site": "wikipedia.org"
+  },
+  {
+   "title": "Reign of Terror",
+   "url": "https://en.wikipedia.org/wiki/Reign_of_Terror",
+   "site": "wikipedia.org"
+  },
+  {
+   "title": "Storming of the Bastille",
+   "url": "https://en.wikipedia.org/wiki/Storming_of_the_Bastille",
+   "site": "wikipedia.org"
+  }
+ ],
+ "tagline": "Liberty, equality, and a lot of drama",
+ "order": 7
+}

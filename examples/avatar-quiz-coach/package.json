@@ -1,0 +1,11 @@
+{
+  "name": "avatar-quiz-coach",
+  "private": true,
+  "type": "module",
+  "description": "Browser assets for the Viva avatar quiz coach (served as static files, no bundler).",
+  "dependencies": {
+    "@met4citizen/headaudio": "1.1.0",
+    "@met4citizen/talkinghead": "1.8.2",
+    "three": "0.186.0"
+  }
+}

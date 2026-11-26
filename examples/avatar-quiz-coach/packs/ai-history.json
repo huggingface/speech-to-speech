@@ -1,0 +1,147 @@
+{
+ "title": "Milestones of AI History",
+ "emoji": "🤖",
+ "brief": "This quiz traces the big turning points in artificial intelligence, from Turing's imitation game to today's chatbots. Knowing this history helps you understand why AI hype, disappointment, and breakthroughs keep repeating in cycles.",
+ "questions": [
+  {
+   "question": "What does the Turing test ask a machine to do in order to pass?",
+   "answer": "A human evaluator reads a text conversation with a machine and a human without knowing which is which, and the machine passes if the evaluator cannot reliably tell them apart.",
+   "key_points": [
+    "Human judge compares conversation transcripts without knowing who is who",
+    "Machine passes if the judge cannot reliably identify it",
+    "Success depends on answers resembling a human's, not being correct"
+   ],
+   "hint": "Think about imitation rather than accuracy.",
+   "fun_fact": "Turing introduced it as the 'imitation game' in his 1950 paper, which opens by asking, 'Can machines think?'",
+   "difficulty": 1,
+   "source": 2,
+   "id": 0
+  },
+  {
+   "question": "What happened at the Dartmouth workshop of 1956, and why is it important?",
+   "answer": "It was the founding event of AI as a research field, where Allen Newell and Herbert Simon presented the Logic Theorist, the concept of the first AI program. The attendees went on to lead AI research for decades.",
+   "key_points": [
+    "Held at Dartmouth College in 1956",
+    "Founded AI as a field of research",
+    "Newell and Simon presented Logic Theorist",
+    "Attendees became leaders of AI research for decades"
+   ],
+   "hint": "It is considered the birthplace of the field, even though it was seen as a failure.",
+   "fun_fact": "Despite launching the whole field, the workshop was considered a failure because it did not deliver on bold predictions of human-level intelligence within a generation.",
+   "difficulty": 1,
+   "source": 1,
+   "id": 1
+  },
+  {
+   "question": "What is an AI winter?",
+   "answer": "An AI winter is a period of reduced funding and interest in AI research, typically after hype is followed by disappointment and criticism. Two major winters lasted roughly from 1974 to 1980 and from 1987 to 2000.",
+   "key_points": [
+    "Period of reduced funding and interest in AI",
+    "Follows hype cycles of enthusiasm and disappointment",
+    "Two major winters: mid-1970s and late 1980s to 2000"
+   ],
+   "hint": "The name is a metaphor for a cold season for the field.",
+   "fun_fact": "The term first appeared in 1984, when researchers Roger Schank and John McDermott warned that the 1980s hype spiral would trigger a chain reaction like a 'nuclear winter' for AI.",
+   "difficulty": 1,
+   "source": 3,
+   "id": 2
+  },
+  {
+   "question": "Why did the 1966 ALPAC report kill funding for machine translation research?",
+   "answer": "The committee concluded that machine translation was more expensive, less accurate, and slower than human translation, so the National Research Council ended all support. Researchers had underestimated how hard it is for a machine to understand what a sentence means in order to translate it.",
+   "key_points": [
+    "ALPAC 1966 report found machine translation worse than human translation",
+    "The National Research Council ended all support after spending about twenty million dollars",
+    "Root problem was word-sense disambiguation and commonsense knowledge"
+   ],
+   "hint": "It came down to cost, accuracy, and speed compared with human translators.",
+   "fun_fact": "An apocryphal example of the problem translated 'the spirit is willing but the flesh is weak' back from Russian as 'the vodka is good but the meat is rotten.'",
+   "difficulty": 2,
+   "source": 3,
+   "id": 3
+  },
+  {
+   "question": "Why did mainstream research into perceptrons stop around 1969?",
+   "answer": "Minsky and Papert's book Perceptrons emphasized the limits of single-layer neural networks, which discouraged funding. Nobody at the time knew how to train multilayered networks, since backpropagation had not yet been developed.",
+   "key_points": [
+    "Minsky and Papert's 1969 book showed limits of single-layer perceptrons",
+    "Multilayer networks could avoid the limits but no training method existed",
+    "Backpropagation was still years away"
+   ],
+   "hint": "The book attacked one specific kind of network, but the fix was not yet known.",
+   "fun_fact": "The neural network winter ended in the mid-1980s thanks to work by John Hopfield and David Rumelhart, long after the criticism.",
+   "difficulty": 2,
+   "source": 3,
+   "id": 4
+  },
+  {
+   "question": "Why did governments cut funding for AI research in 1974?",
+   "answer": "Criticism from James Lighthill and pressure from the U.S. Congress led the U.S. and British governments to stop funding undirected AI research. Researchers had underestimated the complexity of building intelligent machines.",
+   "key_points": [
+    "James Lighthill's criticism was a key trigger",
+    "U.S. Congress pressure on government spending",
+    "U.S. and British governments stopped undirected AI funding",
+    "Researchers had underestimated the complexity of the goal"
+   ],
+   "hint": "It took both a critical report and political pressure in two countries.",
+   "fun_fact": "Only seven years later, Japan's Fifth Generation initiative and the success of expert systems brought investment flooding back, growing AI into a billion-dollar industry.",
+   "difficulty": 2,
+   "source": 1,
+   "id": 5
+  },
+  {
+   "question": "Why did machine learning take off in the early 2000s after the AI winters?",
+   "answer": "Powerful computer hardware became available, expansive data sets accumulated, and rigorous mathematical methods were applied, which allowed machine learning to succeed across academia and industry. Soon after, deep learning eclipsed all other methods.",
+   "key_points": [
+    "Powerful computer hardware",
+    "Accumulation of large data sets",
+    "Rigorous mathematical methods",
+    "Deep learning then became a breakthrough technology"
+   ],
+   "hint": "It took three ingredients: machines, data, and math.",
+   "fun_fact": "Research and funding actually kept growing during the winters, just under other names like 'machine learning.'",
+   "difficulty": 2,
+   "source": 1,
+   "id": 6
+  },
+  {
+   "question": "How did the transformer architecture lead to the rise of chatbots like ChatGPT and Claude?",
+   "answer": "The transformer architecture, introduced in 2017, was used to build generative AI and enabled the rapid scaling of large language models. This sparked the AI boom of the 2020s, with public releases of chatbots exhibiting human-like traits of knowledge and creativity, and fueled exponential investment.",
+   "key_points": [
+    "Transformer architecture introduced in 2017",
+    "Enabled generative AI and large language models",
+    "Sparked the 2020s AI boom and public chatbot releases",
+    "Models show human-like traits, fueling massive investment"
+   ],
+   "hint": "Think about what architectural innovation made large generative models practical.",
+   "fun_fact": "Despite the boom, concerns about risks and ethics of advanced AI have sparked ongoing debate about its future impact on society.",
+   "difficulty": 3,
+   "source": 1,
+   "id": 7
+  }
+ ],
+ "id": "e8268da26983",
+ "topic": "The history of artificial intelligence",
+ "slug": "ai-history",
+ "difficulty": "pro",
+ "model": "zai-org/GLM-5.3",
+ "sources": [
+  {
+   "title": "History of artificial intelligence",
+   "url": "https://en.wikipedia.org/wiki/History_of_artificial_intelligence",
+   "site": "wikipedia.org"
+  },
+  {
+   "title": "Turing test",
+   "url": "https://en.wikipedia.org/wiki/Turing_test",
+   "site": "wikipedia.org"
+  },
+  {
+   "title": "AI winter",
+   "url": "https://en.wikipedia.org/wiki/AI_winter",
+   "site": "wikipedia.org"
+  }
+ ],
+ "tagline": "From Turing to ChatGPT",
+ "order": 6
+}

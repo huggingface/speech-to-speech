@@ -1,0 +1,145 @@
+{
+ "title": "Voice AI: STT, TTS and Voice Agents",
+ "emoji": "🎙️",
+ "brief": "This quiz covers how machines turn speech into text, text back into speech, and detect when someone is actually talking. These three pieces are the backbone of real-time voice assistants like Siri and Alexa.",
+ "questions": [
+  {
+   "question": "What does a speech-to-text system do, and what is another common name for this technology?",
+   "answer": "It translates spoken language into text or other interpretable forms. It is also called automatic speech recognition or computer speech recognition.",
+   "key_points": [
+    "Translates spoken language into text",
+    "Also called automatic speech recognition",
+    "Also called speech recognition"
+   ],
+   "hint": "Think about what happens when you dictate a message to your phone.",
+   "fun_fact": "The first speech recognition system, Audrey, was built by Bell Labs in 1952 and could only recognize spoken digits from a single speaker.",
+   "difficulty": 1,
+   "source": 1,
+   "id": 0
+  },
+  {
+   "question": "What does a text-to-speech system do, and what two main parts is it typically composed of?",
+   "answer": "It converts normal written text into spoken speech. It consists of a front-end that normalizes the text and converts it to phonetic transcriptions with prosody, and a back-end synthesizer that turns that representation into sound.",
+   "key_points": [
+    "Converts written text into speech",
+    "Front-end does text normalization and phoneme conversion",
+    "Back-end synthesizes the sound"
+   ],
+   "hint": "One part prepares the text, the other produces the audio.",
+   "fun_fact": "In 1968, researchers in Japan built the first general English text-to-speech system, and a 1978 Italian system could even sing a cappella.",
+   "difficulty": 1,
+   "source": 2,
+   "id": 1
+  },
+  {
+   "question": "What is voice activity detection, and why is it useful in voice over internet protocol applications?",
+   "answer": "Voice activity detection determines whether human speech is present or absent in an audio signal. In VoIP it avoids coding and transmitting silence packets, saving computation and network bandwidth.",
+   "key_points": [
+    "Detects presence or absence of human speech",
+    "Avoids transmitting silence packets",
+    "Saves computation and bandwidth"
+   ],
+   "hint": "It answers a simple yes-or-no question about the audio, many times per second.",
+   "fun_fact": "Telemarketing firms use voice activity detection with predictive dialers to guess whether a person or an answering machine picked up the phone.",
+   "difficulty": 1,
+   "source": 3,
+   "id": 2
+  },
+  {
+   "question": "In a text-to-speech front-end, what is text normalization and why is it necessary?",
+   "answer": "Text normalization converts raw text containing symbols like numbers and abbreviations into their written-out word equivalents. It is necessary because the synthesizer needs actual words, not symbols, to assign phonetic transcriptions.",
+   "key_points": [
+    "Expands numbers and abbreviations into words",
+    "Also called pre-processing or tokenization",
+    "Prepares text for phoneme conversion"
+   ],
+   "hint": "Think about how a system should read the number 42 aloud.",
+   "fun_fact": "The earliest operating system to include a speech synthesizer was Unix in 1974, through its speak utility.",
+   "difficulty": 2,
+   "source": 2,
+   "id": 3
+  },
+  {
+   "question": "Describe the typical stages of a voice activity detection algorithm.",
+   "answer": "First there may be a noise reduction stage, then features are calculated from a section of the input signal, and a classification rule, often a threshold, labels the section as speech or non-speech. Feedback may also use the decision to improve the noise estimate or adapt the threshold.",
+   "key_points": [
+    "Optional noise reduction stage",
+    "Feature extraction from the signal",
+    "Classification rule, often threshold-based",
+    "Feedback loop improves performance"
+   ],
+   "hint": "It follows a pipeline: clean the signal, measure it, then decide.",
+   "fun_fact": "Voice activity detection is usually independent of language, so it works the same whether you speak English or Japanese.",
+   "difficulty": 2,
+   "source": 3,
+   "id": 4
+  },
+  {
+   "question": "What fundamental trade-off must every voice activity detector make, and how do mobile phones typically handle it?",
+   "answer": "Every VAD must compromise between missing speech, false negatives, and falsely detecting noise as speech, false positives. In difficult conditions mobile VADs usually fail-safe by indicating speech when in doubt, to lower the chance of losing speech segments.",
+   "key_points": [
+    "Trade-off between false positives and false negatives",
+    "Fail-safe means detecting speech when uncertain",
+    "Losing speech segments is worse in phones"
+   ],
+   "hint": "Think about which error is more damaging when someone is talking to you.",
+   "fun_fact": "The biggest challenge for VAD in mobile environments is very low signal-to-noise ratios, where speech can be buried below the background noise.",
+   "difficulty": 2,
+   "source": 3,
+   "id": 5
+  },
+  {
+   "question": "How did hidden Markov models change speech recognition compared to the earlier dynamic time warping approach?",
+   "answer": "Hidden Markov models let researchers combine sources of knowledge like acoustics, language, and syntax in a single unified probabilistic model. They replaced dynamic time warping as the dominant speech recognition algorithm in the 1980s.",
+   "key_points": [
+    "HMMs combine acoustics, language and syntax probabilistically",
+    "Replaced dynamic time warping",
+    "Became dominant in the 1980s"
+   ],
+   "hint": "One approach matched speech frames over time; the other modeled speech statistically.",
+   "fun_fact": "Linguists criticized HMMs as too simplistic to capture many features of human language, yet the approach still proved highly useful in practice.",
+   "difficulty": 3,
+   "source": 1,
+   "id": 6
+  },
+  {
+   "question": "How do speech recognition, text-to-speech, and voice activity detection combine in a real-time voice assistant?",
+   "answer": "Voice activity detection decides when the user starts and stops speaking, so the system knows when to listen and when to respond. Speech recognition then converts the detected speech into text for processing, and text-to-speech converts the assistant's reply back into spoken audio.",
+   "key_points": [
+    "VAD determines when the user is speaking",
+    "Speech recognition converts speech to text",
+    "Text-to-speech produces the spoken reply",
+    "Together they enable natural turn-taking"
+   ],
+   "hint": "Think about the full loop: listening, understanding, and responding.",
+   "fun_fact": "Apple's Siri relies on speech technology from Nuance, a company whose lineage traces back through Dragon Systems and Lernout and Hauspie.",
+   "difficulty": 3,
+   "source": 3,
+   "id": 7
+  }
+ ],
+ "id": "b697d9a8cba6",
+ "topic": "Voice AI: speech recognition, text-to-speech and voice agents",
+ "slug": "voice-ai",
+ "difficulty": "pro",
+ "model": "zai-org/GLM-5.3",
+ "sources": [
+  {
+   "title": "Speech recognition",
+   "url": "https://en.wikipedia.org/wiki/Speech_recognition",
+   "site": "wikipedia.org"
+  },
+  {
+   "title": "Speech synthesis",
+   "url": "https://en.wikipedia.org/wiki/Speech_synthesis",
+   "site": "wikipedia.org"
+  },
+  {
+   "title": "Voice activity detection",
+   "url": "https://en.wikipedia.org/wiki/Voice_activity_detection",
+   "site": "wikipedia.org"
+  }
+ ],
+ "tagline": "The tech that is talking to you right now",
+ "order": 2
+}
