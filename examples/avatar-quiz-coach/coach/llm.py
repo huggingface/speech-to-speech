@@ -25,13 +25,14 @@ def _models(env: str, default: str) -> list[str]:
     return [m.strip() for m in raw.split(",") if m.strip()]
 
 
-# Grading runs on every spoken answer, so it favours speed, and its clues
-# must not give answers away: in a leak test over 12 guided dialogues
-# gpt-oss-120b on Cerebras leaked once at ~0.5 s per turn, against 4 to 5
-# leaks for Qwen3.8-27B, GLM-5.3 and GLM-5.3-Flash.
+# Grading runs on every spoken answer: it must be quick, accept brief correct
+# answers, and keep the answer out of its clues. Over 12 brief correct
+# answers and 12 guided dialogues (2026-11-26), Inkling-2-Small on Together
+# accepted 10/12, leaked 0/12, median 1.2 s per turn; GLM-5.3-Flash
+# 10/12, 0/12, 1.3 s; gpt-oss-120b on Cerebras 10/12, 0/12, 0.5 s.
 GRADER_MODELS = _models(
     "GRADER_MODELS",
-    "openai/gpt-oss-120b:cerebras,openai/gpt-oss-120b:groq,Qwen/Qwen3.8-27B:cerebras,zai-org/GLM-5.3-Flash",
+    "thinkingmachines/Inkling-2-Small:together,zai-org/GLM-5.3-Flash,openai/gpt-oss-120b:cerebras",
 )
 # The grader can run on the speech backend's own model instead (any
 # OpenAI-compatible endpoint, e.g. the deployment's Gemma 4 31B), with the
