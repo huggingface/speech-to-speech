@@ -718,3 +718,24 @@ def test_send_loop_wakes_for_the_transcript_deadline(call):
     _wait_for(lambda: _pending(call) is None)
     with pytest.raises(Empty):
         call.service.text_prompt_queue.get_nowait()
+
+
+@pytest.mark.parametrize(
+    ("kind", "playback", "opted_in", "applied"),
+    [
+        ("webrtc", "pause", False, "pause"),
+        ("webrtc", "duck", False, "duck"),
+        ("webrtc", "continue", False, "play"),
+        ("websocket", "pause", False, "play"),  # the client was never told to pause
+        ("websocket", "pause", True, "pause"),
+        ("websocket", "duck", True, "duck"),
+    ],
+)
+def test_playback_while_pending_depends_on_who_owns_the_player(kind, playback, opted_in, applied):
+    from types import SimpleNamespace
+
+    from speech_to_speech.api.openai_realtime.websocket_router import _interruption_playback
+
+    st = SimpleNamespace(runtime_config=SimpleNamespace(interruption_events_enabled=opted_in))
+    config = FalseInterruptionConfig(playback=playback)
+    assert _interruption_playback(SimpleNamespace(kind=kind), st, config) == applied
