@@ -351,8 +351,12 @@ class Chat:
                 return None
             if any(part.type != "input_text" for part in tail.content):
                 return None
-            if any(part.type == "input_audio" for item in self.buffer
-                   if isinstance(item, RealtimeConversationItemUserMessage) for part in item.content):
+            if any(
+                part.type == "input_audio"
+                for item in self.buffer
+                if isinstance(item, RealtimeConversationItemUserMessage)
+                for part in item.content
+            ):
                 return None
             parts = tuple(part.text for part in tail.content if part.text)
             if not parts or sum(map(len, parts)) + len(parts) - 1 > 2048:

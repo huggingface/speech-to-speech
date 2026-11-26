@@ -32,7 +32,7 @@ class RealtimeServer:
         if not pool:
             raise ValueError("RealtimeServer requires at least one PipelineUnit in the pool")
         self.stop_event = stop_event
-        self.startup_error = None
+        self.startup_error: RuntimeError | None = None
         self.pool = pool
         self.context_integration = context_integration
         self.host = host

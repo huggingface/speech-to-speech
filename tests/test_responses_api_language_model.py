@@ -32,6 +32,7 @@ from openai.types.responses.response_output_text import ResponseOutputText
 
 import speech_to_speech.LLM.base_openai_compatible_language_model as base_openai_compatible_language_model
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.context_extension import PreparedContext
 from speech_to_speech.LLM.base_openai_compatible_language_model import WARMUP_MAX_RETRIES, ToolCall, Usage
 from speech_to_speech.LLM.chat import (
     AUDIO_INPUT_HISTORY_PLACEHOLDER,
@@ -2150,6 +2151,29 @@ def test_out_of_band_invalid_input_emits_failed_end_of_response():
     assert isinstance(outputs[0], EndOfResponse)
     assert outputs[0].error is not None
     assert outputs[0].cancel_generation == scope.generation
+
+
+def test_provider_failure_on_projected_request_keeps_reference_out_of_diagnostics(caplog, monkeypatch):
+    from speech_to_speech.pipeline import transcript_logging
+
+    monkeypatch.setattr(transcript_logging, "_log_transcripts", True)
+    handler = _make_handler(stream=False)
+    request = _make_request("Question", chat_size=5)
+    fact = "Synthetic reference for this request"
+    request.prepared_context = PreparedContext(request.runtime_config.chat.context_anchor(), fact, lambda: True)
+    inputs = []
+
+    def create(**kwargs):
+        inputs.append(kwargs["input"])
+        raise ValueError(f"Cannot process {kwargs['input']}")
+
+    handler.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    outputs = list(drive_llm(handler, request))
+    assert fact in str(inputs)
+    terminal = next(item for item in outputs if isinstance(item, EndOfResponse))
+    assert terminal.error and fact not in terminal.error
+    assert fact not in str(request.runtime_config.chat.to_responses_api_chat())
+    assert fact not in caplog.text
 
 
 def test_response_history_precedes_speech_that_arrived_during_generation():

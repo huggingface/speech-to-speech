@@ -220,10 +220,10 @@ class _Turn(BaseModel):
     wants_audio: bool
     response_key: str
     prefetch_transaction: ResponsePrefetchTransaction | None = None
-    # End of the conversation when this turn started; keeps its output ahead of
-    # user messages appended while the model was still running.
     context_current: Callable[[], bool] | None = Field(default=None, exclude=True, repr=False)
     prepared_context: PreparedContext | None = Field(default=None, exclude=True, repr=False)
+    # End of the conversation when this turn started; keeps its output ahead of
+    # user messages appended while the model was still running.
     history_anchor_id: str | None = None
 
 
@@ -1132,12 +1132,16 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         self.request_timeout_s,
                     )
                     error_message = f"Language model generation timed out after {self.request_timeout_s:.1f}s."
+                elif turn.prepared_context is not None:
+                    # Provider diagnostics may quote the model input verbatim.
+                    logger.error("Language model request with reference data failed (%s)", type(exc).__name__)
+                    error_message = "Language model generation failed while processing reference data."
                 else:
                     log_exception(logger, "LLM generation failed; ending the current response", exc)
                     if error_message is None:
                         error_message = f"Language model generation failed: {exc}"
                 if consumed_image_ids and _is_image_input_rejection(exc):
-                    image_input_error = str(exc)
+                    image_input_error = "Image input rejected" if turn.prepared_context is not None else str(exc)
             finally:
                 self._close_response(events)
                 self._close_response(api_response)

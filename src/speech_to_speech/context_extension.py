@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import sys
 from collections.abc import Callable
@@ -34,8 +35,13 @@ class ContextScope:
     revoked: Event = field(default_factory=Event, repr=False)
 
     def valid(self) -> bool:
-        return bool(
-            self.tenant and self.issuer and self.subject and monotonic() < self.expires_at and not self.revoked.is_set()
+        return (
+            all(isinstance(value, str) and value for value in (self.tenant, self.issuer, self.subject))
+            and isinstance(self.expires_at, (int, float))
+            and math.isfinite(self.expires_at)
+            and monotonic() < self.expires_at
+            and isinstance(self.revoked, Event)
+            and not self.revoked.is_set()
         )
 
 
@@ -81,12 +87,16 @@ def configured_integration() -> ContextIntegration | None:
         if override is not None:
             raise
         return None
-    if type(record.get("format")) is not int or record["format"] != 1:
+    if not isinstance(record, dict) or type(record.get("format")) is not int or record["format"] != 1:
         raise ValueError("Unsupported context binding format")
     if type(record.get("enabled", True)) is not bool:
         raise ValueError("Invalid context binding enabled flag")
     if record.get("enabled") is False:
         return None
+    if any(
+        not isinstance(record.get(key), str) or not record[key].strip() for key in ("distribution", "entry", "config")
+    ):
+        raise ValueError("Expected a distribution, entry and config path in the context binding")
     config = Path(record["config"])
     if not config.is_absolute():
         raise ValueError("Expected an absolute context configuration path")
@@ -104,7 +114,7 @@ def configured_integration() -> ContextIntegration | None:
 def render_records(records: object, budget: int) -> str | None:
     if type(records) is not tuple or len(records) > 4 or any(type(x) is not str for x in records):
         return None
-    accepted = []
+    accepted: list[str] = []
     block = None
     for record in records:
         if len(record) > budget or not record.strip():
@@ -142,9 +152,9 @@ class ContextDispatcher:
         self.provider = provider
         self.wait_seconds = wait_seconds
         self.capacity = capacity
-        self.active = {}
-        self.pending = {}
-        self.dispatches = set()
+        self.active: dict[str, asyncio.Task[tuple[str, ...] | None]] = {}
+        self.pending: dict[str, Callable[[], None]] = {}
+        self.dispatches: set[asyncio.Task[None]] = set()
         self.closed = False
 
     def submit(self, session, request, queue, scope, current, original_text=None, input_item_id=None, *, retrieve=True):

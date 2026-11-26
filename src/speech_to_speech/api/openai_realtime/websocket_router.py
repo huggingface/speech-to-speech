@@ -660,16 +660,15 @@ def create_app(
                 return unit
         return None
 
-    def bind_context_scope(unit, session_id, scope):
+    def connection_scope(scope):
         if context_integration is None:
             return
         from speech_to_speech.context_extension import STATE_KEY, ContextScope
 
         lease = scope.get("state", {}).get(STATE_KEY)
-        if lease is not None:
-            if not isinstance(lease, ContextScope) or not lease.valid():
-                raise ValueError("Invalid context scope")
-            unit.service.context_scopes[session_id] = lease
+        if lease is not None and (not isinstance(lease, ContextScope) or not lease.valid()):
+            raise ValueError("Invalid context scope")
+        return lease
 
     @app.websocket("/v1/realtime")
     async def realtime_endpoint(ws: WebSocket) -> None:
@@ -678,6 +677,11 @@ def create_app(
         }
         await ws.accept(subprotocol="realtime" if "realtime" in offered_subprotocols else None)
 
+        try:
+            lease = connection_scope(ws.scope)
+        except ValueError:
+            await ws.close(code=1008, reason="Invalid context scope")
+            return
         transport = WebSocketTransport(ws)
         unit = _claim_unit(transport)
         if unit is None:
@@ -702,7 +706,8 @@ def create_app(
         try:
             session_id = unit.service.register()
             unit.session.session_id = session_id
-            bind_context_scope(unit, session_id, ws.scope)
+            if lease is not None:
+                unit.service.context_scopes[session_id] = lease
             logger.info(f"Client connected to pipeline {unit.index} (session {session_id})")
 
             # Defensive: drain edge queues and reset events so stale data from a
@@ -824,6 +829,10 @@ def create_app(
                 media_type="text/plain",
             )
         offer_sdp = (await request.body()).decode("utf-8")
+        try:
+            lease = connection_scope(request.scope)
+        except ValueError:
+            return Response(content="Invalid context scope", status_code=403, media_type="text/plain")
 
         # Claim with a placeholder transport; the send loop tolerates a
         # transport-less snapshot until the session object below is attached.
@@ -844,7 +853,8 @@ def create_app(
             session_id = unit.service.register()
             assert unit.session is not None
             unit.session.session_id = session_id
-            bind_context_scope(unit, session_id, request.scope)
+            if lease is not None:
+                unit.service.context_scopes[session_id] = lease
             logger.info(f"WebRTC client claiming pipeline {unit.index} (session {session_id})")
 
             # Defensive: drain edge queues and reset events so stale data from a
@@ -872,6 +882,8 @@ def create_app(
             _release_session(unit, session_id)
 
         async def _on_client_event(raw: dict[str, Any]) -> None:
+            if released:
+                return
             assert session is not None  # callbacks only fire after setup()
             await _dispatch_client_event(unit, session_id, raw, session, transport_kind="webrtc")
 
@@ -972,8 +984,14 @@ def create_app(
                 transport = session.transport if session is not None else None
                 session_id = session.session_id if session is not None else None
 
-                lease = unit.service.context_scopes.get(session_id)
-                if transport is not None and session.released_at is None and lease is not None and not lease.valid():
+                lease = unit.service.context_scopes.get(session_id) if session_id is not None else None
+                if (
+                    session is not None
+                    and session.released_at is None
+                    and transport is not None
+                    and lease is not None
+                    and not lease.valid()
+                ):
                     unit.cancel_scope.cancel()
                     await transport.close()
                     # The owning route drains this slot before its next registration.

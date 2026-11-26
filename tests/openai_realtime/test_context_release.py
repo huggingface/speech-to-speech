@@ -5,6 +5,7 @@ from time import monotonic, sleep
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.context_extension import STATE_KEY, ContextIntegration, ContextScope
@@ -67,7 +68,23 @@ def test_release_with_inflight_recall_drains_revoked_lease():
         assert unit.text_prompt_queue.empty()
 
 
-def test_rejected_webrtc_scope_releases_registration():
+@pytest.mark.parametrize("expiry", [0, float("inf"), "invalid"])
+def test_invalid_websocket_scope_is_rejected_before_registration(expiry):
+    unit = make_pipeline_unit()
+    lease = ContextScope("tenant", "issuer", "expired", expiry)
+
+    @asynccontextmanager
+    async def hooks():
+        yield object()
+
+    with TestClient(scoped_app(unit, hooks, lease)) as client, client.websocket_connect("/v1/realtime") as ws:
+        with pytest.raises(WebSocketDisconnect) as closed:
+            ws.receive_json()
+        assert closed.value.code == 1008
+        assert unit.session is None and unit.service.total_usage.connections == 0
+
+
+def test_expired_webrtc_scope_is_rejected_before_registration():
     pytest.importorskip("aiortc")
     unit = make_pipeline_unit()
     lease = ContextScope("tenant", "issuer", "expired", monotonic() - 1)
@@ -78,6 +95,7 @@ def test_rejected_webrtc_scope_releases_registration():
 
     with TestClient(scoped_app(unit, hooks, lease)) as client:
         response = client.post("/v1/realtime/calls", headers={"Content-Type": "application/sdp"}, content="v=0")
-        assert response.status_code == 500
+        assert response.status_code == 403
+        assert unit.service.total_usage.connections == 0
         assert unit.session is None
         assert not unit.service._conns

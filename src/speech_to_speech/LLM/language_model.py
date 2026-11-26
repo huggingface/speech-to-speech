@@ -625,8 +625,9 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         gen = self.cancel_scope.generation if self.cancel_scope else None
         ctx.cancel_generation = gen
         ctx.prefetch_transaction = request.prefetch_transaction
-        if ((ctx.context_current is not None and not ctx.context_current())
-                or not self._turn_is_latest(ctx.turn_id, ctx.turn_revision)):
+        if (ctx.context_current is not None and not ctx.context_current()) or not self._turn_is_latest(
+            ctx.turn_id, ctx.turn_revision
+        ):
             logger.info("Skipping stale LLM request for turn=%s rev=%s", ctx.turn_id, ctx.turn_revision)
             yield EndOfResponse(
                 turn_id=ctx.turn_id,
@@ -769,7 +770,12 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             # Any generation failure must still terminate the response. Without this
             # the exception would escape process() and no EndOfResponse would be
             # emitted, leaving st.in_response stuck and locking every later response.
-            log_exception(logger, "LLM generation failed; ending the current response", exc)
+            if ctx.prepared_context is None:
+                log_exception(logger, "LLM generation failed; ending the current response", exc)
+                message = f"Language model generation failed: {exc}"
+            else:
+                logger.error("Language model request with reference data failed (%s)", type(exc).__name__)
+                message = "Language model generation failed while processing reference data."
             if request.prefetch_transaction is not None:
                 # The terminal is queued before this generator resumes into its
                 # finally block, so publish failure before yielding it.
@@ -780,7 +786,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 turn_revision=ctx.turn_revision,
                 cancel_generation=ctx.cancel_generation,
                 response_key=request.response_key,
-                error=f"Language model generation failed: {exc}",
+                error=message,
             )
             return
         finally:
@@ -868,8 +874,13 @@ class LanguageModelHandler(BaseLanguageModelHandler):
         return chat_prompt, count
 
     def _generate(
-        self, chat: Chat, language_code: Optional[str], gen: int | None, ctx: StreamContext,
-        runtime_config: RuntimeConfig | None = None, response: RealtimeResponseCreateParams | None = None,
+        self,
+        chat: Chat,
+        language_code: Optional[str],
+        gen: int | None,
+        ctx: StreamContext,
+        runtime_config: RuntimeConfig | None = None,
+        response: RealtimeResponseCreateParams | None = None,
     ) -> Iterator[LLMResponseChunk]:
         plain = self._render_prompt(chat)
         prepared = ctx.prepared_context
@@ -925,22 +936,30 @@ class LanguageModelHandler(BaseLanguageModelHandler):
                 ctx.prefetch_transaction.register_abort(self._cancel_criteria.cancel)
             lock = self._transformers_lock
             tracker = active_turn_latency_tracker()
+            model_error: Exception | None = None
 
             def _locked_pipe() -> None:
-                with lock:
-                    if tracker is not None:
-                        tracker.start_llm()
-                    prompt = admitted_prompt()
-                    if ctx.context_current is not None and not ctx.context_current():
-                        ctx.cancelled = True
-                        self.streamer.on_finalized_text("", stream_end=True)
-                        return
-                    self.pipe(prompt, **self.gen_kwargs)
+                nonlocal model_error
+                try:
+                    with lock:
+                        if tracker is not None:
+                            tracker.start_llm()
+                        prompt = admitted_prompt()
+                        if ctx.context_current is not None and not ctx.context_current():
+                            ctx.cancelled = True
+                            self.streamer.on_finalized_text("", stream_end=True)
+                            return
+                        self.pipe(prompt, **self.gen_kwargs)
+                except Exception as exc:
+                    model_error = exc
+                    self.streamer.on_finalized_text("", stream_end=True)
 
             thread = Thread(target=_locked_pipe)
             thread.start()
             yield from self._stream_tokens(self.streamer, gen, language_code, ctx, runtime_config, response)
             self._finish_transformers_generation(thread, ctx)
+            if model_error is not None:
+                raise model_error
             if self.device == "mps":
                 torch.mps.empty_cache()
 

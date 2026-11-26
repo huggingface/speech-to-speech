@@ -650,7 +650,12 @@ def _build_pipeline_unit(
         default_instructions=default_instructions,
     )
 
-    service.supports_context = llm_selection.spec.name in {"transformers", "mlx-lm", "chat-completions", "responses-api"} and not llm_selection.config.get("is_vlm")
+    service.supports_context = llm_selection.spec.name in {
+        "transformers",
+        "mlx-lm",
+        "chat-completions",
+        "responses-api",
+    } and not llm_selection.config.get("is_vlm")
 
     if module_kwargs.enable_live_transcription and not stt_selection.spec.capabilities.streams_audio_chunks:
         vad_kw.enable_realtime_transcription = True
@@ -890,8 +895,10 @@ def _run_parsed_pipeline_command(command: Literal["serve", "local"], args: Parse
             pipeline_manager = build_local_pipeline(args, stop_event)
         else:
             integration = configured_integration()
-            options = {"context_integration": integration} if integration is not None else {}
-            pipeline_manager = build_pipeline(args, stop_event, **options)
+            if integration is None:
+                pipeline_manager = build_pipeline(args, stop_event)
+            else:
+                pipeline_manager = build_pipeline(args, stop_event, context_integration=integration)
 
     # Set up graceful shutdown handler
     shutdown_requested = [False]  # Use list for nonlocal mutation

@@ -311,7 +311,9 @@ def _build_runtime(arguments: dict[str, ParsedArguments], stop_event: Event) -> 
     return result
 
 
-def build_configured_server(config: ResolvedConfig, stop_event: Event, *, local: bool = False, context_integration=None) -> ConfiguredRuntime:
+def build_configured_server(
+    config: ResolvedConfig, stop_event: Event, *, local: bool = False, context_integration=None
+) -> ConfiguredRuntime:
     """Publish one definition through a server, with an optional loopback client."""
     _validate_counts(config)
     if len(config.pipelines) != 1:

@@ -1,4 +1,5 @@
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from threading import Event
 from types import SimpleNamespace
@@ -8,7 +9,12 @@ from fastapi.testclient import TestClient
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
-from speech_to_speech.context_extension import ContextDispatcher, ContextIntegration, render_records
+from speech_to_speech.context_extension import (
+    ContextDispatcher,
+    ContextIntegration,
+    configured_integration,
+    render_records,
+)
 from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.pipeline.events import TranscriptionCompletedEvent
 from speech_to_speech.pipeline.messages import GenerateResponseRequest
@@ -129,6 +135,17 @@ def test_record_budget_includes_framing():
     assert render_records(("x" * 1024,), 1024) is None
     assert render_records(("a",), 20) == 'Reference data ["a"]'
     assert render_records("wrong shape", 1024) is None
+
+
+@pytest.mark.parametrize(
+    "record", [[], {"format": 1}, {"format": 1, "distribution": "sample", "entry": "v1", "config": 3}]
+)
+def test_invalid_binding_reports_configuration_error(tmp_path, monkeypatch, record):
+    path = tmp_path / "binding.json"
+    path.write_text(json.dumps(record), encoding="utf-8")
+    monkeypatch.setenv("S2S_CONTEXT_BINDING", str(path))
+    with pytest.raises(ValueError, match="context binding"):
+        configured_integration()
 
 
 def pending_text_request(text):

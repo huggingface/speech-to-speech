@@ -73,6 +73,7 @@ from speech_to_speech.api.openai_realtime.reasoning import (
 )
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.api.openai_realtime.visemes import SpeechToSpeechVisemesEvent
+from speech_to_speech.context_extension import ContextDispatcher, ContextScope
 from speech_to_speech.LLM.chat import Chat, make_user_audio_message, make_user_message
 from speech_to_speech.LLM.utils import WHISPER_LANGUAGE_TO_LLM_LANGUAGE
 from speech_to_speech.pipeline.events import (
@@ -396,9 +397,9 @@ class RealtimeService:
         turn_latency_store: TurnLatencyStore | None = None,
         default_instructions: str | None = None,
     ) -> None:
-        self.context_dispatcher = None
-        self.context_scopes = {}
-        self.context_sessions = {}
+        self.context_dispatcher: ContextDispatcher | None = None
+        self.context_scopes: dict[str, ContextScope] = {}
+        self.context_sessions: dict[str, ThreadingEvent] = {}
         self.supports_context = True
         self.text_prompt_queue = text_prompt_queue
         self.should_listen = should_listen
@@ -519,7 +520,14 @@ class RealtimeService:
 
         request.context_current = current
         dispatcher.submit(
-            conn_id, request, queue, scope, current, original_text, input_item_id, retrieve=retrieve and self.supports_context
+            conn_id,
+            request,
+            queue,
+            scope,
+            current,
+            original_text,
+            input_item_id,
+            retrieve=retrieve and self.supports_context,
         )
 
     def retire_context(self, conn_id: str) -> None:
