@@ -70,6 +70,7 @@ _INPUT_EVENTS = {
         ("Okay.", 0),
         ("Yeah, I see.", 0),
         ("Ahem.", 0),
+        ("A ham.", 0),
         ("[coughs]", 0),
         ("(laughing) Hmm.", 0),
         ("Thank you.", 0),

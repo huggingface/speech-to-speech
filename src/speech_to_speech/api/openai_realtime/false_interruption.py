@@ -59,8 +59,13 @@ DEFAULT_IGNORE_WORDS: tuple[str, ...] = (
     "uh huh",
     "huh",
     "aha",
-    "ahem",
     "ha",
+    # Throat clearing, as STT models spell it.
+    "ahem",
+    "a hem",
+    "a ham",
+    "uh hum",
+    "hem",
     # Backchannels: the listener is following, not taking the turn.
     "yeah",
     "yea",
