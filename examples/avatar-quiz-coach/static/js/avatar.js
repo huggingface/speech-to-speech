@@ -151,6 +151,8 @@ export class Avatar extends EventTarget {
     this.upsampler = null;
     /** @type {DelayNode | null} */
     this.voiceDelay = null;
+    /** @type {number[]} */
+    this.lineTimers = [];
   }
 
   /** @param {(ev: ProgressEvent) => void} [onProgress] */
@@ -266,10 +268,21 @@ export class Avatar extends EventTarget {
       const ha = new HeadAudio(head.audioCtx, { visemeMinMs: 110 });
       await ha.loadModel("vendor/headaudio/model-en-mixed.bin");
       head.audioSpeechGainNode.connect(ha);
+      // HeadAudio's shapes are faint on some rigs: apply the coach's lip gain
+      // and open the jaw with the vowels, as for server visemes.
+      /** @type {Record<string, number>} */
+      const current = {};
+      const set = (/** @type {string} */ key, /** @type {number} */ value) => {
+        const mt = head.mtAvatar?.[key];
+        if (mt) Object.assign(mt, { newvalue: value, needsUpdate: true });
+      };
       ha.onvalue = (/** @type {string} */ key, /** @type {number} */ value) => {
         if (this.serverVisemes) return;
-        const mt = head.mtAvatar?.[key];
-        if (mt) Object.assign(mt, { newvalue: Math.min(1, value * 1.3), needsUpdate: true });
+        current[key.replace("viseme_", "")] = value;
+        set(key, Math.min(1, value * this.coach.lipGain * 1.2));
+        let jaw = 0;
+        for (const [v, x] of Object.entries(current)) jaw += (JAW_LEVEL[v] ?? 0) * x;
+        set("jawOpen", Math.min(0.45, jaw * this.coach.jawGain * 1.5));
       };
       head.opt.update = ha.update.bind(ha);
       this.headaudio = ha;
@@ -326,6 +339,14 @@ export class Avatar extends EventTarget {
     const r0 = (this.responseSamples / this.inRate) * 1000;
     const start = Math.max(head.animClock + latencyMs, this.cursor);
     this.cursor = start + durMs;
+    if (this.responseSamples === 0) {
+      // Tell the page when this line becomes audible (it may queue behind the
+      // previous line), so captions appear with the voice, not before it.
+      const id = responseId;
+      this.lineTimers.push(
+        window.setTimeout(() => this.dispatchEvent(new CustomEvent("line-start", { detail: { responseId: id } })), start - head.animClock),
+      );
+    }
     this.responseSamples += pcm.length;
     if (this.pendingCues.length) {
       const later = [];
@@ -346,6 +367,8 @@ export class Avatar extends EventTarget {
 
   /** Barge-in or skip: drop queued audio and close the mouth now. */
   interrupt() {
+    this.lineTimers.forEach(clearTimeout);
+    this.lineTimers = [];
     this.head?.streamInterrupt();
     this.pendingCues = [];
     this.responseId = "";

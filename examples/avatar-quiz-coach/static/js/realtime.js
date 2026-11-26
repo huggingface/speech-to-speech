@@ -109,10 +109,10 @@ export class RealtimeVoice extends EventTarget {
     this.ws = null;
     this.status = "idle";
     this.activeResponse = "";
-    /** @type {{ text: string, kind: string }[]} */
+    /** @type {{ text: string, kind: string, retried?: boolean }[]} */
     this.pending = [];
     this.awaitingCreate = false;
-    /** @type {{ text: string, kind: string } | null} */
+    /** @type {{ text: string, kind: string, retried?: boolean } | null} */
     this.inflight = null;
     this.spoken = "";
     this.relayStats = { lines: 0, faithful: 0 };
@@ -361,6 +361,10 @@ export class RealtimeVoice extends EventTarget {
           this.relayStats.lines++;
           if (score >= 0.9) this.relayStats.faithful++;
           else console.warn(`[voice] line not read verbatim (${score.toFixed(2)}):`, this.spoken);
+        }
+        if (this.inflight && ev.response?.status === "failed" && !this.inflight.retried) {
+          // A hosted LLM hiccup (rate limit, timeout): say the line again once.
+          this.pending.unshift({ ...this.inflight, retried: true });
         }
         this.inflight = null;
         this.activeResponse = "";

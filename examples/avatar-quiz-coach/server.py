@@ -49,6 +49,10 @@ SESSION_PROXY_URL = (
     "" if SPEECH_TO_SPEECH_URL or LOAD_BALANCER_URL else os.environ.get("SESSION_PROXY_URL", "").strip().rstrip("/")
 )
 LB_HF_TOKEN = os.environ.get("LB_HF_TOKEN", "").strip()
+# Local development against a load balancer that requires a verified user
+# token: stands in for the signed-in visitor's OAuth token. Never set it on a
+# public deployment, or every visitor is billed to this account.
+LB_USER_TOKEN = os.environ.get("LB_USER_TOKEN", "").strip()
 RESEARCH_PER_HOUR = int(os.environ.get("RESEARCH_PER_HOUR", "8"))
 # Empty: each coach uses its own voice (Max: Aiden, Ada: Serena; see static/js/avatar.js).
 VOICE = os.environ.get("COACH_VOICE", "").strip()
@@ -173,7 +177,7 @@ def _upstream() -> tuple[str, dict[str, str]]:
 
 def _upstream_headers(request: Request, base: dict[str, str]) -> dict[str, str]:
     headers = dict(base)
-    user_token = _access_token(request)
+    user_token = _access_token(request) or LB_USER_TOKEN or None
     if LOAD_BALANCER_URL:
         gateway = LB_HF_TOKEN or user_token
         if gateway:

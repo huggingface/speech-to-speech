@@ -253,13 +253,14 @@ class Game:
         return f"{lead} {q['question']}"
 
     def opening(self) -> str:
-        brief = self.pack.get("brief", "").strip()
+        # Short on purpose: the topic summary is on screen, and every spoken
+        # second here is a second before the first question.
         n = self.total
         if self.practice:
             intro = f"Let's drill the {n} question{'s' if n != 1 else ''} you missed."
         else:
-            intro = f"{brief} I have {n} questions for you. If you get stuck, I'll give you clues."
-        return f"{intro} {self.ask_current('First question.')}".strip()
+            intro = f"{n} questions on {self.pack.get('title', 'this topic')}. Stuck? I'll give you clues."
+        return f"{intro} {self.ask_current('First one.')}".strip()
 
 
 class GameStore:

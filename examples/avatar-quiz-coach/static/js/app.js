@@ -31,6 +31,11 @@ const store = {
 
 const S = {
   /** @type {any} */ cfg: { mode: "manual" },
+  /** Line text by response id, shown when that line's audio starts. */
+  lineText: new Map(),
+  /** Seconds of audio received per response id, and ids whose audio is complete. */
+  lineAudio: new Map(),
+  lineDone: new Set(),
   coachKey: "max",
   /** @type {any} */ coach: null,
   phase: "lobby",
@@ -497,8 +502,7 @@ function wireVoice(voice) {
     S.responseHadAudio = false;
     setCoachTalking(true);
     avatar.beginResponse(id);
-    const text = /** @type {any} */ (e).detail.text;
-    if (text) subtitlesStart(text);
+    S.lineText.set(id, /** @type {any} */ (e).detail.text || "");
   });
   voice.addEventListener("visemes", (e) => {
     const d = /** @type {any} */ (e).detail;
@@ -507,20 +511,27 @@ function wireVoice(voice) {
   voice.addEventListener("audio", (e) => {
     const d = /** @type {any} */ (e).detail;
     S.responseHadAudio = true;
-    SUB.audioSec += d.pcm.length / d.rate;
+    S.lineAudio.set(d.responseId, (S.lineAudio.get(d.responseId) || 0) + d.pcm.length / d.rate);
     avatar.feed(d.responseId, d.pcm);
   });
-  voice.addEventListener("response-done", () => {
+  voice.addEventListener("response-done", (e) => {
     S.responseActive = false;
     avatar.endResponse();
-    // Now the line's length in seconds is known: pace subtitles to it.
-    if (SUB.audioSec > 0.5) SUB.cps = SUB.total / SUB.audioSec;
+    // Now the line's length in seconds is known: pace its subtitles to it.
+    const id = /** @type {any} */ (e).detail.responseId;
+    S.lineDone.add(id);
+    const secs = S.lineAudio.get(id) || 0;
+    if (id === SUB.id && secs > 0.5) SUB.cps = SUB.total / secs;
     if (!S.responseHadAudio || !avatar.playing) scheduleCoachDone();
   });
+  avatar.addEventListener("line-start", (e) => {
+    const id = /** @type {any} */ (e).detail.responseId;
+    const text = S.lineText.get(id);
+    S.lineText.delete(id);
+    if (text) subtitlesStart(text, id);
+  });
   avatar.addEventListener("playback", (e) => {
-    const playing = /** @type {any} */ (e).detail.playing;
-    if (playing && !SUB.playAt) SUB.playAt = performance.now();
-    if (!playing && !S.responseActive) scheduleCoachDone();
+    if (!(/** @type {any} */ (e).detail.playing) && !S.responseActive) scheduleCoachDone();
   });
   voice.addEventListener("speech-started", () => {
     if (S.phase !== "quiz") return;
@@ -611,10 +622,10 @@ function say(/** @type {string} */ text, kind = "line") {
  * Subtitles: the line is cut into sentence groups and advanced at the voice's
  * pace (characters per second, re-estimated once the line's audio length is known).
  */
-const SUB = { chunks: /** @type {string[]} */ ([]), ends: /** @type {number[]} */ ([]), idx: -1, total: 0, cps: 14, playAt: 0, audioSec: 0, timer: 0 };
+const SUB = { id: "", chunks: /** @type {string[]} */ ([]), ends: /** @type {number[]} */ ([]), idx: -1, total: 0, cps: 14, playAt: 0, timer: 0 };
 
-/** @param {string} text */
-function subtitlesStart(text) {
+/** @param {string} text @param {string} [id] response id, to pace by its audio length */
+function subtitlesStart(text, id = "") {
   const sentences = text.match(/[^.!?]+(?:[.!?]+["')\]]*|$)\s*/g) || [text];
   const chunks = [];
   let cur = "";
@@ -627,7 +638,9 @@ function subtitlesStart(text) {
   }
   if (cur.trim()) chunks.push(cur.trim());
   let acc = 0;
-  Object.assign(SUB, { chunks, ends: chunks.map((c) => (acc += c.length + 1)), idx: 0, total: acc, cps: 14, playAt: 0, audioSec: 0 });
+  const ends = chunks.map((c) => (acc += c.length + 1));
+  const secs = S.lineDone.has(id) ? S.lineAudio.get(id) || 0 : 0;
+  Object.assign(SUB, { id, chunks, ends, idx: 0, total: acc, cps: secs > 0.5 ? acc / secs : 14, playAt: performance.now() });
   showCaption(chunks[0] || text);
   clearInterval(SUB.timer);
   SUB.timer = window.setInterval(() => {

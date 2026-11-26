@@ -59,6 +59,17 @@ pip install -r requirements.txt
 HF_TOKEN=hf_... SPEECH_TO_SPEECH_URL=ws://localhost:8765/v1/realtime uvicorn server:app --port 7860
 ```
 
+A speech-to-speech server running entirely on a laptop is slow here: its LLM
+re-reads every coach line before text-to-speech can start (1.6 to 6 seconds a
+line on an Apple Silicon Mac that also renders the avatar). For realistic
+latency, point it at a hosted LLM (see the main README's LLM backends) or use a
+deployed stack through its load balancer:
+
+```bash
+LOAD_BALANCER_URL=https://<lb>.endpoints.huggingface.cloud LB_HF_TOKEN=$HF_TOKEN LB_USER_TOKEN=$HF_TOKEN \
+HF_TOKEN=hf_... uvicorn server:app --port 7860
+```
+
 Open http://localhost:7860. Add `?fakemic=1` to test without a microphone
 (`vivaFakeMic.play(url)` in the console speaks an audio file into it).
 `python -m pytest tests` runs the scoring tests; `python scripts/bake_packs.py`
@@ -71,6 +82,7 @@ regenerates the featured topics.
 | `HF_TOKEN` | Inference Providers token for research and grading (required for new topics and grading) |
 | `SPEECH_TO_SPEECH_URL` | Realtime WebSocket the browser dials directly |
 | `LOAD_BALANCER_URL`, `LB_HF_TOKEN` | Use a speech-to-speech load balancer instead (its address stays server-side) |
+| `LB_USER_TOKEN` | Local development only: stands in for the signed-in visitor's token when the load balancer requires a verified HF token. Never set it on a public Space. |
 | `SESSION_PROXY_URL` | Or piggyback another deployment's session API, e.g. `https://smolagents-hf-realtime-voice.hf.space/api` |
 | `GRADER_MODELS`, `WRITER_MODELS` | Comma-separated fallback chains (defaults: gpt-oss-120b on Cerebras for grading, GLM-5.3 for writing) |
 | `COACH_VOICE` | Overrides the TTS voice (by default Max uses `Aiden`, Ada uses `Serena`) |
