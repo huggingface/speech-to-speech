@@ -5,6 +5,7 @@ Run from examples/avatar-quiz-coach:  python -m pytest tests
 
 import asyncio
 import json
+import random
 import sys
 from pathlib import Path
 
@@ -45,6 +46,25 @@ def test_instructions_carry_state_but_never_answers(game):
             assert point not in text
     game.player = "Anonymous"
     assert "Anonymous" not in voice.instructions(game) and "Anonymous" not in voice.opening(game)
+
+
+def test_opening_is_casual_and_reads_the_first_question(game):
+    q = game.question()["question"]
+    start = voice.opening(game).split("Start the quiz now.")[1]
+    assert q in start and "Sam" in start
+    assert str(game.total) not in start.replace(q, "")
+    # Back from reading up: no second hello.
+    back = voice.opening(game, greeted=True).split("Start the quiz now.")[1]
+    assert not any(w in back for w in ("Hey", "Hi ")) and q in back
+    # The example line varies from quiz to quiz.
+    starts = {voice.opening(game, rng=random.Random(seed)).split("something like")[1][:40] for seed in range(20)}
+    assert len(starts) > 2
+    game.practice = True
+    assert "missed" in voice.opening(game).split("Start the quiz now.")[1]
+
+
+def test_game_opening_skips_the_count(game):
+    assert str(game.total) not in game.opening().replace(game.question()["question"], "")
 
 
 def test_tools_map_onto_turn_intents():

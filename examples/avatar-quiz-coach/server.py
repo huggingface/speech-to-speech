@@ -350,8 +350,14 @@ def start_game(req: StartRequest, request: Request) -> dict[str, Any]:
         "question": game.public_question(),
         "state": game.state(),
         # The speech backend's LLM holds the conversation: its instructions,
-        # the grader tools it calls, and the words that start the call.
-        "voice": {"instructions": voice.instructions(game), "tools": voice.TOOLS, "opening": voice.opening(game)},
+        # the grader tools it calls, and the words that start the call (the
+        # second when it already said hello while reading up).
+        "voice": {
+            "instructions": voice.instructions(game),
+            "tools": voice.TOOLS,
+            "opening": voice.opening(game),
+            "opening_greeted": voice.opening(game, greeted=True),
+        },
     }
 
 

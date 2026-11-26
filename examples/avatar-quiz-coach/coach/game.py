@@ -260,15 +260,11 @@ class Game:
     def opening(self) -> str:
         # Short on purpose: the topic summary is on screen, and every spoken
         # second here is a second before the first question.
-        n = self.total
+        # Whole sentences: TTS voices mangle fragments like "Stuck?".
         if self.practice:
-            intro = f"Let's drill the {n} question{'s' if n != 1 else ''} you missed."
+            intro = "Let's go over the ones you missed."
         else:
-            # Whole sentences: TTS voices mangle fragments like "Stuck?".
-            intro = (
-                f"Let's do {n} questions on {self.pack.get('title', 'this topic')}. "
-                "If you get stuck, I'll help you with clues."
-            )
+            intro = f"Okay, let's dive into {self.pack.get('title', 'this topic')}."
         first = self.ask_current("Here's the first one.")
         return f"{intro} {first}".strip()
 

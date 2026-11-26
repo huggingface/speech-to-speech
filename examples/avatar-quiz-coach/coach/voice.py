@@ -10,6 +10,7 @@ has been checked for leaks, or the verdict and the next question.
 from __future__ import annotations
 
 import json
+import random
 from typing import Any
 
 from .game import MAX_ATTEMPTS, Game
@@ -99,18 +100,40 @@ def instructions(game: Game) -> str:
     )
 
 
-def opening(game: Game) -> str:
-    """Per-response instructions that start the call."""
+# How the call starts. The model is shown one of these, picked at random per
+# quiz: with no example it opened nearly every quiz with "Let's jump right in."
+OPENERS = [
+    "Hey {name}, let's dig in.",
+    "Hi {name}! Okay, let's get going.",
+    "Hey {name}! Alright, here we go.",
+    "Hi {name}, good to have you. Let's start.",
+    "Hey {name}, let's see what you've got.",
+    "Hi {name}! This should be fun. Let's go.",
+]
+# The coach already said hello while it read up on the topic.
+OPENERS_BACK = ["Okay, all set.", "Alright, I'm ready.", "Done reading! Here we go.", "Okay, got it. Let's go."]
+# A second round on the questions they got wrong.
+OPENERS_PRACTICE = [
+    "Hey {name}, let's take another shot at the ones you missed.",
+    "Hi {name}! Round two: the ones that got away.",
+    "Okay, let's have another go at the tricky ones.",
+]
+
+
+def opening(game: Game, greeted: bool = False, rng: random.Random | None = None) -> str:
+    """Per-response instructions that start the call (`greeted`: hello already said)."""
+    rng = rng or random.Random()
     q = game.question()
-    lead = (
-        f"say you'll drill the {game.total} questions they missed"
-        if game.practice
-        else f'say you have {game.total} questions on "{game.pack.get("title", "this topic")}" '
-        "and that you'll help with clues if they get stuck"
-    )
+    name = game.player if game.player and game.player != "Anonymous" else "there"
+    if game.practice:
+        line = rng.choice(OPENERS_PRACTICE).format(name=name)
+    else:
+        line = rng.choice(OPENERS_BACK if greeted else OPENERS).format(name=name)
+    what = "This round goes back over the questions they missed, so say that. " if game.practice else ""
     return (
-        instructions(game) + f"\n\nStart the call now: greet {_name(game)} in a few words, "
-        f'{lead}, then ask the first question exactly as written: "{q["question"]}"'
+        instructions(game) + f"\n\nStart the quiz now. {what}Open with one short, casual line, "
+        f'something like "{line}" Don\'t say how many questions there are or explain how the quiz works. '
+        f'Then ask the first question exactly as written: "{q["question"]}"'
     )
 
 

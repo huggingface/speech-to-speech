@@ -42,8 +42,9 @@ mic ─▶ speech-to-speech backend: VAD + STT ─▶ LLM (the coach) ─▶ TTS
   quiz state but never the answers. When you attempt one, the LLM calls
   `check_answer`; the browser runs the grader on your actual transcript and
   returns the verdict and what to say (a clue, or the result and the next
-  question). A short "let's see", recorded once per session in the coach's
-  voice, plays while the grader works. When a pause splits an answer, the
+  question). While the grader works the coach says one of 40 short
+  fillers ("let's see", "hang on a second"…), recorded in its voice during
+  the session and picked least-played first, so they rarely repeat. When a pause splits an answer, the
   coach answers an unfinished piece with just "mm-hm", and if the
   student goes on before hearing the clue for the first half, that grade is
   taken back: the try doesn't count and the halves are graded together.

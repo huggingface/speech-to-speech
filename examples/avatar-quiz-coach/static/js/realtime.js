@@ -103,6 +103,11 @@ export class RealtimeVoice extends EventTarget {
     return !!(this.activeResponse || this.awaitingCreate);
   }
 
+  /** The coach has more to say: a reply in progress or held back (a filler recording doesn't count). */
+  get replying() {
+    return this.captureWaiters.size ? !!this.wanted : this.busy;
+  }
+
   // ── Connection ──────────────────────────────────────────────────────────
 
   /**

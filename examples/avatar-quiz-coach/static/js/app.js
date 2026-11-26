@@ -57,9 +57,12 @@ const S = {
   dropped: new Set(),
   echoAt: 0,
   overCoach: false,
-  /** Short fillers in the coach's voice, played while the grader works. @type {Int16Array[]} */
+  /** Short fillers in the coach's voice, played while the grader works. @type {{ pcm: Int16Array, plays: number }[]} */
   fillers: [],
+  /** @type {{ pcm: Int16Array, plays: number } | null} */ lastFiller: null,
   /** @type {RealtimeVoice | null} */ fillersFor: null,
+  /** Grader tool calls not yet answered. */
+  toolsPending: 0,
   /** Seconds of audio received per response id, and ids whose audio is complete. */
   lineAudio: new Map(),
   lineDone: new Set(),
@@ -395,7 +398,7 @@ async function startRun(opts) {
   if (S.voice && S.voiceOk) {
     // From here the backend's LLM runs the quiz, with the grader as its tools.
     S.voice.configure({ instructions: game.voice.instructions, tools: game.voice.tools });
-    S.voice.respond(greeted ? `${game.voice.opening}\n\nYou already said hello while reading up, so skip the greeting.` : game.voice.opening);
+    S.voice.respond(greeted ? game.voice.opening_greeted : game.voice.opening);
   } else {
     showCaption(game.say);
   }
@@ -619,7 +622,8 @@ function wireVoice(voice) {
       }
       return;
     }
-    if (S.phase === "quiz" && S.fillersFor !== voice) prepareFillers(voice);
+    // Start recording fillers once the coach has said something (the reading-up line).
+    if ((S.phase === "research" || S.phase === "quiz") && S.fillersFor !== voice) prepareFillers(voice);
     if (!S.responseHadAudio || !avatar.playing) scheduleCoachDone();
   });
   avatar.addEventListener("line-start", (e) => {
@@ -800,7 +804,13 @@ function setDuplex(mode) {
 }
 
 /** @param {string} text */
-const wordsOf = (text) => text.toLowerCase().replace(/[^a-z0-9' ]+/g, " ").split(/\s+/).filter(Boolean);
+const wordsOf = (text) =>
+  text
+    .toLowerCase()
+    .replace(/\u2019/g, "'")
+    .replace(/[^a-z0-9' ]+/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
 
 /**
  * A transcript that repeats, in order, mostly words the coach just said is the
@@ -825,31 +835,110 @@ function isEcho(text) {
 
 // A tool call the model wrote out as text instead of calling it.
 const CALL_MARKUP = /<\s*\|?\s*(?:tool_call|call)\b|\bcall:(?:check_answer|give_hint|skip_question|end_quiz)\b/i;
-const FILLER_LINES = ["Let's see.", "Okay, let me check.", "Hmm, let's see."];
+// Said while the grader works, so they must not hint at the verdict. Each
+// one is recorded per session in the coach's voice; with 40 of them, picked
+// least-played first, a repeat within a quiz is rare. All 40 came out word for
+// word in both voices on the dev stack (Gemma 4 31B), checked with Whisper.
+const FILLER_LINES = [
+  "Let's see.",
+  "Okay, let me check.",
+  "Hmm, let's see.",
+  "One moment.",
+  "Okay, one second.",
+  "Let me check that.",
+  "Alright, let's see.",
+  "Right, let me see.",
+  "Okay, let's check.",
+  "Give me a second.",
+  "Let me think.",
+  "Hmm, let me check.",
+  "Alright, checking that.",
+  "Let me see here.",
+  "Okay, hang on.",
+  "Just a second.",
+  "Alright, one moment.",
+  "Let's check that.",
+  "Okay, let me see.",
+  "Hmm, one second.",
+  "Let me look at that.",
+  "Okay, let me think.",
+  "Alright, let me check.",
+  "Hang on a second.",
+  "Let me just check.",
+  "Okay, let's see here.",
+  "Hmm, let me see.",
+  "Hold on, let me check.",
+  "Let me check my notes.",
+  "Okay, checking my notes.",
+  "Let's find out.",
+  "Okay, let's find out.",
+  "Okay, let me take a look.",
+  "Let me double-check.",
+  "Okay, give me a sec.",
+  "Checking now.",
+  "Let me have a look.",
+  "Okay, let's see what we've got.",
+  "Right, one second.",
+  "Okay, let me look.",
+];
 
-/** Record the fillers once per voice session, between turns. @param {RealtimeVoice} voice */
+/**
+ * A recording must not hold up a reply: only while the backend has nothing
+ * to do, the student isn't talking and no tool is running. That is during
+ * research, and in the quiz while the coach's line is still playing here
+ * (the backend is done with it, and the student isn't due to answer yet).
+ * @param {RealtimeVoice} voice
+ */
+const canRecordFiller = (voice) =>
+  !voice.busy && !voice.speaking && !S.toolsPending && (S.phase === "research" || (S.phase === "quiz" && S.coachTalking));
+
+/** Record the fillers once per voice session, a line at a time. @param {RealtimeVoice} voice */
 async function prepareFillers(voice) {
   S.fillersFor = voice;
   S.fillers = [];
-  for (const line of FILLER_LINES) {
-    // Only while nothing else is going on; give up on a line rather than wait long.
-    for (let i = 0; i < 20 && (voice.busy || S.coachTalking); i++) await sleep(500);
+  S.lastFiller = null;
+  // A different order each session, so the first ones ready aren't always the same.
+  const todo = [...FILLER_LINES];
+  for (let i = todo.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [todo[i], todo[j]] = [todo[j], todo[i]];
+  }
+  let failures = 0;
+  while (todo.length && failures < 10) {
+    while (!canRecordFiller(voice)) {
+      await sleep(250);
+      if (S.voice !== voice) return;
+    }
+    const line = /** @type {string} */ (todo.shift());
     const rec = await voice.synthesize(line);
     if (S.voice !== voice) return;
-    // Keep it only if the coach said that line (a model once "answered" the
-    // filler with "Take your time." and that played after every answer).
-    if (rec && wordsOf(rec.text).join(" ") === wordsOf(line).join(" ")) S.fillers.push(rec.pcm);
-    else if (rec) console.warn("[voice] filler not recorded as written:", line, "->", rec.text);
+    if (!rec) {
+      // Refused, or cut off because the student started talking: later.
+      todo.push(line);
+      failures++;
+    } else if (wordsOf(rec.text).join(" ") === wordsOf(line).join(" ")) {
+      S.fillers.push({ pcm: rec.pcm, plays: 0 });
+    } else {
+      // Keep it only if the coach said that line (a model once "answered" the
+      // filler with "Take your time." and that played after every answer).
+      console.warn("[voice] filler not recorded as written:", line, "->", rec.text);
+    }
   }
 }
 
 function playFiller() {
   const avatar = S.avatar;
   if (!avatar || !S.fillers.length) return;
-  const pcm = S.fillers[Math.floor(Math.random() * S.fillers.length)];
+  // The least played so far, never the one just heard.
+  const pool = S.fillers.length > 1 ? S.fillers.filter((f) => f !== S.lastFiller) : S.fillers;
+  const least = Math.min(...pool.map((f) => f.plays));
+  const ties = pool.filter((f) => f.plays === least);
+  const filler = ties[Math.floor(Math.random() * ties.length)];
+  filler.plays++;
+  S.lastFiller = filler;
   const id = `filler-${performance.now()}`;
   avatar.beginResponse(id);
-  avatar.feed(id, pcm);
+  avatar.feed(id, filler.pcm);
   avatar.endResponse();
   setCoachTalking(true);
 }
@@ -869,7 +958,7 @@ function bargeIn() {
 function scheduleCoachDone() {
   clearTimeout(S.unmuteTimer);
   S.unmuteTimer = window.setTimeout(() => {
-    if (!S.responseActive && !S.avatar?.playing && !S.voice?.busy) {
+    if (!S.responseActive && !S.avatar?.playing && !S.voice?.replying) {
       setCoachTalking(false);
       subtitlesStop(S.phase === "results" ? 6000 : 3500);
     }
@@ -1061,6 +1150,7 @@ const SETTLE_MS = 600;
  * @param {{ callId: string, name: string, args: any }} call
  */
 function runTool(call) {
+  S.toolsPending++;
   S.turnChain = S.turnChain
     .then(async () => {
       const game = S.game;
@@ -1123,7 +1213,8 @@ function runTool(call) {
       console.error(err);
       toast(err.message || "Something went wrong.");
       setMicIdle();
-    });
+    })
+    .finally(() => S.toolsPending--);
 }
 
 /** @param {any} out */
