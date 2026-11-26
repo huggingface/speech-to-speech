@@ -61,6 +61,7 @@ from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
 from speech_to_speech.pipeline.speculative_turns import TurnOutputHeld
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
+from speech_to_speech.utils.utils import is_out_of_band, response_wants_audio
 
 # aiortc (the 'webrtc' extra) is optional. Import it here, at module load,
 # rather than lazily in the calls endpoint: the av/cryptography C extensions
@@ -642,8 +643,14 @@ def _interruption_playback(transport: SessionTransport, st: Any, config: FalseIn
 _REPLY_ENDING_MS = 1000.0
 
 
+def _reply_audible(st: Any) -> bool:
+    """Whether the active response speaks: out-of-band and text-only responses do not."""
+    params = st.current_response_params
+    return st.in_response and response_wants_audio(params) and not is_out_of_band(params)
+
+
 def _assistant_still_speaking(transport: SessionTransport, st: Any) -> bool:
-    if st.in_response or st.response_pending:
+    if _reply_audible(st) or st.response_pending:
         return True
     return transport.unplayed_audio_ms() > _REPLY_ENDING_MS
 
@@ -657,8 +664,8 @@ def _holds_interruption(unit: PipelineUnit, transport: SessionTransport, st: Any
         return False
     if not (event.interrupt_response and cfg.interrupt_response_enabled):
         return False
-    if not (st.in_response or st.response_pending or transport.has_unplayed_audio()):
-        # The assistant is silent: there is nothing to protect.
+    if not (_reply_audible(st) or st.response_pending or transport.has_unplayed_audio()):
+        # The assistant is silent: there is no speech to protect.
         return False
     turns = unit.service.speculative_turns
     return turns is not None and turns.mark_provisional(event.turn_id)

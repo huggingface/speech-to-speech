@@ -589,9 +589,10 @@ off. The server flag `--false_interruption {off,continue,pause,duck}` (with
 `--false_interruption_min_words`) sets the default for sessions that leave the
 field unset. It is off by default.
 
-When speech starts while a reply is active, queued, or still playing, the
-server holds that user turn instead of cancelling the reply. The reply keeps
-generating. Then:
+When speech starts while a spoken reply is active, queued, or still playing,
+the server holds that user turn instead of cancelling the reply. The reply
+keeps generating. Out-of-band and text-only responses are not speech to
+protect: speech during them alone is handled as before. Then:
 
 - **Real words commit the interruption.** Once the transcript has `min_words`
   words that are not fillers or backchannels, the barge-in happens exactly as

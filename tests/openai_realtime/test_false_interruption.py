@@ -531,6 +531,26 @@ def test_backchannel_with_seconds_of_reply_left_is_ignored(call):
     assert call.service.text_prompt_queue.empty()
 
 
+def test_short_answer_during_a_text_only_side_response_is_a_turn(call):
+    """Out-of-band text responses (e.g. a client's background extraction) are not speech to protect."""
+    call.configure()
+    turn, key = call.user_says("Let's start.")
+    call.reply(turn, key, "Ready for the first question?", seconds=0.5)
+    call.finish(key)
+    call.ws.send_json({"type": "response.create", "response": {"conversation": "none", "output_modalities": ["text"]}})
+    call.receive_until("response.created")
+    call.service.text_prompt_queue.get(timeout=2)
+
+    answer = call.speech()
+    _wait_for(lambda: _pending(call) is not None)
+    call.stop(answer, 0.3)
+    call.final(answer, "Yes.")
+
+    request = call.service.text_prompt_queue.get(timeout=2)
+    assert (request.turn_id, request.turn_revision) == answer
+    assert call.user_messages() == ["Let's start.", "Yes."]
+
+
 def test_speech_while_the_assistant_is_silent_is_a_normal_turn(call):
     call.configure()
     call.speech()
