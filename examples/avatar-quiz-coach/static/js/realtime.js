@@ -74,6 +74,8 @@ export class RealtimeVoice extends EventTarget {
     this.speaking = false;
     /** Assistant message item of each response (for truncation). @type {Map<string, string>} */
     this.items = new Map();
+    /** Item id of each tool result we sent, by call id. @type {Map<string, string>} */
+    this.outputItems = new Map();
     this.closed = false;
     this.micNode = null;
     this.micStream = null;
@@ -204,12 +206,20 @@ export class RealtimeVoice extends EventTarget {
 
   /**
    * Coach instructions and tools for the quiz (deep-merged into the session).
-   * @param {{ instructions?: string, tools?: any[] }} cfg
+   * `silenceMs` is how long the student must be quiet before their turn ends.
+   * @param {{ instructions?: string, tools?: any[], silenceMs?: number }} cfg
    */
   configure(cfg) {
     /** @type {Record<string, any>} */
     const session = { type: "realtime" };
     if (cfg.instructions) session.instructions = cfg.instructions;
+    if (cfg.silenceMs) {
+      session.audio = {
+        input: {
+          turn_detection: { type: "server_vad", create_response: true, interrupt_response: true, silence_duration_ms: cfg.silenceMs },
+        },
+      };
+    }
     if (cfg.tools) Object.assign(session, { tools: cfg.tools, tool_choice: cfg.tools.length ? "auto" : "none" });
     this.send({ type: "session.update", session });
   }
@@ -313,6 +323,13 @@ export class RealtimeVoice extends EventTarget {
     if (itemId) this.send({ type: "conversation.item.delete", item_id: itemId });
   }
 
+  /** Take a tool call and its result back out of the conversation. @param {string} callId @param {string} callItemId */
+  withdrawCall(callId, callItemId) {
+    this.deleteItemId(callItemId);
+    const out = this.outputItems.get(callId);
+    if (out) this.deleteItemId(out);
+  }
+
   /** Remove a reply from the conversation history. @param {string} responseId */
   deleteItem(responseId) {
     const itemId = this.items.get(responseId);
@@ -356,6 +373,10 @@ export class RealtimeVoice extends EventTarget {
         this.lastSpeechStart = performance.now();
         this.speaking = true;
         this.emit("speech-started", {});
+        break;
+      case "conversation.item.created":
+      case "conversation.item.added":
+        if (ev.item?.type === "function_call_output" && ev.item.id) this.outputItems.set(ev.item.call_id, ev.item.id);
         break;
       case "input_audio_buffer.speech_stopped":
         this.speaking = false;
@@ -410,7 +431,7 @@ export class RealtimeVoice extends EventTarget {
         try {
           args = JSON.parse(ev.arguments || "{}");
         } catch {}
-        this.emit("tool-call", { responseId: ev.response_id || this.activeResponse, callId: ev.call_id, name: ev.name, args });
+        this.emit("tool-call", { responseId: ev.response_id || this.activeResponse, callId: ev.call_id, itemId: ev.item_id, name: ev.name, args });
         break;
       }
       case "response.done": {

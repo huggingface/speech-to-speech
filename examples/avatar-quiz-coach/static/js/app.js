@@ -41,6 +41,12 @@ const S = {
   /** What the student said since the coach last spoke, graded when the coach calls check_answer. */
   heard: /** @type {string[]} */ ([]),
   lastFinalAt: 0,
+  /**
+   * The last grade that gave a clue, until the student has heard it: if they
+   * go on talking first, it is taken back (see retractCheck).
+   * @type {{ callId: string, itemId: string, graded: string[], sentAt: number, replyId: string } | null}
+   */
+  lastCheck: null,
   /** Responses that called a tool, and ones that wrote a tool call as text instead. */
   toolResponses: new Set(),
   badResponses: new Set(),
@@ -388,7 +394,9 @@ async function startRun(opts) {
   S.heard = [];
   if (S.voice && S.voiceOk) {
     // From here the backend's LLM runs the quiz, with the grader as its tools.
-    S.voice.configure({ instructions: game.voice.instructions, tools: game.voice.tools });
+    // Answers come in several sentences with thinking pauses: wait longer
+    // before ending the student's turn than the backend's default.
+    S.voice.configure({ instructions: game.voice.instructions, tools: game.voice.tools, silenceMs: ANSWER_SILENCE_MS });
     S.voice.respond(greeted ? `${game.voice.opening}\n\nYou already said hello while reading up, so skip the greeting.` : game.voice.opening);
   } else {
     showCaption(game.say);
@@ -538,6 +546,7 @@ function wireVoice(voice) {
   voice.addEventListener("queue", (e) => setVoiceLine(`Waiting for a voice server… #${/** @type {any} */ (e).detail.position} in line`, ""));
   voice.addEventListener("response-started", (e) => {
     const id = /** @type {any} */ (e).detail.responseId;
+    if (S.lastCheck && !S.lastCheck.replyId) S.lastCheck.replyId = id;
     if (S.echoAt && performance.now() - S.echoAt < 3000) {
       // The backend is answering the coach's own echo: drop the reply.
       S.dropped.add(id);
@@ -612,11 +621,6 @@ function wireVoice(voice) {
       }
       return;
     }
-    // The coach replied without grading: what the student said before is
-    // answered and the next attempt starts fresh, unless the reply was just a
-    // "mm-hm" while they think out loud.
-    const said = (S.lineText.get(id) || "").trim().split(/\s+/).filter(Boolean).length;
-    if (/** @type {any} */ (e).detail.status === "completed" && S.responseHadAudio && !S.toolResponses.has(id) && said > 3) S.heard = [];
     if (S.phase === "quiz" && S.fillersFor !== voice) prepareFillers(voice);
     if (!S.responseHadAudio || !avatar.playing) scheduleCoachDone();
   });
@@ -625,12 +629,21 @@ function wireVoice(voice) {
     subtitlesStart(S.lineText.get(id) || "", id);
   });
   avatar.addEventListener("playback", (e) => {
+    // The clue for the last grade has been heard out: it stands.
+    if (!(/** @type {any} */ (e).detail.playing) && S.lastCheck?.replyId && S.lineDone.has(S.lastCheck.replyId)) S.lastCheck = null;
     if (!(/** @type {any} */ (e).detail.playing) && !S.responseActive) scheduleCoachDone();
   });
   voice.addEventListener("speech-started", () => {
     // Echo only happens while the coach is talking; an answer that repeats the
     // question's words after it finished must not be mistaken for it.
     S.overCoach = S.coachTalking;
+    if (S.lastCheck) {
+      // Talking over the clue right away means they hadn't finished; once
+      // they've heard a good part of it, the grade stands.
+      const heard = S.lastCheck.replyId && S.avatar?.heardMs ? S.avatar.heardMs(S.lastCheck.replyId) : 0;
+      if (heard < 1500) S.turnChain = S.turnChain.then(retractCheck);
+      else S.lastCheck = null;
+    }
     if (S.coachTalking && canBargeIn()) bargeIn();
     if (S.phase !== "quiz") return;
     S.partial = "";
@@ -712,9 +725,13 @@ function maybeSpeculate() {
   prefetchGrade(answerSoFar(text));
 }
 
-/** The answer check_answer would grade: the student's last few utterances (an answer with pauses arrives in pieces). @param {string} [pending] */
+/**
+ * The answer check_answer grades: what the student said since the last grade
+ * (an answer with pauses arrives in pieces; the grader ignores small talk).
+ * @param {string} [pending]
+ */
 function answerSoFar(pending) {
-  return [...S.heard, ...(pending ? [pending] : [])].slice(-3).join(" ");
+  return [...S.heard, ...(pending ? [pending] : [])].slice(-4).join(" ").slice(-600);
 }
 
 /** @param {string} text */
@@ -1011,6 +1028,31 @@ async function doTurn(text, intent) {
   handleOutcome(out);
 }
 
+const ANSWER_SILENCE_MS = 800;
+
+/**
+ * The student went on talking before hearing the clue for what they had said:
+ * it was half an answer. Undo that grade (the try doesn't count), take the call
+ * out of the coach's history, and grade the halves together next time.
+ */
+async function retractCheck() {
+  const check = S.lastCheck;
+  S.lastCheck = null;
+  if (!check || !S.game || !S.voice) return;
+  S.voice.withdrawCall(check.callId, check.itemId);
+  S.heard = [...check.graded, ...S.heard];
+  try {
+    const out = await postJson(`api/game/${S.game.game_id}/retract`, {});
+    if (out.retracted) {
+      S.voice.configure({ instructions: out.voice.instructions });
+      updateHud(out.state);
+      updateStakes(out.state);
+      hideVerdict();
+    }
+  } catch (err) {
+    console.warn("[voice] retract failed", err);
+  }
+}
 const TOOL_INTENTS = { check_answer: null, give_hint: "hint", skip_question: "skip", end_quiz: "stop" };
 const SETTLE_MS = 600;
 
@@ -1035,18 +1077,20 @@ function runTool(call) {
         // a moment, don't grade the fragment (it would cost them a try).
         await sleep(SETTLE_MS);
         if (voice.speaking || voice.lastSpeechStart > S.lastFinalAt) {
-          voice.sendToolOutput(
-            call.callId,
-            JSON.stringify({ status: "not graded: the student kept talking", next: "Let them finish; don't comment on this." }),
-            false,
-          );
+          // Take the call back out of the conversation: the model then sees the
+          // whole answer as if it had waited, not a note that the student
+          // "kept talking" (which it answered with "take your time").
+          voice.deleteItemId(call.itemId);
           return;
         }
       }
       // Grade the student's own words, not the coach's paraphrase of them.
       let transcript = "";
+      /** @type {string[]} */
+      let graded = [];
       if (call.name === "check_answer") {
         transcript = answerSoFar() || String(call.args?.answer || "") || "(no answer)";
+        graded = S.heard;
         S.heard = [];
       }
       $("#answer-box").classList.add("grading");
@@ -1062,6 +1106,16 @@ function runTool(call) {
         $("#answer-box").classList.remove("grading");
       }
       if (S.game !== game) return;
+      if (call.name === "check_answer" && out.retry) {
+        S.lastCheck = { callId: call.callId, itemId: call.itemId, graded, sentAt: performance.now(), replyId: "" };
+        // They already went on while it was being graded: take it back now.
+        if (voice.speaking || voice.lastSpeechStart > S.lastFinalAt) {
+          await retractCheck();
+          return;
+        }
+      } else if (call.name === "check_answer") {
+        S.lastCheck = null;
+      }
       handleOutcome(out);
       voice.configure({ instructions: out.voice.instructions });
       voice.sendToolOutput(call.callId, out.voice.output);

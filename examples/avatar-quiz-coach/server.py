@@ -390,6 +390,17 @@ async def turn(game_id: str, req: TurnRequest) -> dict[str, Any]:
         return out
 
 
+@app.post("/api/game/{game_id}/retract")
+async def retract(game_id: str) -> dict[str, Any]:
+    """Undo the last clue-giving grade (the student kept talking before hearing it)."""
+    game = _game(game_id)
+    async with game.lock:
+        done = game_mod.retract(game)
+        if LOG_TURNS:
+            logger.info("turn %s retracted: %s", game_id[:6], done)
+        return {"retracted": done, "state": game.state(), "voice": {"instructions": voice.instructions(game)}}
+
+
 @app.post("/api/game/{game_id}/prefetch")
 async def prefetch(game_id: str, req: TurnRequest) -> dict[str, Any]:
     """Grade a speculative transcript early; the matching /turn reuses the result."""

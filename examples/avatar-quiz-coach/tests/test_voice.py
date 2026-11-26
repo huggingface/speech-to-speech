@@ -84,3 +84,22 @@ def test_tool_outputs(game, monkeypatch):
     done = json.loads(voice.tool_output(game, run(g.handle_turn(game, "(stop)", "stop"))))
     assert done["quiz_finished"] and "say" not in done  # the coach already acknowledged the stop
     assert "over" in voice.instructions(game)
+
+
+def test_retract_undoes_a_half_answer(game, monkeypatch):
+    verdicts = iter(["partial", "correct"])
+
+    async def decide(game, transcript):
+        return {"intent": "answer", "verdict": next(verdicts), "score": 50, "points_hit": [0], "say": "Go on."}, "stub"
+
+    monkeypatch.setattr(g, "_decide", decide)
+    history = len(game.history)
+    out = run(g.handle_turn(game, "first half"))
+    assert out["retry"] and game.attempt == 2
+    assert g.retract(game)
+    res = game.result()
+    assert game.attempt == 1 and res.answers == [] and res.clues == [] and len(game.history) == history
+    assert not g.retract(game)  # only once
+    out = run(g.handle_turn(game, "first half second half"))
+    assert out["verdict"] == "correct" and out["points"] == g.BASE_POINTS[game.pack["questions"][0]["difficulty"]]
+    assert not g.retract(game)  # a resolved question can't be taken back

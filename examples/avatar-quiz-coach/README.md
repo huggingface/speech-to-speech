@@ -43,10 +43,12 @@ mic ─▶ speech-to-speech backend: VAD + STT ─▶ LLM (the coach) ─▶ TTS
   `check_answer`; the browser runs the grader on your actual transcript and
   returns the verdict and what to say (a clue, or the result and the next
   question). A short "let's see", recorded once per session in the coach's
-  voice, plays while the grader works. The backend ends a turn at short
-  pauses, so an answer often arrives in pieces: the coach answers an
-  unfinished one with just "mm-hm", the pieces are graded together, and a
-  grade is dropped if the student starts talking again within 0.6 seconds.
+  voice, plays while the grader works. During a quiz the student's turn ends
+  after 800 ms of silence (the backend's default is much shorter), so an
+  answer in several sentences stays one turn. When a longer pause still splits
+  it, the coach answers an unfinished piece with just "mm-hm", and if the
+  student goes on before hearing the clue for the first half, that grade is
+  taken back: the try doesn't count and the halves are graded together.
   In 68 scripted text turns (six quizzes) on the dev stack's Gemma 4 31B, the
   coach picked the right tool, or none for small talk, "repeat that" and
   trailing off, every time, leaked no answers, and read 24 of 24 next

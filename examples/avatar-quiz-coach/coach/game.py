@@ -10,6 +10,7 @@ plain rules, so the leaderboard never depends on the model's arithmetic.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import random
@@ -186,6 +187,8 @@ class Game:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Grades started from speculative transcripts, keyed by question state and text.
     speculative: dict[tuple[int, int, int, str], asyncio.Future[Any]] = field(default_factory=dict)
+    # State before the last graded turn that kept the question open (see retract).
+    undo: dict[str, Any] | None = None
 
     # ── Views ────────────────────────────────────────────────────────────
 
@@ -472,6 +475,16 @@ async def handle_turn(game: Game, transcript: str, intent: str | None = None) ->
 
     q = game.question()
     res = game.result()
+    snapshot = {
+        "position": game.position,
+        "attempt": game.attempt,
+        "history": len(game.history),
+        "turns": game.turns - 1,
+        "result": dataclasses.replace(
+            res, answers=list(res.answers), clues=list(res.clues), points_hit=list(res.points_hit)
+        ),
+    }
+    game.undo = None
     if intent in BUTTON_INTENTS:
         model = "button"
         decision = {"intent": intent, "verdict": None, "score": 0, "points_hit": [], "say": ""}
@@ -577,7 +590,28 @@ async def handle_turn(game: Game, transcript: str, intent: str | None = None) ->
 
     game.history.append({"role": "coach", "text": say})
     out.update({"say": say.strip(), "state": game.state(), "question": game.public_question()})
+    if out.get("retry"):
+        game.undo = snapshot
     return out
+
+
+def retract(game: Game) -> bool:
+    """Take back the last grade that gave a clue: the student was still talking.
+
+    Speech recognition ends a turn at a long pause, so the first half of an
+    answer can be graded on its own. When the student goes on before hearing
+    the result, the try is not counted and the halves are graded together.
+    """
+    snap = game.undo
+    game.undo = None
+    if snap is None or game.finished or snap["position"] != game.position:
+        return False
+    game.attempt = snap["attempt"]
+    game.turns = snap["turns"]
+    game.results[snap["result"].qid] = snap["result"]
+    del game.history[snap["history"] :]
+    game.speculative.clear()
+    return True
 
 
 def finish_now(game: Game, say: str) -> dict[str, Any]:
