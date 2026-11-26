@@ -261,8 +261,13 @@ class Game:
         if self.practice:
             intro = f"Let's drill the {n} question{'s' if n != 1 else ''} you missed."
         else:
-            intro = f"{n} questions on {self.pack.get('title', 'this topic')}. Stuck? I'll give you clues."
-        return f"{intro} {self.ask_current('First one.')}".strip()
+            # Whole sentences: TTS voices mangle fragments like "Stuck?".
+            intro = (
+                f"Let's do {n} questions on {self.pack.get('title', 'this topic')}. "
+                "If you get stuck, I'll help you with clues."
+            )
+        first = self.ask_current("Here's the first one.")
+        return f"{intro} {first}".strip()
 
 
 class GameStore:
