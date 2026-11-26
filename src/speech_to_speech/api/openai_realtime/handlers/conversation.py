@@ -568,6 +568,33 @@ class ConversationHandler(RealtimeBaseHandler):
                 return routed_item_id
         return st.current_input_item_id
 
+    def speculative_final_snapshot(self, conn_id: str, item_id: str, transcript: str) -> list[ServerEvent]:
+        """Share a revision's final transcript with opted-in clients before its turn commits.
+
+        The authoritative ``completed`` event waits until the turn commits, after
+        the reopen grace, while the server already uses this text speculatively
+        for its own response. A client that answers turns itself
+        (``create_response: false``) gets it as a replaceable snapshot, so it can
+        start its work during the grace too.
+        """
+        st = self._state(conn_id)
+        if not transcript or not st.runtime_config.input_audio_transcription_snapshots_enabled:
+            return []
+        input_item = st.input_items.get(item_id)
+        if input_item is not None:
+            if input_item.latest_transcript == transcript:
+                return []
+            input_item.latest_transcript = transcript
+        return [
+            SpeechToSpeechInputAudioTranscriptionSnapshotEvent(
+                type="speech_to_speech.input_audio_transcription.snapshot",
+                event_id=self._next_event_id(),
+                item_id=item_id,
+                content_index=0,
+                transcript=transcript,
+            )
+        ]
+
     def on_transcription_completed(
         self,
         conn_id: str,

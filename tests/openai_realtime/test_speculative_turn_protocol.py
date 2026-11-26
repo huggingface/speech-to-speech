@@ -505,3 +505,50 @@ def test_direct_audio_commits_a_user_item_without_transcription(session):
     assert session.service._state(session.conn_id).input_items == {}
     assert_input_lifecycle_contract(session.events)
     assert_openai_schema(session.events)
+
+
+def test_opted_in_client_sees_each_revision_final_before_the_turn_commits(session):
+    """A client answering turns itself can speculate during the reopen grace.
+
+    The authoritative ``completed`` event still waits for the commit, but a
+    snapshot carries each revision's final transcript as soon as STT finishes.
+    """
+    from openai.types.realtime import SessionUpdateEvent
+
+    session.service.handle_session_update(
+        session.conn_id,
+        SessionUpdateEvent.model_validate(
+            {
+                "type": "session.update",
+                "session": {"type": "realtime", "extensions": ["speech_to_speech.input_audio_transcription.snapshot"]},
+            }
+        ),
+    )
+    session.start_turn("turn_1")
+    session.stop_speech("turn_1", 0, duration_s=1.0, audio_end_ms=1000)
+    early = session.final("turn_1", 0, "The quick brown fox")
+    assert [(event.type, event.transcript) for event in early] == [
+        ("speech_to_speech.input_audio_transcription.snapshot", "The quick brown fox")
+    ]
+
+    # Speech resumes: the next revision's final is shared the same way, on the same item.
+    session.resume_turn("turn_1", 0, audio_start_ms=1500)
+    session.stop_speech("turn_1", 1, duration_s=2.0, audio_end_ms=2000)
+    resumed = session.final("turn_1", 1, "The quick brown fox jumps")
+    assert [event.transcript for event in resumed] == ["The quick brown fox jumps"]
+    assert resumed[0].item_id == early[0].item_id
+    # The same text twice is not repeated.
+    assert session.final("turn_1", 1, "The quick brown fox jumps") == []
+
+    committed = session.answer("turn_1", 1)
+    completions = [
+        event for event in committed if event.type == "conversation.item.input_audio_transcription.completed"
+    ]
+    assert [event.transcript for event in completions] == ["The quick brown fox jumps"]
+    assert_input_lifecycle_contract(session.events)
+
+
+def test_snapshots_stay_off_without_opt_in(session):
+    session.start_turn("turn_1")
+    session.stop_speech("turn_1", 0, duration_s=1.0, audio_end_ms=1000)
+    assert session.final("turn_1", 0, "The quick brown fox") == []

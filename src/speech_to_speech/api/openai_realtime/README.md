@@ -315,7 +315,8 @@ Clients negotiate opt-in by advertising the extension in `session.update`:
 
 When opted in:
 - The server emits `speech_to_speech.input_audio_transcription.snapshot` with the latest cumulative hypothesis on every progressive update, even when word revisions cause append-only deltas to be temporarily withheld.
-- Snapshots are display-only and keyed by `item_id`. A newer snapshot replaces any earlier snapshot for the same item.
+- Each pause's final transcript is also sent as a snapshot as soon as speech-to-text finishes. The authoritative `completed` event waits until the turn commits, after the reopen grace, so a client that answers turns itself (`create_response: false`) can start its own work during that grace, as the server does for its LLM, and drop it if speech resumes and the same item gets a newer snapshot.
+- Snapshots are replaceable hypotheses keyed by `item_id`. A newer snapshot replaces any earlier snapshot for the same item.
 - Bundled clients combine both streams: standard deltas maintain stable committed text, snapshots provide real-time speculative display without duplicating words, and `completed.transcript` authoritatively replaces all state and releases per-item memory.
 
 ### Transcript event compatibility

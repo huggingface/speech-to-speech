@@ -958,7 +958,9 @@ class RealtimeService:
 
         # The chat now holds this revision's text, but the client only learns
         # about the user item once the turn is committed. A revision superseded
-        # before then is replaced in the chat and discarded here.
+        # before then is replaced in the chat and discarded here. Clients that
+        # opted in to snapshots see the text now, as a replaceable hypothesis.
+        early = self.conversation.speculative_final_snapshot(conn_id, completed_events[0].item_id, event.transcript)
         self.audio.hold_input_terminal(
             conn_id,
             completed_events[0].item_id,
@@ -966,7 +968,7 @@ class RealtimeService:
             event.turn_revision,
             terminal=completed_events[0],
         )
-        return self.audio.resolve_input_terminals(conn_id)
+        return early + self.audio.resolve_input_terminals(conn_id)
 
     def _on_transcription_failed(self, conn_id: str, event: TranscriptionFailedEvent) -> list[ServerEvent]:
         """Surface a final STT failure without creating conversation or LLM work."""
