@@ -394,9 +394,7 @@ async function startRun(opts) {
   S.heard = [];
   if (S.voice && S.voiceOk) {
     // From here the backend's LLM runs the quiz, with the grader as its tools.
-    // Answers come in several sentences with thinking pauses: wait longer
-    // before ending the student's turn than the backend's default.
-    S.voice.configure({ instructions: game.voice.instructions, tools: game.voice.tools, silenceMs: ANSWER_SILENCE_MS });
+    S.voice.configure({ instructions: game.voice.instructions, tools: game.voice.tools });
     S.voice.respond(greeted ? `${game.voice.opening}\n\nYou already said hello while reading up, so skip the greeting.` : game.voice.opening);
   } else {
     showCaption(game.say);
@@ -1030,8 +1028,6 @@ async function doTurn(text, intent) {
   $("#answer-box").classList.remove("grading");
   handleOutcome(out);
 }
-
-const ANSWER_SILENCE_MS = 800;
 
 /**
  * The student went on talking before hearing the clue for what they had said:

@@ -212,20 +212,12 @@ export class RealtimeVoice extends EventTarget {
 
   /**
    * Coach instructions and tools for the quiz (deep-merged into the session).
-   * `silenceMs` is how long the student must be quiet before their turn ends.
-   * @param {{ instructions?: string, tools?: any[], silenceMs?: number }} cfg
+   * @param {{ instructions?: string, tools?: any[] }} cfg
    */
   configure(cfg) {
     /** @type {Record<string, any>} */
     const session = { type: "realtime" };
     if (cfg.instructions) session.instructions = cfg.instructions;
-    if (cfg.silenceMs) {
-      session.audio = {
-        input: {
-          turn_detection: { type: "server_vad", create_response: true, interrupt_response: true, silence_duration_ms: cfg.silenceMs },
-        },
-      };
-    }
     if (cfg.tools) Object.assign(session, { tools: cfg.tools, tool_choice: cfg.tools.length ? "auto" : "none" });
     this.send({ type: "session.update", session });
   }
