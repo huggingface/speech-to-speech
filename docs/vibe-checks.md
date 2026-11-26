@@ -240,6 +240,8 @@ Two scenario sets, chosen with `--set`:
 
 - `conversations` (default): three conversations of 8 to 10 turns.
 - `first-turns`: 24 opening requests, the first call of a conversation with no history.
+- `mid-turn-results`: six short conversations where the report finishes while the user is asking
+  for something else, so the result and the new request reach the model together.
 
 ### Text-only runs
 
@@ -289,6 +291,11 @@ column per report, with a two-sided Fisher exact p-value against the first:
 - **Call markup in spoken text**: call syntax the server did not parse. The check is a regex over
   known formats, so read unusual misses by hand.
 - **Call when none was needed**, **Late result spoken**, **Long-running tool called again**.
+- **Result arriving mid-turn spoken** (`mid-turn-results` only): the reply to the new request, or
+  the follow-up the packaged client asks for afterwards, told the user about the result. It counts
+  a reply that says "report", "2030" or "energy density". **its follow-up refused** counts
+  follow-ups the server turned down because a completed reply already had the result as input;
+  when the reply did not mention it, the user never hears it.
 
 Differences of a few cases out of hundreds are usually not significant; run more `--reps` before
 drawing conclusions, and read the individual turns behind any miss.

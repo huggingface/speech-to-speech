@@ -2,7 +2,8 @@
 
 A scenario set is a list of conversations; a conversation is a list of user turns, each with
 the tool it should lead to (``None`` when no tool is needed). The client runs the tools itself:
-most return at once, ``research_report`` is long-running and returns two user turns later.
+most return at once, ``research_report`` is long-running and returns two user turns later, or
+while the user is saying a turn that sets ``result_arrives``.
 """
 
 from __future__ import annotations
@@ -65,6 +66,9 @@ RESULTS: dict[str, Any] = {
     },
 }
 
+# A reply told the user about a long-running result if it contains one of these.
+RESULT_MARKERS: dict[str, tuple[str, ...]] = {"research_report": ("report", "2030", "energy density")}
+
 
 @dataclass(frozen=True)
 class Turn:
@@ -72,6 +76,8 @@ class Turn:
     expected_tool: Optional[str]
     # Values a call must send; a tuple lists every accepted value.
     expected_arguments: dict[str, str | int | tuple[str, ...]] | None = None
+    # A long-running tool whose result arrives while the user is saying this turn.
+    result_arrives: Optional[str] = None
 
 
 Conversation = tuple[Turn, ...]
@@ -143,7 +149,30 @@ FIRST_TURNS: tuple[Conversation, ...] = tuple(
     )
 )
 
+_REPORT = Turn("Can you put together a research report on solid-state batteries?", "research_report")
+_DONE = "research_report"
+
+# The report finishes while the user is asking for something else, so its result and the new
+# request reach the model in one request. In the last two the model has replied since the call.
+MID_TURN_RESULTS: tuple[Conversation, ...] = (
+    (_REPORT, Turn("What's the capital of Peru?", None, result_arrives=_DONE)),
+    (_REPORT, Turn("Meanwhile, what's the weather in Rome?", "get_weather", {"city": "Rome"}, result_arrives=_DONE)),
+    (_REPORT, Turn("Can you dance a little?", "dance", result_arrives=_DONE)),
+    (_REPORT, Turn("Set a 3 minute timer for the tea.", "set_timer", {"minutes": 3}, result_arrives=_DONE)),
+    (
+        _REPORT,
+        Turn("Tell me a joke.", None),
+        Turn("What time is it in Tokyo?", "get_time", {"city": "Tokyo"}, result_arrives=_DONE),
+    ),
+    (
+        _REPORT,
+        Turn("What's the weather in Lisbon?", "get_weather", {"city": "Lisbon"}),
+        Turn("What's the capital of Peru?", None, result_arrives=_DONE),
+    ),
+)
+
 SCENARIO_SETS: dict[str, tuple[Conversation, ...]] = {
     "conversations": CONVERSATIONS,
     "first-turns": FIRST_TURNS,
+    "mid-turn-results": MID_TURN_RESULTS,
 }

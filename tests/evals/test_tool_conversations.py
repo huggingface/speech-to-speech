@@ -9,7 +9,7 @@ import pytest
 from speech_to_speech.evals.tool_conversations.__main__ import main
 from speech_to_speech.evals.tool_conversations.report import fisher_exact, render_comparison, render_report, summarize
 from speech_to_speech.evals.tool_conversations.runner import RunnerConfig, run_set
-from speech_to_speech.evals.tool_conversations.scenarios import CONVERSATIONS, RESULTS, Turn
+from speech_to_speech.evals.tool_conversations.scenarios import CONVERSATIONS, MID_TURN_RESULTS, RESULTS, Turn
 
 
 def _user(index, expected, *rounds):
@@ -166,6 +166,66 @@ def test_runner_sends_the_long_running_result_two_turns_later():
     assert (s["right_tool"], s["late_results"], s["late_result_spoken"]) == (2, 1, 1)
     assert (s["valid_arguments"], s["argument_calls"]) == (1, 2)
     assert (s["correct_arguments"], s["scored_argument_calls"]) == (1, 1)
+
+
+def test_runner_delivers_a_result_that_arrives_while_the_user_speaks():
+    import websockets
+
+    received = []
+
+    async def handler(ws):
+        creates = 0
+        async for message in ws:
+            event = json.loads(message)
+            received.append(event)
+            if event["type"] != "response.create":
+                continue
+            creates += 1
+            if "event_id" in event:  # the reply already had the result as input, so the follow-up is refused
+                error = {"type": "tool_followup_already_answered", "event_id": event["event_id"]}
+                await ws.send(json.dumps({"type": "error", "error": error}))
+                continue
+            if creates == 1:
+                call = {"type": "function_call", "name": "research_report", "call_id": "call_r", "arguments": "{}"}
+                body = {"output": [call]}
+            else:
+                reply = {"type": "message", "content": [{"type": "output_text", "text": "Lima."}]}
+                body = {"output": [reply], "metadata": {"s2s_tool_input_call_ids": '["call_r"]'}}
+            await ws.send(json.dumps({"type": "response.done", "response": {"status": "completed", **body}}))
+
+    async def scenario():
+        async with websockets.serve(handler, "127.0.0.1", 0) as ws_server:
+            port = ws_server.sockets[0].getsockname()[1]
+            return await run_set(RunnerConfig(url=f"ws://127.0.0.1:{port}"), MID_TURN_RESULTS[-1:], reps=1)
+
+    [row] = asyncio.run(scenario())
+    sent = [e["item"]["type"] if e["type"] == "conversation.item.create" else e["type"] for e in received[1:]]
+    # Two turns after the call, the result still shares one response with the request it arrived
+    # during, and the marked follow-up comes after that reply.
+    assert sent == ["message", "response.create"] * 2 + [
+        "function_call_output",
+        "message",
+        "response.create",
+        "response.create",
+    ]
+    assert [turn["kind"] for turn in row["turns"]] == ["user"] * 3
+    assert received[-1]["response"]["metadata"] == {"s2s_tool_followup_call_ids": '["call_r"]'}
+    assert row["turns"][2]["arrived_result"] == {
+        "tool": "research_report",
+        "in_model_input": True,
+        "follow_up": {"refused": "tool_followup_already_answered"},
+    }
+    s = summarize([row])
+    assert (s["mid_turn_results"], s["mid_turn_result_spoken"], s["mid_turn_follow_up_refused"]) == (1, 0, 1)
+    assert s["server_errors"] == 0
+
+    in_reply = _user(1, None, ("Lima. And the report expects mass production around 2030.", []))
+    in_reply["arrived_result"] = row["turns"][2]["arrived_result"]
+    in_follow_up = _user(1, None, ("Lima.", []))
+    follow_up = {"text": "Your REPORT is ready.", "calls": [], "status": "completed"}
+    in_follow_up["arrived_result"] = {"tool": "research_report", "in_model_input": False, "follow_up": follow_up}
+    s = summarize([{"turns": [in_reply, in_follow_up]}])
+    assert (s["mid_turn_results"], s["mid_turn_result_spoken"], s["mid_turn_follow_up_refused"]) == (2, 2, 1)
 
 
 def test_server_config_is_private_and_points_speech_at_the_stand_in(tmp_path, monkeypatch):

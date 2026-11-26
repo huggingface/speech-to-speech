@@ -14,7 +14,12 @@ from typing import Any
 
 from jsonschema.validators import validator_for
 
-from speech_to_speech.evals.tool_conversations.scenarios import EXPRESSION_TOOLS, LONG_RUNNING_TOOLS, TOOLS
+from speech_to_speech.evals.tool_conversations.scenarios import (
+    EXPRESSION_TOOLS,
+    LONG_RUNNING_TOOLS,
+    RESULT_MARKERS,
+    TOOLS,
+)
 
 REPORT_SCHEMA = "tool-conversations/1"
 
@@ -36,6 +41,8 @@ METRICS = (
     ("extra_call", "Call when none was needed", "extra_call", "free_turns"),
     ("late_result_spoken", "Late result spoken", "late_result_spoken", "late_results"),
     ("late_result_recalled", "Long-running tool called again", "repeated_long_running", "late_results"),
+    ("mid_turn_result_spoken", "Result arriving mid-turn spoken", "mid_turn_result_spoken", "mid_turn_results"),
+    ("mid_turn_follow_up_refused", "  its follow-up refused", "mid_turn_follow_up_refused", "mid_turn_results"),
     ("crashed", "Conversations that crashed", "crashed", "conversations"),
 )
 
@@ -105,6 +112,13 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, int]:
             c["call_markup_spoken"] += any(CALL_MARKUP.search(r["text"] or "") for r in rounds)
             long_calls = sum(called.count(name) for name in LONG_RUNNING_TOOLS)
             c["repeated_long_running"] += max(0, long_calls - (expected in LONG_RUNNING_TOOLS))
+            arrived = turn.get("arrived_result")
+            if arrived:
+                follow_up = arrived["follow_up"]
+                spoken = " ".join([r["text"] or "" for r in rounds] + [follow_up.get("text") or ""]).casefold()
+                c["mid_turn_results"] += 1
+                c["mid_turn_result_spoken"] += any(m in spoken for m in RESULT_MARKERS.get(arrived["tool"], ()))
+                c["mid_turn_follow_up_refused"] += "refused" in follow_up
             if expected:
                 _count_arguments(turn, c)
                 c["tool_turns"] += 1
