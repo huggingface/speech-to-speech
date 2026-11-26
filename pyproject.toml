@@ -53,6 +53,7 @@ dependencies = [
     "torchaudio>=2.4.0; platform_system != 'Darwin'",
     "transformers==5.18.0; platform_system == 'Darwin'",
     "transformers>=5.18.0,<6; platform_system != 'Darwin'",
+    "tzdata>=2024.1; sys_platform == 'win32'",
     "uvicorn>=0.30.0",
     "websockets>=12.0",
     "nano-parakeet>=0.2.0; platform_system != 'Darwin'",
