@@ -38,10 +38,14 @@ mic ─▶ speech-to-speech backend: VAD + STT ─▶ LLM (the coach) ─▶ TTS
   `check_answer`; the browser runs the grader on your actual transcript and
   returns the verdict and what to say (a clue, or the result and the next
   question). A short "let's see", recorded once per session in the coach's
-  voice, plays while the grader works. In 44 scripted text turns (four quizzes)
-  on the dev stack's Gemma 4 31B, the coach picked the right tool, or none for
-  small talk and "repeat that", every time, leaked no answers, and read 16 of
-  16 next questions word for word. In one voice test it wrote a call out as
+  voice, plays while the grader works. The backend ends a turn at short
+  pauses, so an answer often arrives in pieces: the coach answers an
+  unfinished one with just "mm-hm", the pieces are graded together, and a
+  grade is dropped if the student starts talking again within 0.6 seconds.
+  In 68 scripted text turns (six quizzes) on the dev stack's Gemma 4 31B, the
+  coach picked the right tool, or none for small talk, "repeat that" and
+  trailing off, every time, leaked no answers, and read 24 of 24 next
+  questions word for word. In one voice test it wrote a call out as
   text instead; such a reply is cut from playback and history and retried
   with a tool call required.
 - **Brain**: `server.py` researches topics into eight spoken-friendly
@@ -106,6 +110,7 @@ regenerates the featured topics.
 | `GRADER_MODELS`, `WRITER_MODELS` | Comma-separated Inference Providers fallback chains (defaults: Qwen3.8-27B on Cerebras with reasoning off for grading, GLM-5.3 for writing; `model@effort` sets a model's reasoning effort) |
 | `COACH_VOICE` | Overrides the TTS voice (by default Max uses `en-arthur_m` and Ada `en-maya_f`, voices of the hosted stack; a Qwen3-TTS CustomVoice backend needs e.g. `Aiden` / `Serena`) |
 | `SERPER_API_KEY` | Adds Google results to research |
+| `LOG_TURNS` | `1` logs each graded turn (the student's words and the grader's decision) for debugging |
 | `GITHUB_TOKEN` | Optional, for reading GitHub repositories past the anonymous API limit (60 requests an hour per IP) |
 | `LEADERBOARD_REPO` | Dataset repo that mirrors the leaderboard so it survives restarts |
 | `RESEARCH_PER_HOUR` | New topics per visitor per hour (default 8) |

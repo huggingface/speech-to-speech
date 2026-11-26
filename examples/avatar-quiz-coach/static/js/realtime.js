@@ -69,6 +69,7 @@ export class RealtimeVoice extends EventTarget {
     /** @type {Map<string, (pcm: Int16Array | null) => void>} */
     this.captureWaiters = new Map();
     this.lastSpeechStart = 0;
+    this.speaking = false;
     /** Assistant message item of each response (for truncation). @type {Map<string, string>} */
     this.items = new Map();
     this.closed = false;
@@ -318,10 +319,10 @@ export class RealtimeVoice extends EventTarget {
     this.respond();
   }
 
-  /** @param {string} callId @param {string} output */
-  sendToolOutput(callId, output) {
+  /** @param {string} callId @param {string} output @param {boolean} [reply] ask the coach to speak about it */
+  sendToolOutput(callId, output, reply = true) {
     this.send({ type: "conversation.item.create", item: { type: "function_call_output", call_id: callId, output } });
-    this.respond();
+    if (reply) this.respond();
   }
 
   /** Cancel the reply being generated (the server does this itself on barge-in). */
@@ -344,9 +345,11 @@ export class RealtimeVoice extends EventTarget {
     switch (ev.type) {
       case "input_audio_buffer.speech_started":
         this.lastSpeechStart = performance.now();
+        this.speaking = true;
         this.emit("speech-started", {});
         break;
       case "input_audio_buffer.speech_stopped":
+        this.speaking = false;
         this.emit("speech-stopped", {});
         break;
       case "conversation.item.input_audio_transcription.delta":

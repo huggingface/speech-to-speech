@@ -40,6 +40,7 @@ const S = {
   lineText: new Map(),
   /** What the student said since the coach last spoke, graded when the coach calls check_answer. */
   heard: /** @type {string[]} */ ([]),
+  lastFinalAt: 0,
   /** Responses that called a tool, and ones that wrote a tool call as text instead. */
   toolResponses: new Set(),
   badResponses: new Set(),
@@ -585,8 +586,10 @@ function wireVoice(voice) {
       return;
     }
     // The coach replied without grading: what the student said before is
-    // answered; the next attempt starts fresh.
-    if (/** @type {any} */ (e).detail.status === "completed" && S.responseHadAudio && !S.toolResponses.has(id)) S.heard = [];
+    // answered and the next attempt starts fresh, unless the reply was just a
+    // "mm-hm" while they think out loud.
+    const said = (S.lineText.get(id) || "").trim().split(/\s+/).filter(Boolean).length;
+    if (/** @type {any} */ (e).detail.status === "completed" && S.responseHadAudio && !S.toolResponses.has(id) && said > 3) S.heard = [];
     if (S.phase === "quiz" && S.fillersFor !== voice) prepareFillers(voice);
     if (!S.responseHadAudio || !avatar.playing) scheduleCoachDone();
   });
@@ -626,6 +629,7 @@ function wireVoice(voice) {
     }
     // The coach decides what to do with it; grade it early in case it's an answer.
     S.retriedCall = false;
+    S.lastFinalAt = performance.now();
     S.heard.push(text);
     $("#answer-text").textContent = text;
     prefetchGrade(answerSoFar());
@@ -664,9 +668,9 @@ function maybeSpeculate() {
   prefetchGrade(answerSoFar(text));
 }
 
-/** The answer check_answer would grade: the student's last two utterances. @param {string} [pending] */
+/** The answer check_answer would grade: the student's last few utterances (an answer with pauses arrives in pieces). @param {string} [pending] */
 function answerSoFar(pending) {
-  return [...S.heard, ...(pending ? [pending] : [])].slice(-2).join(" ");
+  return [...S.heard, ...(pending ? [pending] : [])].slice(-3).join(" ");
 }
 
 /** @param {string} text */
@@ -881,6 +885,7 @@ async function doTurn(text, intent) {
 }
 
 const TOOL_INTENTS = { check_answer: null, give_hint: "hint", skip_question: "skip", end_quiz: "stop" };
+const SETTLE_MS = 600;
 
 /**
  * The coach called a grader tool: run it, update the screen, and hand the
@@ -898,6 +903,19 @@ function runTool(call) {
         return;
       }
       const intent = TOOL_INTENTS[/** @type {keyof typeof TOOL_INTENTS} */ (call.name)];
+      if (call.name === "check_answer") {
+        // The student may only have paused: if they start talking again within
+        // a moment, don't grade the fragment (it would cost them a try).
+        await sleep(SETTLE_MS);
+        if (voice.speaking || voice.lastSpeechStart > S.lastFinalAt) {
+          voice.sendToolOutput(
+            call.callId,
+            JSON.stringify({ status: "not graded: the student kept talking", next: "Let them finish; don't comment on this." }),
+            false,
+          );
+          return;
+        }
+      }
       // Grade the student's own words, not the coach's paraphrase of them.
       let transcript = "";
       if (call.name === "check_answer") {

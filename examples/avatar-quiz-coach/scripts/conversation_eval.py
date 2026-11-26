@@ -63,6 +63,7 @@ SCRIPT = [
     ("dunno", "I honestly have no idea.", "check_answer"),
     ("correct2", correct_answer, "check_answer"),
     ("smalltalk", "By the way, how's your day going?", None),
+    ("trailing", "Hmm, I think it's about the", None),
     ("stop", "Okay, I think I'll stop here for today.", "end_quiz"),
 ]
 

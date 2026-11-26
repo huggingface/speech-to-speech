@@ -56,6 +56,8 @@ LB_USER_TOKEN = os.environ.get("LB_USER_TOKEN", "").strip()
 RESEARCH_PER_HOUR = int(os.environ.get("RESEARCH_PER_HOUR", "8"))
 # Empty: each coach uses its own voice (Max: Aiden, Ada: Serena; see static/js/avatar.js).
 VOICE = os.environ.get("COACH_VOICE", "").strip()
+# Log each graded turn (what the student said and the grader's decision), for debugging.
+LOG_TURNS = os.environ.get("LOG_TURNS", "") == "1"
 
 app = FastAPI(title="Viva quiz coach")
 
@@ -372,6 +374,16 @@ async def turn(game_id: str, req: TurnRequest) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail="Empty answer.")
     async with game.lock:
         out = await game_mod.handle_turn(game, req.transcript or f"({req.intent})", req.intent)
+        if LOG_TURNS:
+            logger.info(
+                "turn %s q%d: %r -> %s/%s %r",
+                game_id[:6],
+                game.position,
+                req.transcript[:160],
+                out.get("intent"),
+                out.get("verdict"),
+                out.get("say", "")[:160],
+            )
         # For a tool call from the backend's LLM: its result, and the session
         # instructions updated to the new question state.
         out["voice"] = {"instructions": voice.instructions(game), "output": voice.tool_output(game, out)}
