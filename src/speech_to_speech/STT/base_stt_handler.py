@@ -118,10 +118,12 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
 
         is_partial = isinstance(output, PartialTranscription)
         gate_start = perf_counter()
-        if is_partial:
-            is_latest = self._is_latest_turn_item(output, wait_for_pending_reopen=True, wait_for_stability=False)
-        else:
-            is_latest = self._wait_for_final_output_gate(output)
+        is_latest = self._is_latest_turn_item(
+            output,
+            wait_for_pending_reopen=True,
+            wait_for_stability=False,
+            wait_for_smart_turn=not is_partial,
+        )
         gate_wait_s = perf_counter() - gate_start
         if is_latest and not is_partial and gate_wait_s >= self._GATE_WAIT_REPORT_S:
             self._record_vad_settle(output, gate_wait_s)
@@ -133,47 +135,31 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
             return False
         return True
 
-    def _wait_for_final_output_gate(self, output: STTOut) -> bool:
-        """Wait for any background Smart Turn decision and incomplete delay before emitting final STT."""
-        if self.speculative_turns is None:
-            return True
-        turn_id = getattr(output, "turn_id", None)
-        turn_revision = getattr(output, "turn_revision", None)
-        if turn_id is None or turn_revision is None:
-            return True
-        if not self.speculative_turns.wait_for_gate(
-            turn_id,
-            turn_revision,
-            hold_for_grace=False,
-            hold_for_smart_turn=True,
-        ):
-            return False
-        processing_deadline = self.speculative_turns.processing_deadline(turn_id, turn_revision)
-        if processing_deadline is None:
-            return True
-        remaining_delay_s = max(0.0, processing_deadline - monotonic())
-        if remaining_delay_s <= 0.0:
-            return True
-        wait_started_at_s = perf_counter()
-        is_latest = self.speculative_turns.wait_for_gate(
-            turn_id,
-            turn_revision,
-            hold_for_grace=False,
-            hold_until=processing_deadline,
-        )
-        store = getattr(self, "turn_latency_store", None)
-        if store is not None:
-            store.record_smart_wait(
-                turn_id,
-                turn_revision,
-                wait_started_at_s,
-                min(perf_counter(), wait_started_at_s + remaining_delay_s),
-            )
-        return is_latest
-
     def before_emit_output(self, output: STTOut) -> None:
         if isinstance(output, Transcription):
             self._mark_completed_final_revision(output)
+
+    def _wait_with_processing_delay(
+        self,
+        turn_id: str,
+        turn_revision: int,
+        delay_s: float,
+        min_hold_s: float = 0.0,
+    ) -> bool:
+        hold_s = max(min_hold_s, delay_s)
+        wait_started_at_s = perf_counter()
+        is_latest = self.speculative_turns.wait_for_gate(  # type: ignore[union-attr]
+            turn_id,
+            turn_revision,
+            hold_for_grace=False,
+            hold_until=monotonic() + hold_s if hold_s > 0 else None,
+        )
+        store = getattr(self, "turn_latency_store", None)
+        if store is not None and delay_s > 0:
+            store.record_smart_wait(
+                turn_id, turn_revision, wait_started_at_s, min(perf_counter(), wait_started_at_s + delay_s)
+            )
+        return is_latest
 
     def _is_latest_turn_item(
         self,
@@ -181,6 +167,7 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
         *,
         wait_for_pending_reopen: bool,
         wait_for_stability: bool,
+        wait_for_smart_turn: bool = False,
     ) -> bool:
         if self.speculative_turns is None:
             return True
@@ -189,39 +176,30 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
         if turn_id is None or turn_revision is None:
             return True
 
+        if wait_for_smart_turn:
+            if not self.speculative_turns.wait_for_gate(
+                turn_id, turn_revision, hold_for_grace=False, hold_for_smart_turn=True
+            ):
+                return False
+            deadline = self.speculative_turns.processing_deadline(turn_id, turn_revision)
+            delay_s = max(0.0, deadline - monotonic()) if deadline is not None else 0.0
+            return True if delay_s <= 0.0 else self._wait_with_processing_delay(turn_id, turn_revision, delay_s)
         if wait_for_stability:
             if self.speculative_turns.has_pending_smart_turn(turn_id, turn_revision):
                 # Smart Turn runs in parallel with STT; start transcription immediately
                 # and enforce any incomplete processing delay before emitting the final text.
                 hold_until = monotonic() + self.final_revision_settle_s if self.final_revision_settle_s > 0 else None
                 return self.speculative_turns.wait_for_gate(
-                    turn_id,
-                    turn_revision,
-                    hold_for_grace=False,
-                    hold_for_smart_turn=False,
-                    hold_until=hold_until,
+                    turn_id, turn_revision, hold_for_grace=False, hold_for_smart_turn=False, hold_until=hold_until
                 )
             item_delay_s = max(0.0, getattr(item, "processing_delay_s", 0.0) - self._item_age_s(item))
             processing_deadline = self.speculative_turns.processing_deadline(turn_id, turn_revision)
             if processing_deadline is not None:
                 item_delay_s = max(0.0, processing_deadline - monotonic())
-            wait_started_at_s = perf_counter()
-            is_latest = self.speculative_turns.wait_for_gate(
-                turn_id,
-                turn_revision,
-                hold_for_grace=False,
-                hold_until=monotonic() + max(self.final_revision_settle_s, item_delay_s),
-            )
-            store = getattr(self, "turn_latency_store", None)
-            if store is not None and item_delay_s > 0:
-                store.record_smart_wait(
-                    turn_id, turn_revision, wait_started_at_s, min(perf_counter(), wait_started_at_s + item_delay_s)
-                )
-        elif wait_for_pending_reopen:
-            is_latest = self.speculative_turns.wait_for_gate(turn_id, turn_revision, hold_for_grace=False)
-        else:
-            is_latest = self.speculative_turns.is_latest(turn_id, turn_revision)
-        return is_latest
+            return self._wait_with_processing_delay(turn_id, turn_revision, item_delay_s, self.final_revision_settle_s)
+        if wait_for_pending_reopen:
+            return self.speculative_turns.wait_for_gate(turn_id, turn_revision, hold_for_grace=False)
+        return self.speculative_turns.is_latest(turn_id, turn_revision)
 
     def _drop_stale_queued_inputs(self) -> int:
         if self.speculative_turns is None or not hasattr(self.queue_in, "mutex") or not hasattr(self.queue_in, "queue"):

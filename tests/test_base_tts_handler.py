@@ -111,7 +111,7 @@ def test_speculative_admit_and_commit_first_audio_during_reopen_grace() -> None:
     assert tracker.is_committed(turn_id, rev)
 
 
-def test_is_synthesis_cancelled_and_latency_timer_honor_speculative_reopen() -> None:
+def test_is_stale_and_latency_timer_honor_speculative_reopen() -> None:
     tracker = SpeculativeTurnTracker()
     turn_id, rev = tracker.start_turn()
     handler = _Handler(threading.Event(), queue.Queue(), queue.Queue())
@@ -122,12 +122,12 @@ def test_is_synthesis_cancelled_and_latency_timer_honor_speculative_reopen() -> 
     store.get_or_create_response("resp_1", turn_id=turn_id, turn_revision=rev)
 
     tts_input = TTSInput(text="hi", turn_id=turn_id, turn_revision=rev, response_key="resp_1")
-    gen = handler._effective_cancel_generation(tts_input)
+    gen = handler.cancel_scope.generation
     timer = handler._latency_timer(tts_input, gen)
-    assert not handler._is_synthesis_cancelled(tts_input, gen)
+    assert not handler._is_stale(gen, tts_input)
 
     reopen(tracker, turn_id, rev)
-    assert handler._is_synthesis_cancelled(tts_input, gen)
+    assert handler._is_stale(gen, tts_input)
 
     # Superseded speculative revision must not record tts_ttfa (would wrongly tag tts=cut).
     timer.first_provider_audio()

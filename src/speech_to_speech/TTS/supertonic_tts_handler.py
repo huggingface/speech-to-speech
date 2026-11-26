@@ -141,7 +141,7 @@ class SupertonicTTSHandler(BaseTTSHandler):
         if not self._admit_input(tts_input, commit=False, hold_for_grace=False):
             return
 
-        cancel_gen = self._effective_cancel_generation(tts_input)
+        cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
 
         text = tts_input.text
         if not text.strip():
@@ -158,11 +158,7 @@ class SupertonicTTSHandler(BaseTTSHandler):
         lang = self._resolve_language(language_code)
 
         # Synthesis start: after speculative gate / language resolve, before provider work.
-        timer = self._latency_timer(
-            tts_input,
-            cancel_gen,
-            also_cancelled=lambda: self._is_synthesis_cancelled(tts_input, cancel_gen),
-        )
+        timer = self._latency_timer(tts_input, cancel_gen)
         # Supertonic returns (1, num_samples) shaped array at 44.1kHz float32
         wav, _duration = self.tts.synthesize(
             text=text,
@@ -172,7 +168,7 @@ class SupertonicTTSHandler(BaseTTSHandler):
         )
 
         # If the user interrupted during the blocking synthesize(), drop the buffer.
-        if self._is_synthesis_cancelled(tts_input, cancel_gen):
+        if self._is_stale(cancel_gen):
             logger.info("Supertonic TTS output cancelled (interruption)")
             return
 
@@ -193,31 +189,25 @@ class SupertonicTTSHandler(BaseTTSHandler):
 
         # Convert to int16 format expected by the audio pipeline
         audio_int16 = np.clip(audio_16k_float * 32768, -32768, 32767).astype(np.int16)
-        committed = False
+        if not self._commit_first_audio(tts_input, generation=cancel_gen):
+            return
+        console.print(f"[green]ASSISTANT: {text}")
 
         def emit(block: np.ndarray) -> Iterator[TTSOut]:
-            nonlocal committed
-            if not committed:
-                if not self._commit_first_audio(tts_input):
-                    return
-                committed = True
-                console.print(f"[green]ASSISTANT: {text}")
             timer.first_yield()
             yield block
 
         # Yield in block-aligned chunks so the streamer can handle it smoothly
         n = (len(audio_int16) // self.blocksize) * self.blocksize
         for i in range(0, n, self.blocksize):
-            if self._is_synthesis_cancelled(tts_input, cancel_gen):
+            if self._is_stale(cancel_gen):
                 logger.info("Supertonic TTS output cancelled (interruption)")
                 return
             yield from emit(audio_int16[i : i + self.blocksize])
-            if not committed:
-                return
 
         # Pad the tail so the audio streamer's fixed-blocksize callback doesn't crash
         if n < len(audio_int16):
-            if self._is_synthesis_cancelled(tts_input, cancel_gen):
+            if self._is_stale(cancel_gen):
                 logger.info("Supertonic TTS output cancelled (interruption)")
                 return
             tail = audio_int16[n:]

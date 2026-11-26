@@ -142,10 +142,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
         if hold_for_grace and observe_wait:
             return self.speculative_turns.wait_for_gate(turn_id, turn_revision)
         return self.speculative_turns.wait_for_gate(
-            turn_id,
-            turn_revision,
-            hold_for_grace=hold_for_grace,
-            observe_wait=observe_wait,
+            turn_id, turn_revision, hold_for_grace=hold_for_grace, observe_wait=observe_wait
         )
 
     def process(self, lm_output: LLMOut) -> Iterator[TTSIn | PipelineEvent]:
@@ -254,15 +251,9 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 continue
             if isinstance(part, AssistantToolCallPart) and has_spoken_audio:
                 # Tool calls must never leave the processor before the reopen grace settles.
-                if not self._turn_output_allowed(
-                    lm_output.turn_id,
-                    lm_output.turn_revision,
-                    hold_for_grace=True,
-                ):
+                if not self._turn_output_allowed(lm_output.turn_id, lm_output.turn_revision):
                     logger.debug(
-                        "Dropping stale tool call chunk for turn=%s rev=%s",
-                        lm_output.turn_id,
-                        lm_output.turn_revision,
+                        "Dropping stale tool call chunk for turn=%s rev=%s", lm_output.turn_id, lm_output.turn_revision
                     )
                     return
             output_sequence = self._output_sequence

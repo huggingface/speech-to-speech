@@ -488,7 +488,10 @@ class SpeculativeTurnTracker:
         self._committed.add(self._current)
         self._phase = TurnPhase.ANSWERING
         self._processing_deadline = None
-        if self._smart_turn_matches_locked(turn_id, revision):
+        if self._pending_smart_turn is not None and (
+            self._pending_smart_turn.turn_id,
+            self._pending_smart_turn.revision,
+        ) == (turn_id, revision):
             self._pending_smart_turn = None
         if self._grace_matches_locked(turn_id, revision):
             self._reopen_grace = None
@@ -572,16 +575,11 @@ class SpeculativeTurnTracker:
             and pending.deadline > time.monotonic()
         )
 
-    def _smart_turn_matches_locked(self, turn_id: str, revision: int) -> bool:
-        pending = self._pending_smart_turn
-        return pending is not None and pending.turn_id == turn_id and pending.revision == revision
-
     def _smart_turn_holds_locked(self, turn_id: str, revision: int) -> bool:
         pending = self._pending_smart_turn
         return (
             pending is not None
-            and pending.turn_id == turn_id
-            and pending.revision == revision
+            and (pending.turn_id, pending.revision) == (turn_id, revision)
             and self._is_current_locked(turn_id, revision)
             and pending.deadline > time.monotonic()
         )

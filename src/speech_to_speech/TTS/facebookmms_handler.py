@@ -148,7 +148,7 @@ class FacebookMMSTTSHandler(BaseTTSHandler):
         if not self._admit_input(tts_input, commit=False, hold_for_grace=False):
             return
 
-        gen = self._effective_cancel_generation(tts_input)
+        gen = self.cancel_scope.generation if self.cancel_scope else None
         language_code = tts_input.tts_language_code
         selected = tts_input.selected_language
         if selected not in (None, "auto") and language_code not in WHISPER_LANGUAGE_TO_FACEBOOK_LANGUAGE:
@@ -158,7 +158,6 @@ class FacebookMMSTTSHandler(BaseTTSHandler):
         if language_code is None and runtime_config is not None and tts_input.selected_language == "auto":
             language_code = self._initial_language
         text = tts_input.text
-
         logger.debug("Processing text: %s", transcript_for_log(text))
         logger.debug(f"Language code: {language_code}")
 
@@ -179,16 +178,8 @@ class FacebookMMSTTSHandler(BaseTTSHandler):
                 logger.warning(f"Unsupported language: {language_code}")
 
         # Synthesis start: after any language model reload, before provider work.
-        timer = self._latency_timer(
-            tts_input,
-            gen,
-            also_cancelled=lambda: self._is_synthesis_cancelled(tts_input, gen),
-        )
+        timer = self._latency_timer(tts_input, gen)
         audio_output = self.generate_audio(text)
-
-        if self._is_synthesis_cancelled(tts_input, gen):
-            logger.info("TTS generation cancelled (interruption)")
-            return
 
         if audio_output is None or audio_output.numel() == 0:
             logger.warning("No audio output generated")
@@ -211,17 +202,14 @@ class FacebookMMSTTSHandler(BaseTTSHandler):
 
         audio_int16 = np.clip(audio_resampled * 32768, -32768, 32767).astype(np.int16)
         logger.debug(f"Final audio shape: {audio_int16.shape}, dtype: {audio_int16.dtype}")
-        committed = False
+        if not self._commit_first_audio(tts_input, generation=gen):
+            return
+        console.print(f"[green]ASSISTANT: {text}")
 
         for i in range(0, len(audio_int16), self.chunk_size):
-            if self._is_synthesis_cancelled(tts_input, gen):
+            if self._is_stale(gen):
                 logger.info("TTS generation cancelled (interruption)")
                 return
-            if not committed:
-                if not self._commit_first_audio(tts_input):
-                    return
-                committed = True
-                console.print(f"[green]ASSISTANT: {text}")
             chunk = audio_int16[i : i + self.chunk_size]
             block = np.pad(chunk, (0, self.chunk_size - len(chunk)))
             timer.first_yield()

@@ -124,27 +124,18 @@ class KittenTTSHandler(BaseTTSHandler):
         text = tts_input.text
         if not text.strip():
             return
-        cancel_gen = self._effective_cancel_generation(tts_input)
+        cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
         voice = self._resolve_voice(tts_input)
         logger.debug("KittenTTS synthesizing: %s", transcript_for_log(text))
 
         # Synthesis start: after speculative gate / voice resolve, before provider work.
-        timer = self._latency_timer(
+        timer = self._latency_timer(tts_input, cancel_gen)
+        emit = self._first_audio_emitter(
             tts_input,
+            timer,
             cancel_gen,
-            also_cancelled=lambda: self._is_synthesis_cancelled(tts_input, cancel_gen),
+            on_first=lambda: console.print(f"[green]ASSISTANT: {text}"),
         )
-        committed = False
-
-        def emit(block: np.ndarray) -> Iterator[TTSOut]:
-            nonlocal committed
-            if not committed:
-                if not self._commit_first_audio(tts_input):
-                    return
-                committed = True
-                console.print(f"[green]ASSISTANT: {text}")
-            timer.first_yield()
-            yield block
 
         # One input can hold several sentences, each a blocking model call. Deliver
         # each chunk before synthesizing the next so the first one is not held back
@@ -153,7 +144,7 @@ class KittenTTSHandler(BaseTTSHandler):
         carry = np.zeros(0, dtype=np.int16)
         for waveform in self._generate_chunks(text=text, voice=voice):
             generated_at_s = perf_counter()
-            if self._is_synthesis_cancelled(tts_input, cancel_gen):
+            if self._is_stale(cancel_gen):
                 return
             audio = np.asarray(waveform, dtype=np.float32).reshape(-1)
             if audio.size == 0:
@@ -167,16 +158,14 @@ class KittenTTSHandler(BaseTTSHandler):
             audio_int16 = np.concatenate([carry, np.clip(audio * 32768, -32768, 32767).astype(np.int16)])
             n = (len(audio_int16) // self.blocksize) * self.blocksize
             for i in range(0, n, self.blocksize):
-                if self._is_synthesis_cancelled(tts_input, cancel_gen):
+                if self._is_stale(cancel_gen):
                     return
                 yield from emit(audio_int16[i : i + self.blocksize])
-                if not committed:
-                    return
             carry = audio_int16[n:]
             # Advancing the generator starts the next blocking model call.
-            if self._is_synthesis_cancelled(tts_input, cancel_gen):
+            if self._is_stale(cancel_gen):
                 return
         if len(carry):
-            if self._is_synthesis_cancelled(tts_input, cancel_gen):
+            if self._is_stale(cancel_gen):
                 return
             yield from emit(np.pad(carry, (0, self.blocksize - len(carry))))

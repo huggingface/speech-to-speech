@@ -107,9 +107,6 @@ class Qwen3TTSHandler(BaseTTSHandler):
       - Voice design (instruct prompt)
     """
 
-    _active_tts_input: TTSInput | None = None
-    _active_cancel_gen: int | None = None
-
     def setup(
         self,
         should_listen: Event,
@@ -700,26 +697,9 @@ class Qwen3TTSHandler(BaseTTSHandler):
         gen: Any,
         label: str,
         timer: TTSResponseTimer | None = None,
-        *,
-        tts_input: TTSInput | None = None,
-        cancel_gen: int | None = None,
     ) -> Iterator[bytes | np.ndarray]:
         """Common streaming loop: log TTFA and RTF, yield int16 chunks."""
-        if tts_input is None:
-            tts_input = getattr(self, "_active_tts_input", None)
-        if cancel_gen is None:
-            cancel_gen = getattr(self, "_active_cancel_gen", None)
-        if cancel_gen is None:
-            if tts_input is not None:
-                cancel_gen = self._effective_cancel_generation(tts_input)
-            else:
-                cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
-
-        def _cancelled() -> bool:
-            if tts_input is not None:
-                return self._is_synthesis_cancelled(tts_input, cancel_gen)
-            return self._is_stale(cancel_gen)
-
+        cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
         start = perf_counter()
         if timer is not None:
             # Measure from here, after any MLX lock wait, so ``tts_ttfa`` matches the logged TTFA.
@@ -731,7 +711,7 @@ class Qwen3TTSHandler(BaseTTSHandler):
         resampler: StreamingPcm16Resampler | None = None
 
         for item in gen:
-            if _cancelled():
+            if self._is_stale(cancel_gen):
                 logger.info("TTS generation cancelled (interruption)")
                 return
 
@@ -764,22 +744,22 @@ class Qwen3TTSHandler(BaseTTSHandler):
                 found_speech = True
 
             for block in blocks.push(audio_chunk):
-                if _cancelled():
+                if self._is_stale(cancel_gen):
                     return
                 yield block
                 total_samples += len(block)
 
-        if _cancelled():
+        if self._is_stale(cancel_gen):
             return
         if resampler is not None and found_speech:
             tail = np.frombuffer(resampler.flush(), dtype=np.int16)
             for block in blocks.push(tail):
-                if _cancelled():
+                if self._is_stale(cancel_gen):
                     return
                 yield block
                 total_samples += len(block)
         for block in blocks.flush():
-            if _cancelled():
+            if self._is_stale(cancel_gen):
                 return
             yield block
             total_samples += len(block)
@@ -877,10 +857,8 @@ class Qwen3TTSHandler(BaseTTSHandler):
         logger.info("Qwen3-TTS language=%s (input_code=%s)", request_language, language_code)
         store = getattr(self, "turn_latency_store", None)
         tracker = store.get_response(tts_input.response_key) if store else None
-        cancel_gen = self._effective_cancel_generation(tts_input)
+        cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
         timer = self._latency_timer(tts_input, cancel_gen)
-        self._active_tts_input = tts_input
-        self._active_cancel_gen = cancel_gen
         try:
             with bind_active_turn_latency_tracker(tracker):
                 if self._has_voice_clone_reference():
@@ -897,9 +875,7 @@ class Qwen3TTSHandler(BaseTTSHandler):
                 first_audio = True
                 for audio_chunk in audio_iter:
                     if first_audio:
-                        if not self._commit_first_audio(tts_input):
-                            return
-                        if self._is_synthesis_cancelled(tts_input, cancel_gen):
+                        if not self._commit_first_audio(tts_input, generation=cancel_gen):
                             return
                         console.print(f"[green]ASSISTANT: {text}")
                         self._log_first_audio_latency(tts_input, timer)
@@ -907,9 +883,6 @@ class Qwen3TTSHandler(BaseTTSHandler):
                     yield audio_chunk
         except Exception as exc:
             log_exception(logger, "Error during Qwen3-TTS generation", exc)
-        finally:
-            self._active_tts_input = None
-            self._active_cancel_gen = None
 
     def _log_first_audio_latency(self, tts_input: TTSInput, timer: TTSResponseTimer) -> None:
         elapsed_s = timer.speech_stop_elapsed_s()

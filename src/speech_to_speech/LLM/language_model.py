@@ -229,11 +229,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         return self.speculative_turns is None or self.speculative_turns.is_latest(turn_id, turn_revision)
 
     def _turn_output_allowed(
-        self,
-        turn_id: str | None,
-        turn_revision: int | None,
-        *,
-        hold_for_grace: bool = True,
+        self, turn_id: str | None, turn_revision: int | None, *, hold_for_grace: bool = True
     ) -> bool:
         if self.speculative_turns is None:
             return True
@@ -585,11 +581,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 runtime_config,
                 response,
             )
-            if chunks and not self._turn_output_allowed(
-                ctx.turn_id,
-                ctx.turn_revision,
-                hold_for_grace=not wants_audio,
-            ):
+            if chunks and not self._turn_output_allowed(ctx.turn_id, ctx.turn_revision, hold_for_grace=not wants_audio):
                 ctx.cancelled = True
                 logger.info("LLM generation cancelled (stale speculative turn)")
                 break
@@ -612,11 +604,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 leftover = ctx.printable_text.strip()
                 ctx.sentence_batch.append(remove_markdown(leftover) if wants_audio else leftover)
                 ctx.printable_text = ""
-            if not self._turn_output_allowed(
-                ctx.turn_id,
-                ctx.turn_revision,
-                hold_for_grace=not wants_audio,
-            ):
+            if not self._turn_output_allowed(ctx.turn_id, ctx.turn_revision, hold_for_grace=not wants_audio):
                 ctx.cancelled = True
                 logger.info("LLM generation cancelled (stale speculative turn)")
                 return
@@ -742,9 +730,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 return
 
             turn_output_allowed = not ctx.cancelled and self._turn_output_allowed(
-                ctx.turn_id,
-                ctx.turn_revision,
-                hold_for_grace=not response_wants_audio(response),
+                ctx.turn_id, ctx.turn_revision, hold_for_grace=not response_wants_audio(response)
             )
             # Out-of-band responses still emit output, but never write back to the default
             # conversation (their context was a throwaway chat).

@@ -207,7 +207,9 @@ class PhononTTSHandler(BaseTTSHandler):
 
         if not self._admit_input(tts_input, commit=False, hold_for_grace=False):
             return
-        generation = self._effective_cancel_generation(tts_input)
+        generation = tts_input.cancel_generation
+        if generation is None and self.cancel_scope is not None:
+            generation = self.cancel_scope.generation
         if (
             identity in self._failed_responses
             or not tts_input.text.strip()
@@ -241,20 +243,15 @@ class PhononTTSHandler(BaseTTSHandler):
         voice = self._resolve_voice(tts_input)
         timer = self._latency_timer(tts_input, also_cancelled=lambda: self._is_cancelled(generation, tts_input))
         first_audio = True
-        committed = False
         pcm_blocks = PCMBlockBuffer(self.blocksize)
         tail_ms = self.max_trailing_silence_ms
         trimmer = _TrailingSilenceTrimmer(PIPELINE_SAMPLE_RATE, tail_ms) if tail_ms is not None else None
-
-        def emit(block: np.ndarray) -> Iterator[np.ndarray]:
-            nonlocal committed
-            if not committed:
-                if not self._commit_first_audio(tts_input):
-                    return
-                committed = True
-                console.print(f"[green]ASSISTANT: {tts_input.text}")
-            timer.first_yield()
-            yield block
+        emit = self._first_audio_emitter(
+            tts_input,
+            timer,
+            generation,
+            on_first=lambda: console.print(f"[green]ASSISTANT: {tts_input.text}"),
+        )
 
         # Closing the context on cancellation, exceptions, or generator.close()
         # stops native generation and joins its worker threads.
@@ -272,8 +269,6 @@ class PhononTTSHandler(BaseTTSHandler):
                     if self._is_cancelled(generation, tts_input):
                         return
                     yield from emit(block)
-                    if not committed:
-                        return
 
             def trimmed_blocks(samples: np.ndarray) -> Iterator[np.ndarray]:
                 if trimmer is None:
@@ -281,8 +276,6 @@ class PhononTTSHandler(BaseTTSHandler):
                     return
                 for retained in trimmer.push(samples):
                     yield from blocks(retained)
-                    if not committed and self._is_cancelled(generation, tts_input):
-                        return
 
             for chunk in audio:
                 if self._is_cancelled(generation, tts_input):
@@ -302,16 +295,10 @@ class PhononTTSHandler(BaseTTSHandler):
                 raise RuntimeError("Phonon returned no audio")
             if resampler is not None:
                 yield from trimmed_blocks(resampler.resample_chunk(np.empty(0, dtype=np.float32), last=True))
-                if self._is_cancelled(generation, tts_input):
-                    return
             if trimmer is not None:
                 for retained in trimmer.finish():
                     yield from blocks(retained)
-                    if self._is_cancelled(generation, tts_input):
-                        return
             for block in pcm_blocks.flush():
                 if self._is_cancelled(generation, tts_input):
                     return
                 yield from emit(block)
-                if not committed:
-                    return
