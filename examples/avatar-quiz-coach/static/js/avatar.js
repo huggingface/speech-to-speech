@@ -44,6 +44,10 @@ export class Avatar extends EventTarget {
     this.voiceDelay = null;
     /** @type {number[]} */
     this.lineTimers = [];
+    /** @type {AnalyserNode | null} */
+    this.outTap = null;
+    /** @type {Float32Array | null} */
+    this.outBuf = null;
     /** Audible start (ms, avatar clock) of each response's audio. @type {Map<string, number>} */
     this.lineStarts = new Map();
   }
@@ -133,6 +137,9 @@ export class Avatar extends EventTarget {
     head.audioSpeechGainNode.disconnect(head.audioReverbNode);
     head.audioSpeechGainNode.connect(this.voiceDelay);
     this.voiceDelay.connect(head.audioReverbNode);
+    this.outTap = head.audioCtx.createAnalyser();
+    this.outTap.fftSize = 1024;
+    this.voiceDelay.connect(this.outTap);
   }
 
   /**
@@ -252,6 +259,17 @@ export class Avatar extends EventTarget {
   /** The reply's audio is complete; let the player end when it drains. */
   endResponse() {
     this.head?.streamNotifyEnd();
+  }
+
+  /** Loudness (RMS) of the voice being played right now, for the mic's echo gate. */
+  outputLevel() {
+    const tap = this.outTap;
+    if (!tap) return 0;
+    const buf = this.outBuf || (this.outBuf = new Float32Array(tap.fftSize));
+    tap.getFloatTimeDomainData(buf);
+    let e = 0;
+    for (let i = 0; i < buf.length; i++) e += buf[i] * buf[i];
+    return Math.sqrt(e / buf.length);
   }
 
   /**

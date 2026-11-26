@@ -33,7 +33,12 @@ mic ─▶ speech-to-speech backend: VAD + STT ─▶ LLM (the coach) ─▶ TTS
   whose LLM is the coach: it answers on its own after each turn, chats,
   repeats or explains a question, and stops when you talk over it (server VAD
   with `interrupt_response`; the browser flushes its audio and truncates the
-  reply to what you heard). Session instructions (`coach/voice.py`) carry the
+  reply to what you heard). The voice plays through Web Audio, which the
+  browser's echo canceller doesn't hear, so during the coach's first two
+  seconds of speech the mic is muted and its level is compared with the
+  coach's: on headphones barge-in turns on; if the mic tracks the coach's
+  voice (loudspeakers), the coach stops listening while it talks instead of
+  answering itself. Session instructions (`coach/voice.py`) carry the
   quiz state but never the answers. When you attempt one, the LLM calls
   `check_answer`; the browser runs the grader on your actual transcript and
   returns the verdict and what to say (a clue, or the result and the next

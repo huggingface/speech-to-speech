@@ -69,6 +69,8 @@ export class RealtimeVoice extends EventTarget {
     /** @type {Map<string, (pcm: Int16Array | null) => void>} */
     this.captureWaiters = new Map();
     this.lastSpeechStart = 0;
+    /** What the response.create in flight was for, to retry it right if the server refuses it. @type {{ instructions?: string, extra?: any, capture?: string } | null} */
+    this.pendingCreate = null;
     this.speaking = false;
     /** Assistant message item of each response (for truncation). @type {Map<string, string>} */
     this.items = new Map();
@@ -247,7 +249,7 @@ export class RealtimeVoice extends EventTarget {
       const { pcm, rms } = e.data || {};
       if (pcm) {
         this.send({ type: "input_audio_buffer.append", audio: toBase64(new Uint8Array(pcm)) });
-        this.emit("mic-level", { rms: this.muted ? 0 : rms });
+        this.emit("mic-level", { rms: this.muted ? 0 : rms, raw: rms });
       }
     };
     this.ctx.createMediaStreamSource(stream).connect(node);
@@ -274,6 +276,7 @@ export class RealtimeVoice extends EventTarget {
       return;
     }
     this.awaitingCreate = true;
+    this.pendingCreate = { instructions, extra };
     this.send({ type: "response.create", response: { ...(instructions ? { instructions } : {}), ...extra } });
   }
 
@@ -286,6 +289,7 @@ export class RealtimeVoice extends EventTarget {
     if (this.busy || this.captureWaiters.size) return Promise.resolve(null);
     const key = `l${Math.random().toString(36).slice(2, 8)}`;
     this.awaitingCreate = true;
+    this.pendingCreate = { capture: key };
     this.send({
       type: "response.create",
       response: {
@@ -302,6 +306,11 @@ export class RealtimeVoice extends EventTarget {
         if (this.captureWaiters.delete(key)) resolve(null);
       }, 15000);
     });
+  }
+
+  /** Remove a user item (e.g. the coach's own voice picked up by the mic). @param {string} itemId */
+  deleteItemId(itemId) {
+    if (itemId) this.send({ type: "conversation.item.delete", item_id: itemId });
   }
 
   /** Remove a reply from the conversation history. @param {string} responseId */
@@ -363,6 +372,7 @@ export class RealtimeVoice extends EventTarget {
         break;
       case "response.created": {
         this.awaitingCreate = false;
+        this.pendingCreate = null;
         this.activeResponse = ev.response?.id || "resp";
         const key = ev.response?.metadata?.viva_capture;
         if (key) {
@@ -435,9 +445,21 @@ export class RealtimeVoice extends EventTarget {
         const code = err.code || err.type;
         console.warn("[voice] server error", err);
         if (code === "conversation_already_has_active_response") {
-          // Our response.create raced one the server started: try again after it.
+          // Our response.create raced one the server started (the student
+          // spoke). A recording is simply skipped (re-sent as a plain reply,
+          // with no new input, the model would carry on talking, even as the
+          // student); a reply we asked for (a tool result to announce) goes
+          // out after it, unless the student's new turn covers it.
+          const failed = this.pendingCreate;
           this.awaitingCreate = false;
-          this.wanted = this.wanted || { at: performance.now() };
+          this.pendingCreate = null;
+          if (failed?.capture) {
+            const done = this.captureWaiters.get(failed.capture);
+            this.captureWaiters.delete(failed.capture);
+            done?.(null);
+          } else if (failed) {
+            this.wanted = this.wanted || { instructions: failed.instructions, extra: failed.extra, at: performance.now() };
+          }
           break;
         }
         this.awaitingCreate = false;

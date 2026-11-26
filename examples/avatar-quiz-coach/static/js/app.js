@@ -45,6 +45,12 @@ const S = {
   toolResponses: new Set(),
   badResponses: new Set(),
   retriedCall: false,
+  /** What the coach said lately (to spot its own voice coming back through the mic). @type {{ t: number, text: string }[]} */
+  coachSaid: [],
+  /** Responses to drop: the backend answering the coach's own echo. */
+  dropped: new Set(),
+  echoAt: 0,
+  overCoach: false,
   /** Short fillers in the coach's voice, played while the grader works. @type {Int16Array[]} */
   fillers: [],
   /** @type {RealtimeVoice | null} */ fillersFor: null,
@@ -64,6 +70,8 @@ const S = {
   /** @type {RealtimeVoice | null} */ voice: null,
   voiceOk: false,
   bargeIn: store.get("bargein", "1") === "1",
+  /** Barge-in once the echo check says the mic doesn't hear the coach. @type {"probe" | "full" | "half"} */
+  duplex: "probe",
   coachTalking: false,
   responseActive: false,
   responseHadAudio: false,
@@ -504,6 +512,7 @@ function fakeMic(ctx) {
   const dest = ctx.createMediaStreamDestination();
   Object.assign(window, {
     vivaFakeMic: {
+      dest,
       async play(/** @type {string} */ url) {
         const buf = await ctx.decodeAudioData(await (await fetch(url)).arrayBuffer());
         const src = ctx.createBufferSource();
@@ -529,6 +538,13 @@ function wireVoice(voice) {
   voice.addEventListener("queue", (e) => setVoiceLine(`Waiting for a voice server… #${/** @type {any} */ (e).detail.position} in line`, ""));
   voice.addEventListener("response-started", (e) => {
     const id = /** @type {any} */ (e).detail.responseId;
+    if (S.echoAt && performance.now() - S.echoAt < 3000) {
+      // The backend is answering the coach's own echo: drop the reply.
+      S.dropped.add(id);
+      S.echoAt = 0;
+      voice.cancel();
+      return;
+    }
     S.responseActive = true;
     S.responseHadAudio = false;
     avatar.beginResponse(id);
@@ -551,6 +567,10 @@ function wireVoice(voice) {
   });
   voice.addEventListener("tool-call", (e) => {
     const d = /** @type {any} */ (e).detail;
+    if (S.dropped.has(d.responseId)) {
+      voice.sendToolOutput(d.callId, JSON.stringify({ status: "ignored: that was your own voice picked up by the microphone" }), false);
+      return;
+    }
     S.toolResponses.add(d.responseId);
     // Grading takes a moment: say "let's see" right away if the coach hasn't spoken.
     if (d.name === "check_answer" && !S.responseHadAudio && !avatar.playing) playFiller();
@@ -562,12 +582,17 @@ function wireVoice(voice) {
   });
   voice.addEventListener("audio", (e) => {
     const d = /** @type {any} */ (e).detail;
+    if (S.dropped.has(d.responseId)) return;
     if (!S.responseHadAudio) setCoachTalking(true);
     S.responseHadAudio = true;
     S.lineAudio.set(d.responseId, (S.lineAudio.get(d.responseId) || 0) + d.pcm.length / d.rate);
     avatar.feed(d.responseId, d.pcm);
   });
   voice.addEventListener("response-done", (e) => {
+    if (S.dropped.has(/** @type {any} */ (e).detail.responseId)) {
+      voice.deleteItem(/** @type {any} */ (e).detail.responseId);
+      return;
+    }
     S.responseActive = false;
     avatar.endResponse();
     // Now the line's length in seconds is known: pace its subtitles to it.
@@ -575,6 +600,8 @@ function wireVoice(voice) {
     S.lineDone.add(id);
     const secs = S.lineAudio.get(id) || 0;
     if (id === SUB.id && secs > 0.5) SUB.cps = SUB.total / secs;
+    const spoken = S.lineText.get(id);
+    if (spoken) S.coachSaid = [...S.coachSaid.filter((x) => performance.now() - x.t < 30000), { t: performance.now(), text: spoken }];
     if (S.badResponses.has(id) && !S.toolResponses.has(id)) {
       // Drop the garbled reply from history (the model would copy it) and ask
       // again with a tool call required, once per student turn.
@@ -601,7 +628,10 @@ function wireVoice(voice) {
     if (!(/** @type {any} */ (e).detail.playing) && !S.responseActive) scheduleCoachDone();
   });
   voice.addEventListener("speech-started", () => {
-    if (S.coachTalking && S.bargeIn) bargeIn();
+    // Echo only happens while the coach is talking; an answer that repeats the
+    // question's words after it finished must not be mistaken for it.
+    S.overCoach = S.coachTalking;
+    if (S.coachTalking && canBargeIn()) bargeIn();
     if (S.phase !== "quiz") return;
     S.partial = "";
     if ($("#verdict").classList.contains("previous")) hideVerdict();
@@ -623,6 +653,19 @@ function wireVoice(voice) {
     S.snap.text = "";
     S.snap.sent = "";
     const text = /** @type {any} */ (e).detail.transcript;
+    if (S.overCoach && isEcho(text)) {
+      // The mic picked up the coach itself: forget it, and the reply to it.
+      console.warn("[voice] ignoring the coach's own voice:", text);
+      voice.deleteItemId(/** @type {any} */ (e).detail.itemId);
+      S.echoAt = performance.now();
+      if (voice.busy) voice.cancel();
+      if (S.duplex !== "half") {
+        setDuplex("half");
+        toast(`${S.coach.name} can hear itself through your speakers, so it won't listen while it talks. Use headphones to be able to interrupt.`, "info");
+      }
+      if (S.phase === "quiz") setMicIdle();
+      return;
+    }
     if (S.phase !== "quiz" || !text) {
       if (S.phase === "quiz") setMicIdle();
       return;
@@ -637,6 +680,7 @@ function wireVoice(voice) {
   });
   voice.addEventListener("mic-level", (e) => {
     const rms = /** @type {any} */ (e).detail.rms;
+    probeEcho(/** @type {any} */ (e).detail.raw);
     if (rms > 0.02) S.snap.lastLoud = performance.now();
     else if (S.snap.text) maybeSpeculate();
     $("#mic-ring").style.setProperty("--lvl", String(0.9 + Math.min(0.3, rms * 4)));
@@ -681,6 +725,87 @@ function prefetchGrade(text) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ transcript: text }),
   }).catch(() => {});
+}
+
+/**
+ * Echo check. The coach's voice plays through Web Audio, which the browser's
+ * echo canceller doesn't see, so on loudspeakers the mic hears the coach and
+ * would interrupt it. Until this check is done, the mic is muted while the
+ * coach talks; meanwhile its level is compared with the coach's: a quiet mic
+ * (headphones) or one that doesn't follow the coach's voice turns barge-in
+ * on, one that tracks it (echo) keeps the mic muted while the coach talks.
+ */
+const PROBE = { mic: /** @type {number[]} */ ([]), play: /** @type {number[]} */ ([]) };
+const PROBE_CHUNKS = 50; // 2 s of the coach talking
+
+/** @param {number} micRms */
+function probeEcho(micRms) {
+  if (S.duplex !== "probe" || !S.coachTalking) return;
+  const play = S.avatar?.outputLevel ? S.avatar.outputLevel() : 0;
+  PROBE.mic.push(micRms);
+  PROBE.play.push(play);
+  const audible = PROBE.play.filter((x) => x > 0.01).length;
+  if (audible < PROBE_CHUNKS) return;
+  const micMean = PROBE.mic.reduce((a, x) => a + x, 0) / PROBE.mic.length;
+  let corr = 0;
+  if (micMean >= 0.006) {
+    // Best correlation of the two loudness envelopes, mic 0-240 ms behind.
+    for (let lag = 0; lag <= 6; lag++) corr = Math.max(corr, pearson(PROBE.mic.slice(lag), PROBE.play.slice(0, PROBE.play.length - lag)));
+  }
+  const echo = micMean >= 0.006 && corr > 0.5;
+  console.info(`[voice] echo check: mic ${micMean.toFixed(4)}, correlation ${corr.toFixed(2)} -> ${echo ? "echo" : "clear"}`);
+  setDuplex(echo ? "half" : "full");
+  if (echo) toast(`${S.coach.name} can hear itself through your speakers, so it won't listen while it talks. Use headphones to be able to interrupt.`, "info");
+}
+
+/** @param {number[]} a @param {number[]} b */
+function pearson(a, b) {
+  const n = Math.min(a.length, b.length);
+  if (n < 10) return 0;
+  const ma = a.slice(0, n).reduce((x, y) => x + y, 0) / n;
+  const mb = b.slice(0, n).reduce((x, y) => x + y, 0) / n;
+  let sab = 0;
+  let sa = 0;
+  let sb = 0;
+  for (let i = 0; i < n; i++) {
+    sab += (a[i] - ma) * (b[i] - mb);
+    sa += (a[i] - ma) ** 2;
+    sb += (b[i] - mb) ** 2;
+  }
+  return sa && sb ? sab / Math.sqrt(sa * sb) : 0;
+}
+
+/** @param {"probe" | "full" | "half"} mode */
+function setDuplex(mode) {
+  S.duplex = mode;
+  PROBE.mic = [];
+  PROBE.play = [];
+  applyMicGate();
+  if (S.coachTalking && S.phase === "quiz") setCoachTalking(true);
+}
+
+/** @param {string} text */
+const wordsOf = (text) => text.toLowerCase().replace(/[^a-z0-9' ]+/g, " ").split(/\s+/).filter(Boolean);
+
+/**
+ * A transcript that repeats, in order, mostly words the coach just said is the
+ * coach's own voice coming back through the mic, not the student.
+ * @param {string} text
+ */
+function isEcho(text) {
+  const said = wordsOf(text);
+  if (said.length < 3) return false;
+  const now = performance.now();
+  const coach = wordsOf(S.coachSaid.filter((x) => now - x.t < 30000).map((x) => x.text).join(" ") + " " + (S.lineText.get(SUB.id) || ""));
+  if (!coach.length) return false;
+  // Longest common subsequence of words, relative to the transcript.
+  let prev = new Array(coach.length + 1).fill(0);
+  for (const w of said) {
+    const cur = [0];
+    for (let j = 1; j <= coach.length; j++) cur[j] = w === coach[j - 1] ? prev[j - 1] + 1 : Math.max(prev[j], cur[j - 1]);
+    prev = cur;
+  }
+  return prev[coach.length] / said.length >= 0.75;
 }
 
 // A tool call the model wrote out as text instead of calling it.
@@ -738,7 +863,7 @@ function setCoachTalking(on) {
   S.coachTalking = on;
   applyMicGate();
   if (S.phase !== "quiz") return;
-  if (on) setMic("speaking", `${S.coach.name} is talking`, S.bargeIn ? "Talk over to interrupt" : "Your turn is next");
+  if (on) setMic("speaking", `${S.coach.name} is talking`, canBargeIn() ? "Talk over to interrupt" : "Your turn is next");
   else setMicIdle();
 }
 
@@ -748,8 +873,10 @@ function setMicIdle() {
 }
 
 function applyMicGate() {
-  S.voice?.setMuted(S.coachTalking && !S.bargeIn);
+  S.voice?.setMuted(S.coachTalking && !(S.bargeIn && S.duplex === "full"));
 }
+
+const canBargeIn = () => S.bargeIn && S.duplex === "full";
 
 /** @param {string} state @param {string} title @param {string} sub */
 function setMic(state, title, sub) {

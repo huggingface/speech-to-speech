@@ -116,6 +116,10 @@ export class SplatAvatar extends EventTarget {
     this.stoppedAt = 0;
     /** @type {number[]} */
     this.lineTimers = [];
+    /** @type {AnalyserNode | null} */
+    this.outTap = null;
+    /** @type {Float32Array | null} */
+    this.outBuf = null;
     /** Audible start (ms, avatar clock) of each response's audio. @type {Map<string, number>} */
     this.lineStarts = new Map();
     // Face state
@@ -187,6 +191,9 @@ export class SplatAvatar extends EventTarget {
     // goes through a delay that is switched on only when HeadAudio drives.
     this.voiceDelay = ctx.createDelay(0.5);
     voice.connect(this.voiceDelay).connect(ctx.destination);
+    this.outTap = ctx.createAnalyser();
+    this.outTap.fftSize = 1024;
+    this.voiceDelay.connect(this.outTap);
     this.upsampler = new Upsampler(this.inRate, ctx.sampleRate);
     try {
       await ctx.audioWorklet.addModule("vendor/headaudio/headworklet.min.mjs");
@@ -290,6 +297,17 @@ export class SplatAvatar extends EventTarget {
 
   endResponse() {
     this.player?.port.postMessage({ type: "no-more-data" });
+  }
+
+  /** Loudness (RMS) of the voice being played right now, for the mic's echo gate. */
+  outputLevel() {
+    const tap = this.outTap;
+    if (!tap) return 0;
+    const buf = this.outBuf || (this.outBuf = new Float32Array(tap.fftSize));
+    tap.getFloatTimeDomainData(buf);
+    let e = 0;
+    for (let i = 0; i < buf.length; i++) e += buf[i] * buf[i];
+    return Math.sqrt(e / buf.length);
   }
 
   /**
