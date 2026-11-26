@@ -1515,3 +1515,68 @@ def test_openai_tts_cancellation_unblocks_a_stalled_socket_and_session_end(monke
         release_server.set()
         listener.close()
         server_thread.join(timeout=1)
+
+
+def test_openai_tts_synthesizes_speculatively_during_reopen_grace_and_commits_on_expiry(monkeypatch):
+    tracker = SpeculativeTurnTracker()
+    tracker.start_turn()
+    tracker.start_reopen_grace("turn_1", 0, grace_s=0.1)
+    handler = _openai_tts_handler(monkeypatch, speculative_turns=tracker)
+
+    request_started = Event()
+    _FakeSpeechOperation.startup_action = request_started.set
+
+    done = Event()
+    outputs = []
+
+    def run_process() -> None:
+        outputs.extend(handler.process(TTSInput(text="Hello.", turn_id="turn_1", turn_revision=0)))
+        done.set()
+
+    thread = Thread(target=run_process)
+    thread.start()
+
+    # HTTP synthesis begins immediately during reopen grace, while audio emission
+    # and turn commit stay held until grace elapses.
+    assert request_started.wait(0.05)
+    assert not done.wait(0.02)
+    assert outputs == []
+    assert not tracker.is_committed("turn_1", 0)
+
+    assert done.wait(1.0)
+    thread.join(timeout=1.0)
+
+    assert len(outputs) >= 1
+    assert tracker.is_committed("turn_1", 0)
+
+
+def test_openai_tts_drops_speculative_audio_when_turn_reopens_during_grace(monkeypatch):
+    tracker = SpeculativeTurnTracker()
+    tracker.start_turn()
+    tracker.start_reopen_grace("turn_1", 0, grace_s=0.5)
+    handler = _openai_tts_handler(monkeypatch, speculative_turns=tracker)
+
+    request_started = Event()
+    _FakeSpeechOperation.startup_action = request_started.set
+
+    done = Event()
+    outputs = []
+
+    def run_process() -> None:
+        outputs.extend(handler.process(TTSInput(text="Hello.", turn_id="turn_1", turn_revision=0)))
+        done.set()
+
+    thread = Thread(target=run_process)
+    thread.start()
+
+    assert request_started.wait(0.5)
+    assert not done.wait(0.03)
+    assert outputs == []
+    assert not tracker.is_committed("turn_1", 0)
+
+    reopen(tracker, "turn_1", 0)
+    assert done.wait(1.0)
+    thread.join(timeout=1.0)
+
+    assert outputs == []
+    assert not tracker.is_committed("turn_1", 0)

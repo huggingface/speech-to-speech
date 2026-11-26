@@ -138,7 +138,7 @@ class SupertonicTTSHandler(BaseTTSHandler):
                 yield AUDIO_RESPONSE_DONE
             return
 
-        if not self._admit_input(tts_input):
+        if not self._admit_input(tts_input, commit=False, hold_for_grace=False):
             return
 
         cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
@@ -156,8 +156,6 @@ class SupertonicTTSHandler(BaseTTSHandler):
             # A detected language Supertonic cannot speak keeps the session language.
             language_code = selected
         lang = self._resolve_language(language_code)
-
-        console.print(f"[green]ASSISTANT: {text}")
 
         # Synthesis start: after speculative gate / language resolve, before provider work.
         timer = self._latency_timer(tts_input, cancel_gen)
@@ -191,6 +189,9 @@ class SupertonicTTSHandler(BaseTTSHandler):
 
         # Convert to int16 format expected by the audio pipeline
         audio_int16 = np.clip(audio_16k_float * 32768, -32768, 32767).astype(np.int16)
+        if not self._commit_first_audio(tts_input, generation=cancel_gen):
+            return
+        console.print(f"[green]ASSISTANT: {text}")
 
         def emit(block: np.ndarray) -> Iterator[TTSOut]:
             timer.first_yield()

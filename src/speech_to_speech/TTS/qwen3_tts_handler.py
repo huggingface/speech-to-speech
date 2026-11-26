@@ -773,7 +773,8 @@ class Qwen3TTSHandler(BaseTTSHandler):
 
     def _coalesce_pending_tts_input(self, current_input: TTSInput) -> tuple[str, Optional[str]]:
         """Combine already-queued text chunks before the next TTS synthesis call."""
-        if not hasattr(self.queue_in, "mutex") or not hasattr(self.queue_in, "queue"):
+        queue_in = getattr(self, "queue_in", None)
+        if not hasattr(queue_in, "mutex") or not hasattr(queue_in, "queue"):
             return current_input.text, current_input.tts_language_code
 
         text = current_input.text
@@ -838,7 +839,7 @@ class Qwen3TTSHandler(BaseTTSHandler):
                 yield AUDIO_RESPONSE_DONE
             return
 
-        if not self._admit_input(tts_input):
+        if not self._admit_input(tts_input, commit=False, hold_for_grace=False):
             return
 
         runtime_config = tts_input.runtime_config
@@ -852,8 +853,6 @@ class Qwen3TTSHandler(BaseTTSHandler):
         self._apply_session_voice_override(model_type, runtime_config, response)
 
         request_language = self._language_for_utterance(language_code, tts_input.selected_language)
-
-        console.print(f"[green]ASSISTANT: {text}")
 
         logger.info("Qwen3-TTS language=%s (input_code=%s)", request_language, language_code)
         store = getattr(self, "turn_latency_store", None)
@@ -876,6 +875,9 @@ class Qwen3TTSHandler(BaseTTSHandler):
                 first_audio = True
                 for audio_chunk in audio_iter:
                     if first_audio:
+                        if not self._commit_first_audio(tts_input, generation=cancel_gen):
+                            return
+                        console.print(f"[green]ASSISTANT: {text}")
                         self._log_first_audio_latency(tts_input, timer)
                         first_audio = False
                     yield audio_chunk

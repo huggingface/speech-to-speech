@@ -239,7 +239,7 @@ class KokoroTTSHandler(BaseTTSHandler):
                 yield AUDIO_RESPONSE_DONE
             return
 
-        if not self._admit_input(tts_input):
+        if not self._admit_input(tts_input, commit=False, hold_for_grace=False):
             return
 
         runtime_config = tts_input.runtime_config
@@ -360,9 +360,13 @@ class KokoroTTSHandler(BaseTTSHandler):
                 except Exception as e:
                     logger.warning(f"Failed to switch language/voice: {e}. Keeping current language: {self.lang_code}")
 
-            console.print(f"[green]ASSISTANT: {llm_sentence}")
-
             timer = self._latency_timer(tts_input, gen)
+            emit = self._first_audio_emitter(
+                tts_input,
+                timer,
+                gen,
+                on_first=lambda: console.print(f"[green]ASSISTANT: {llm_sentence}"),
+            )
 
             # Generate audio using the preloaded pipeline directly
             # This avoids the voice reload that happens in model.generate()
@@ -371,6 +375,9 @@ class KokoroTTSHandler(BaseTTSHandler):
                 voice=self.voice,
                 speed=self.speed,
             ):
+                if self._is_stale(gen):
+                    logger.info("TTS generation cancelled (interruption)")
+                    return
                 if result.audio is None:
                     continue
                 # result.audio is an mx.array with shape (1, samples), convert to numpy and squeeze
@@ -408,9 +415,8 @@ class KokoroTTSHandler(BaseTTSHandler):
                         logger.info("TTS generation cancelled (interruption)")
                         return
                     chunk = audio[i : i + self.blocksize]
-                    timer.first_yield()
                     logger.debug(f"TTS yielding audio chunk: {len(chunk)} samples")
-                    yield chunk
+                    yield from emit(chunk)
 
     def _process_kokoro(
         self,
@@ -441,12 +447,19 @@ class KokoroTTSHandler(BaseTTSHandler):
         if new_voice == pinned_voice:
             new_voice = self._load_requested_voice(self.pipeline, new_voice)
         self.voice = new_voice
-
-        console.print(f"[green]ASSISTANT: {llm_sentence}")
+        emit = self._first_audio_emitter(
+            tts_input,
+            timer,
+            gen,
+            on_first=lambda: console.print(f"[green]ASSISTANT: {llm_sentence}"),
+        )
 
         # Generate audio using Kokoro
         # The pipeline yields tuples of (graphemes, phonemes, audio)
         for gs, ps, audio in self.pipeline(llm_sentence, voice=self.voice, speed=self.speed):
+            if self._is_stale(gen):
+                logger.info("TTS generation cancelled (interruption)")
+                return
             if audio is None:
                 continue
 
@@ -472,9 +485,7 @@ class KokoroTTSHandler(BaseTTSHandler):
                 if self._is_stale(gen):
                     logger.info("TTS generation cancelled (interruption)")
                     return
-                chunk = audio[i : i + self.blocksize]
-                timer.first_yield()
-                yield chunk
+                yield from emit(audio[i : i + self.blocksize])
 
     def on_session_end(self) -> None:
         self.voice = self._initial_voice

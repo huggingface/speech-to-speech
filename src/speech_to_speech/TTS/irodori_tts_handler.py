@@ -107,7 +107,7 @@ class IrodoriTTSHandler(BaseTTSHandler):
                 yield AUDIO_RESPONSE_DONE
             return
 
-        if not self._admit_input(tts_input):
+        if not self._admit_input(tts_input, commit=False, hold_for_grace=False):
             return
 
         text = tts_input.text
@@ -115,8 +115,6 @@ class IrodoriTTSHandler(BaseTTSHandler):
             return
 
         cancel_generation = self.cancel_scope.generation if self.cancel_scope else None
-
-        console.print(f"[green]ASSISTANT: {text}")
         # Synthesis start: after the speculative gate, before provider work.
         timer = self._latency_timer(tts_input, cancel_generation)
         result = self.runtime.synthesize(self._request(text=text))
@@ -144,6 +142,9 @@ class IrodoriTTSHandler(BaseTTSHandler):
             )
 
         audio_int16 = np.clip(audio * 32768, -32768, 32767).astype(np.int16)
+        if not self._commit_first_audio(tts_input, generation=cancel_generation):
+            return
+        console.print(f"[green]ASSISTANT: {text}")
 
         def emit(block: np.ndarray) -> Iterator[TTSOut]:
             timer.first_yield()

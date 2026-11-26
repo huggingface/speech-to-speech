@@ -5,8 +5,12 @@ import threading
 
 import pytest
 
+from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.messages import EndOfResponse, TTSInput
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
+from tests.turns import reopen
 
 
 class _Tracker:
@@ -75,3 +79,58 @@ def test_admit_input_commits_by_default_and_drops_stale() -> None:
 
 def test_admit_input_passes_without_tracker() -> None:
     assert _handler(None)._admit_input(_text()) is True
+
+
+def test_speculative_admit_and_commit_first_audio_during_reopen_grace() -> None:
+    tracker = SpeculativeTurnTracker()
+    turn_id, rev = tracker.start_turn()
+    tracker.start_reopen_grace(turn_id, rev, grace_s=0.08)
+    handler = _Handler(threading.Event(), queue.Queue(), queue.Queue())
+    handler.speculative_turns = tracker
+    tts_input = TTSInput(text="hi", turn_id=turn_id, turn_revision=rev)
+
+    # Speculative admission succeeds immediately without committing the turn.
+    assert handler._admit_input(tts_input, commit=False, hold_for_grace=False) is True
+    assert not tracker.is_committed(turn_id, rev)
+
+    # _commit_first_audio blocks until reopen grace elapses, then commits.
+    done = threading.Event()
+    committed: list[bool] = []
+
+    def run_commit() -> None:
+        committed.append(handler._commit_first_audio(tts_input))
+        done.set()
+
+    thread = threading.Thread(target=run_commit)
+    thread.start()
+    assert not done.wait(0.02)
+    assert done.wait(1.0)
+    thread.join(timeout=1.0)
+
+    assert committed == [True]
+    assert tracker.is_committed(turn_id, rev)
+
+
+def test_is_stale_and_latency_timer_honor_speculative_reopen() -> None:
+    tracker = SpeculativeTurnTracker()
+    turn_id, rev = tracker.start_turn()
+    handler = _Handler(threading.Event(), queue.Queue(), queue.Queue())
+    handler.speculative_turns = tracker
+    handler.cancel_scope = CancelScope()
+    store = TurnLatencyStore()
+    handler.turn_latency_store = store
+    store.get_or_create_response("resp_1", turn_id=turn_id, turn_revision=rev)
+
+    tts_input = TTSInput(text="hi", turn_id=turn_id, turn_revision=rev, response_key="resp_1")
+    gen = handler.cancel_scope.generation
+    timer = handler._latency_timer(tts_input, gen)
+    assert not handler._is_stale(gen, tts_input)
+
+    reopen(tracker, turn_id, rev)
+    assert handler._is_stale(gen, tts_input)
+
+    # Superseded speculative revision must not record tts_ttfa (would wrongly tag tts=cut).
+    timer.first_provider_audio()
+    response_tracker = store.get_response("resp_1")
+    assert response_tracker is not None
+    assert response_tracker.tts_ttfa_s is None

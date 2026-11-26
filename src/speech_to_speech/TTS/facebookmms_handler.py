@@ -145,7 +145,7 @@ class FacebookMMSTTSHandler(BaseTTSHandler):
                 yield AUDIO_RESPONSE_DONE
             return
 
-        if not self._admit_input(tts_input):
+        if not self._admit_input(tts_input, commit=False, hold_for_grace=False):
             return
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
@@ -158,8 +158,6 @@ class FacebookMMSTTSHandler(BaseTTSHandler):
         if language_code is None and runtime_config is not None and tts_input.selected_language == "auto":
             language_code = self._initial_language
         text = tts_input.text
-
-        console.print(f"[green]ASSISTANT: {text}")
         logger.debug("Processing text: %s", transcript_for_log(text))
         logger.debug(f"Language code: {language_code}")
 
@@ -204,6 +202,9 @@ class FacebookMMSTTSHandler(BaseTTSHandler):
 
         audio_int16 = np.clip(audio_resampled * 32768, -32768, 32767).astype(np.int16)
         logger.debug(f"Final audio shape: {audio_int16.shape}, dtype: {audio_int16.dtype}")
+        if not self._commit_first_audio(tts_input, generation=gen):
+            return
+        console.print(f"[green]ASSISTANT: {text}")
 
         for i in range(0, len(audio_int16), self.chunk_size):
             if self._is_stale(gen):

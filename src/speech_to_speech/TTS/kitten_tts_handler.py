@@ -118,7 +118,7 @@ class KittenTTSHandler(BaseTTSHandler):
                 yield AUDIO_RESPONSE_DONE
             return
 
-        if not self._admit_input(tts_input):
+        if not self._admit_input(tts_input, commit=False, hold_for_grace=False):
             return
 
         text = tts_input.text
@@ -126,15 +126,16 @@ class KittenTTSHandler(BaseTTSHandler):
             return
         cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
         voice = self._resolve_voice(tts_input)
-        console.print(f"[green]ASSISTANT: {text}")
         logger.debug("KittenTTS synthesizing: %s", transcript_for_log(text))
 
         # Synthesis start: after speculative gate / voice resolve, before provider work.
         timer = self._latency_timer(tts_input, cancel_gen)
-
-        def emit(block: np.ndarray) -> Iterator[TTSOut]:
-            timer.first_yield()
-            yield block
+        emit = self._first_audio_emitter(
+            tts_input,
+            timer,
+            cancel_gen,
+            on_first=lambda: console.print(f"[green]ASSISTANT: {text}"),
+        )
 
         # One input can hold several sentences, each a blocking model call. Deliver
         # each chunk before synthesizing the next so the first one is not held back

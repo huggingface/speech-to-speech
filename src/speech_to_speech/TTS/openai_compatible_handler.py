@@ -460,7 +460,7 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
                 yield AUDIO_RESPONSE_DONE
             return
 
-        if not self._admit_input(tts_input, commit=False):
+        if not self._admit_input(tts_input, commit=False, hold_for_grace=False):
             return
 
         cancel_generation = tts_input.cancel_generation
@@ -590,12 +590,6 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
                 with self._operation_lock:
                     if self._active_operation is operation:
                         self._active_operation = None
-
-    def _commit_first_audio(self, tts_input: TTSInput) -> bool:
-        tracker = self.speculative_turns
-        if tracker is None or tts_input.turn_id is None or tts_input.turn_revision is None:
-            return True
-        return tracker.wait_for_gate(tts_input.turn_id, tts_input.turn_revision, commit=True)
 
     @staticmethod
     def _response_identity(

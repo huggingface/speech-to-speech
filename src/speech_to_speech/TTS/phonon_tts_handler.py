@@ -205,7 +205,7 @@ class PhononTTSHandler(BaseTTSHandler):
                 yield AUDIO_RESPONSE_DONE
             return
 
-        if not self._admit_input(tts_input):
+        if not self._admit_input(tts_input, commit=False, hold_for_grace=False):
             return
         generation = tts_input.cancel_generation
         if generation is None and self.cancel_scope is not None:
@@ -241,16 +241,17 @@ class PhononTTSHandler(BaseTTSHandler):
 
     def _synthesize(self, tts_input: TTSInput, generation: int | None) -> Iterator[TTSOut]:
         voice = self._resolve_voice(tts_input)
-        console.print(f"[green]ASSISTANT: {tts_input.text}")
         timer = self._latency_timer(tts_input, also_cancelled=lambda: self._is_cancelled(generation, tts_input))
         first_audio = True
         pcm_blocks = PCMBlockBuffer(self.blocksize)
         tail_ms = self.max_trailing_silence_ms
         trimmer = _TrailingSilenceTrimmer(PIPELINE_SAMPLE_RATE, tail_ms) if tail_ms is not None else None
-
-        def emit(block: np.ndarray) -> np.ndarray:
-            timer.first_yield()
-            return block
+        emit = self._first_audio_emitter(
+            tts_input,
+            timer,
+            generation,
+            on_first=lambda: console.print(f"[green]ASSISTANT: {tts_input.text}"),
+        )
 
         # Closing the context on cancellation, exceptions, or generator.close()
         # stops native generation and joins its worker threads.
@@ -267,7 +268,7 @@ class PhononTTSHandler(BaseTTSHandler):
                 for block in pcm_blocks.push(pcm):
                     if self._is_cancelled(generation, tts_input):
                         return
-                    yield emit(block)
+                    yield from emit(block)
 
             def trimmed_blocks(samples: np.ndarray) -> Iterator[np.ndarray]:
                 if trimmer is None:
@@ -300,4 +301,4 @@ class PhononTTSHandler(BaseTTSHandler):
             for block in pcm_blocks.flush():
                 if self._is_cancelled(generation, tts_input):
                     return
-                yield emit(block)
+                yield from emit(block)

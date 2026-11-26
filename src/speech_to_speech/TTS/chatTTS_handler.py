@@ -62,13 +62,12 @@ class ChatTTSHandler(BaseTTSHandler):
                 yield AUDIO_RESPONSE_DONE
             return
 
-        if not self._admit_input(tts_input):
+        if not self._admit_input(tts_input, commit=False, hold_for_grace=False):
             return
 
         text = tts_input.text
 
         _cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
-        console.print(f"[green]ASSISTANT: {text}")
         if self.device == "mps":
             import time
 
@@ -88,9 +87,12 @@ class ChatTTSHandler(BaseTTSHandler):
             text, params_infer_code=self.params_infer_code, stream=self.stream, split_text=not self.stream
         )
 
-        def emit(block: np.ndarray) -> Iterator[TTSOut]:
-            timer.first_yield()
-            yield block
+        emit = self._first_audio_emitter(
+            tts_input,
+            timer,
+            _cancel_gen,
+            on_first=lambda: console.print(f"[green]ASSISTANT: {text}"),
+        )
 
         if self.stream:
             resampler = soxr.ResampleStream(24000, 16000, 1, dtype="float32", quality="HQ")

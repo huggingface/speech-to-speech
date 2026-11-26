@@ -298,7 +298,7 @@ class PocketTTSHandler(BaseTTSHandler):
 
         if self._response_identity(tts_input) in self._failed_responses:
             return
-        if not self._admit_input(tts_input):
+        if not self._admit_input(tts_input, commit=False, hold_for_grace=False):
             return
 
         gen = tts_input.cancel_generation
@@ -307,8 +307,6 @@ class PocketTTSHandler(BaseTTSHandler):
         language_code = tts_input.tts_language_code
         text = tts_input.text
         logger.debug(f"Received language code: {language_code}")
-
-        console.print(f"[green]ASSISTANT: {text}")
 
         # Generate audio stream
         logger.debug("Generating audio: %s", transcript_for_log(text))
@@ -355,9 +353,12 @@ class PocketTTSHandler(BaseTTSHandler):
             if timer.first_provider_audio(first_audio_at_s):
                 logger.debug("Time to first audio: %.3fs", first_audio_at_s - timer.started_at_s)
 
-        def emit(block: np.ndarray) -> Iterator[TTSOut]:
-            timer.first_yield()
-            yield block
+        emit = self._first_audio_emitter(
+            tts_input,
+            timer,
+            gen,
+            on_first=lambda: console.print(f"[green]ASSISTANT: {text}"),
+        )
 
         for audio_chunk in self._generate_audio(text, gen, record_first_provider_audio):
             if self._is_stale(gen):

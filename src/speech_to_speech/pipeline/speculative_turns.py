@@ -227,6 +227,7 @@ class SpeculativeTurnTracker:
         hold_for_grace: bool = True,
         hold_until: float | None = None,
         commit: bool = False,
+        observe_wait: bool = True,
     ) -> bool:
         """Block a worker thread until :meth:`gate` accepts or drops the work.
 
@@ -241,7 +242,9 @@ class SpeculativeTurnTracker:
                 if decision.action is not TurnGateAction.HOLD:
                     return decision.action is TurnGateAction.ACCEPT
                 assert decision.deadline is not None
-                waiting_for_grace = hold_until is None and not self._pending_holds_locked(turn_id, revision)
+                waiting_for_grace = (
+                    observe_wait and hold_until is None and not self._pending_holds_locked(turn_id, revision)
+                )
                 wait_started_at_s = time.perf_counter()
                 self._condition.wait(max(0.0, decision.deadline - time.monotonic()))
                 if waiting_for_grace and self.wait_observer is not None:
