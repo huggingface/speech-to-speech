@@ -12,7 +12,7 @@ from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.pipeline.transcript_logging import transcript_for_log
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
-from speech_to_speech.utils.utils import validate_device
+from speech_to_speech.utils.utils import is_rocm, normalize_device, validate_device
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,10 @@ SUPPORTED_LANGUAGES = [
     "sr", "su", "sv", "sw", "ta", "te", "tg", "th", "tk", "tl",
     "tr", "tt", "uk", "ur", "uz", "vi", "yi", "yo", "yue", "zh",
 ]  # fmt: skip
+
+
+# CTranslate2 compute types that only load on CUDA; see its types.cc.
+_GPU_ONLY_COMPUTE_TYPES = frozenset({"float16", "bfloat16", "int8_float16", "int8_bfloat16"})
 
 
 class FasterWhisperSTTHandler(BaseSTTHandler):
@@ -59,9 +63,48 @@ class FasterWhisperSTTHandler(BaseSTTHandler):
         self.gen_kwargs = gen_kwargs
 
         # CTranslate2 resolves "auto" itself and only runs on CPU or CUDA.
+        device = normalize_device(device)
         validate_device(device, ("cpu", "cuda"), "Faster Whisper STT")
+        ctranslate2_device = self._ctranslate2_device(device)
+        if ctranslate2_device != device:
+            compute_type = self._cpu_compute_type(compute_type)
+        device = ctranslate2_device
         os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
         self.model = WhisperModel(model_name, device=device, compute_type=compute_type)
+
+    @staticmethod
+    def _ctranslate2_device(device: str) -> str:
+        """On a ROCm host, use CPU when CUDA is asked for but CTranslate2 sees no CUDA device.
+
+        The PyPI CTranslate2 wheels are built for CUDA only. On a ROCm host ``torch.cuda`` is
+        available while CTranslate2 is not, so an explicit ``cuda`` would fail at model load.
+        Elsewhere a missing CUDA backend still fails loudly.
+        """
+        if not device.startswith("cuda") or not is_rocm():
+            return device
+        try:
+            import ctranslate2
+
+            if ctranslate2.get_cuda_device_count() > 0:
+                return device
+        except Exception:  # noqa: BLE001 - any probe failure means no usable CUDA backend
+            pass
+        logger.warning(
+            "CTranslate2 found no CUDA device (ROCm PyTorch detected); running Faster Whisper on CPU. "
+            "Use --stt whisper or parakeet-tdt to run STT on the GPU."
+        )
+        return "cpu"
+
+    @staticmethod
+    def _cpu_compute_type(compute_type: str) -> str:
+        """Replace a GPU-only CTranslate2 compute type with one the CPU fallback can load."""
+        if compute_type not in _GPU_ONLY_COMPUTE_TYPES:
+            return compute_type
+        cpu_compute_type = "int8" if compute_type.startswith("int8") else "float32"
+        logger.warning(
+            "compute_type %s is not supported on CPU; using %s for the CPU fallback.", compute_type, cpu_compute_type
+        )
+        return cpu_compute_type
 
     @staticmethod
     def _normalize_language(language: Any) -> Any:

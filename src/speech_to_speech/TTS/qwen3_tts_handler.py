@@ -43,7 +43,7 @@ from speech_to_speech.pipeline.turn_latency import TTSResponseTimer, bind_active
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
 from speech_to_speech.TTS.pcm_blocks import PCMBlockBuffer
 from speech_to_speech.utils.mlx_lock import MLXLockContext
-from speech_to_speech.utils.utils import resolve_device
+from speech_to_speech.utils.utils import normalize_device, resolve_attn_implementation, resolve_device
 
 logger = logging.getLogger(__name__)
 
@@ -190,8 +190,9 @@ class Qwen3TTSHandler(BaseTTSHandler):
             # Only the torch backend places the model itself; qwentts.cpp (GGML) picks its own device.
             if self.faster_backend == "torch":
                 self.device = resolve_device(device, ("cuda",), "Qwen3-TTS torch backend")
+                attn_implementation = resolve_attn_implementation(attn_implementation, self.device)
             else:
-                self.device = device
+                self.device = normalize_device(device)
             self.model_name = model_name
             logger.info(
                 "Loading Qwen3-TTS model: %s via faster-qwen3-tts (%s backend)",
