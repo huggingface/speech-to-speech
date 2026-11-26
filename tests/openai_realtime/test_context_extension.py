@@ -1,13 +1,17 @@
 import asyncio
 from contextlib import asynccontextmanager
 from threading import Event
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.context_extension import ContextDispatcher, ContextIntegration, render_records
+from speech_to_speech.LLM.chat import Chat, make_user_message
 from speech_to_speech.pipeline.events import TranscriptionCompletedEvent
+from speech_to_speech.pipeline.messages import GenerateResponseRequest
 from tests.openai_realtime.conftest import make_pipeline_unit
 
 
@@ -125,3 +129,65 @@ def test_record_budget_includes_framing():
     assert render_records(("x" * 1024,), 1024) is None
     assert render_records(("a",), 20) == 'Reference data ["a"]'
     assert render_records("wrong shape", 1024) is None
+
+
+def pending_text_request(text):
+    chat = Chat(4)
+    chat.add_item(make_user_message(text))
+    return GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["exception", "malformed", "empty"])
+async def test_provider_errors_and_misses_submit_one_plain_model_request(outcome):
+    class Provider:
+        async def prepare_context(self, query):
+            if outcome == "exception":
+                raise RuntimeError("offline")
+            return ["invalid record container"] if outcome == "malformed" else ()
+
+    queue = asyncio.Queue()
+    dispatcher = ContextDispatcher(Provider(), wait_seconds=1)
+    request = pending_text_request("question")
+    try:
+        dispatcher.submit("session", request, SimpleNamespace(put=queue.put_nowait), None, lambda: True)
+        assert await asyncio.wait_for(queue.get(), 2) is request
+        assert request.prepared_context is None
+        assert queue.empty() and not dispatcher.active
+    finally:
+        await dispatcher.close()
+
+
+@pytest.mark.asyncio
+async def test_global_capacity_bypasses_recall_and_recovers_after_work_finishes():
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    class Provider:
+        async def prepare_context(self, query):
+            calls.append(query.session_id)
+            started.set()
+            await release.wait()
+            return ("record",)
+
+    queue = asyncio.Queue()
+    output = SimpleNamespace(put=queue.put_nowait)
+    dispatcher = ContextDispatcher(Provider(), wait_seconds=1, capacity=1)
+    first, second, third = map(pending_text_request, ("first", "second", "third"))
+    try:
+        dispatcher.submit("one", first, output, None, lambda: True)
+        await asyncio.wait_for(started.wait(), 2)
+        dispatcher.submit("two", second, output, None, lambda: True)
+        assert queue.get_nowait() is second and second.prepared_context is None
+        assert calls == ["one"]
+
+        release.set()
+        assert await asyncio.wait_for(queue.get(), 2) is first
+        assert first.prepared_context is not None
+        dispatcher.submit("two", third, output, None, lambda: True)
+        assert await asyncio.wait_for(queue.get(), 2) is third
+        assert third.prepared_context is not None
+        assert calls == ["one", "two"] and queue.empty()
+    finally:
+        await dispatcher.close()
