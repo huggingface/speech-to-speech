@@ -294,3 +294,9 @@ def test_prefetch_for_other_text_is_ignored(grader):
 
     out = asyncio.run(flow())
     assert len(calls) == 2 and out["verdict"] == "correct"
+
+
+def test_chain_entries_carry_their_own_reasoning_effort():
+    assert llm.route("Qwen/Qwen3.8-27B:cerebras@none", "low")[1:] == ("Qwen/Qwen3.8-27B:cerebras", "none")
+    assert llm.route("org/model", "low")[1:] == ("org/model", "low")
+    assert llm.route(("http://x/v1", "gemma", None), "low") == ("http://x/v1", "gemma", None)

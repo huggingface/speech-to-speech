@@ -27,12 +27,14 @@ def _models(env: str, default: str) -> list[str]:
 
 # Grading runs on every spoken answer: it must be quick, accept brief correct
 # answers, and keep the answer out of its clues. Over 12 brief correct
-# answers and 12 guided dialogues (2026-11-26), Inkling-2-Small on Together
-# accepted 10/12, leaked 0/12, median 1.2 s per turn; GLM-5.3-Flash
-# 10/12, 0/12, 1.3 s; gpt-oss-120b on Cerebras 10/12, 0/12, 0.5 s.
+# answers and 12 guided dialogues (2026-11-26): Qwen3.8-27B on Cerebras with
+# reasoning off accepted 10/12, leaked 0/12, median 0.4 s per turn;
+# Inkling-2-Small on Together 10/12, 0/12, 1.2 s (it rejects reasoning off);
+# gpt-oss-120b on Cerebras 10/12, 0/12, 0.5 s. `model@effort` sets the
+# reasoning effort per model.
 GRADER_MODELS = _models(
     "GRADER_MODELS",
-    "thinkingmachines/Inkling-2-Small:together,zai-org/GLM-5.3-Flash,openai/gpt-oss-120b:cerebras",
+    "Qwen/Qwen3.8-27B:cerebras@none,thinkingmachines/Inkling-2-Small:together@low,openai/gpt-oss-120b:cerebras@low",
 )
 # The grader can run on the speech backend's own model instead (any
 # OpenAI-compatible endpoint, e.g. the deployment's Gemma 4 31B), with the
@@ -56,6 +58,14 @@ WRITER_MODELS = _models(
     "WRITER_MODELS",
     "zai-org/GLM-5.3,MiniMaxAI/MiniMax-M3.1-Flash,openai/gpt-oss-120b:cerebras",
 )
+
+
+def route(entry: str | Route, default_effort: str | None) -> Route:
+    """``(base_url, model, reasoning_effort)`` for a chain entry (``model@effort`` or a Route)."""
+    if isinstance(entry, tuple):
+        return entry
+    model, sep, effort = entry.partition("@")
+    return BASE_URL, model, (effort or None) if sep else default_effort
 
 
 class LLMError(RuntimeError):
@@ -141,7 +151,7 @@ async def chat_json(
         raise LLMError("No HF_TOKEN configured for the coach's language model.")
     errors: list[str] = []
     for entry in models:
-        base_url, model, effort = entry if isinstance(entry, tuple) else (BASE_URL, entry, reasoning_effort)
+        base_url, model, effort = route(entry, reasoning_effort)
         key = (os.environ.get("GRADER_API_KEY") or token) if isinstance(entry, tuple) else token
         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
         body: dict[str, Any] = {
