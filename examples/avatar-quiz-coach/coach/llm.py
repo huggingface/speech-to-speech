@@ -77,13 +77,22 @@ def api_token() -> str:
 
 
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
+_TRAILING_COMMA = re.compile(r",(\s*[}\]])")
+
+
+def _loads(text: str) -> Any:
+    """json.loads, forgiving a trailing comma before } or ] (Gemma 4 writes one now and then)."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return json.loads(_TRAILING_COMMA.sub(r"\1", text))
 
 
 def extract_json(text: str) -> dict[str, Any]:
     """Parse the first JSON object in a model reply (tolerates fences and prose)."""
     text = _FENCE.sub("", (text or "").strip())
     try:
-        value = json.loads(text)
+        value = _loads(text)
         if isinstance(value, dict):
             return value
     except json.JSONDecodeError:
@@ -111,7 +120,7 @@ def extract_json(text: str) -> dict[str, Any]:
                 depth -= 1
                 if depth == 0:
                     try:
-                        value = json.loads(text[start : i + 1])
+                        value = _loads(text[start : i + 1])
                     except json.JSONDecodeError:
                         break
                     if isinstance(value, dict):

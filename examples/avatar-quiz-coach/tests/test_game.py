@@ -183,6 +183,7 @@ def test_practice_games_use_subset():
 def test_extract_json_handles_fences_and_prose():
     assert extract_json('```json\n{"a": 1}\n```') == {"a": 1}
     assert extract_json('Sure! Here you go: {"a": {"b": "}"}} hope it helps') == {"a": {"b": "}"}}
+    assert extract_json('```json\n{\n  "a": [1, 2,],\n  "say": "hi",\n}\n```') == {"a": [1, 2], "say": "hi"}
     with pytest.raises(ValueError):
         extract_json("no json here")
 

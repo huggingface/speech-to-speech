@@ -97,6 +97,8 @@ def test_tool_outputs(game, monkeypatch):
     assert skipped["verdict"] == "skipped" and skipped["next_question"] == game.question()["question"]
     assert skipped["say"].startswith("No worries. The answer is")
     assert game.question()["question"] not in skipped["say"]  # the next question is asked separately
+    # A lead-in like "Moving on." comes before the next question.
+    assert any(f'say "{t}"' in skipped["next"] for t in g.TRANSITIONS + g.LAST_TRANSITIONS)
 
     hint = json.loads(voice.tool_output(game, run(g.handle_turn(game, "(hint)", "hint"))))
     assert hint["hint"] == game.question()["hint"]
@@ -104,6 +106,14 @@ def test_tool_outputs(game, monkeypatch):
     done = json.loads(voice.tool_output(game, run(g.handle_turn(game, "(stop)", "stop"))))
     assert done["quiz_finished"] and "say" not in done  # the coach already acknowledged the stop
     assert "over" in voice.instructions(game)
+
+
+def test_transitions_never_repeat_back_to_back(game):
+    leads = [game.transition() for _ in range(50)]
+    assert all(a != b for a, b in zip(leads, leads[1:]))
+    assert set(leads) <= set(g.TRANSITIONS) and len(set(leads)) > 5
+    game.position = game.total - 1
+    assert game.transition() in g.LAST_TRANSITIONS
 
 
 def test_retract_undoes_a_half_answer(game, monkeypatch):

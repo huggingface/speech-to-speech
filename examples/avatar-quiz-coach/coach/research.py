@@ -35,7 +35,7 @@ MAX_TOTAL_CHARS = 26000
 # A repository or paper read first-hand gets a larger reading budget.
 MAX_PRIMARY_CHARS = 80000
 # Bumped when research changes, so cached packs from older research are redone.
-RESEARCH_VERSION = 2
+RESEARCH_VERSION = 3
 SPARE_QUESTIONS = 3
 
 DIFFICULTIES = {
@@ -173,9 +173,11 @@ async def _fetch_page(http: httpx.AsyncClient, source: dict[str, str]) -> dict[s
 # ── Question writing ─────────────────────────────────────────────────────────
 
 REQUIRED_RULE = (
-    "A key point is required only if the question explicitly asks for it: a correct spoken answer must contain it. "
-    "Context the question does not ask about (who wrote it, where, extra facts or numbers) is not required. "
-    "Every question has at least one required key point."
+    "Mark as required the fewest key points a correct spoken answer must contain: for a question about one idea, "
+    "the one key point that is its core; when the question asks for several things (two components, a year and a "
+    "title, what happened and why), one key point per thing asked. Details, examples, names, numbers, nuances and "
+    "consequences the question does not ask about are never required. Every question has at least one required "
+    "key point."
 )
 
 WRITER_SYSTEM = (

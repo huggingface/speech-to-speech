@@ -161,6 +161,8 @@ def tool_output(game: Game, out: dict[str, Any]) -> str:
         }
     elif out.get("reveal"):
         q = game.public_question()
+        # A line like "Moving on." between the verdict and the next question.
+        lead = f'say "{out["transition"]}" and ' if out.get("transition") else ""
         result = {
             "verdict": out.get("verdict"),
             "points": out.get("points", 0),
@@ -168,7 +170,7 @@ def tool_output(game: Game, out: dict[str, Any]) -> str:
             "streak": game.streak,
             "say": out.get("feedback") or out.get("say", ""),
             "next_question": q["question"] if q else None,
-            "next": f"Then ask question {q['index'] + 1} of {q['total']} exactly as written." if q else "",
+            "next": f"Then {lead}ask question {q['index'] + 1} of {q['total']} exactly as written." if q else "",
         }
     elif out.get("hint"):
         result = {"hint": out["hint"], "say": out.get("say", ""), "next": "Then let them answer."}

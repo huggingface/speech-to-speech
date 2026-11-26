@@ -52,9 +52,10 @@ GRADER_SYSTEM = """You are {coach}, a warm, encouraging quiz coach in a spoken c
 If they give an answer and also say something else, the intent is "answer".
 
 2. If the intent is "answer", grade everything the student has said about this question so far (earlier_attempts plus student_said):
-- "correct": conveys every key point listed in required_point_indices (the parts the question asks for). The other key points and extra details in the reference answer are context: never require them, never ask for them as a follow-up.
-- "partial": right direction but misses an essential key point
+- "correct": gets across what the question asks, the way a fair teacher hearing a spoken answer would accept it, even if it is short. The key points in required_point_indices describe a full answer. When the question asks for several things (a year and a title, two components, three steps), each one must be there. When it asks about one idea, getting its core across is enough, without every detail or nuance of the key points. The other key points and extra details in the reference answer are context: never require them, never ask for them as a follow-up.
+- "partial": right direction but misses something the question asks for
 - "incorrect": wrong or off target
+Their own words count, however informal and without the technical term or the component's exact name ("the error signal fades as it goes back through the layers" covers "vanishing gradients"); never ask them for a term. Saying what something is for implies the gap it fills ("we add X so the model knows Y" covers "without X the model can't know Y"), and a why question is answered by the reason in plain terms, without also explaining the mechanism behind it. A vague answer that could fit many questions ("to make it work better") is not enough. Key points that restate each other or follow from one another count as one.
 Also give score 0-100 and points_hit, the indices of key_points they have covered.
 
 3. Write "say", your next spoken words: at most two sentences and 40 words, plain speech for text-to-speech (no markdown, lists, emojis, parentheses, slashes or symbols). Never read the question itself; the app does that.
@@ -77,7 +78,22 @@ REPORT_SYSTEM = """You are {coach}, a supportive quiz coach. Given a student's q
 Return ONLY JSON:
 {"headline": "max 8 words", "strengths": ["one or two things they clearly know"], "review": ["up to three concrete concepts to review, phrased as study tips"], "say": "two or three spoken sentences wrapping up: mention the score naturally, one strength, one thing to review. It is read aloud by text-to-speech: no lists, markdown, slashes or symbols."}"""
 
-TRANSITIONS = ["Next question.", "Here's the next one.", "Moving on.", "Okay, next.", "Let's keep going."]
+# Said after the verdict (and fun fact), right before the next question.
+TRANSITIONS = [
+    "Next question.",
+    "Here's the next one.",
+    "Moving on.",
+    "Okay, next one.",
+    "Let's keep going.",
+    "Alright, next up.",
+    "On to the next one.",
+    "Now, try this one.",
+    "Here's another one.",
+    "Okay, let's move on.",
+    "Alright, moving on.",
+    "Let's see how you do with this one.",
+]
+LAST_TRANSITIONS = ["Last question!", "And now, the final question.", "Here's the last one.", "Okay, last one."]
 STREAK_CALLOUTS = {
     3: ["That's three in a row!", "Three in a row, you're on fire!"],
     5: ["Five in a row, unstoppable!", "Five straight, incredible!"],
@@ -189,6 +205,7 @@ class Game:
     speculative: dict[tuple[int, int, int, str], asyncio.Future[Any]] = field(default_factory=dict)
     # State before the last graded turn that kept the question open (see retract).
     undo: dict[str, Any] | None = None
+    last_transition: str = ""
 
     # ── Views ────────────────────────────────────────────────────────────
 
@@ -250,12 +267,17 @@ class Game:
 
     # ── Script pieces ────────────────────────────────────────────────────
 
+    def transition(self) -> str:
+        """A line leading into the current question, never the same twice in a row."""
+        q = self.public_question()
+        pool = LAST_TRANSITIONS if q and q["index"] == q["total"] - 1 else TRANSITIONS
+        self.last_transition = random.choice([t for t in pool if t != self.last_transition] or pool)
+        return self.last_transition
+
     def ask_current(self, lead: str | None = None) -> str:
         q = self.public_question()
         assert q is not None
-        if lead is None:
-            lead = "Last question!" if q["index"] == q["total"] - 1 else random.choice(TRANSITIONS)
-        return f"{lead} {q['question']}"
+        return f"{self.transition() if lead is None else lead} {q['question']}"
 
     def opening(self) -> str:
         # Short on purpose: the topic summary is on screen, and every spoken
@@ -568,7 +590,7 @@ async def handle_turn(game: Game, transcript: str, intent: str | None = None) ->
     elif intent == "stop":
         return finish_now(game, say or "No problem, let's stop here.")
     elif not say:
-        say = "Take your time. What's your answer?"
+        say = "Go on, I'm listening."
 
     if resolved:
         res.feedback = say
@@ -582,7 +604,8 @@ async def handle_turn(game: Game, transcript: str, intent: str | None = None) ->
             out["say"] = say
             out["state"] = game.state()
             return out
-        say = f"{say} {game.ask_current()}"
+        out["transition"] = game.transition()
+        say = f"{say} {game.ask_current(out['transition'])}"
 
     game.history.append({"role": "coach", "text": say})
     out.update({"say": say.strip(), "state": game.state(), "question": game.public_question()})
