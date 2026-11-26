@@ -17,7 +17,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from fastapi import WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
@@ -28,6 +28,8 @@ if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import RealtimeService, ServerEvent
 
 logger = logging.getLogger(__name__)
+
+PlaybackState = Literal["play", "pause", "duck"]
 
 
 class SessionTransport(ABC):
@@ -57,6 +59,18 @@ class SessionTransport(ABC):
         clients buffer audio on their side and flush it themselves; that
         transport only estimates how much was left.
         Returns the duration of unplayed audio in milliseconds.
+        """
+
+    def has_unplayed_audio(self) -> bool:
+        """Whether assistant audio sent so far may still be playing."""
+        return False
+
+    def set_playback(self, state: PlaybackState) -> None:
+        """Pause, duck, or resume assistant playback while barge-in is undecided.
+
+        Paused audio is kept and resumes from the same point; it still counts
+        as unplayed for :meth:`discard_pending_audio`. Transports that do not
+        pace playback ignore this.
         """
 
     @abstractmethod
@@ -102,6 +116,12 @@ class WebSocketTransport(SessionTransport):
         # finishing after a discard not to add its discarded audio back.
         self._sending_seconds = 0.0
         self._discards = 0
+        # Set while the client is expected to hold playback (see set_playback):
+        # the playback estimate stops advancing from this moment.
+        self._paused_at: float | None = None
+
+    def _now(self) -> float:
+        return self._paused_at if self._paused_at is not None else self._clock()
 
     async def send_events(self, events: list[ServerEvent]) -> None:
         async with self._send_lock:
@@ -127,14 +147,29 @@ class WebSocketTransport(SessionTransport):
             if discards == self._discards:
                 self._sending_seconds -= seconds
         if seconds and discards == self._discards:
-            self._playback_end = max(self._playback_end, self._clock()) + seconds
+            self._playback_end = max(self._playback_end, self._now()) + seconds
+
+    def has_unplayed_audio(self) -> bool:
+        return self._playback_end > self._now() or self._sending_seconds > 0
+
+    def set_playback(self, state: PlaybackState) -> None:
+        # The client's player does the pausing, after the opt-in
+        # speech_to_speech.interruption.pending event; only "pause" stops it.
+        if state == "pause":
+            if self._paused_at is None:
+                self._paused_at = self._clock()
+            return
+        if self._paused_at is not None:
+            if self._playback_end > self._paused_at:
+                self._playback_end += self._clock() - self._paused_at
+            self._paused_at = None
 
     def discard_pending_audio(self) -> float:
         # The client flushes its own player on barge-in. Report the audio it
         # had not played yet, including sends still in progress, so clients
         # that never send conversation.item.truncate still get history cut to
         # what they heard.
-        now = self._clock()
+        now = self._now()
         unplayed = max(0.0, self._playback_end - now) + self._sending_seconds
         self._playback_end = now
         self._sending_seconds = 0.0

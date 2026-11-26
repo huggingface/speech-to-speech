@@ -6,6 +6,13 @@ from openai.types.realtime.realtime_audio_config_input import RealtimeAudioConfi
 from openai.types.realtime.realtime_audio_config_output import RealtimeAudioConfigOutput
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
+from speech_to_speech.api.openai_realtime.false_interruption import (
+    INTERRUPTION_EVENTS_EXTENSION,
+    FalseInterruptionConfig,
+    is_unset,
+    parse_false_interruption,
+    turn_detection_setting,
+)
 from speech_to_speech.api.openai_realtime.reasoning import SessionRequest
 from speech_to_speech.LLM.chat import Chat
 from speech_to_speech.utils.request_tracing import safe_identifier
@@ -90,6 +97,8 @@ class RuntimeConfig(BaseModel):
     )
     last_assistant_language: str | None = Field(default=None, exclude=True)
     _trace_session_id: str | None = PrivateAttr(default=None)
+    # Server default (--false_interruption) for sessions that leave the field unset.
+    _default_false_interruption: FalseInterruptionConfig | None = PrivateAttr(default=None)
 
     @property
     def trace_session_id(self) -> str | None:
@@ -149,6 +158,32 @@ class RuntimeConfig(BaseModel):
         else:
             return True
         return val if val is not None else True
+
+    def set_default_false_interruption(self, config: FalseInterruptionConfig | None) -> None:
+        self._default_false_interruption = config
+
+    @property
+    def false_interruption(self) -> FalseInterruptionConfig | None:
+        """Settings for holding barge-in until real words arrive, or ``None`` when off.
+
+        Reads ``turn_detection.false_interruption``. A session that never set
+        it gets the server default; ``null`` or ``false`` turns it off.
+        """
+        assert self.session.audio is not None and self.session.audio.input is not None
+        value = turn_detection_setting(self.session.audio.input.turn_detection)
+        if is_unset(value):
+            return self._default_false_interruption
+        try:
+            return parse_false_interruption(value)
+        except ValueError:
+            # session.update validates the field; keep the old behaviour for anything else.
+            return None
+
+    @property
+    def interruption_events_enabled(self) -> bool:
+        """Whether the client opted in to ``speech_to_speech.interruption.*`` events."""
+        extensions = getattr(self.session, "extensions", None)
+        return isinstance(extensions, (list, tuple, set)) and INTERRUPTION_EVENTS_EXTENSION in extensions
 
     @property
     def input_audio_transcription_snapshots_enabled(self) -> bool:

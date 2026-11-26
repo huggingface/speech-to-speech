@@ -52,6 +52,11 @@ from openai.types.realtime.realtime_response_create_params import RealtimeRespon
 from openai.types.realtime.realtime_server_event import ConversationItemRetrieved
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from speech_to_speech.api.openai_realtime.false_interruption import (
+    FalseInterruptionConfig,
+    SpeechToSpeechInterruptionPendingEvent,
+    SpeechToSpeechInterruptionResolvedEvent,
+)
 from speech_to_speech.api.openai_realtime.handlers import (
     AudioHandler,
     ConversationHandler,
@@ -154,6 +159,8 @@ ClientEvent = Union[
 ServerEvent = Union[
     SpeechToSpeechReasoningDeltaEvent,
     SpeechToSpeechVisemesEvent,
+    SpeechToSpeechInterruptionPendingEvent,
+    SpeechToSpeechInterruptionResolvedEvent,
     SessionCreatedEvent,
     SessionUpdatedEvent,
     RealtimeErrorEvent,
@@ -351,6 +358,10 @@ class ConnState(BaseModel):
     # frame has finished sending. Pipeline output is held behind this key so a
     # fast or already-buffered generation cannot overtake that lifecycle event.
     response_created_pending_key: str | None = None
+    # User speech held during assistant audio until its transcript shows
+    # whether it interrupts: a false_interruption.PendingInterruption, owned
+    # by the router. Typed loosely so pydantic never validates its events.
+    pending_interruption: Any = None
 
     def mark_response_pending(self, response_key: str) -> None:
         """Track an implicit response from queueing until its first output."""
@@ -395,6 +406,7 @@ class RealtimeService:
         speculative_turns: SpeculativeTurnTracker | None = None,
         turn_latency_store: TurnLatencyStore | None = None,
         default_instructions: str | None = None,
+        default_false_interruption: FalseInterruptionConfig | None = None,
     ) -> None:
         self.text_prompt_queue = text_prompt_queue
         self.should_listen = should_listen
@@ -404,6 +416,7 @@ class RealtimeService:
         if speculative_turns is not None:
             speculative_turns.wait_observer = self.turn_latency_store.record_smart_wait
         self._default_instructions = default_instructions
+        self.default_false_interruption = default_false_interruption
         # None means the active backend does not declare a complete language set.
         self.stt_supported_languages: set[str] | None = None
         self.tts_supported_languages: set[str] | None = None
@@ -488,6 +501,7 @@ class RealtimeService:
             )
         )
         state.runtime_config.bind_trace_session(state.session_id)
+        state.runtime_config.set_default_false_interruption(self.default_false_interruption)
         self._conns[state.session_id] = state
         self.total_usage.connections += 1
         return state.session_id

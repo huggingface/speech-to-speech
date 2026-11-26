@@ -22,6 +22,13 @@ from openai.types.realtime import (
     SessionUpdateEvent,
 )
 
+from speech_to_speech.api.openai_realtime.false_interruption import (
+    FalseInterruptionConfig,
+    PendingInterruption,
+    SpeechToSpeechInterruptionPendingEvent,
+    SpeechToSpeechInterruptionResolvedEvent,
+    Verdict,
+)
 from speech_to_speech.api.openai_realtime.llm_proxy import LLMProxyConfig, mount_llm_proxy
 from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit, SessionState
 from speech_to_speech.api.openai_realtime.service import (
@@ -29,6 +36,7 @@ from speech_to_speech.api.openai_realtime.service import (
     build_error_event,
 )
 from speech_to_speech.api.openai_realtime.transports import (
+    PlaybackState,
     SessionTransport,
     WebSocketTransport,
     send_ws_event,
@@ -52,7 +60,7 @@ from speech_to_speech.pipeline.events import (
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
 from speech_to_speech.pipeline.speculative_turns import TurnOutputHeld
-from speech_to_speech.pipeline.transcript_logging import log_exception
+from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
 
 # aiortc (the 'webrtc' extra) is optional. Import it here, at module load,
 # rather than lazily in the calls endpoint: the av/cryptography C extensions
@@ -108,6 +116,7 @@ def _keep_user_text_event(item: Any) -> bool:
     return isinstance(
         item,
         (
+            SpeechStartedEvent,
             SpeechStoppedEvent,
             PartialTranscriptionEvent,
             TranscriptionCompletedEvent,
@@ -534,6 +543,270 @@ async def _dispatch_client_event(
         unit.response_playing.clear()
 
 
+async def _deliver_text_event(
+    unit: PipelineUnit,
+    session: SessionState | None,
+    transport: SessionTransport | None,
+    session_id: str | None,
+    text_msg: Any,
+    parked_index: int | None = None,
+) -> None:
+    """Dispatch one side-channel event and apply barge-in for a speech start.
+
+    Also replays the held events of a committed interruption, so a delayed
+    barge-in takes exactly the path an immediate one would have.
+    """
+    is_speech_start = isinstance(text_msg, SpeechStartedEvent)
+
+    was_in_response = False
+    was_response_pending = False
+    if is_speech_start and session_id:
+        st = unit.service._state(session_id)
+        was_in_response = st.in_response
+        was_response_pending = st.response_pending
+
+    events: list[Any] = []
+    if transport is not None and isinstance(text_msg, PipelineEvent) and session is not None and session_id:
+        try:
+            events = unit.service.dispatch_pipeline_event(session_id, text_msg)
+        except TurnOutputHeld:
+            # Resumed speech started after the hold check. Park
+            # the event again in its original place.
+            pending_items = session.pending_text_output_items
+            pending_items.insert(len(pending_items) if parked_index is None else parked_index, text_msg)
+            events = []
+
+    interrupt_enabled = False
+    if isinstance(text_msg, SpeechStartedEvent) and session_id:
+        active_cfg = unit.service._state(session_id).runtime_config
+        interrupt_enabled = text_msg.interrupt_response and (
+            active_cfg is None or active_cfg.interrupt_response_enabled
+        )
+        if interrupt_enabled and transport is not None:
+            # Flush even when no response is active: the client
+            # can still hold unplayed audio from a response whose
+            # done-sentinel was already observed —
+            # finish_response() runs on the sentinel, not when
+            # playback completes. WebSocket only estimates it.
+            # Cut history before speech_started goes out, so a
+            # client that retrieves the reply sees the cut. An
+            # interrupted reply has already ended: dispatching
+            # SpeechStartedEvent ran on_speech_started, which
+            # finished it as cancelled, so the cut is not
+            # skipped as in-progress output.
+            unit.service.truncate_unplayed_audio(session_id, transport.discard_pending_audio())
+
+    if events and transport is not None:
+        await transport.send_events(events)
+
+    if isinstance(text_msg, SpeechStartedEvent) and session_id:
+        if was_in_response or was_response_pending:
+            if interrupt_enabled:
+                unit.cancel_scope.cancel()
+                unit.service.close_pending_responses(session_id)
+                _flush_queue(unit.text_prompt_queue, preserve=_keep_pipeline_control)
+                _flush_queue(unit.output_queue, preserve=_keep_cancel_bookkeeping)
+                _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
+                if unit.response_playing.is_set():
+                    unit.response_playing.clear()
+                logger.info(
+                    "Pipeline %d: speech during %s: cancelled, queue flushed",
+                    unit.index,
+                    "response" if was_in_response else "pending response",
+                )
+            else:
+                logger.info(f"Pipeline {unit.index}: speech during response: interrupt_response disabled, ignoring")
+
+
+# ---------------------------------------------------------------------------
+# Barge-in that waits for words (turn_detection.false_interruption)
+# ---------------------------------------------------------------------------
+
+
+def _interruption_playback(transport: SessionTransport, st: Any, config: FalseInterruptionConfig) -> PlaybackState:
+    """Playback while a possible interruption is undecided.
+
+    A WebSocket client owns its player, so it pauses only when it was told
+    to, through the opt-in interruption events. Ducking needs no bookkeeping.
+    """
+    if config.playback == "continue":
+        return "play"
+    if transport.kind == "websocket" and not st.runtime_config.interruption_events_enabled:
+        return "play"
+    return "pause" if config.playback == "pause" else "duck"
+
+
+def _holds_interruption(unit: PipelineUnit, transport: SessionTransport, st: Any, event: SpeechStartedEvent) -> bool:
+    """Whether this speech start may be noise to hold instead of a barge-in to apply now."""
+    cfg = st.runtime_config
+    if cfg.false_interruption is None or event.turn_id is None or event.reopened:
+        # A reopened turn continues the user's own unanswered speech: its
+        # speculative reply is stale whatever the new words are.
+        return False
+    if not (event.interrupt_response and cfg.interrupt_response_enabled):
+        return False
+    if not (st.in_response or st.response_pending or transport.has_unplayed_audio()):
+        # The assistant is silent: there is nothing to protect.
+        return False
+    turns = unit.service.speculative_turns
+    return turns is not None and turns.mark_provisional(event.turn_id)
+
+
+async def _send_interruption_event(transport: SessionTransport, st: Any, event: Any) -> None:
+    if st.runtime_config.interruption_events_enabled:
+        await transport.send_events([event])
+
+
+async def _confirm_interruption(
+    unit: PipelineUnit,
+    session: SessionState,
+    transport: SessionTransport,
+    session_id: str,
+) -> None:
+    """Real words arrived: apply the barge-in now, as if it had happened at speech start."""
+    service = unit.service
+    st = service._state(session_id)
+    pending = st.pending_interruption
+    if pending is None:
+        return
+    st.pending_interruption = None
+    if service.speculative_turns is not None:
+        service.speculative_turns.confirm_provisional(pending.turn_id)
+    logger.info(
+        "Pipeline %d: speech during response is an interruption after %.0f ms (turn=%s)",
+        unit.index,
+        (time.monotonic() - pending.started_at) * 1000,
+        pending.turn_id,
+    )
+    await _send_interruption_event(
+        transport,
+        st,
+        SpeechToSpeechInterruptionResolvedEvent(
+            event_id=service._next_event_id(),
+            interrupted=True,
+            transcript=pending.transcript,
+        ),
+    )
+    for event in pending.events:
+        await _deliver_text_event(unit, session, transport, session_id, event)
+    # The replayed speech start discarded the paused audio; play what follows.
+    transport.set_playback("play")
+
+
+async def _dismiss_interruption(
+    unit: PipelineUnit,
+    transport: SessionTransport,
+    session_id: str,
+    reason: str,
+) -> None:
+    """No words: forget the held turn and let the reply carry on."""
+    service = unit.service
+    st = service._state(session_id)
+    pending = st.pending_interruption
+    if pending is None:
+        return
+    st.pending_interruption = None
+    if service.speculative_turns is not None:
+        service.speculative_turns.discard_provisional(pending.turn_id)
+    for revision in pending.revisions:
+        service.turn_latency_store.discard_pending_turn(pending.turn_id, revision)
+    transport.set_playback("play")
+    unit.should_listen.set()
+    logger.info(
+        "Pipeline %d: speech during response was not an interruption (%s, transcript=%s); reply continues",
+        unit.index,
+        reason,
+        transcript_for_log(pending.transcript),
+    )
+    await _send_interruption_event(
+        transport,
+        st,
+        SpeechToSpeechInterruptionResolvedEvent(
+            event_id=service._next_event_id(),
+            interrupted=False,
+            transcript=pending.transcript,
+        ),
+    )
+
+
+async def _gate_interruption(
+    unit: PipelineUnit,
+    session: SessionState,
+    transport: SessionTransport,
+    session_id: str,
+    event: Any,
+) -> bool:
+    """Hold user speech that may not interrupt. Returns ``True`` when *event* was consumed.
+
+    Held events stay private: the service never sees them until the
+    interruption is committed, when they are replayed in order. A dismissed
+    turn leaves no trace in the protocol, the conversation, or usage.
+    """
+    if not isinstance(event, PipelineEvent):
+        return False
+    try:
+        st = unit.service._state(session_id)
+    except KeyError:
+        return False
+    pending = st.pending_interruption
+    if pending is not None:
+        if pending.owns(event):
+            verdict = pending.observe(event)
+            if verdict is Verdict.CONFIRM:
+                await _confirm_interruption(unit, session, transport, session_id)
+            elif verdict is Verdict.DISMISS:
+                reason = "transcription failed" if isinstance(event, TranscriptionFailedEvent) else "no words"
+                await _dismiss_interruption(unit, transport, session_id, reason)
+            return True
+        if not isinstance(event, SpeechStartedEvent):
+            return False
+        # A newer turn started before the held one produced words.
+        await _dismiss_interruption(unit, transport, session_id, "superseded")
+    if not isinstance(event, SpeechStartedEvent) or not _holds_interruption(unit, transport, st, event):
+        return False
+    config = st.runtime_config.false_interruption
+    assert config is not None
+    st.pending_interruption = PendingInterruption.begin(event, config)
+    transport.set_playback(_interruption_playback(transport, st, config))
+    logger.info(
+        "Pipeline %d: speech during response held until it has words (turn=%s, playback=%s)",
+        unit.index,
+        event.turn_id,
+        config.playback,
+    )
+    await _send_interruption_event(
+        transport,
+        st,
+        SpeechToSpeechInterruptionPendingEvent(
+            event_id=unit.service._next_event_id(),
+            audio_start_ms=event.audio_start_ms,
+            playback=config.playback,
+        ),
+    )
+    return True
+
+
+async def _expire_interruption(unit: PipelineUnit, transport: SessionTransport, session_id: str) -> None:
+    """Resume when speech stopped long ago and no transcript ever came."""
+    try:
+        pending = unit.service._state(session_id).pending_interruption
+    except KeyError:
+        return
+    if pending is not None and pending.expired():
+        await _dismiss_interruption(unit, transport, session_id, "no transcript before timeout")
+
+
+def _interruption_wait_s(unit: PipelineUnit, session_id: str) -> float | None:
+    try:
+        pending = unit.service._state(session_id).pending_interruption
+    except KeyError:
+        return None
+    deadline = pending.deadline() if pending is not None else None
+    if deadline is None:
+        return None
+    return max(SEND_LOOP_HOLD_RETRY_S, deadline - time.monotonic())
+
+
 def _send_loop_wait_timeout(unit: PipelineUnit) -> float:
     """Choose how long the send loop may idle before re-checking local state.
 
@@ -555,6 +828,9 @@ def _send_loop_wait_timeout(unit: PipelineUnit) -> float:
         return SEND_LOOP_WAIT_TIMEOUT_S
     if pending_terminals:
         return SEND_LOOP_HOLD_RETRY_S
+    interruption_wait = _interruption_wait_s(unit, session_id)
+    if interruption_wait is not None:
+        return min(SEND_LOOP_WAIT_TIMEOUT_S, interruption_wait)
     return SEND_LOOP_WAIT_TIMEOUT_S
 
 
@@ -931,6 +1207,9 @@ def create_app(
                 transport = session.transport if session is not None else None
                 session_id = session.session_id if session is not None else None
 
+                if transport is not None and session is not None and session_id and session.released_at is None:
+                    await _expire_interruption(unit, transport, session_id)
+
                 # Text events first (speech_started cancels active response).
                 try:
                     text_msg = None
@@ -966,73 +1245,13 @@ def create_app(
                         if session_id is not None and _response_key_is_obsolete(unit, session_id, response_key):
                             _discard_obsolete_response_key(unit, session_id, response_key)
                             continue
-                    is_speech_start = isinstance(text_msg, SpeechStartedEvent)
-
-                    was_in_response = False
-                    was_response_pending = False
-                    if is_speech_start and session_id:
-                        st = unit.service._state(session_id)
-                        was_in_response = st.in_response
-                        was_response_pending = st.response_pending
-
-                    events: list[Any] = []
-                    if (
+                    if not (
                         transport is not None
-                        and isinstance(text_msg, PipelineEvent)
                         and session is not None
                         and session_id
+                        and await _gate_interruption(unit, session, transport, session_id, text_msg)
                     ):
-                        try:
-                            events = unit.service.dispatch_pipeline_event(session_id, text_msg)
-                        except TurnOutputHeld:
-                            # Resumed speech started after the hold check. Park
-                            # the event again in its original place.
-                            pending_items = session.pending_text_output_items
-                            pending_items.insert(len(pending_items) if parked_index is None else parked_index, text_msg)
-                            events = []
-
-                    interrupt_enabled = False
-                    if isinstance(text_msg, SpeechStartedEvent) and session_id:
-                        active_cfg = unit.service._state(session_id).runtime_config
-                        interrupt_enabled = text_msg.interrupt_response and (
-                            active_cfg is None or active_cfg.interrupt_response_enabled
-                        )
-                        if interrupt_enabled and transport is not None:
-                            # Flush even when no response is active: the client
-                            # can still hold unplayed audio from a response whose
-                            # done-sentinel was already observed —
-                            # finish_response() runs on the sentinel, not when
-                            # playback completes. WebSocket only estimates it.
-                            # Cut history before speech_started goes out, so a
-                            # client that retrieves the reply sees the cut. An
-                            # interrupted reply has already ended: dispatching
-                            # SpeechStartedEvent ran on_speech_started, which
-                            # finished it as cancelled, so the cut is not
-                            # skipped as in-progress output.
-                            unit.service.truncate_unplayed_audio(session_id, transport.discard_pending_audio())
-
-                    if events and transport is not None:
-                        await transport.send_events(events)
-
-                    if isinstance(text_msg, SpeechStartedEvent) and session_id:
-                        if was_in_response or was_response_pending:
-                            if interrupt_enabled:
-                                unit.cancel_scope.cancel()
-                                unit.service.close_pending_responses(session_id)
-                                _flush_queue(unit.text_prompt_queue, preserve=_keep_pipeline_control)
-                                _flush_queue(unit.output_queue, preserve=_keep_cancel_bookkeeping)
-                                _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
-                                if unit.response_playing.is_set():
-                                    unit.response_playing.clear()
-                                logger.info(
-                                    "Pipeline %d: speech during %s: cancelled, queue flushed",
-                                    unit.index,
-                                    "response" if was_in_response else "pending response",
-                                )
-                            else:
-                                logger.info(
-                                    f"Pipeline {unit.index}: speech during response: interrupt_response disabled, ignoring"
-                                )
+                        await _deliver_text_event(unit, session, transport, session_id, text_msg, parked_index)
                 except Empty:
                     pass
 

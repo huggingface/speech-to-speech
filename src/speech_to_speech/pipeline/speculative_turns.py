@@ -62,6 +62,21 @@ class _ReopenGrace:
     deadline: float
 
 
+@dataclass
+class _Predecessor:
+    """The cursor as it was before the latest turn started, kept up to date.
+
+    A provisional turn (speech that may be a cough or a backchannel) keeps
+    this turn's work relevant, and a dismissed one restores it.
+    """
+
+    current: _TurnReference | None
+    closed_current: _TurnReference | None
+    phase: TurnPhase | None
+    last_final_audio_ms: int | None
+    processing_deadline: float | None
+
+
 class SpeculativeTurnTracker:
     """Thread-safe conversation cursor for raw-audio speculative turns."""
 
@@ -80,6 +95,8 @@ class SpeculativeTurnTracker:
         self._processing_deadline: float | None = None
         self._unanswered_reopen_ms = 7000
         self._last_response_closed_at: float | None = None
+        self._predecessor: _Predecessor | None = None
+        self._provisional: str | None = None
         self.wait_observer: Callable[[str, int, float, float], None] | None = None
 
     @property
@@ -177,6 +194,17 @@ class SpeculativeTurnTracker:
     def start_turn(self) -> tuple[str, int]:
         """Advance the conversation cursor and return the new turn metadata."""
         with self._condition:
+            if self._provisional is None or self._current is None or self._current.turn_id != self._provisional:
+                # A provisional turn that a new one supersedes never happened:
+                # the turn before it stays the one to fall back to.
+                self._predecessor = _Predecessor(
+                    current=self._current,
+                    closed_current=self._closed_current,
+                    phase=self._phase,
+                    last_final_audio_ms=self._last_final_audio_ms,
+                    processing_deadline=self._processing_deadline,
+                )
+            self._provisional = None
             self._sequence += 1
             self._current = _TurnReference(
                 sequence=self._sequence,
@@ -192,6 +220,73 @@ class SpeculativeTurnTracker:
             logger.debug("Started speculative turn %s", self._current.turn_id)
             self._condition.notify_all()
             return self._current.turn_id, self._current.revision
+
+    def mark_provisional(self, turn_id: str | None) -> bool:
+        """Treat the current turn as speech that may turn out not to be a turn.
+
+        Until :meth:`confirm_provisional` or :meth:`discard_provisional`, work
+        for the turn before it stays relevant: its reply keeps generating and a
+        tool follow-up for it is not dropped as stale. Only a freshly started
+        turn qualifies.
+        """
+        with self._condition:
+            if (
+                turn_id is None
+                or self._current is None
+                or self._current.turn_id != turn_id
+                or self._predecessor is None
+                or (self._provisional is not None and self._provisional != turn_id)
+            ):
+                return False
+            self._provisional = turn_id
+            logger.debug("Speculative turn %s is provisional", turn_id)
+            return True
+
+    def confirm_provisional(self, turn_id: str | None) -> None:
+        """The provisional turn is real: the turn before it is superseded as usual."""
+        with self._condition:
+            if turn_id is None or self._provisional != turn_id:
+                return
+            self._provisional = None
+            self._predecessor = None
+            logger.debug("Speculative turn %s confirmed", turn_id)
+            self._condition.notify_all()
+
+    def discard_provisional(self, turn_id: str | None) -> bool:
+        """Forget the provisional turn and restore the turn before it as current.
+
+        Returns ``False`` (and changes nothing else) when the turn is no longer
+        the provisional current turn, for example because a newer turn started.
+        """
+        with self._condition:
+            if turn_id is None or self._provisional != turn_id:
+                return False
+            self._provisional = None
+            predecessor = self._predecessor
+            self._predecessor = None
+            if predecessor is None or self._current is None or self._current.turn_id != turn_id:
+                self._condition.notify_all()
+                return False
+            self._current = predecessor.current
+            self._closed_current = predecessor.closed_current
+            self._phase = predecessor.phase
+            self._last_final_audio_ms = predecessor.last_final_audio_ms
+            self._processing_deadline = predecessor.processing_deadline
+            self._pending_reopen = None
+            self._reopen_grace = None
+            logger.debug("Discarded provisional speculative turn %s", turn_id)
+            self._condition.notify_all()
+            return True
+
+    def _is_provisional_predecessor_locked(self, turn_id: str, revision: int) -> bool:
+        predecessor = self._predecessor
+        return (
+            self._provisional is not None
+            and predecessor is not None
+            and predecessor.current is not None
+            and predecessor.current.turn_id == turn_id
+            and predecessor.current.revision == revision
+        )
 
     def is_latest(self, turn_id: str | None, revision: int | None) -> bool:
         if turn_id is None or revision is None:
@@ -290,6 +385,12 @@ class SpeculativeTurnTracker:
                 self._closed_current = committed
                 self._phase = TurnPhase.CLOSED
                 self._processing_deadline = None
+            elif self._predecessor is not None and self._predecessor.current == committed:
+                # Restoring this turn after a dismissed provisional turn must
+                # find it answered, exactly as if no speech had started.
+                self._predecessor.closed_current = committed
+                self._predecessor.phase = TurnPhase.CLOSED
+                self._predecessor.processing_deadline = None
             self._condition.notify_all()
 
     def seconds_since_response_closed(self) -> float | None:
@@ -415,6 +516,7 @@ class SpeculativeTurnTracker:
         return (
             self._is_current_locked(turn_id, revision)
             or self._committed_reference_locked(turn_id, revision) is not None
+            or self._is_provisional_predecessor_locked(turn_id, revision)
         )
 
     def _blocks_reopen_locked(self, turn_id: str, revision: int) -> bool:
@@ -494,4 +596,6 @@ class SpeculativeTurnTracker:
             self._closed_current = None
             self._pending_reopen = None
             self._reopen_grace = None
+            self._predecessor = None
+            self._provisional = None
             self._condition.notify_all()

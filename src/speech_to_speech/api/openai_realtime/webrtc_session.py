@@ -33,7 +33,7 @@ from aiortc.rtcrtpsender import RTCEncodedFrame
 from aiortc.rtp import AnyRtcpPacket, RtcpRrPacket, RtcpSrPacket
 
 from speech_to_speech.api.openai_realtime.service import PIPELINE_SAMPLE_RATE
-from speech_to_speech.api.openai_realtime.transports import SessionTransport
+from speech_to_speech.api.openai_realtime.transports import PlaybackState, SessionTransport
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
 
 if TYPE_CHECKING:
@@ -47,6 +47,8 @@ WEBRTC_FRAME_SAMPLES = int(WEBRTC_SAMPLE_RATE * AUDIO_PTIME)
 # One frame flushes Opus lookahead; four more release it through aiortc's
 # audio receiver prefetch. Stop sending after this bounded 100 ms tail.
 WEBRTC_DRAIN_FRAMES = 5
+# Volume of assistant audio while possible barge-in is checked with playback "duck" (about -12 dB).
+_DUCK_GAIN = 0.25
 DATA_CHANNEL_LABEL = "oai-events"
 ICE_SERVERS_ENV = "SPEECH_TO_SPEECH_ICE_SERVERS"
 ICE_GATHERING_TIMEOUT_S = 5.0
@@ -128,6 +130,23 @@ class PipelineAudioTrack(MediaStreamTrack):
         self._drain_remaining = 0
         self._generation = 0
         self._frame_generation = 0
+        # Barge-in that is still undecided pauses or ducks playback. Paused
+        # audio stays buffered and plays on from the same sample.
+        self._paused = False
+        self._gain = 1.0
+
+    def pause(self) -> None:
+        self._paused = True
+
+    def set_gain(self, gain: float) -> None:
+        self._gain = gain
+
+    def resume(self) -> None:
+        self._gain = 1.0
+        if self._paused:
+            self._paused = False
+            if self._buffer:
+                self._data_available.set()
 
     def write(self, pcm: bytes) -> None:
         if not pcm:
@@ -155,7 +174,7 @@ class PipelineAudioTrack(MediaStreamTrack):
 
         while True:
             waited_for_audio = False
-            while not self._buffer and not self._drain_remaining:
+            while (not self._buffer or self._paused) and not self._drain_remaining:
                 self._data_available.clear()
                 waited_for_audio = True
                 await self._data_available.wait()
@@ -191,6 +210,8 @@ class PipelineAudioTrack(MediaStreamTrack):
             payload += b"\x00" * (needed - len(payload))
 
             samples = np.frombuffer(payload, dtype=np.int16)
+            if self._gain != 1.0:
+                samples = (samples.astype(np.float32) * self._gain).astype(np.int16)
             frame = av.AudioFrame.from_ndarray(samples[np.newaxis, :], format="s16", layout="mono")
             frame.sample_rate = WEBRTC_SAMPLE_RATE
             # The encoder/resampler needs contiguous input PTS. The sender
@@ -421,6 +442,17 @@ class WebRTCSession(SessionTransport):
         if events:
             await self.send_events(events)
         self._track.write(self._out_resampler.resample_pcm(pcm, PIPELINE_SAMPLE_RATE))
+
+    def has_unplayed_audio(self) -> bool:
+        return self._track.buffered_bytes > 0
+
+    def set_playback(self, state: PlaybackState) -> None:
+        if state == "pause":
+            self._track.pause()
+        elif state == "duck":
+            self._track.set_gain(_DUCK_GAIN)
+        else:
+            self._track.resume()
 
     def discard_pending_audio(self) -> float:
         unplayed_ms = self._track.buffered_bytes / 2 / WEBRTC_SAMPLE_RATE * 1000
