@@ -789,3 +789,16 @@ def test_playback_while_pending_depends_on_who_owns_the_player(kind, playback, o
     st = SimpleNamespace(runtime_config=SimpleNamespace(interruption_events_enabled=opted_in))
     config = FalseInterruptionConfig(playback=playback)
     assert _interruption_playback(SimpleNamespace(kind=kind), st, config) == applied
+
+
+def test_server_flags_build_the_session_default():
+    from types import SimpleNamespace
+
+    from speech_to_speech.s2s_pipeline import _default_false_interruption
+
+    flags = SimpleNamespace(
+        false_interruption="off", false_interruption_min_words=2, false_interruption_min_speech_ms=0
+    )
+    assert _default_false_interruption(flags) is None
+    flags.false_interruption = "duck"
+    assert _default_false_interruption(flags) == FalseInterruptionConfig(playback="duck", min_words=2, min_speech_ms=0)

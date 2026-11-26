@@ -343,10 +343,12 @@ def _default_false_interruption(module_kwargs: ModuleArguments) -> FalseInterrup
     mode = getattr(module_kwargs, "false_interruption", "off")
     if mode == "off":
         return None
-    return FalseInterruptionConfig(
-        playback=mode,
-        min_words=module_kwargs.false_interruption_min_words,
-        min_speech_ms=module_kwargs.false_interruption_min_speech_ms,
+    return FalseInterruptionConfig.model_validate(
+        {
+            "playback": mode,
+            "min_words": module_kwargs.false_interruption_min_words,
+            "min_speech_ms": module_kwargs.false_interruption_min_speech_ms,
+        }
     )
 
 
