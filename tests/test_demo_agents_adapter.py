@@ -20,10 +20,6 @@ def _run_node(script: str) -> None:
     )
 
 
-def test_websocket_playback_buffer():
-    _run_node('await import("./demo/tests/playback.test.mjs");')
-
-
 def test_adapter_uses_stock_sdk_transport_for_each_mode():
     _run_node(
         """

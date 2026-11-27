@@ -242,60 +242,8 @@ def test_auto_mode_uses_detect_language_and_forces_the_result():
     assert handler.model.calls[0]["language"] == "de"
 
 
-def test_auto_mode_reuses_the_encoder_output_instead_of_re_encoding():
+def test_auto_mode_reuses_one_encoder_pass_with_gradients_disabled():
     """Detection and generation share one encoder pass, so detection is not extra cost."""
-    handler = make_handler(
-        start_language="auto",
-        last_language=None,
-        gen_kwargs={"task": "transcribe"},
-        responses=[FakeSequences([2626], "Hallo.")],
-        detect_language_result="<|de|>",
-    )
-
-    run(handler)
-
-    assert handler.model.encoder_calls == 1
-    assert handler.model.calls[0]["encoder_outputs"] is SENTINEL_ENCODER_OUTPUTS
-
-
-def test_detection_runs_with_gradients_disabled():
-    """Calling the encoder directly does not inherit generate()'s internal no-grad context.
-
-    Without an explicit `torch.no_grad()`, the encoder output keeps its autograd graph alive
-    for the whole of decoding -- pure waste in a forward-only pipeline, and enough to risk
-    OOM with a large Whisper checkpoint in auto-language mode.
-    """
-    handler = make_handler(
-        start_language="auto",
-        last_language=None,
-        gen_kwargs={"task": "transcribe"},
-        responses=[FakeSequences([2626], "Hallo.")],
-        detect_language_result="<|de|>",
-    )
-
-    run(handler)
-
-    assert handler.model.encoder_grad_enabled == [False]
-    assert handler.model.detect_grad_enabled == [False]
-
-
-def test_detection_restores_the_ambient_grad_mode():
-    """no_grad must be scoped to detection, not leak out and disable autograd globally."""
-    handler = make_handler(
-        start_language="auto",
-        last_language=None,
-        gen_kwargs={"task": "transcribe"},
-        responses=[FakeSequences([2626], "Hallo.")],
-        detect_language_result="<|de|>",
-    )
-
-    assert torch.is_grad_enabled()
-    run(handler)
-    assert torch.is_grad_enabled()
-
-
-def test_detection_runs_with_gradients_disabled_even_under_enabled_grad():
-    """Explicitly enabling grad around the call must not re-enable it inside detection."""
     handler = make_handler(
         start_language="auto",
         last_language=None,
@@ -306,8 +254,13 @@ def test_detection_runs_with_gradients_disabled_even_under_enabled_grad():
 
     with torch.enable_grad():
         run(handler)
+        assert torch.is_grad_enabled()
 
     assert handler.model.encoder_grad_enabled == [False]
+    assert handler.model.detect_grad_enabled == [False]
+
+    assert handler.model.encoder_calls == 1
+    assert handler.model.calls[0]["encoder_outputs"] is SENTINEL_ENCODER_OUTPUTS
 
 
 def test_detection_does_not_mutate_shared_gen_kwargs():
