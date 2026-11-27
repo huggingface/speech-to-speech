@@ -148,16 +148,32 @@ class SpeculativeTurnTracker:
             turn_id, revision = self.start_turn()
             return turn_id, revision, False
 
-    def segment_finalized(self, audio_ms: int, output_hold_ms: int = 0, processing_delay_ms: int = 0) -> None:
-        """Record audio timing and both Smart Turn deadlines for this revision."""
+    def segment_finalized(
+        self,
+        audio_ms: int,
+        output_hold_ms: int = 0,
+        processing_delay_ms: int = 0,
+        *,
+        finalized_at: float | None = None,
+    ) -> None:
+        """Record audio timing and both Smart Turn deadlines for this revision.
+
+        Both windows run from *finalized_at* (``time.monotonic()``, default
+        now), so Smart Turn inference after VAD finalization does not extend them.
+        """
         with self._condition:
             if self._current is None or self._blocks_reopen_locked(self._current.turn_id, self._current.revision):
                 return
             self._phase = TurnPhase.SOFT_ENDED
             self._last_final_audio_ms = audio_ms
-            now = time.monotonic()
-            self._processing_deadline = now + max(0, processing_delay_ms) / 1000.0
-            self.start_reopen_grace(self._current.turn_id, self._current.revision, max(0, output_hold_ms) / 1000.0)
+            started_at = time.monotonic() if finalized_at is None else finalized_at
+            self._processing_deadline = started_at + max(0, processing_delay_ms) / 1000.0
+            self.start_reopen_grace(
+                self._current.turn_id,
+                self._current.revision,
+                max(0, output_hold_ms) / 1000.0,
+                started_at=started_at,
+            )
             self._condition.notify_all()
 
     def segment_discarded(self) -> None:
@@ -267,13 +283,20 @@ class SpeculativeTurnTracker:
                 wait_s = min(remaining_s, self._ABORT_POLL_S) if should_abort is not None else remaining_s
                 self._condition.wait(wait_s)
 
-    def start_reopen_grace(self, turn_id: str | None, revision: int | None, grace_s: float) -> None:
+    def start_reopen_grace(
+        self,
+        turn_id: str | None,
+        revision: int | None,
+        grace_s: float,
+        *,
+        started_at: float | None = None,
+    ) -> None:
         if turn_id is None or revision is None or grace_s <= 0:
             return
         with self._condition:
             if not self._is_current_locked(turn_id, revision) or self._blocks_reopen_locked(turn_id, revision):
                 return
-            deadline = time.monotonic() + grace_s
+            deadline = (time.monotonic() if started_at is None else started_at) + grace_s
             existing = self._reopen_grace
             if (
                 existing is None
