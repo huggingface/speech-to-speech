@@ -1151,8 +1151,10 @@ def test_per_session_false_interruption_config_via_session_update() -> None:
         err = unit.service.handle_session_update(sid_a, bad_ev)
         assert err is not None and err.error.type == "invalid_request_error"
 
-    # 2. End-to-end WebSocket: server default 0, client opts in via session.update and recovers from a cough.
+    # 2. End-to-end WebSocket: server default 0, client sends an idle instructions update, then opts in before reply 1.
     with _ws_session(min_words=0) as (u, ws, sid):
+        ws.send_json({"type": "session.update", "session": {"type": "realtime", "instructions": "Be concise."}})
+        _drain_until(ws, "session.updated")
         ws.send_json(
             {
                 "type": "session.update",

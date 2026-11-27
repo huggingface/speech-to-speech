@@ -893,7 +893,9 @@ async def _dispatch_client_event(
             await send_correlated([err])
         else:
             if service.session_min_interruption_words(session_id) <= 0:
-                service._state(session_id).replay_enabled_for_response = False
+                st = service._state(session_id)
+                if st.replay_enabled_for_response:
+                    st.replay_enabled_for_response = False
                 _confirm_false_interruption(unit, session_id, "session.update disabled recovery", clear_audio=True)
             await send_correlated([service.build_session_updated(session_id)])
 
