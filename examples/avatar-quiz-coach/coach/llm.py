@@ -25,23 +25,18 @@ def _models(env: str, default: str) -> list[str]:
     return [m.strip() for m in raw.split(",") if m.strip()]
 
 
-# Grading runs on every spoken answer: it must be quick, accept brief correct
-# answers, and keep the answer out of its clues. Over 12 brief correct
-# answers and 12 guided dialogues (2026-11-26): Qwen3.8-27B on Cerebras with
-# reasoning off accepted 10/12, leaked 0/12, median 0.4 s per turn;
-# Inkling-2-Small on Together 10/12, 0/12, 1.2 s (it rejects reasoning off);
-# gpt-oss-120b on Cerebras 10/12, 0/12, 0.5 s. `model@effort` sets the
-# reasoning effort per model.
-# After the grading prompt was reworked (2026-11-27), Qwen with reasoning off
-# was too strict on answers in the student's own words: a real two-try answer
-# passed 0/3. With low reasoning it passes 3/3, keeps the same 20/64 half
-# answers to two-part questions partial and rejects every wrong or vague
-# control, at a median 0.54 s (p90 0.9 s) a grade. Gemma 4 31B judged as
-# fairly but took a median 1.3 s with a p90 of 6 s; medium reasoning sometimes
-# ran out of tokens before the JSON.
+# Grading runs on every spoken answer: it must be quick, accept answers in the
+# student's own words, refuse half answers and keep the answer out of its
+# clues. On hand-labeled sets (2026-11-27: 60 textbook answers and 128 casual
+# spoken ones, complete and near miss), DeepSeek V4.1-Flash, V4-Pro, Gemma 4 31B,
+# Kimi K3, Qwen3.8-27B and gpt-6.1-terra all scored 98-100%, so speed and
+# availability decide. V4.1-Flash with reasoning off took a median 0.77 s
+# (p90 1.45 s) with no failed calls, on whichever provider the router picks;
+# Qwen3.8-27B on Cerebras was faster but rate-limited about one call in 30.
+# `model@effort` sets the reasoning effort per model.
 GRADER_MODELS = _models(
     "GRADER_MODELS",
-    "Qwen/Qwen3.8-27B:cerebras@low,google/gemma-4-31B-it@none,openai/gpt-oss-120b:cerebras@low",
+    "deepseek-ai/DeepSeek-V4.1-Flash@none,deepseek-ai/DeepSeek-V4-Pro-0813@none,google/gemma-4-31B-it@none",
 )
 # The grader can run on the speech backend's own model instead (any
 # OpenAI-compatible endpoint, e.g. the deployment's Gemma 4 31B), with the
