@@ -147,6 +147,9 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
             processing_deadline = self.speculative_turns.processing_deadline(turn_id, turn_revision)
             if processing_deadline is not None:
                 item_delay_s = max(0.0, processing_deadline - monotonic())
+            if self.speculative_turns.is_provisional(turn_id):
+                # Speech held over a paused reply: its words decide, now, whether the reply resumes.
+                item_delay_s = 0.0
             wait_started_at_s = perf_counter()
             is_latest = self.speculative_turns.wait_for_gate(
                 turn_id,

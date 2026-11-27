@@ -404,3 +404,30 @@ def test_stt_does_not_restart_expired_tracker_processing_delay(monkeypatch):
     thread.join(timeout=1.0)
     assert completed_without_new_wait
     assert result == [True]
+
+
+def test_speech_held_over_a_paused_reply_is_transcribed_without_the_smart_turn_delay():
+    """The paused reply waits on this transcript; once the turn is real, the delay applies as usual."""
+    tracker = SpeculativeTurnTracker()
+    tracker.start_turn()
+    tracker.segment_finalized(1000)
+    tracker.gate("turn_1", 0, commit=True)
+    turn, revision = tracker.start_turn()
+    assert tracker.mark_provisional(turn)
+    tracker.segment_finalized(2000, processing_delay_ms=600)
+    handler = _handler(tracker, Queue(), Queue())
+    item = _vad_audio(turn_id=turn, revision=revision, mode="final", processing_delay_s=0.6)
+
+    result = []
+    thread = Thread(target=lambda: result.append(handler.should_process_input(item)))
+    thread.start()
+    thread.join(timeout=0.3)
+    assert not thread.is_alive() and result == [True]
+
+    tracker.confirm_provisional(turn)
+    thread = Thread(target=lambda: result.append(handler.should_process_input(item)))
+    thread.start()
+    thread.join(timeout=0.3)
+    assert thread.is_alive(), "a confirmed turn waits out the Smart Turn delay"
+    thread.join(timeout=1.0)
+    assert result == [True, True]

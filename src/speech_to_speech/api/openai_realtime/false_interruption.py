@@ -106,6 +106,7 @@ DEFAULT_IGNORE_WORDS: tuple[str, ...] = (
     "ahem",
     "a hem",
     "a ham",
+    "a hand",
     "uh hum",
     "hem",
     # Backchannels: the listener is following, not taking the turn.

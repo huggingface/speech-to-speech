@@ -185,15 +185,9 @@ class SpeculativeTurnTracker:
                 self._condition.notify_all()
 
     def processing_deadline(self, turn_id: str | None, revision: int | None) -> float | None:
-        """Return the monotonic deadline, or None for legacy unfinalized input.
-
-        A provisional turn has none: the reply before it is paused until its
-        transcript says whether it was words or only a cough.
-        """
+        """Return the monotonic deadline, or None for legacy unfinalized input."""
         with self._condition:
             if turn_id is None or revision is None or not self._is_current_locked(turn_id, revision):
-                return None
-            if self._provisional == turn_id:
                 return None
             return self._processing_deadline
 
@@ -247,6 +241,16 @@ class SpeculativeTurnTracker:
             self._provisional = turn_id
             logger.debug("Speculative turn %s is provisional", turn_id)
             return True
+
+    def is_provisional(self, turn_id: str | None) -> bool:
+        """Whether *turn_id* is open and may still be dismissed as noise."""
+        with self._condition:
+            return (
+                turn_id is not None
+                and self._provisional == turn_id
+                and self._current is not None
+                and (self._current.turn_id == turn_id)
+            )
 
     def current_is_provisional(self) -> bool:
         """Whether the open turn may still be dismissed as noise."""
