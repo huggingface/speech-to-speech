@@ -57,7 +57,13 @@ from speech_to_speech.pipeline.events import (
     TranscriptionFailedEvent,
 )
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
+from speech_to_speech.pipeline.messages import (
+    AUDIO_RESPONSE_DONE,
+    PIPELINE_END,
+    AssistantTextPart,
+    AssistantToolCallPart,
+    AudioOutput,
+)
 from speech_to_speech.pipeline.speculative_turns import TurnOutputHeld, TurnPhase
 from speech_to_speech.pipeline.transcript_logging import log_exception
 from speech_to_speech.utils.utils import is_out_of_band, response_wants_audio
@@ -198,8 +204,15 @@ def _output_is_held(unit: PipelineUnit, session_id: str, item: Any) -> bool:
         if _response_key_is_obsolete(unit, session_id, getattr(item, "response_key", None)):
             return False
     response_key = _output_response_key(item)
-    if response_key is not None and unit.service.response.is_response_output_blocked(session_id, response_key):
-        return True
+    if response_key is not None:
+        try:
+            st = unit.service._state(session_id)
+            if st.active_resumed_audio is not None and response_key == st.current_response_key:
+                return False
+        except KeyError:
+            pass
+        if unit.service.response.is_response_output_blocked(session_id, response_key):
+            return True
     return unit.service.is_turn_output_held(item)
 
 
@@ -399,6 +412,7 @@ def _release_session(unit: PipelineUnit, session_id: str) -> None:
             logger.debug("Skipped late usage for unregistered session %s", session_id)
 
     if old_session.pending_false_interruption is not None:
+        old_session.pending_false_interruption.audio_buffer.buffered_tool_events.clear()
         old_session.pending_false_interruption.audio_buffer.resolve_history_proposal()
         old_session.pending_false_interruption = None
     old_session.last_assistant_audio = None
@@ -448,7 +462,7 @@ def _record_replay(
     pcm: bytes = b"",
 ) -> None:
     """Retain assistant transcript segments and PCM16 audio for false-interruption replay."""
-    if unit.service.min_interruption_words <= 0 or (event is None and not pcm):
+    if unit.service.session_min_interruption_words(session_id) <= 0 or (event is None and not pcm):
         return
     st = unit.service._state(session_id)
     if is_out_of_band(st.current_response_params) or not response_wants_audio(st.current_response_params):
@@ -501,6 +515,7 @@ def _confirm_false_interruption(unit: PipelineUnit, session_id: str, reason: str
     except KeyError:
         st = None
     buf = pending.audio_buffer
+    buf.buffered_tool_events.clear()
     buf.resolve_history_proposal()
     if pending.was_generating:
         if not buf.generation_done:
@@ -533,7 +548,8 @@ async def _resume_false_interruption(
             return
 
         cut = pending.cut_samples()
-        if cut >= buf.total_samples and buf.generation_done:
+        buffered_tools = list(buf.buffered_tool_events)
+        if cut >= buf.total_samples and buf.generation_done and not buffered_tools:
             if buf.root_item_id and buf.full_text():
                 st.runtime_config.chat.truncate_assistant_message(buf.root_item_id, buf.full_text(), status="completed")
             if pending.was_generating:
@@ -541,9 +557,13 @@ async def _resume_false_interruption(
             logger.info("Pipeline %d: false interruption (%s), reply already fully played", unit.index, reason)
             return
 
-        resume_sample = buf.pcm_base_sample + resume_rewind_samples(buf.pcm, cut - buf.pcm_base_sample)
+        resume_sample = (
+            buf.total_samples
+            if cut >= buf.total_samples
+            else buf.pcm_base_sample + resume_rewind_samples(buf.pcm, cut - buf.pcm_base_sample)
+        )
         remaining = buf.remaining_segments_from(resume_sample)
-        created_events = unit.service.response.begin_resumed_audio_response(session_id, buf, resume_sample)
+        created_events = unit.service.response.begin_resumed_audio_response(session_id, buf, resume_sample, cut)
         session.last_assistant_audio = buf
         logger.info(
             "Pipeline %d: resuming after false interruption (%s, cut=%dms, resume=%dms, generating=%s)",
@@ -570,6 +590,13 @@ async def _resume_false_interruption(
                 await transport.send_audio_chunk(
                     unit.service, session_id, seg_pcm[offset : offset + MAX_AUDIO_BATCH_BYTES], st.current_response_key
                 )
+
+        buf.buffered_tool_events.clear()
+        for tool_ev in buffered_tools:
+            if session.released_at is not None or not st.in_response:
+                return
+            if tool_events := unit.service.dispatch_pipeline_event(session_id, tool_ev):
+                await transport.send_events(tool_events)
 
         if buf.generation_done:
             if st.in_response and session.released_at is None:
@@ -617,13 +644,32 @@ def _buffer_pending_output(unit: PipelineUnit, session: SessionState | None, ite
             _confirm_false_interruption(unit, session.session_id, "response failed")
         elif isinstance(item, AssistantToolCallReadyEvent):
             buf.had_tool_call = True
-            _confirm_false_interruption(unit, session.session_id, "early tool call")
+            buf.buffered_tool_events.append(item)
+            buf.replace_history_proposal(item.history)
         elif isinstance(item, AssistantOutputEvent):
-            if buf.record_output_parts(item.parts):
-                _confirm_false_interruption(unit, session.session_id, "tool call")
-                return True
-            if item.output_sequence is not None:
-                buf.next_output_sequence = max(buf.next_output_sequence, item.output_sequence + 1)
+            for part in item.parts:
+                if isinstance(part, AssistantTextPart):
+                    buf.append_text(part.text)
+            non_text: list[Any] = [part for part in item.parts if not isinstance(part, AssistantTextPart)]
+            if any(isinstance(part, AssistantToolCallPart) for part in non_text):
+                buf.had_tool_call = True
+                buf.buffered_tool_events.append(
+                    AssistantOutputEvent(
+                        history=None,
+                        parts=non_text,
+                        turn_id=item.turn_id,
+                        turn_revision=item.turn_revision,
+                        cancel_generation=item.cancel_generation,
+                        response_key=item.response_key,
+                        output_sequence=item.output_sequence,
+                    )
+                )
+            elif item.output_sequence is not None:
+                tool_seqs = [
+                    seq for ev in buf.buffered_tool_events if (seq := getattr(ev, "output_sequence", None)) is not None
+                ]
+                if not tool_seqs or item.output_sequence < min(tool_seqs):
+                    buf.next_output_sequence = max(buf.next_output_sequence, item.output_sequence + 1)
             buf.replace_history_proposal(item.history)
         elif isinstance(item, AssistantResponseDoneEvent):
             buf.done_status, buf.done_reason = item.status, item.reason
@@ -656,11 +702,14 @@ async def _tick_pending_interruption(
     if time.monotonic() < pending.deadline:
         return
     turns = unit.service.speculative_turns
-    still_speaking = turns is not None and (turns.phase == TurnPhase.LISTENING or turns.has_speech_candidate())
-    if pending.short_transcript_pending and not still_speaking:
-        await _resume_false_interruption(unit, session, session.session_id, transport, "short transcript")
+    still_speaking = (not pending.speech_stopped) or (
+        turns is not None and (turns.phase == TurnPhase.LISTENING or turns.has_speech_candidate())
+    )
+    if still_speaking:
+        _confirm_false_interruption(unit, session.session_id, "speech continued past timeout")
     else:
-        _confirm_false_interruption(unit, session.session_id, "timeout")
+        reason = "short transcript" if pending.short_transcript_pending else "transcription timeout"
+        await _resume_false_interruption(unit, session, session.session_id, transport, reason)
 
 
 def _pre_dispatch_interruption(
@@ -671,13 +720,21 @@ def _pre_dispatch_interruption(
     if isinstance(text_msg, SpeechStartedEvent):
         if text_msg.reopened and text_msg.turn_id == pending.interrupt_turn_id:
             pending.short_transcript_pending = False
+            pending.speech_stopped = False
+            pending.deadline = time.monotonic() + pending.timeout_s
         else:
             _confirm_false_interruption(unit, session.session_id, "new speech turn")
+    elif (
+        isinstance(text_msg, SpeechStoppedEvent) and not is_stale_turn and text_msg.turn_id == pending.interrupt_turn_id
+    ):
+        pending.speech_stopped = True
+        pending.deadline = time.monotonic() + pending.timeout_s
     elif (
         isinstance(text_msg, TranscriptionCompletedEvent)
         and not is_stale_turn
         and text_msg.turn_id == pending.interrupt_turn_id
-        and count_interruption_words(text_msg.transcript) >= unit.service.min_interruption_words
+        and count_interruption_words(text_msg.transcript)
+        >= unit.service.session_min_interruption_words(session.session_id)
     ):
         _confirm_false_interruption(unit, session.session_id, "words threshold met")
 
@@ -719,12 +776,14 @@ def _start_false_interruption(
     unplayed_ms: float,
 ) -> None:
     unplayed_samples = round(unplayed_ms * PIPELINE_SAMPLE_RATE / 1000)
+    timeout_s = unit.service.session_false_interruption_timeout_s(session_id)
     session.pending_false_interruption = PendingFalseInterruption(
         interrupt_turn_id=turn_id,
         audio_buffer=buf,
         was_generating=was_generating,
         estimated_played_samples=max(buf.wire_start_sample, buf.total_samples - unplayed_samples),
-        deadline=time.monotonic() + unit.service.false_interruption_timeout_s,
+        timeout_s=timeout_s,
+        deadline=time.monotonic() + timeout_s,
     )
     unit.service._state(session_id).false_interruption_turn_id = turn_id
     unit.response_playing.clear()
@@ -825,6 +884,8 @@ async def _dispatch_client_event(
         if err:
             await send_correlated([err])
         else:
+            if service.session_min_interruption_words(session_id) <= 0:
+                _confirm_false_interruption(unit, session_id, "session.update disabled recovery", clear_audio=True)
             await send_correlated([service.build_session_updated(session_id)])
 
     elif isinstance(event, ConversationItemCreateEvent):
@@ -1313,6 +1374,8 @@ def create_app(
                     if text_msg is None:
                         text_msg = unit.text_output_queue.get_nowait()
 
+                    if _buffer_pending_output(unit, session, text_msg):
+                        continue
                     if session is not None and session_id is not None and _output_is_held(unit, session_id, text_msg):
                         # Response-dependent side-channel events share the same
                         # exposure barrier as audio/output events. In particular,
@@ -1327,8 +1390,6 @@ def create_app(
                         text_msg = None
                     if text_msg is None:
                         raise Empty
-                    if _buffer_pending_output(unit, session, text_msg):
-                        continue
                     if isinstance(text_msg, AssistantToolCallReadyEvent):
                         generation = text_msg.cancel_generation
                         response_key = text_msg.response_key
@@ -1353,7 +1414,7 @@ def create_app(
                         )
                         replay_buf = session.last_assistant_audio if session is not None else None
                         can_recover_base = (
-                            unit.service.min_interruption_words > 0
+                            unit.service.session_min_interruption_words(session_id) > 0
                             and interrupt_enabled
                             and transport is not None
                             and not text_msg.reopened

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from unicodedata import category
 
 from openai.types.realtime import (
@@ -190,13 +190,26 @@ class ConversationHandler(RealtimeBaseHandler):
         # input state; its Chat entry is only written when transcription ends.
         committed_input = event.item_id in st.input_items and event.item_id in st.acknowledged_item_ids
         empty_input = st.published_input_transcripts.pop(event.item_id, None) == ""
-        if removed is None and not committed_input and not empty_input and not unheard:
+        resumed_origin = st.resumed_audio_origins.pop(event.item_id, None)
+        if removed is None and not committed_input and not empty_input and not unheard and resumed_origin is None:
             error = self.make_error(
                 f"No conversation item with id '{event.item_id}' found.", "conversation_item_not_found"
             )
             # Deferred errors are emitted outside the client dispatch callback.
             error.error.event_id = event.event_id
             return [error]
+        if resumed_origin is not None:
+            _, audio_buf = resumed_origin
+            root_id = audio_buf.root_item_id
+            has_other_replay = any(buf.root_item_id == root_id for _, buf in st.resumed_audio_origins.values())
+            if root_id and not has_other_replay:
+                root_cut = st.resumed_root_wire_cuts.pop(root_id, None)
+                if root_id in chat.item_ids():
+                    from speech_to_speech.api.openai_realtime.handlers.response import _heard_transcript
+
+                    cut = st.assistant_audio_cuts.get(root_id, root_cut if root_cut is not None else 0)
+                    root_text = _heard_transcript(st.assistant_audio_segments.get(root_id, []), cut)
+                    chat.truncate_assistant_message(root_id, root_text, status="incomplete")
         reference = st.input_turn_by_item_id.pop(event.item_id, None)
         if reference is None:
             reference = next(
@@ -216,9 +229,14 @@ class ConversationHandler(RealtimeBaseHandler):
         # edit a new item that reuses its id.
         st.assistant_audio_segments.pop(event.item_id, None)
         st.assistant_audio_cuts.pop(event.item_id, None)
-        st.resumed_audio_origins.pop(event.item_id, None)
+        st.resumed_root_wire_cuts.pop(event.item_id, None)
         self._service.audio._release_input_item_state_by_id(conn_id, event.item_id)
-        retained_ids = chat.item_ids() | chat.unheard_assistant_item_ids() | st.input_items.keys()
+        retained_ids = (
+            chat.item_ids()
+            | chat.unheard_assistant_item_ids()
+            | st.input_items.keys()
+            | st.resumed_audio_origins.keys()
+        )
         st.acknowledged_item_ids = [item_id for item_id in st.acknowledged_item_ids if item_id in retained_ids]
         if removed is not None and removed.type == "function_call" and removed.call_id is not None:
             st.input_turn_by_call_id.pop(removed.call_id, None)
@@ -276,6 +294,16 @@ class ConversationHandler(RealtimeBaseHandler):
                 if call.id == item_id:
                     return call.model_copy(update={"object": "realtime.item", "status": call.status or "in_progress"})
 
+        if item_id in st.resumed_root_wire_cuts:
+            if (
+                st.runtime_config.chat.get_item(item_id) is None
+                and item_id not in st.runtime_config.chat.unheard_assistant_item_ids()
+            ):
+                return None
+            segments = st.assistant_audio_segments.get(item_id, [])
+            cut = st.assistant_audio_cuts.get(item_id, st.resumed_root_wire_cuts[item_id])
+            return self._audio_assistant_item(item_id, segments, cut, "incomplete")
+
         speech = item_id in published or item_id in st.input_items
         held = st.runtime_config.chat.get_item(item_id)
         if held is not None:
@@ -303,21 +331,12 @@ class ConversationHandler(RealtimeBaseHandler):
             # told about the item and its empty completed transcription.
             return self._user_audio_item(item_id, "")
         if item_id in st.resumed_audio_origins:
-            from speech_to_speech.api.openai_realtime.handlers.response import _heard_transcript
-
             segments = st.assistant_audio_segments.get(item_id, [])
             cut = st.assistant_audio_cuts.get(item_id, sum(seg[1] for seg in segments))
             status: Literal["completed", "incomplete"] = (
                 "incomplete" if item_id in st.assistant_audio_cuts else "completed"
             )
-            return RealtimeConversationItemAssistantMessage(
-                id=item_id,
-                object="realtime.item",
-                type="message",
-                role="assistant",
-                status=status,
-                content=[AssistantContent(type="output_audio", transcript=_heard_transcript(segments, cut))],
-            )
+            return self._audio_assistant_item(item_id, segments, cut, status)
         if item_id in st.runtime_config.chat.unheard_assistant_item_ids():
             # A reply nobody heard is kept out of model history, but like a
             # truncation to 0 ms it still exists, with nothing heard.
@@ -335,6 +354,21 @@ class ConversationHandler(RealtimeBaseHandler):
                 content=[content],
             )
         return None
+
+    @staticmethod
+    def _audio_assistant_item(
+        item_id: str, segments: list[list[Any]], cut: int, status: Literal["completed", "incomplete"]
+    ) -> RealtimeConversationItemAssistantMessage:
+        from speech_to_speech.api.openai_realtime.handlers.response import _heard_transcript
+
+        return RealtimeConversationItemAssistantMessage(
+            id=item_id,
+            object="realtime.item",
+            type="message",
+            role="assistant",
+            status=status,
+            content=[AssistantContent(type="output_audio", transcript=_heard_transcript(segments, cut))],
+        )
 
     @staticmethod
     def _user_audio_item(item_id: str, transcript: str | None) -> RealtimeConversationItemUserMessage:

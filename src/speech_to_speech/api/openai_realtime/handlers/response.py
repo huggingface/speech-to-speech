@@ -1040,6 +1040,7 @@ class ResponseHandler(RealtimeBaseHandler):
                 del segments_by_item[oldest]
                 st.assistant_audio_cuts.pop(oldest, None)
                 st.resumed_audio_origins.pop(oldest, None)
+                st.resumed_root_wire_cuts.pop(oldest, None)
         return segments
 
     def _record_audio_text(self, conn_id: str, item_id: str, text: str) -> None:
@@ -1158,6 +1159,9 @@ class ResponseHandler(RealtimeBaseHandler):
         if (origin := st.resumed_audio_origins.get(item_id)) is not None:
             resume_sample, audio_buf = origin
             self._update_resumed_root_history(st, audio_buf, "incomplete", resume_sample + played_samples, source)
+            return
+        if item_id in st.resumed_root_wire_cuts:
+            st.resumed_root_wire_cuts[item_id] = played_samples
             return
         text = _heard_transcript(segments, played_samples)
         st.runtime_config.chat.truncate_assistant_message(item_id, text)
@@ -1299,16 +1303,24 @@ class ResponseHandler(RealtimeBaseHandler):
         self._service.conversation.record_acknowledged_item(conn_id, item_id)
         return events
 
-    def begin_resumed_audio_response(self, conn_id: str, audio_buf: Any, resume_sample: int) -> list[ServerEvent]:
+    def begin_resumed_audio_response(
+        self, conn_id: str, audio_buf: Any, resume_sample: int, cut_samples: int
+    ) -> list[ServerEvent]:
         """Open a standard Realtime audio response to replay unplayed audio."""
         st = self._state(conn_id)
         st.current_response_id = _generate_id("resp")
-        st.current_response_key = None if audio_buf.generation_done else audio_buf.response_key
+        st.current_response_key = (
+            None if (audio_buf.generation_done and not audio_buf.buffered_tool_events) else audio_buf.response_key
+        )
         st.current_response_turn_id, st.current_response_turn_revision = audio_buf.turn_id, audio_buf.turn_revision
         st.next_assistant_output_sequence = audio_buf.next_output_sequence
         st.in_response = True
         new_item_id = self._start_item(conn_id)
         st.active_resumed_audio = st.resumed_audio_origins[new_item_id] = (resume_sample, audio_buf)
+        if audio_buf.root_item_id and (cut_samples < audio_buf.total_samples or not audio_buf.generation_done):
+            st.resumed_root_wire_cuts.setdefault(
+                audio_buf.root_item_id, st.assistant_audio_cuts.get(audio_buf.root_item_id, cut_samples)
+            )
         while len(st.resumed_audio_origins) > _AUDIO_ITEM_HISTORY:
             st.resumed_audio_origins.pop(next(iter(st.resumed_audio_origins)))
         audio_buf.current_item_id, audio_buf.wire_start_sample = new_item_id, resume_sample
@@ -1459,6 +1471,9 @@ class ResponseHandler(RealtimeBaseHandler):
 
     def _accept_turn_output(self, conn_id: str, event: AssistantOutputEvent | AssistantResponseDoneEvent) -> bool:
         """Commit the event's turn and write its history, or report it stale."""
+        st = self._state(conn_id)
+        if st.active_resumed_audio is not None and event.response_key == st.current_response_key:
+            return True
         if self._service.speculative_turns is not None:
             # VAD can start resumed speech after the send loop's hold check, so
             # check again and commit under one lock.
@@ -1469,7 +1484,6 @@ class ResponseHandler(RealtimeBaseHandler):
                 logger.debug("Dropping stale assistant output for turn=%s rev=%s", event.turn_id, event.turn_revision)
                 return False
         self._service.history.accept(conn_id, event.response_key)
-        st = self._state(conn_id)
         if st.current_response_turn_id is None and event.turn_id is not None:
             st.current_response_turn_id = event.turn_id
             st.current_response_turn_revision = event.turn_revision
@@ -1622,6 +1636,8 @@ class ResponseHandler(RealtimeBaseHandler):
                 # Explicitly in-progress calls receive output_item.done at
                 # response close, once the outcome is known.
                 st.pending_function_calls[output_idx] = pending_call
+                if st.active_resumed_audio is not None and st.runtime_config.chat.get_item(function_item_id) is None:
+                    st.runtime_config.chat.add_ordered_function_call(pending_call.model_copy(deep=True))
                 self._service.conversation.record_acknowledged_item(conn_id, function_item_id)
         if output_sequence is not None:
             st.pending_early_tool_calls.pop(output_sequence, None)

@@ -44,6 +44,32 @@ def validate_reasoning(params: Any) -> str | None:
     return None
 
 
+def _turn_detection_of(params: Any) -> Any:
+    audio = getattr(params, "audio", None) if params is not None else None
+    input_audio = getattr(audio, "input", None) if audio is not None else None
+    return getattr(input_audio, "turn_detection", None) if input_audio is not None else None
+
+
+def _turn_detection_value(td: Any, name: str) -> Any:
+    if td is None:
+        return None
+    return td.get(name) if isinstance(td, dict) else getattr(td, name, None)
+
+
+def validate_false_interruption(params: Any) -> str | None:
+    """Return an error message when per-session false-interruption options are invalid."""
+    td = _turn_detection_of(params)
+    if td is None:
+        return None
+    min_words = _turn_detection_value(td, "min_interruption_words")
+    if min_words is not None and (isinstance(min_words, bool) or not isinstance(min_words, int) or min_words < 0):
+        return "turn_detection.min_interruption_words must be a non-negative integer."
+    timeout_ms = _turn_detection_value(td, "false_interruption_timeout_ms")
+    if timeout_ms is not None and (isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms <= 0):
+        return "turn_detection.false_interruption_timeout_ms must be a positive integer."
+    return None
+
+
 def resolve_reasoning_effort(runtime_config: Any, response: Any = None) -> str | None:
     """Effective per-request effort: ``response.create`` overrides the session.
 
@@ -149,6 +175,18 @@ class RuntimeConfig(BaseModel):
         else:
             return True
         return val if val is not None else True
+
+    @property
+    def min_interruption_words(self) -> int | None:
+        """Per-session override for false-interruption word threshold, or ``None`` for server default."""
+        val = _turn_detection_value(_turn_detection_of(self.session), "min_interruption_words")
+        return val if isinstance(val, int) and not isinstance(val, bool) else None
+
+    @property
+    def false_interruption_timeout_ms(self) -> int | None:
+        """Per-session override for false-interruption grace timeout (ms), or ``None`` for server default."""
+        val = _turn_detection_value(_turn_detection_of(self.session), "false_interruption_timeout_ms")
+        return val if isinstance(val, int) and not isinstance(val, bool) else None
 
     @property
     def input_audio_transcription_snapshots_enabled(self) -> bool:

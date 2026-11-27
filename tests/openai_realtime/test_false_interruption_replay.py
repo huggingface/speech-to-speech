@@ -31,6 +31,7 @@ from speech_to_speech.LLM.chat import make_assistant_message, make_user_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
+    AssistantToolCallReadyEvent,
     SpeechStartedEvent,
     SpeechStoppedEvent,
     TranscriptionCompletedEvent,
@@ -424,8 +425,8 @@ def test_short_backchannel_and_stt_failure_resume_without_triggering_llm() -> No
         assert any(ev["type"] == "response.output_audio.delta" for ev in _drain_until(ws, "response.done"))
 
 
-def test_timeout_explicit_cancel_and_tool_call_abort_recovery() -> None:
-    # 1. Timeout confirms and cancels still-generating turn.
+def test_timeout_explicit_cancel_and_tool_call_recovery() -> None:
+    # 1a. Continuing speech (never stops before timeout) confirms real interruption and cancels generation.
     with _ws_session(min_words=1, timeout_ms=80) as (unit, ws, _sid):
         gen = unit.cancel_scope.generation
         unit.output_queue.put(AssistantOutputEvent(text="Streaming...", response_key="rk_to", cancel_generation=gen))
@@ -433,6 +434,39 @@ def test_timeout_explicit_cancel_and_tool_call_abort_recovery() -> None:
         _drain_until(ws, "response.output_audio.delta")
         unit.text_output_queue.put(SpeechStartedEvent(turn_id="turn_to", turn_revision=0))
         _drain_until(ws, "input_audio_buffer.speech_started")
+        _wait_for(lambda: unit.session.pending_false_interruption is None)
+        assert unit.cancel_scope.generation == gen + 1
+
+    # 1b. Speech stops, then STT stalls past grace timeout -> resumes instead of leaving assistant silent.
+    with _ws_session(min_words=1, timeout_ms=80) as (unit, ws, sid):
+        chat = unit.service._state(sid).runtime_config.chat
+        chat.add_item(make_user_message("Ask me."))
+        _queue_completed_reply(unit, sid, "rk_to_res", [("What is the capital of France?", _tone(RATE * 2))])
+        _drain_until(ws, "response.done")
+
+        unit.text_output_queue.put(SpeechStartedEvent(turn_id="turn_to_res", turn_revision=0))
+        _drain_until(ws, "input_audio_buffer.speech_started")
+        time.sleep(0.05)  # Under timeout_ms; stopping resets the grace period from speech stop.
+        unit.text_output_queue.put(SpeechStoppedEvent(turn_id="turn_to_res", turn_revision=0, duration_s=0.05))
+        replayed = _drain_until(ws, "response.done")
+        assert any(ev["type"] == "response.output_audio.delta" for ev in replayed)
+        assert [(m.role, m.status) for m in chat.buffer] == [("user", None), ("assistant", "completed")]
+
+    # 1c. Grace period resets at speech_stopped, so a real transcript arriving after start+timeout still confirms.
+    with _ws_session(min_words=1, timeout_ms=100) as (unit, ws, sid):
+        gen = unit.cancel_scope.generation
+        unit.output_queue.put(AssistantOutputEvent(text="Long answer.", response_key="rk_reset", cancel_generation=gen))
+        unit.output_queue.put(AudioOutput(audio=_tone(RATE * 2), response_key="rk_reset", cancel_generation=gen))
+        _drain_until(ws, "response.output_audio.delta")
+        unit.text_output_queue.put(SpeechStartedEvent(turn_id="turn_reset", turn_revision=0))
+        _drain_until(ws, "input_audio_buffer.speech_started")
+        time.sleep(0.06)
+        unit.text_output_queue.put(SpeechStoppedEvent(turn_id="turn_reset", turn_revision=0, duration_s=0.06))
+        time.sleep(0.06)  # 120 ms since speech_started (> 100 ms), 60 ms since speech_stopped (< 100 ms).
+        assert unit.session.pending_false_interruption is not None
+        unit.text_output_queue.put(
+            TranscriptionCompletedEvent(transcript="Stop please", turn_id="turn_reset", turn_revision=0)
+        )
         _wait_for(lambda: unit.session.pending_false_interruption is None)
         assert unit.cancel_scope.generation == gen + 1
 
@@ -452,26 +486,113 @@ def test_timeout_explicit_cancel_and_tool_call_abort_recovery() -> None:
         evs = _drain_until(ws, "conversation.item.input_audio_transcription.completed")
         assert not any(ev["type"] == "response.created" for ev in evs)
 
-    # 3. Tool call arriving during private buffering aborts recovery immediately.
-    with _ws_session(min_words=1) as (unit, ws, _sid):
+    # 3a. Tool call arriving during a cough (both early side-channel and ordered) is held and delivered once on resume.
+    with _ws_session(min_words=1, speculative=True) as (unit, ws, sid):
+        chat = unit.service._state(sid).runtime_config.chat
+        chat.add_item(make_user_message("Check my score."))
         gen = unit.cancel_scope.generation
-        unit.output_queue.put(AssistantOutputEvent(text="Checking...", response_key="rk_tool", cancel_generation=gen))
-        unit.output_queue.put(AudioOutput(audio=_tone(RATE), response_key="rk_tool", cancel_generation=gen))
-        _drain_until(ws, "response.output_audio.delta")
-        unit.text_output_queue.put(SpeechStartedEvent(turn_id="turn_t", turn_revision=0))
-        _drain_until(ws, "input_audio_buffer.speech_started")
+        turns = unit.service.speculative_turns
+        assert turns is not None
+        t0, r0 = turns.start_turn()
+        turns.segment_finalized(500, output_hold_ms=0)
         unit.output_queue.put(
             AssistantOutputEvent(
-                parts=[
-                    AssistantToolCallPart(
-                        tool=ResponseFunctionToolCall(type="function_call", call_id="c1", name="search", arguments="{}")
-                    )
-                ],
+                text="Checking your score.",
                 response_key="rk_tool",
                 cancel_generation=gen,
+                turn_id=t0,
+                turn_revision=r0,
+                output_sequence=0,
             )
         )
-        _wait_for(lambda: unit.session.pending_false_interruption is None)
+        unit.output_queue.put(AudioOutput(audio=_tone(RATE), response_key="rk_tool", cancel_generation=gen))
+        _drain_until(ws, "response.output_audio.delta")
+
+        t1, r1 = turns.start_turn()
+        unit.text_output_queue.put(SpeechStartedEvent(turn_id=t1, turn_revision=r1))
+        _drain_until(ws, "input_audio_buffer.speech_started")
+        assert unit.session.pending_false_interruption is not None
+
+        tool_part = AssistantToolCallPart(
+            tool=ResponseFunctionToolCall(
+                id="fc_score", type="function_call", call_id="call_score", name="get_score", arguments='{"user":"a"}'
+            )
+        )
+        unit.text_output_queue.put(
+            AssistantToolCallReadyEvent(
+                part=tool_part,
+                output_sequence=1,
+                turn_id=t0,
+                turn_revision=r0,
+                cancel_generation=gen,
+                response_key="rk_tool",
+            )
+        )
+        unit.output_queue.put(
+            AssistantOutputEvent(
+                parts=[tool_part],
+                output_sequence=1,
+                turn_id=t0,
+                turn_revision=r0,
+                cancel_generation=gen,
+                response_key="rk_tool",
+            )
+        )
+        unit.output_queue.put(
+            AssistantResponseDoneEvent(response_key="rk_tool", cancel_generation=gen, turn_id=t0, turn_revision=r0)
+        )
+        unit.output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key="rk_tool", cancel_generation=gen))
+        _wait_for(lambda: unit.session.pending_false_interruption.audio_buffer.generation_done)
+        assert unit.cancel_scope.generation == gen  # Not cancelled while STT is pending.
+
+        turns.segment_finalized(1000, output_hold_ms=0)
+        unit.text_output_queue.put(SpeechStoppedEvent(turn_id=t1, turn_revision=r1, duration_s=0.2))
+        unit.text_output_queue.put(TranscriptionCompletedEvent(transcript="", turn_id=t1, turn_revision=r1))
+        resumed = _drain_until(ws, "response.done")
+        fn_done = [ev for ev in resumed if ev["type"] == "response.function_call_arguments.done"]
+        assert len(fn_done) == 1
+        assert fn_done[0]["call_id"] == "call_score" and fn_done[0]["name"] == "get_score"
+        assert any(getattr(item, "call_id", None) == "call_score" for item in chat.buffer)
+
+        # Follow-up function_call_output succeeds against the recovered call in Chat.
+        ws.send_json(
+            {
+                "type": "conversation.item.create",
+                "item": {"type": "function_call_output", "call_id": "call_score", "output": '{"score": 10}'},
+            }
+        )
+        created = _drain_until(ws, "conversation.item.created")[-1]
+        assert created["item"]["call_id"] == "call_score"
+
+    # 3b. Tool call arriving during a real interruption is discarded and never delivered.
+    with _ws_session(min_words=1) as (unit, ws, sid):
+        chat = unit.service._state(sid).runtime_config.chat
+        gen = unit.cancel_scope.generation
+        unit.output_queue.put(
+            AssistantOutputEvent(text="Checking...", response_key="rk_td", cancel_generation=gen, output_sequence=0)
+        )
+        unit.output_queue.put(AudioOutput(audio=_tone(RATE), response_key="rk_td", cancel_generation=gen))
+        _drain_until(ws, "response.output_audio.delta")
+
+        unit.text_output_queue.put(SpeechStartedEvent(turn_id="turn_td", turn_revision=0))
+        _drain_until(ws, "input_audio_buffer.speech_started")
+        tool_part = AssistantToolCallPart(
+            tool=ResponseFunctionToolCall(
+                id="fc_drop", type="function_call", call_id="call_drop", name="search", arguments="{}"
+            )
+        )
+        unit.output_queue.put(
+            AssistantOutputEvent(parts=[tool_part], output_sequence=1, response_key="rk_td", cancel_generation=gen)
+        )
+        _wait_for(lambda: len(unit.session.pending_false_interruption.audio_buffer.buffered_tool_events) == 1)
+
+        unit.text_output_queue.put(SpeechStoppedEvent(turn_id="turn_td", turn_revision=0, duration_s=0.4))
+        unit.text_output_queue.put(
+            TranscriptionCompletedEvent(transcript="Never mind", turn_id="turn_td", turn_revision=0)
+        )
+        evs = _drain_until(ws, "conversation.item.input_audio_transcription.completed")
+        assert not any(ev["type"] == "response.function_call_arguments.done" for ev in evs)
+        assert not any(getattr(item, "call_id", None) == "call_drop" for item in chat.buffer)
         assert unit.cancel_scope.generation == gen + 1
 
 
@@ -659,3 +780,167 @@ def test_disabled_by_default_retains_no_audio_and_cancels_immediately() -> None:
         _drain_until(ws, "input_audio_buffer.speech_started")
         _wait_for(lambda: unit.cancel_scope.generation == gen + 1)
         assert unit.session.pending_false_interruption is None
+
+
+def test_wire_item_retrieve_preserves_original_cut_and_delete_works_on_replay_item() -> None:
+    with _ws_session(min_words=1) as (unit, ws, sid):
+        chat = unit.service._state(sid).runtime_config.chat
+        chat.add_item(make_user_message("Tell me two sentences."))
+        _queue_completed_reply(
+            unit,
+            sid,
+            "rk_ret",
+            [("First sentence.", _tone(RATE * 2)), ("Last sentence.", _tone(RATE * 2))],
+        )
+        item_1 = next(
+            ev["item"]["id"] for ev in _drain_until(ws, "response.done") if ev["type"] == "response.output_item.added"
+        )
+
+        # Cough at 2s; truncate item_1 and verify its wire view before replay.
+        unit.text_output_queue.put(SpeechStartedEvent(turn_id="turn_ret", turn_revision=0))
+        _drain_until(ws, "input_audio_buffer.speech_started")
+        ws.send_json(
+            {"type": "conversation.item.truncate", "item_id": item_1, "content_index": 0, "audio_end_ms": 2000}
+        )
+        ws.send_json({"type": "conversation.item.retrieve", "item_id": item_1})
+        before = _drain_until(ws, "conversation.item.retrieved")[-1]["item"]
+        assert before["status"] == "incomplete"
+        assert before["content"][0]["transcript"] == "First sentence."
+
+        # Replay completes as item_2.
+        unit.text_output_queue.put(SpeechStoppedEvent(turn_id="turn_ret", turn_revision=0, duration_s=0.2))
+        unit.text_output_queue.put(TranscriptionCompletedEvent(transcript="", turn_id="turn_ret", turn_revision=0))
+        item_2 = next(
+            ev["item"]["id"] for ev in _drain_until(ws, "response.done") if ev["type"] == "response.output_item.added"
+        )
+        assert item_2 != item_1
+
+        # Model history has the combined completed turn, while item_1 keeps its original truncated wire view.
+        assert [(m.role, m.status, m.content[0].text) for m in chat.buffer] == [
+            ("user", None, "Tell me two sentences."),
+            ("assistant", "completed", "First sentence. Last sentence."),
+        ]
+        ws.send_json({"type": "conversation.item.retrieve", "item_id": item_1})
+        after_1 = _drain_until(ws, "conversation.item.retrieved")[-1]["item"]
+        assert after_1["status"] == "incomplete"
+        assert after_1["content"][0]["transcript"] == "First sentence."
+
+        ws.send_json({"type": "conversation.item.retrieve", "item_id": item_2})
+        after_2 = _drain_until(ws, "conversation.item.retrieved")[-1]["item"]
+        assert after_2["status"] == "completed"
+        assert "Last sentence." in after_2["content"][0]["transcript"]
+
+        # Deleting item_2 succeeds, rolls Chat back to item_1's heard prefix, and removes item_2 from retrieval.
+        ws.send_json({"type": "conversation.item.delete", "item_id": item_2})
+        deleted = _drain_until(ws, "conversation.item.deleted")[-1]
+        assert deleted["item_id"] == item_2
+        assert [(m.role, m.status, m.content[0].text) for m in chat.buffer] == [
+            ("user", None, "Tell me two sentences."),
+            ("assistant", "incomplete", "First sentence."),
+        ]
+        ws.send_json({"type": "conversation.item.retrieve", "item_id": item_2})
+        err = _drain_until(ws, "error")[-1]
+        assert err["error"]["type"] == "conversation_item_not_found"
+        ws.send_json({"type": "conversation.item.retrieve", "item_id": item_1})
+        still_1 = _drain_until(ws, "conversation.item.retrieved")[-1]["item"]
+        assert still_1["status"] == "incomplete" and still_1["content"][0]["transcript"] == "First sentence."
+
+
+def test_per_session_false_interruption_config_via_session_update() -> None:
+    # 1. Server default disabled (0); Session A opts in via session.update while Session B on same service stays off.
+    unit = _make_unit(min_words=0, timeout_ms=2000)
+    sid_a = unit.service.register()
+    sid_b = unit.service.register()
+    assert unit.service.session_min_interruption_words(sid_a) == 0
+    assert unit.service.session_min_interruption_words(sid_b) == 0
+
+    ev_enable = unit.service.parse_client_event(
+        {
+            "type": "session.update",
+            "session": {
+                "type": "realtime",
+                "audio": {
+                    "input": {
+                        "turn_detection": {
+                            "type": "server_vad",
+                            "min_interruption_words": 2,
+                            "false_interruption_timeout_ms": 1200,
+                        }
+                    }
+                },
+            },
+        }
+    )
+    assert ev_enable is not None
+    assert unit.service.handle_session_update(sid_a, ev_enable) is None
+    assert unit.service.session_min_interruption_words(sid_a) == 2
+    assert unit.service.session_false_interruption_timeout_s(sid_a) == pytest.approx(1.2)
+    assert unit.service.session_min_interruption_words(sid_b) == 0
+    assert unit.service.session_false_interruption_timeout_s(sid_b) == pytest.approx(2.0)
+
+    # Validation rejects negative/bool words and non-positive timeout.
+    for bad_td in (
+        {"type": "server_vad", "min_interruption_words": -1},
+        {"type": "server_vad", "min_interruption_words": True},
+        {"type": "server_vad", "false_interruption_timeout_ms": 0},
+    ):
+        bad_ev = unit.service.parse_client_event(
+            {"type": "session.update", "session": {"type": "realtime", "audio": {"input": {"turn_detection": bad_td}}}}
+        )
+        assert bad_ev is not None
+        err = unit.service.handle_session_update(sid_a, bad_ev)
+        assert err is not None and err.error.type == "invalid_request_error"
+
+    # 2. End-to-end WebSocket: server default 0, client opts in via session.update and recovers from a cough.
+    with _ws_session(min_words=0) as (u, ws, sid):
+        ws.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "realtime",
+                    "audio": {
+                        "input": {
+                            "turn_detection": {
+                                "type": "server_vad",
+                                "min_interruption_words": 1,
+                                "false_interruption_timeout_ms": 1500,
+                            }
+                        }
+                    },
+                },
+            }
+        )
+        updated = _drain_until(ws, "session.updated")[-1]
+        assert updated["session"]["audio"]["input"]["turn_detection"]["min_interruption_words"] == 1
+
+        _queue_completed_reply(u, sid, "rk_optin", [("Opted in reply.", _tone(RATE * 2))])
+        _drain_until(ws, "response.done")
+        u.text_output_queue.put(SpeechStartedEvent(turn_id="turn_opt", turn_revision=0))
+        _drain_until(ws, "input_audio_buffer.speech_started")
+        u.text_output_queue.put(SpeechStoppedEvent(turn_id="turn_opt", turn_revision=0, duration_s=0.2))
+        u.text_output_queue.put(TranscriptionCompletedEvent(transcript="", turn_id="turn_opt", turn_revision=0))
+        replayed = _drain_until(ws, "response.done")
+        assert any(ev["type"] == "response.output_audio.delta" for ev in replayed)
+
+    # 3. Server default enabled (1), client disables via session.update(min_interruption_words=0) mid-check -> cancels.
+    with _ws_session(min_words=1) as (u, ws, _sid):
+        gen = u.cancel_scope.generation
+        u.output_queue.put(AssistantOutputEvent(text="Streaming.", response_key="rk_off_s", cancel_generation=gen))
+        u.output_queue.put(AudioOutput(audio=_tone(RATE * 2), response_key="rk_off_s", cancel_generation=gen))
+        _drain_until(ws, "response.output_audio.delta")
+        u.text_output_queue.put(SpeechStartedEvent(turn_id="turn_off_s", turn_revision=0))
+        _drain_until(ws, "input_audio_buffer.speech_started")
+        assert u.session.pending_false_interruption is not None
+
+        ws.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "realtime",
+                    "audio": {"input": {"turn_detection": {"type": "server_vad", "min_interruption_words": 0}}},
+                },
+            }
+        )
+        _drain_until(ws, "session.updated")
+        assert u.session.pending_false_interruption is None
+        assert u.cancel_scope.generation == gen + 1

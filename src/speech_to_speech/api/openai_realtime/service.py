@@ -308,6 +308,8 @@ class ConnState(BaseModel):
     assistant_audio_cuts: dict[str, int] = Field(default_factory=dict)
     # Resumed wire item_id -> (resume_sample, AssistantAudioBuffer).
     resumed_audio_origins: dict[str, tuple[int, Any]] = Field(default_factory=dict)
+    # Superseded root item_id -> original wire cut (pipeline samples) preserved for item.retrieve.
+    resumed_root_wire_cuts: dict[str, int] = Field(default_factory=dict)
     # Active resumed response metadata: (resume_sample, AssistantAudioBuffer).
     active_resumed_audio: tuple[int, Any] | None = None
     # Active false-interruption candidate turn_id (suppresses chat/LLM while under min_interruption_words).
@@ -416,7 +418,8 @@ class RealtimeService:
             speculative_turns.wait_observer = self.turn_latency_store.record_smart_wait
         self._default_instructions = default_instructions
         self.min_interruption_words = max(0, min_interruption_words)
-        self.false_interruption_timeout_s = max(0.001, false_interruption_timeout_ms / 1000.0)
+        self.false_interruption_timeout_ms = max(1, false_interruption_timeout_ms)
+        self.false_interruption_timeout_s = max(0.001, self.false_interruption_timeout_ms / 1000.0)
         # None means the active backend does not declare a complete language set.
         self.stt_supported_languages: set[str] | None = None
         self.tts_supported_languages: set[str] | None = None
@@ -486,6 +489,15 @@ class RealtimeService:
         }
 
     # ── Connection lifecycle ─────────────────────
+
+    def session_min_interruption_words(self, conn_id: str) -> int:
+        override = self._state(conn_id).runtime_config.min_interruption_words
+        return self.min_interruption_words if override is None else override
+
+    def session_false_interruption_timeout_s(self, conn_id: str) -> float:
+        override = self._state(conn_id).runtime_config.false_interruption_timeout_ms
+        timeout_ms = self.false_interruption_timeout_ms if override is None else override
+        return max(0.001, timeout_ms / 1000.0)
 
     def register(self) -> str:
         """Register a new connection and return its session_id."""
@@ -740,7 +752,13 @@ class RealtimeService:
             self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
             return []
 
-        if self._is_stale_turn_event(event):
+        st = self._state(conn_id)
+        resumed_output = (
+            st.active_resumed_audio is not None
+            and isinstance(event, _TURN_OUTPUT_EVENTS)
+            and getattr(event, "response_key", None) == st.current_response_key
+        )
+        if not resumed_output and self._is_stale_turn_event(event):
             history = getattr(event, "history", None)
             if history is not None:
                 history.resolve()
@@ -923,11 +941,12 @@ class RealtimeService:
             accounting.speech_stopped_at_s = event.speech_stopped_at_s
 
         cfg = st.runtime_config
+        min_words = self.session_min_interruption_words(conn_id)
         suppress_false_interruption = (
-            self.min_interruption_words > 0
+            min_words > 0
             and st.false_interruption_turn_id is not None
             and event.turn_id == st.false_interruption_turn_id
-            and count_interruption_words(event.transcript) < self.min_interruption_words
+            and count_interruption_words(event.transcript) < min_words
         )
         transcript = "" if suppress_false_interruption else event.transcript
         if transcript and event.speaker_attribution is not None:

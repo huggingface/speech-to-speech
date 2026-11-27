@@ -110,6 +110,7 @@ class AssistantAudioBuffer:
     done_status: Literal["completed", "incomplete", "failed"] = "completed"
     done_reason: Literal["max_output_tokens", "content_filter"] | None = None
     final_history_proposal: ResponseHistory | None = None
+    buffered_tool_events: list[Any] = field(default_factory=list)
 
     @property
     def total_samples(self) -> int:
@@ -211,7 +212,9 @@ class PendingFalseInterruption:
     audio_buffer: AssistantAudioBuffer
     was_generating: bool
     estimated_played_samples: int
+    timeout_s: float
     deadline: float
+    speech_stopped: bool = False
     client_played_samples: int | None = None
     short_transcript_pending: bool = False
 
