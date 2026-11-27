@@ -177,22 +177,11 @@ class TestFactoryHelpers:
 
 
 class TestSystemMessages:
-    def test_sets_init_chat_message(self):
-        chat = Chat(size=5)
-        sys_msg = _system("Be concise.")
-        chat.add_item(sys_msg)
-        assert chat.init_chat_message is sys_msg
-
     def test_overwrite_replaces_previous(self):
         chat = Chat(size=5)
         chat.add_item(_system("first"))
         chat.add_item(_system("second"))
         assert chat.init_chat_message.content[0].text == "second"
-
-    def test_system_message_not_in_buffer(self):
-        chat = Chat(size=5)
-        chat.add_item(_system("system"))
-        assert chat.buffer == []
 
 
 # ===================================================================

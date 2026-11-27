@@ -178,17 +178,13 @@ CHAT_BODY = {
 
 
 class TestChatCompletionsPassthrough:
-    def test_upstream_response_arrives_verbatim(self, upstream):
+    def test_forwards_request_with_server_credentials_and_returns_upstream_response(self, upstream):
         app = _make_app(_proxy_config(upstream))
         with TestClient(app) as client:
             r = client.post("/v1/chat/completions", json=CHAT_BODY)
         assert r.status_code == 200
         assert r.json() == {"id": "chatcmpl-1", "object": "chat.completion", "choices": []}
 
-    def test_upstream_receives_forced_model_and_server_key(self, upstream):
-        app = _make_app(_proxy_config(upstream))
-        with TestClient(app) as client:
-            client.post("/v1/chat/completions", json=CHAT_BODY)
         (request,) = upstream.requests
         assert request["path"] == "/v1/chat/completions"
         assert request["body"]["model"] == "server-model"
@@ -379,7 +375,7 @@ class TestResponsesPassthrough:
     def _config(self, upstream, **overrides):
         return _proxy_config(upstream, llm_backend="responses-api", **overrides)
 
-    def test_non_streaming_passes_through_verbatim(self, upstream):
+    def test_forwards_request_with_store_disabled_and_returns_upstream_response(self, upstream):
         upstream.responder = lambda request: (200, {"id": "resp_1", "object": "response", "output": []})
         app = _make_app(self._config(upstream))
         with TestClient(app) as client:
@@ -387,10 +383,6 @@ class TestResponsesPassthrough:
         assert r.status_code == 200
         assert r.json() == {"id": "resp_1", "object": "response", "output": []}
 
-    def test_upstream_receives_store_false_and_forced_model(self, upstream):
-        app = _make_app(self._config(upstream))
-        with TestClient(app) as client:
-            client.post("/v1/responses", json=RESPONSES_BODY)
         (request,) = upstream.requests
         assert request["path"] == "/v1/responses"
         assert request["body"]["store"] is False
