@@ -6,20 +6,22 @@
  * Reachy Mini's SDK frame (head position and orientation, two antennas and
  * the body's yaw) that each body maps onto its own joints.
  *
- * Mouths come from the same lip-sync timing as the other coaches (server
- * visemes or HeadAudio, see face-driver.js). Reachy Mini and Reachy 2 have
- * none, so they talk the way the real robots do, with their heads: open
- * vowels lift the head, lip closures and pauses let it settle, and the
- * antennas flick on syllables. Microduck opens its beak. Reactions replay
- * emotions recorded on the real Reachy Mini (Pollen's emotions library, baked
- * by scripts/bake_reachy_moves.py), on whichever robot is on screen.
+ * They talk the way the real robots do: the head wobbles with the voice,
+ * using the official SDK's speech wobble (head-wobbler.js); Microduck also
+ * opens its beak with the lip-sync timing the other coaches use (server
+ * visemes or HeadAudio, see face-driver.js). Between lines each robot holds
+ * a pose per conversational state (idle breathing, listening, thinking,
+ * speaking, after Pollen's reachy-mini-3d-voice Space), and reactions replay
+ * emotions recorded on the real Reachy Mini (Pollen's emotions library,
+ * baked by scripts/bake_reachy_moves.py), on whichever robot is on screen.
  */
 
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
 import { BODIES } from "./robot-bodies.js";
-import { FaceDriver, mouthParams, smooth, wobble } from "./face-driver.js";
+import { FaceDriver, mouthParams, smooth } from "./face-driver.js";
+import { HeadWobbler } from "./head-wobbler.js";
 import { Stage } from "./stage.js";
 
 /** @typedef {{ name: string, fps: number, frames: number[][] }} Move */
@@ -40,6 +42,33 @@ const REACTION_MOVES = /** @type {Record<string, string[]>} */ ({
   listen: ["attentive1", "attentive2"],
   surprised: ["amazed1"],
 });
+
+const TAU = 2 * Math.PI;
+/** Antennas open and close together, 15 degrees at 0.5 Hz, as the robot breathes. @param {number} t */
+const breathing = (t) => {
+  const s = ((15 * Math.PI) / 180) * Math.sin(TAU * 0.5 * t);
+  return [-s, s];
+};
+/**
+ * Base pose per conversational state, in the SDK frame (metres, radians;
+ * pitch + is nose down), after robot/motion.js in Pollen's
+ * reachy-mini-3d-voice Space.
+ * @type {Record<string, (t: number) => { x?: number, z: number, roll: number, pitch: number, yaw: number, bodyYaw?: number }>}
+ */
+const STATES = {
+  idle: (t) => ({
+    z: 0.004 * Math.sin((TAU * t) / 4.6),
+    pitch: 0.02 * Math.sin((TAU * t) / 5.3 + 1.2),
+    yaw: 0.08 * Math.sin(0.31 * t) + 0.05 * Math.sin(0.13 * t + 2.1),
+    roll: 0.02 * Math.sin(0.17 * t + 0.7),
+    bodyYaw: 0.05 * Math.sin(0.09 * t),
+  }),
+  listening: (t) => ({ z: 0.008 + 0.003 * Math.sin((TAU * t) / 3.8), pitch: -0.04, yaw: 0.03 * Math.sin(0.23 * t), roll: 0.015 * Math.sin(0.19 * t + 1) }),
+  thinking: (t) => ({ z: 0.006, pitch: -0.12, yaw: 0.22 + 0.02 * Math.sin(1.1 * t), roll: 0.06 }),
+  speaking: () => ({ z: 0.004, pitch: -0.02, yaw: 0, roll: 0 }),
+};
+/** Seconds to blend from one state's pose to the next. */
+const STATE_BLEND_S = 0.7;
 
 const newPose = () => /** @type {Pose} */ ({ p: new THREE.Vector3(), q: new THREE.Quaternion(), ant: [0, 0], yaw: 0 });
 const _e = new THREE.Euler(0, 0, 0, "ZYX");
@@ -80,14 +109,35 @@ export class RobotAvatar extends FaceDriver {
     this.pose = newPose();
     this.base = newPose();
     this.movePose = newPose();
-    /** Speech motion: a springy "jaw" the head rides on, and the mouth opening. */
-    this.talk = { lift: 0, v: 0, ant: 0, antV: 0, lastOpen: 0, open: 0 };
-    // Head motion on a spring trails the syllables by ~90 ms (measured), so
-    // it runs that much ahead: server cues are scheduled earlier, and with
-    // HeadAudio the voice waits that much longer. A robot with a real mouth
-    // (Microduck's beak) sets its own lead.
-    this.leadMs = coach.leadMs ?? 90;
-    this.headaudioDelay += this.leadMs / 1000;
+    /** The mouth opening, for a robot with a beak. */
+    this.talk = { open: 0 };
+    /** Weight of each state's pose, blended over STATE_BLEND_S. @type {Record<string, number>} */
+    this.stateW = { idle: 1, listening: 0, thinking: 0, speaking: 0 };
+    this.wobbler = new HeadWobbler(this.inRate);
+    this.wob = { pitch: 0, yaw: 0, roll: 0, x: 0, y: 0, z: 0 };
+    if (coach.mouth === "beak") {
+      // The beak trails the sound by its smoothing; it runs that far ahead
+      // (measured): server cues are scheduled earlier, and with HeadAudio the
+      // voice waits that much longer.
+      this.leadMs = coach.leadMs ?? 60;
+      this.headaudioDelay += this.leadMs / 1000;
+    } else {
+      // No mouth to line up with HeadAudio's visemes: no voice delay.
+      this.leadMs = 0;
+      this.headaudioDelay = 0;
+    }
+  }
+
+  /** The wobble follows the voice as it is heard. @param {Int16Array} pcm @param {number} startMs */
+  onChunk(pcm, startMs) {
+    // Plus the voice delay that lines HeadAudio's visemes up with the beak
+    // (set for this response in feed(); the AudioParam reads back late).
+    this.wobbler.feed(pcm, startMs + (this.serverVisemes ? 0 : this.headaudioDelay) * 1000);
+  }
+
+  interrupt() {
+    super.interrupt();
+    this.wobbler.reset();
   }
 
   /**
@@ -114,9 +164,10 @@ export class RobotAvatar extends FaceDriver {
     draco.dispose();
     this.body = body;
     const cam = body.camera;
-    this.stage = new Stage(this.container, { focusY: cam.focusY, frameH: cam.frameH, frameW: cam.frameW, fov: 24 });
+    this.stage = new Stage(this.container, { focusY: cam.focusY, frameH: cam.frameH, frameW: cam.frameW, tiltDeg: cam.tiltDeg ?? 0, fov: 24 });
     this.stage.scene.add(body.group);
     body.light?.(this.stage);
+    if (body.table) this.stage.addTable(body.group, body.table);
     this.stage.updaters.push((dt) => this.update(dt));
     onProgress?.({ lengthComputable: true, loaded: 100, total: 100 });
     // Wake up: from the resting pose (head down, antennas folded) into a hello.
@@ -168,16 +219,31 @@ export class RobotAvatar extends FaceDriver {
     const t = performance.now() / 1000;
     const sdt = dt / 1000;
 
-    // Base pose: the face driver's head (idle drift, gaze, listening and
-    // thinking poses), in the SDK frame (x forward, y left, z up; pitch + is
-    // nose down there).
-    const H = this.head;
-    _e.set(H.roll, -H.pitch, H.yaw * 1.2, "ZYX");
+    // Base pose: each conversational state's pose, blended as the state
+    // changes.
+    const state = this.talking ? "speaking" : this.mode === "Thinking" ? "thinking" : this.mode === "Listening" ? "listening" : "idle";
+    let total = 0;
+    for (const k in this.stateW) {
+      this.stateW[k] = Math.max(0, Math.min(1, this.stateW[k] + (k === state ? 1 : -1) * (sdt / STATE_BLEND_S)));
+      total += this.stateW[k];
+    }
+    let x = 0, z = 0, roll = 0, pitch = 0, yaw = 0, bodyYaw = 0;
+    for (const k in this.stateW) {
+      const w = this.stateW[k] / (total || 1);
+      if (!w) continue;
+      const p = STATES[k](t);
+      x += (p.x ?? 0) * w;
+      z += p.z * w;
+      roll += p.roll * w;
+      pitch += p.pitch * w;
+      yaw += p.yaw * w;
+      bodyYaw += (p.bodyYaw ?? 0) * w;
+    }
+    _e.set(roll, pitch, yaw, "ZYX");
     this.base.q.setFromEuler(_e);
-    this.base.p.set(0, 0, 0.002 * wobble(t, 7) + H.bounce * 0.15);
-    const idleAnt = 0.12 * wobble(t * 0.8, 11);
-    this.base.ant = [-0.18 + idleAnt, 0.18 + idleAnt * 0.8];
-    this.base.yaw = H.yaw * 0.6 + 0.04 * wobble(t * 0.5, 5);
+    this.base.p.set(x, 0, z);
+    this.base.ant = breathing(t);
+    this.base.yaw = bodyYaw;
 
     // Recorded move on top, faded in from wherever the robot was, and out
     // over its last 0.5 s.
@@ -195,26 +261,18 @@ export class RobotAvatar extends FaceDriver {
       copyPose(this.pose, this.base);
     }
 
-    // Speech: a springy lift driven by the mouth opening (the robot's
-    // "jaw"), so the head rises on vowels and settles on closures and
-    // pauses; the antennas flick on syllable onsets.
-    const m = mouthParams(w);
-    const T = this.talk;
-    T.open = m.open;
-    const drive = Math.min(1, m.open * 2.6);
-    T.v += ((drive - T.lift) * 900 - T.v * 36) * sdt;
-    T.lift += T.v * sdt;
-    const onset = Math.max(0, drive - T.lastOpen);
-    T.lastOpen = drive;
-    T.antV += (-T.ant * 140 - T.antV * 8 + onset * 160) * sdt;
-    T.ant += T.antV * sdt;
-    const talkW = Math.min(1, this.energySlow * 1.2);
+    // Speech: the SDK's wobble on top of whatever the robot is doing.
+    const o = this.wobbler.at((this.ctx?.currentTime ?? 0) * 1000, this.wob);
     const k = this.body?.talkScale ?? 1;
-    this.pose.p.z += T.lift * 0.009 * k;
-    this.pose.p.x += T.lift * 0.003 * k;
-    _e.set(Math.sin(t * 1.7) * 0.05 * talkW, (-T.lift * 0.2 + 0.03 * talkW) * k, Math.sin(t * 0.9) * 0.09 * talkW, "ZYX");
+    this.pose.p.x += o.x * k;
+    this.pose.p.y += o.y * k;
+    this.pose.p.z += o.z * k;
+    _e.set(o.roll * k, o.pitch * k, o.yaw * k, "ZYX");
     this.pose.q.multiply(_q.setFromEuler(_e));
-    this.pose.ant = [this.pose.ant[0] - T.ant * 0.5, this.pose.ant[1] + T.ant * 0.5];
+
+    // A beak follows the mouth shapes.
+    const T = this.talk;
+    T.open = mouthParams(w).open;
 
     this.body?.apply(this.pose, T, sdt);
   }

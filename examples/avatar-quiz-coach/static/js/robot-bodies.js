@@ -21,11 +21,12 @@ import { loadMJCF, poseMJCF, setPackLoader } from "./mjcf.js";
 import { smooth } from "./face-driver.js";
 
 /** @typedef {{ p: THREE.Vector3, q: THREE.Quaternion, ant: number[], yaw: number }} Pose */
-/** @typedef {{ lift: number, open: number }} Talk */
+/** @typedef {{ open: number }} Talk */
 /**
  * @typedef {{
  *   group: THREE.Object3D,
- *   camera: { focusY: number, frameH: number, frameW: number },
+ *   camera: { focusY: number, frameH: number, frameW: number, tiltDeg?: number },
+ *   table?: { y: number, radius: number },
  *   apply: (pose: Pose, talk: Talk, dt: number) => void,
  *   light?: (stage: import("./stage.js").Stage) => void,
  *   talkScale?: number,
@@ -115,7 +116,8 @@ async function loadMini(loader, coach, progress) {
   robot.group.userData.hidden = hidden;
   return {
     group: robot.group,
-    camera: { focusY: 0.45, frameH: 4.9, frameW: 3.6 },
+    camera: { focusY: 0.05, frameH: 6.2, frameW: 4.8, tiltDeg: 14 },
+    table: { y: -2.15, radius: 4.5 },
     apply: (pose) => robot.setPose(pose),
     light: whiteShellLight,
   };
@@ -164,7 +166,7 @@ async function loadReachy2(loader, coach, progress) {
 
   return {
     group: root,
-    camera: { focusY: 1.22, frameH: 0.82, frameW: 0.66 },
+    camera: { focusY: 1.2, frameH: 0.86, frameW: 0.7, tiltDeg: 6 },
     apply: (pose) => {
       toScene(pose.q, neck.quaternion);
       // The neck only turns: head height becomes a nod (up when it rises).
@@ -251,7 +253,8 @@ async function loadDuck(loader, coach, progress) {
   const turn = (/** @type {THREE.Object3D} */ j, /** @type {number} */ a) => j.quaternion.setFromAxisAngle(Z, a);
   return {
     group: root,
-    camera: { focusY: 0.25, frameH: 4, frameW: 3.3 },
+    camera: { focusY: -0.1, frameH: 5.1, frameW: 4.3, tiltDeg: 14 },
+    table: { y: -1.6, radius: 4 },
     talkScale: 0.5,
     apply: (pose, talk, dt) => {
       t += dt;

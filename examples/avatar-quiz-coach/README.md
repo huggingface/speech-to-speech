@@ -75,11 +75,14 @@ mic ─▶ speech-to-speech backend: VAD + STT ─▶ LLM (the coach) ─▶ TTS
   When the backend runs with `--enable_visemes`, its phoneme-based visemes drive
   the mouth, merged into held, blended shapes and scheduled against the audio
   player; otherwise [HeadAudio](https://github.com/met4citizen/HeadAudio)
-  derives visemes from the audio in the browser. The Reachys have no mouth,
-  so the same timing moves their heads, as the real robots do when they
-  talk: the head rises on vowels and settles on closures, and the antennas
-  flick on syllables. Microduck opens its beak. All three react with
-  emotions recorded on the real Reachy Mini.
+  derives visemes from the audio in the browser. The robots talk the way
+  the real Reachy Mini does: the head wobbles with the voice, using the
+  official SDK's speech wobble (loudness-driven sways on all six head axes),
+  and Microduck also opens its beak with the visemes. They stand on a
+  tabletop, hold a pose per conversational state (breathing, listening,
+  thinking, as in Pollen's
+  [reachy-mini-3d-voice](https://huggingface.co/spaces/pollen-robotics/reachy-mini-3d-voice)
+  Space), and react with emotions recorded on the real Reachy Mini.
 
 ## Run locally
 

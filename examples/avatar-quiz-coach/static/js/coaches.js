@@ -68,8 +68,8 @@ export const COACHES = {
     robot: "duck",
     lipGain: 1,
     jawGain: 1,
-    // Its beak follows the mouth shapes without the head's spring, so it
-    // needs less lead (measured).
+    // Its beak follows the mouth shapes, 60 ms ahead of the voice (measured).
+    mouth: "beak",
     leadMs: 60,
     asset: "static/avatars/robots/duck",
     moves: "static/avatars/reachy-moves.json",
