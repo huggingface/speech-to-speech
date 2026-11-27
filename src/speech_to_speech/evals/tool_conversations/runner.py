@@ -1,7 +1,7 @@
 """Drive scripted conversations through a running Realtime server.
 
-Text in, tool calls and spoken text out: each user turn is a ``conversation.item.create``
-followed by ``response.create``. Tool calls are answered by the client; a call to a
+Text turns use ``conversation.item.create`` followed by ``response.create``.
+The spoken timer sends audio and waits for automatic generation. Tool calls are answered by the client; a call to a
 long-running tool is answered ``LATE_RESULT_AFTER_TURNS`` user turns later, followed by its own
 ``response.create``, which exercises the server's running-tool handling.
 """
@@ -9,6 +9,7 @@ long-running tool is answered ``LATE_RESULT_AFTER_TURNS`` user turns later, foll
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import random
 import time
@@ -16,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from speech_to_speech.evals.tool_conversations.scenarios import (
+    FIVE_MINUTE_TIMER,
     INSTRUCTIONS,
     LATE_RESULT_AFTER_TURNS,
     LONG_RUNNING_TOOLS,
@@ -24,6 +26,9 @@ from speech_to_speech.evals.tool_conversations.scenarios import (
     Conversation,
 )
 
+AUDIO_RATE = 24000
+AUDIO_CHUNK_MS = 20
+AUDIO_TRAILING_MS = 2000
 MAX_TOOL_ROUNDS = 3
 RESPONSE_TIMEOUT_S = 120.0
 
@@ -34,6 +39,7 @@ class RunnerConfig:
     headers: dict[str, str] = field(default_factory=dict)
     concurrency: int = 3
     connect_attempts: int = 30
+    timer_pcm: bytes | None = None
 
 
 @dataclass
@@ -44,11 +50,17 @@ class Response:
     errors: list[str]
 
 
-async def _response(ws: Any) -> Response:
-    await ws.send(json.dumps({"type": "response.create"}))
+async def _response(ws: Any, *, request: bool = True) -> Response:
+    if request:
+        await ws.send(json.dumps({"type": "response.create"}))
+    async with asyncio.timeout(RESPONSE_TIMEOUT_S):
+        return await _read_response(ws)
+
+
+async def _read_response(ws: Any) -> Response:
     errors: list[str] = []
     while True:
-        event = json.loads(await asyncio.wait_for(ws.recv(), RESPONSE_TIMEOUT_S))
+        event = json.loads(await ws.recv())
         kind = event.get("type")
         if kind == "error":
             error = event.get("error") or {}
@@ -66,6 +78,16 @@ async def _response(ws: Any) -> Response:
             return Response(text.strip(), calls, body.get("status"), errors)
 
 
+async def _send_timer_audio(ws: Any, pcm: bytes) -> None:
+    from speech_to_speech.evals.big_bench_audio.runner import iter_chunks
+
+    # Signed 16-bit mono samples, two bytes each.
+    chunk_bytes = AUDIO_RATE * AUDIO_CHUNK_MS // 1000 * 2
+    for chunk in iter_chunks(pcm + bytes(AUDIO_RATE * AUDIO_TRAILING_MS // 1000 * 2), chunk_bytes):
+        await ws.send(json.dumps({"type": "input_audio_buffer.append", "audio": base64.b64encode(chunk).decode()}))
+        await asyncio.sleep(AUDIO_CHUNK_MS / 1000)
+
+
 async def _send_output(ws: Any, call_id: str, name: str) -> None:
     item = {"type": "function_call_output", "call_id": call_id, "output": json.dumps(RESULTS.get(name, {}))}
     await ws.send(json.dumps({"type": "conversation.item.create", "item": item}))
@@ -75,16 +97,23 @@ async def run_conversation(config: RunnerConfig, conversation: Conversation) -> 
     """Run one conversation and return its turns as plain dicts."""
     import websockets
 
+    timer = conversation == FIVE_MINUTE_TIMER
+    pcm = config.timer_pcm if timer else None
     turns: list[dict[str, Any]] = []
     errors: list[str] = []
     pending: list[dict[str, Any]] = []
     async with websockets.connect(config.url, max_size=None, additional_headers=config.headers or None) as ws:
-        session = {
+        session: dict[str, Any] = {
             "type": "realtime",
             "instructions": INSTRUCTIONS,
             "tools": TOOLS,
             "audio": {"input": {"turn_detection": None}},
         }
+        if pcm is not None:
+            session["audio"]["input"] = {
+                "format": {"type": "audio/pcm", "rate": AUDIO_RATE},
+                "turn_detection": {"type": "server_vad", "create_response": True, "silence_duration_ms": 900},
+            }
         await ws.send(json.dumps({"type": "session.update", "session": session}))
         for index, turn in enumerate(conversation):
             for call in [c for c in pending if index - c["turn"] >= LATE_RESULT_AFTER_TURNS]:
@@ -102,10 +131,21 @@ async def run_conversation(config: RunnerConfig, conversation: Conversation) -> 
                     }
                 )
             item = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": turn.ask}]}
-            await ws.send(json.dumps({"type": "conversation.item.create", "item": item}))
+            if pcm is None:
+                await ws.send(json.dumps({"type": "conversation.item.create", "item": item}))
+            else:
+                async with asyncio.timeout(RESPONSE_TIMEOUT_S):
+                    await _send_timer_audio(ws, pcm)
             rounds = []
-            for _ in range(MAX_TOOL_ROUNDS):
-                reply = await _response(ws)
+            failure = None
+            for round_index in range(MAX_TOOL_ROUNDS):
+                try:
+                    reply = await _response(ws, request=pcm is None or round_index > 0)
+                except TimeoutError:
+                    if not timer:
+                        raise
+                    failure = "response_timeout" if round_index == 0 else "tool_followup_timeout"
+                    break
                 errors += reply.errors
                 rounds.append(
                     {
@@ -132,6 +172,7 @@ async def run_conversation(config: RunnerConfig, conversation: Conversation) -> 
                     "expected_tool": turn.expected_tool,
                     "expected_arguments": turn.expected_arguments,
                     "rounds": rounds,
+                    **({"failure": failure} if failure else {}),
                 }
             )
     return {"turns": turns, "errors": errors}

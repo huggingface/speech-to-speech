@@ -298,3 +298,25 @@ drawing conclusions, and read the individual turns behind any miss.
 Tools, tool results and conversations live in `src/speech_to_speech/evals/tool_conversations/scenarios.py`.
 Add a set to `SCENARIO_SETS` to make it available to `--set`. Changing a set changes what its
 numbers mean, so compare only reports made with the same set.
+
+### Spoken-input timer check
+
+Record yourself saying “Can you start a five minute timer for the tea?” and save
+the recording locally. Start a Realtime server with speech recognition and tool
+calling enabled. Use the same server for the text and audio runs.
+
+```bash
+python -m speech_to_speech.evals.tool_conversations run \
+    --set five-minute-timer --reps 1 --out timer-text.json
+python -m speech_to_speech.evals.tool_conversations run \
+    --set five-minute-timer --reps 1 --audio-file timer.wav --out timer-audio.json
+python -m speech_to_speech.evals.tool_conversations compare timer-text.json timer-audio.json
+```
+
+The audio run sends the recording at real-time speed and waits for the server
+to detect the end of speech and start the response. The evaluator returns a
+simulated timer result. Both runs check the first response for a schema-valid
+`set_timer` call with `minutes: 5`. Failed trials remain in the timer success
+denominator. The JSON records the input mode, observed calls and arguments, and
+the outcome of each trial. For audio it also records a hash of the decoded
+question PCM. A single recording checks this path on your server configuration.
