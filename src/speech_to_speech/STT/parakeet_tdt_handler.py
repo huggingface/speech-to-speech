@@ -272,10 +272,7 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
 
                 # Acquire lock with longer timeout for final transcription
                 lock_scope_start_s = perf_counter()
-                # A final ends the user's turn: a reply being synthesized lets it in between steps.
-                with self._compute_lock_context(
-                    handler_name="ParakeetSTT-Final", timeout=5.0, priority=True
-                ) as acquired:
+                with self._compute_lock_context(handler_name="ParakeetSTT-Final", timeout=5.0) as acquired:
                     lock_scope_s = perf_counter() - lock_scope_start_s
                     if not acquired:
                         logger.error("Failed to acquire compute lock for final transcription")
@@ -374,12 +371,10 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
 
     @contextmanager
     def _compute_lock_context(
-        self, handler_name: str, timeout: float, miss_log_level: int = logging.WARNING, priority: bool = False
+        self, handler_name: str, timeout: float, miss_log_level: int = logging.WARNING
     ) -> Iterator[bool]:
         if self.backend == "mlx":
-            with MLXLockContext(
-                handler_name=handler_name, timeout=timeout, miss_log_level=miss_log_level, priority=priority
-            ) as acquired:
+            with MLXLockContext(handler_name=handler_name, timeout=timeout, miss_log_level=miss_log_level) as acquired:
                 yield acquired
             return
 

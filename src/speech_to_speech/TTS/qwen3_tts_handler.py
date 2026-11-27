@@ -42,7 +42,7 @@ from speech_to_speech.pipeline.transcript_logging import log_exception
 from speech_to_speech.pipeline.turn_latency import TTSResponseTimer, bind_active_turn_latency_tracker
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
 from speech_to_speech.TTS.pcm_blocks import PCMBlockBuffer
-from speech_to_speech.utils.mlx_lock import MLXLockContext, hand_over_mlx_lock
+from speech_to_speech.utils.mlx_lock import MLXLockContext
 from speech_to_speech.utils.utils import resolve_device
 
 logger = logging.getLogger(__name__)
@@ -91,17 +91,6 @@ QWEN3_LANGUAGE_ALIASES = {
     "es": "spanish",
     "it": "italian",
 }
-
-
-def _handing_over_mlx_lock(generation: Iterator[Any]) -> Iterator[Any]:
-    """Between generation steps, let a waiting final transcription take the MLX lock.
-
-    Each item has been consumed (converted to samples) before the next step
-    starts, so no MLX work of this utterance is in flight at the hand-over.
-    """
-    for item in generation:
-        yield item
-        hand_over_mlx_lock("Qwen3TTS")
 
 
 class Qwen3TTSHandler(BaseTTSHandler):
@@ -933,11 +922,9 @@ class Qwen3TTSHandler(BaseTTSHandler):
             if not acquired:
                 raise TimeoutError("Timed out waiting for MLX lock")
             yield from self._stream(
-                _handing_over_mlx_lock(
-                    generation_fn(
-                        **self._mlx_stream_kwargs(max_tokens=max_tokens),
-                        **generation_kwargs,
-                    ),
+                generation_fn(
+                    **self._mlx_stream_kwargs(max_tokens=max_tokens),
+                    **generation_kwargs,
                 ),
                 label=label,
                 timer=timer,
