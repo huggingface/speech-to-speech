@@ -48,11 +48,10 @@ after a long pause may be ignored.
 
 Only new turns are scored. Speech that continues a reopenable turn keeps
 `--min_speech_continuation_ms`, and stitched short segments keep the plain rule. When
-`--barge_in_ms` is set to a positive value, it replaces only the `--min_speech_ms`
-(ordinary-speech) term while an assistant response is playing or buffered for playback
-(`0`, the default, keeps `--min_speech_ms`); confident speech still uses
-`--min_confident_speech_ms`. Every
-scored candidate logs its score, active and confident time and idle seconds at INFO.
+`--barge_in_ms` or `--barge_in_min_confident_speech_ms` is set to a positive value, it
+replaces `--min_speech_ms` or `--min_confident_speech_ms` respectively while an assistant
+response is playing or buffered for playback (`0`, the default, keeps the normal value).
+Every scored candidate logs its score, active and confident time and idle seconds at INFO.
 These options are implemented for Silero only and are rejected with FireRed. Speech
 that is confidently human but not addressed to the assistant still opens a turn; this
 separates speech from noise, not addressees.
