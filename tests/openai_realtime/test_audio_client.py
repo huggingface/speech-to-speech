@@ -2366,6 +2366,210 @@ def _retrieved(item_id, transcript, status="incomplete"):
     )
 
 
+def test_tts_status_appears_after_transcript_quiet_period_and_clears_on_audio():
+    async def run():
+        renderer, output = _terminal_renderer()
+        playback = SimpleNamespace(append=lambda *_: None, finish=lambda: None, clear=lambda: None)
+
+        handle_server_event(
+            SimpleNamespace(type="response.created", response=SimpleNamespace(id="r")),
+            playback=playback,
+            renderer=renderer,
+            print_json=False,
+        )
+        assert output.getvalue() == ""
+
+        handle_server_event(
+            SimpleNamespace(
+                type="response.output_audio_transcript.delta",
+                delta="Hello.",
+                response_id="r",
+                item_id="i",
+                output_index=0,
+                content_index=0,
+            ),
+            playback=playback,
+            renderer=renderer,
+            print_json=False,
+        )
+        assert output.getvalue().endswith("ASSISTANT: Hello.")
+        assert "generating audio" not in output.getvalue()
+        handle_server_event(
+            SimpleNamespace(
+                type="response.output_audio_transcript.done",
+                transcript="Hello.",
+                # Some upstream event variants omit response_id on the delta or done.
+                response_id=None,
+                item_id="i",
+                output_index=0,
+                content_index=0,
+            ),
+            playback=playback,
+            renderer=renderer,
+            print_json=False,
+        )
+        await asyncio.sleep(audio_client_module._TTS_STATUS_IDLE_DELAY_SECONDS + 0.05)
+        assert output.getvalue().endswith("ASSISTANT: Hello.\nGenerating audio…")
+        assert "ASSISTANT: <response started>" not in output.getvalue()
+
+        handle_server_event(
+            SimpleNamespace(type="response.output_audio.delta", delta="AQI=", item_id="i", content_index=0),
+            playback=playback,
+            renderer=renderer,
+            print_json=False,
+        )
+        assert output.getvalue().endswith("\r\x1b[2K")
+        assert renderer.status == ""
+        assert not renderer.status_visible
+
+    asyncio.run(run())
+
+
+def test_tts_status_is_skipped_when_audio_starts_before_quiet_period():
+    async def run():
+        renderer, output = _terminal_renderer()
+        playback = SimpleNamespace(append=lambda *_: None, finish=lambda: None, clear=lambda: None)
+        handle_server_event(
+            SimpleNamespace(type="response.created", response=SimpleNamespace(id="r")),
+            playback=playback,
+            renderer=renderer,
+            print_json=False,
+        )
+        handle_server_event(
+            SimpleNamespace(
+                type="response.output_audio_transcript.delta",
+                delta="Hello.",
+                response_id="r",
+                item_id="i",
+                output_index=0,
+                content_index=0,
+            ),
+            playback=playback,
+            renderer=renderer,
+            print_json=False,
+        )
+        handle_server_event(
+            SimpleNamespace(type="response.output_audio.delta", delta="AQI=", item_id="i", content_index=0),
+            playback=playback,
+            renderer=renderer,
+            print_json=False,
+        )
+        await asyncio.sleep(audio_client_module._TTS_STATUS_IDLE_DELAY_SECONDS + 0.05)
+        assert "generating audio" not in output.getvalue()
+
+    asyncio.run(run())
+
+
+def test_tts_status_timer_restarts_for_each_transcript_delta():
+    async def run():
+        renderer, output = _terminal_renderer()
+        playback = SimpleNamespace(append=lambda *_: None, finish=lambda: None, clear=lambda: None)
+        handle_server_event(
+            SimpleNamespace(type="response.created", response=SimpleNamespace(id="r")),
+            playback=playback,
+            renderer=renderer,
+            print_json=False,
+        )
+        for delta in ("Hello", " there."):
+            handle_server_event(
+                SimpleNamespace(
+                    type="response.output_audio_transcript.delta",
+                    delta=delta,
+                    response_id="r",
+                    item_id="i",
+                    output_index=0,
+                    content_index=0,
+                ),
+                playback=playback,
+                renderer=renderer,
+                print_json=False,
+            )
+            await asyncio.sleep(audio_client_module._TTS_STATUS_IDLE_DELAY_SECONDS * 0.4)
+        assert "generating audio" not in output.getvalue()
+        await asyncio.sleep(audio_client_module._TTS_STATUS_IDLE_DELAY_SECONDS)
+        assert output.getvalue().endswith("ASSISTANT: Hello there.\nGenerating audio…")
+
+    asyncio.run(run())
+
+
+def test_late_transcript_delta_resumes_same_line_after_tts_status():
+    async def run():
+        renderer, output = _terminal_renderer()
+        playback = SimpleNamespace(append=lambda *_: None, finish=lambda: None, clear=lambda: None)
+        handle_server_event(
+            SimpleNamespace(type="response.created", response=SimpleNamespace(id="r")),
+            playback=playback,
+            renderer=renderer,
+            print_json=False,
+        )
+        first_delta = SimpleNamespace(
+            type="response.output_audio_transcript.delta",
+            delta="The answer is",
+            response_id="r",
+            item_id="i",
+            output_index=0,
+            content_index=0,
+        )
+        handle_server_event(first_delta, playback=playback, renderer=renderer, print_json=False)
+        await asyncio.sleep(audio_client_module._TTS_STATUS_IDLE_DELAY_SECONDS + 0.05)
+        assert output.getvalue().endswith("ASSISTANT: The answer is\nGenerating audio…")
+
+        late_delta = SimpleNamespace(**{**vars(first_delta), "delta": " forty-two."})
+        handle_server_event(late_delta, playback=playback, renderer=renderer, print_json=False)
+        assert renderer.status == ""
+        assert not renderer.status_visible
+        assert output.getvalue().endswith("\r\x1b[2K forty-two.")
+        assert output.getvalue().count("ASSISTANT: ") == 1
+
+        await asyncio.sleep(audio_client_module._TTS_STATUS_IDLE_DELAY_SECONDS + 0.05)
+        assert output.getvalue().endswith(" forty-two.\nGenerating audio…")
+        handle_server_event(
+            SimpleNamespace(type="response.output_audio.delta", delta="AQI=", item_id="i", content_index=0),
+            playback=playback,
+            renderer=renderer,
+            print_json=False,
+        )
+        assert output.getvalue().endswith("\r\x1b[2K")
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("status", ["completed", "cancelled"])
+def test_tts_status_is_cleared_when_response_finishes(status):
+    async def run():
+        renderer, output = _terminal_renderer()
+        playback = SimpleNamespace(finish=lambda: None, clear=lambda: None)
+        handle_server_event(
+            SimpleNamespace(type="response.created", response=SimpleNamespace(id="r")),
+            playback=playback,
+            renderer=renderer,
+            print_json=False,
+        )
+        handle_server_event(
+            SimpleNamespace(
+                type="response.output_audio_transcript.delta",
+                delta="Hello.",
+                response_id="r",
+                item_id="i",
+                output_index=0,
+                content_index=0,
+            ),
+            playback=playback,
+            renderer=renderer,
+            print_json=False,
+        )
+        await asyncio.sleep(audio_client_module._TTS_STATUS_IDLE_DELAY_SECONDS + 0.05)
+        assert renderer.status_visible
+        handle_server_event(
+            response_done(status=status), playback=playback, renderer=renderer, print_json=False
+        )
+        assert output.getvalue().endswith("\r\x1b[2K")
+        assert renderer.status == ""
+        assert not renderer.status_visible
+
+    asyncio.run(run())
+
+
 def test_interrupted_assistant_line_is_rewritten_to_the_heard_text():
     renderer, output = _terminal_renderer()
     _stream_assistant(renderer, "Sure, here are five ways to improve it.")
