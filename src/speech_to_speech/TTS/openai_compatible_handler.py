@@ -459,13 +459,9 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
         if lock is None:
             return False
         with lock:
-            operation = self._active_operation
-        if operation is None:
-            return False
-        cancelled_event = getattr(operation, "_cancelled", None)
-        if cancelled_event is not None:
-            return bool(cancelled_event.is_set())
-        return bool(getattr(operation, "cancelled", False))
+            op = self._active_operation
+        ev = getattr(op, "_cancelled", None) if op is not None else None
+        return bool(ev.is_set()) if ev is not None else bool(getattr(op, "cancelled", False))
 
     def _on_first_audio_committed(self, tts_input: TTSInput, timer: TTSResponseTimer | None) -> None:
         if timer is not None:

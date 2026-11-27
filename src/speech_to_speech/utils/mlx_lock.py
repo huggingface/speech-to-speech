@@ -23,8 +23,10 @@ fix does not remove the need for this lock.
 
 import logging
 import types
+from collections.abc import Iterator
+from contextlib import contextmanager
 from threading import Lock, RLock, current_thread, get_ident
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import Literal
 
 from speech_to_speech.pipeline.turn_latency import active_turn_latency_tracker
@@ -40,6 +42,13 @@ _lock_owner_thread: str | None = None
 _lock_owner_handler: str | None = None
 _lock_acquired_at: float | None = None
 _lock_depth = 0
+# Threads waiting for the lock, and those among them waiting for short work
+# that must not wait out a long hold, such as a final transcription during a
+# reply (see hand_over_mlx_lock).
+_waiters = 0
+_priority_waiters = 0
+# How long hand_over_mlx_lock waits for a priority waiter to take the lock.
+_HAND_OVER_WAIT_S = 0.05
 
 
 def _owner_snapshot(now: float | None = None) -> str:
@@ -97,6 +106,7 @@ def acquire_mlx_lock(
     timeout: float | None = None,
     handler_name: str = "Unknown",
     miss_log_level: int = logging.WARNING,
+    priority: bool = False,
 ) -> bool:
     """
     Acquire the global MLX lock.
@@ -106,15 +116,27 @@ def acquire_mlx_lock(
         handler_name: Name of the handler acquiring the lock (for logging)
         miss_log_level: Level for a timed-out acquisition; callers that skip work when
             the lock is busy can lower it so routine misses are not reported as warnings
+        priority: Short work that a long holder should let in between its steps
+            (see ``hand_over_mlx_lock``)
 
     Returns:
         True if lock was acquired, False if timeout occurred
     """
+    global _priority_waiters, _waiters
     with _mlx_lock_state:
         owner_before = _owner_snapshot()
+        _waiters += 1
+        if priority:
+            _priority_waiters += 1
     logger.debug("%s: Attempting to acquire MLX lock (owner=%s)", handler_name, owner_before)
     start = perf_counter()
-    acquired = _mlx_lock.acquire(timeout=timeout) if timeout else _mlx_lock.acquire(blocking=True)
+    try:
+        acquired = _mlx_lock.acquire(timeout=timeout) if timeout else _mlx_lock.acquire(blocking=True)
+    finally:
+        with _mlx_lock_state:
+            _waiters -= 1
+            if priority:
+                _priority_waiters -= 1
     wait_s = perf_counter() - start
     tracker = active_turn_latency_tracker()
     if tracker is not None:
@@ -179,6 +201,68 @@ def release_mlx_lock(handler_name: str = "Unknown") -> None:
         logger.error(f"{handler_name}: Failed to release MLX lock: {e}")
 
 
+def _synchronize_mlx() -> None:
+    try:
+        import mlx.core as mx
+    except ImportError:
+        return
+    mx.synchronize()
+
+
+def hand_over_mlx_lock(handler_name: str = "Unknown") -> bool:
+    """Between two steps of a long hold, let a waiting priority holder run first.
+
+    A reply being synthesized holds the lock for seconds. A final transcription
+    that arrives meanwhile, such as user speech over that reply, would wait all
+    of it out. The owner calls this between steps, with no MLX work of its own
+    in flight: if a priority waiter is queued, it finishes the GPU work,
+    releases the lock, and takes it back after the waiter is done. Returns
+    whether the lock was handed over.
+
+    Ordinary waiters, which may hold the lock for long, are not let in. A
+    release wakes every thread already queued before the owner gets the lock
+    back, so the lock is handed over only when all of them are priority
+    waiters; with an ordinary one queued, the owner keeps it to the end.
+    """
+    with _mlx_lock_state:
+        if (
+            not _priority_waiters
+            or _waiters != _priority_waiters
+            or _lock_owner_ident != get_ident()
+            or _lock_depth != 1
+        ):
+            return False
+    _synchronize_mlx()
+    release_mlx_lock(handler_name=handler_name)
+    deadline = perf_counter() + _HAND_OVER_WAIT_S
+    while perf_counter() < deadline:
+        with _mlx_lock_state:
+            if _lock_owner_ident is not None or not _priority_waiters:
+                break
+        sleep(0.0005)
+    acquire_mlx_lock(handler_name=handler_name)
+    return True
+
+
+@contextmanager
+def suspend_mlx_lock() -> Iterator[None]:
+    """Release the MLX lock while its owner blocks on non-MLX work, then re-acquire."""
+    with _mlx_lock_state:
+        if _lock_owner_ident != get_ident() or _lock_depth <= 0:
+            yield
+            return
+        depth = _lock_depth
+        handler_name = _lock_owner_handler or "Unknown"
+    _synchronize_mlx()
+    for _ in range(depth):
+        release_mlx_lock(handler_name=handler_name)
+    try:
+        yield
+    finally:
+        for _ in range(depth):
+            acquire_mlx_lock(handler_name=handler_name)
+
+
 class MLXLockContext:
     """Context manager for MLX lock."""
 
@@ -187,10 +271,12 @@ class MLXLockContext:
         handler_name: str = "Unknown",
         timeout: float | None = None,
         miss_log_level: int = logging.WARNING,
+        priority: bool = False,
     ) -> None:
         self.handler_name = handler_name
         self.timeout = timeout
         self.miss_log_level = miss_log_level
+        self.priority = priority
         self.acquired = False
 
     def __enter__(self) -> bool:
@@ -198,6 +284,7 @@ class MLXLockContext:
             timeout=self.timeout,
             handler_name=self.handler_name,
             miss_log_level=self.miss_log_level,
+            priority=self.priority,
         )
         return self.acquired
 

@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from queue import Queue
-from typing import Any
 from uuid import uuid4
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
@@ -135,10 +134,11 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
 
     def _is_cancelled(self, cancel_generation: int | None) -> bool:
         stop_event = getattr(self, "stop_event", None)
-        if stop_event is not None and stop_event.is_set():
-            return True
         cancel_scope = getattr(self, "cancel_scope", None)
-        return cancel_generation is not None and cancel_scope is not None and cancel_scope.is_stale(cancel_generation)
+        return bool(
+            (stop_event is not None and stop_event.is_set())
+            or (cancel_generation is not None and cancel_scope is not None and cancel_scope.is_stale(cancel_generation))
+        )
 
     def _turn_output_allowed(
         self,
@@ -153,19 +153,16 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
             return False
         if self.speculative_turns is None:
             return True
-        stop_event = getattr(self, "stop_event", None)
-        cancel_scope = getattr(self, "cancel_scope", None)
-        has_abort = stop_event is not None or (cancel_generation is not None and cancel_scope is not None)
-        if hold_for_grace and observe_wait and not has_abort:
-            return self.speculative_turns.wait_for_gate(turn_id, turn_revision)
-        kwargs: dict[str, Any] = {}
-        if not hold_for_grace:
-            kwargs["hold_for_grace"] = False
-        if not observe_wait:
-            kwargs["observe_wait"] = False
-        if has_abort:
-            kwargs["should_abort"] = lambda: self._is_cancelled(cancel_generation)
-        return self.speculative_turns.wait_for_gate(turn_id, turn_revision, **kwargs)
+        has_abort = getattr(self, "stop_event", None) is not None or (
+            cancel_generation is not None and getattr(self, "cancel_scope", None) is not None
+        )
+        return self.speculative_turns.wait_for_gate(
+            turn_id,
+            turn_revision,
+            hold_for_grace=hold_for_grace,
+            observe_wait=observe_wait,
+            should_abort=(lambda: self._is_cancelled(cancel_generation)) if has_abort else None,
+        )
 
     def process(self, lm_output: LLMOut) -> Iterator[TTSIn | PipelineEvent]:
         """

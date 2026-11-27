@@ -281,12 +281,15 @@ def test_session_end_cancels_pending_stream_without_reporting_failure(adapter):
     assert closed.wait(1)
 
 
-def test_zerogpu_cancellation_during_grace_drops_audio_and_allows_reopen(adapter):
+@pytest.mark.parametrize("cancel", [False, True])
+def test_zerogpu_speculative_reopen_grace_timing_and_cancellation(adapter, cancel):
     handler, worker, scope, _ = adapter
     tracker = SpeculativeTurnTracker()
     turn_id, rev, _ = tracker.speech_started(0)
-    tracker.segment_finalized(1000, output_hold_ms=300)
+    tracker.segment_finalized(1000, output_hold_ms=300 if cancel else 80)
     handler.speculative_turns = tracker
+    latency = TurnLatencyTracker()
+    handler.turn_latency_store = SimpleNamespace(get_response=lambda key: latency)
 
     chunk_ready = Event()
 
@@ -295,110 +298,32 @@ def test_zerogpu_cancellation_during_grace_drops_audio_and_allows_reopen(adapter
         yield np.ones(512, dtype=np.int16)
 
     worker.synthesize_chunks = synthesize
-    done = Event()
-    outputs = []
-
-    def consume():
-        outputs.extend(
-            handler.process(
-                TTSInput(text="Hello.", turn_id=turn_id, turn_revision=rev, cancel_generation=scope.generation)
-            )
-        )
-        done.set()
-
-    thread = Thread(target=consume)
-    thread.start()
-    try:
-        assert chunk_ready.wait(0.5)
-        assert not done.wait(0.03)
-        scope.cancel()
-        assert done.wait(0.2)
-    finally:
-        thread.join(2)
-
-    assert outputs == []
-    assert not tracker.is_committed(turn_id, rev)
-    assert tracker.can_reopen(1100)
-    assert tracker.speech_started(1100) == (turn_id, 1, True)
-
-
-def test_zerogpu_speculative_grace_records_pre_grace_ttfa_and_suppresses_on_cancel(adapter):
-    handler, worker, scope, _ = adapter
-
-    # Part 1: When speculative synthesis finishes during reopen grace and later commits,
-    # tts_ttfa_s reflects synthesis time (excluding the grace sleep) while e2e_s reflects
-    # actual first-audio release after grace expires.
-    speculative = SpeculativeTurnTracker()
-    turn_id, rev = speculative.start_turn()
-    speculative.start_reopen_grace(turn_id, rev, grace_s=0.08)
-    handler.speculative_turns = speculative
-    committed_latency = TurnLatencyTracker()
-    handler.turn_latency_store = SimpleNamespace(get_response=lambda key: committed_latency)
-
-    worker.synthesize_chunks = lambda *args, **kwargs: iter([np.ones(512, dtype=np.int16)])
-    stopped_at = perf_counter()
-    outputs = list(
-        handler.process(
-            TTSInput(
-                text="Hello.",
-                turn_id=turn_id,
-                turn_revision=rev,
-                response_key="resp-commit",
-                speech_stopped_at_s=stopped_at,
-                cancel_generation=scope.generation,
-            )
-        )
+    done, outputs = Event(), []
+    item = TTSInput(
+        text="Hello.",
+        turn_id=turn_id,
+        turn_revision=rev,
+        response_key="resp",
+        speech_stopped_at_s=perf_counter(),
+        cancel_generation=scope.generation,
     )
-    assert len(outputs) == 1
-    assert speculative.is_committed(turn_id, rev)
-    assert committed_latency.tts_ttfa_s is not None
-    assert committed_latency.tts_ttfa_s < 0.05
-    assert committed_latency.e2e_s is not None
-    assert committed_latency.e2e_s >= 0.07
 
-    # Part 2: Cancelling during reopen grace leaves both tts_ttfa_s and e2e_s unset.
-    cancelled_spec = SpeculativeTurnTracker()
-    c_turn, c_rev, _ = cancelled_spec.speech_started(0)
-    cancelled_spec.segment_finalized(1000, output_hold_ms=300)
-    handler.speculative_turns = cancelled_spec
-    cancelled_latency = TurnLatencyTracker()
-    handler.turn_latency_store = SimpleNamespace(get_response=lambda key: cancelled_latency)
-
-    chunk_ready = Event()
-
-    def synthesize_then_hold(*args, **kwargs):
-        chunk_ready.set()
-        yield np.ones(512, dtype=np.int16)
-
-    worker.synthesize_chunks = synthesize_then_hold
-    done = Event()
-    cancelled_outputs = []
-
-    def consume():
-        cancelled_outputs.extend(
-            handler.process(
-                TTSInput(
-                    text="Dropped.",
-                    turn_id=c_turn,
-                    turn_revision=c_rev,
-                    response_key="resp-cancel",
-                    speech_stopped_at_s=perf_counter(),
-                    cancel_generation=scope.generation,
-                )
-            )
-        )
-        done.set()
-
-    thread = Thread(target=consume)
+    thread = Thread(target=lambda: (outputs.extend(handler.process(item)), done.set()))
     thread.start()
     try:
         assert chunk_ready.wait(0.5)
         assert not done.wait(0.02)
-        scope.cancel()
-        assert done.wait(0.2)
+        if cancel:
+            scope.cancel()
+        assert done.wait(0.5)
     finally:
         thread.join(2)
 
-    assert cancelled_outputs == []
-    assert cancelled_latency.tts_ttfa_s is None
-    assert cancelled_latency.e2e_s is None
+    if cancel:
+        assert outputs == [] and latency.tts_ttfa_s is None and latency.e2e_s is None
+        assert not tracker.is_committed(turn_id, rev)
+        assert tracker.can_reopen(1100) and tracker.speech_started(1100) == (turn_id, 1, True)
+    else:
+        assert len(outputs) == 1 and tracker.is_committed(turn_id, rev)
+        assert latency.tts_ttfa_s is not None and latency.tts_ttfa_s < 0.05
+        assert latency.e2e_s is not None and latency.e2e_s >= 0.07

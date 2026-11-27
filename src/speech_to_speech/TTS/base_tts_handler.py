@@ -3,6 +3,7 @@ from __future__ import annotations
 import functools
 import logging
 from collections.abc import Callable, Iterator
+from contextlib import nullcontext
 from typing import Any
 
 from speech_to_speech.baseHandler import BaseHandler
@@ -10,8 +11,9 @@ from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import EndOfResponse, TTSInput
-from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnGateAction
 from speech_to_speech.pipeline.turn_latency import TTSResponseTimer, TurnLatencyStore
+from speech_to_speech.utils.mlx_lock import suspend_mlx_lock
 
 logger = logging.getLogger(__name__)
 
@@ -102,14 +104,12 @@ class BaseTTSHandler(BaseHandler[TTSIn, TTSOut]):
         first yielded audio block.
         """
         tracker = self.speculative_turns
-        if tracker is None:
-            return True
-        admitted = (
-            tracker.wait_for_gate(tts_input.turn_id, tts_input.turn_revision, commit=commit)
-            if hold_for_grace
-            else tracker.wait_for_gate(tts_input.turn_id, tts_input.turn_revision, hold_for_grace=False, commit=commit)
-        )
-        if not admitted:
+        if tracker is not None and not tracker.wait_for_gate(
+            tts_input.turn_id,
+            tts_input.turn_revision,
+            hold_for_grace=hold_for_grace,
+            commit=commit,
+        ):
             logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
             return False
         return True
@@ -164,12 +164,19 @@ class BaseTTSHandler(BaseHandler[TTSIn, TTSOut]):
             and tts_input.turn_id is not None
             and tts_input.turn_revision is not None
         ):
-            if not tracker.wait_for_gate(
-                tts_input.turn_id,
-                tts_input.turn_revision,
-                commit=True,
-                should_abort=_aborted,
-            ):
+            gate = getattr(tracker, "gate", None)
+            would_hold = (
+                callable(gate)
+                and gate(tts_input.turn_id, tts_input.turn_revision, commit=False).action is TurnGateAction.HOLD
+            )
+            with suspend_mlx_lock() if would_hold else nullcontext():
+                committed = tracker.wait_for_gate(
+                    tts_input.turn_id,
+                    tts_input.turn_revision,
+                    commit=True,
+                    should_abort=_aborted,
+                )
+            if not committed:
                 logger.debug(
                     "Dropping speculative TTS audio before commit for turn=%s rev=%s",
                     tts_input.turn_id,

@@ -1517,102 +1517,36 @@ def test_openai_tts_cancellation_unblocks_a_stalled_socket_and_session_end(monke
         server_thread.join(timeout=1)
 
 
-def test_openai_tts_synthesizes_speculatively_during_reopen_grace_and_commits_on_expiry(monkeypatch):
-    tracker = SpeculativeTurnTracker()
-    tracker.start_turn()
-    tracker.start_reopen_grace("turn_1", 0, grace_s=0.1)
-    handler = _openai_tts_handler(monkeypatch, speculative_turns=tracker)
-
-    request_started = Event()
-    _FakeSpeechOperation.startup_action = request_started.set
-
-    done = Event()
-    outputs = []
-
-    def run_process() -> None:
-        outputs.extend(handler.process(TTSInput(text="Hello.", turn_id="turn_1", turn_revision=0)))
-        done.set()
-
-    thread = Thread(target=run_process)
-    thread.start()
-
-    # HTTP synthesis begins immediately during reopen grace, while audio emission
-    # and turn commit stay held until grace elapses.
-    assert request_started.wait(0.05)
-    assert not done.wait(0.02)
-    assert outputs == []
-    assert not tracker.is_committed("turn_1", 0)
-
-    assert done.wait(1.0)
-    thread.join(timeout=1.0)
-
-    assert len(outputs) >= 1
-    assert tracker.is_committed("turn_1", 0)
-
-
-def test_openai_tts_drops_speculative_audio_when_turn_reopens_during_grace(monkeypatch):
-    tracker = SpeculativeTurnTracker()
-    tracker.start_turn()
-    tracker.start_reopen_grace("turn_1", 0, grace_s=0.5)
-    handler = _openai_tts_handler(monkeypatch, speculative_turns=tracker)
-
-    request_started = Event()
-    _FakeSpeechOperation.startup_action = request_started.set
-
-    done = Event()
-    outputs = []
-
-    def run_process() -> None:
-        outputs.extend(handler.process(TTSInput(text="Hello.", turn_id="turn_1", turn_revision=0)))
-        done.set()
-
-    thread = Thread(target=run_process)
-    thread.start()
-
-    assert request_started.wait(0.5)
-    assert not done.wait(0.03)
-    assert outputs == []
-    assert not tracker.is_committed("turn_1", 0)
-
-    reopen(tracker, "turn_1", 0)
-    assert done.wait(1.0)
-    thread.join(timeout=1.0)
-
-    assert outputs == []
-    assert not tracker.is_committed("turn_1", 0)
-
-
-def test_openai_tts_cancellation_during_grace_drops_audio_and_allows_reopen(monkeypatch):
-    tracker = SpeculativeTurnTracker()
+@pytest.mark.parametrize("outcome", ["expire", "reopen", "cancel"])
+def test_openai_tts_speculative_reopen_grace(monkeypatch, outcome):
+    tracker, scope = SpeculativeTurnTracker(), CancelScope()
     turn_id, rev, _ = tracker.speech_started(0)
-    tracker.segment_finalized(1000, output_hold_ms=300)
-    scope = CancelScope()
+    tracker.segment_finalized(1000, output_hold_ms=80 if outcome == "expire" else 300)
     handler = _openai_tts_handler(monkeypatch, cancel_scope=scope, speculative_turns=tracker)
 
     request_started = Event()
     _FakeSpeechOperation.startup_action = request_started.set
+    done, outputs = Event(), []
+    tts_input = TTSInput(text="Hello.", turn_id=turn_id, turn_revision=rev, cancel_generation=scope.generation)
 
-    done = Event()
-    outputs = []
-
-    def run_process() -> None:
-        outputs.extend(
-            handler.process(
-                TTSInput(text="Hello.", turn_id=turn_id, turn_revision=rev, cancel_generation=scope.generation)
-            )
-        )
-        done.set()
-
-    thread = Thread(target=run_process)
+    thread = Thread(target=lambda: (outputs.extend(handler.process(tts_input)), done.set()))
     thread.start()
+    try:
+        assert request_started.wait(0.5)
+        assert not done.wait(0.02)
+        assert outputs == [] and not tracker.is_committed(turn_id, rev)
+        if outcome == "reopen":
+            reopen(tracker, turn_id, rev)
+        elif outcome == "cancel":
+            scope.cancel()
+        assert done.wait(1.0)
+    finally:
+        thread.join(timeout=1.0)
 
-    assert request_started.wait(0.5)
-    assert not done.wait(0.03)
-    scope.cancel()
-    assert done.wait(0.2)
-    thread.join(timeout=1.0)
-
-    assert outputs == []
-    assert not tracker.is_committed(turn_id, rev)
-    assert tracker.can_reopen(1100)
-    assert tracker.speech_started(1100) == (turn_id, 1, True)
+    if outcome == "expire":
+        assert len(outputs) >= 1 and tracker.is_committed(turn_id, rev)
+    else:
+        assert outputs == [] and not tracker.is_committed(turn_id, rev)
+        assert _FakeSpeechOperation.instances[-1].cancelled is True
+        if outcome == "cancel":
+            assert tracker.can_reopen(1100) and tracker.speech_started(1100) == (turn_id, 1, True)

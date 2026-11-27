@@ -42,7 +42,7 @@ from speech_to_speech.pipeline.transcript_logging import log_exception
 from speech_to_speech.pipeline.turn_latency import TTSResponseTimer, bind_active_turn_latency_tracker
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
 from speech_to_speech.TTS.pcm_blocks import PCMBlockBuffer
-from speech_to_speech.utils.mlx_lock import MLXLockContext
+from speech_to_speech.utils.mlx_lock import MLXLockContext, hand_over_mlx_lock
 from speech_to_speech.utils.utils import resolve_device
 
 logger = logging.getLogger(__name__)
@@ -91,6 +91,17 @@ QWEN3_LANGUAGE_ALIASES = {
     "es": "spanish",
     "it": "italian",
 }
+
+
+def _handing_over_mlx_lock(generation: Iterator[Any]) -> Iterator[Any]:
+    """Between generation steps, let a waiting final transcription take the MLX lock.
+
+    Each item has been consumed (converted to samples) before the next step
+    starts, so no MLX work of this utterance is in flight at the hand-over.
+    """
+    for item in generation:
+        yield item
+        hand_over_mlx_lock("Qwen3TTS")
 
 
 class Qwen3TTSHandler(BaseTTSHandler):
@@ -697,12 +708,10 @@ class Qwen3TTSHandler(BaseTTSHandler):
         gen: Any,
         label: str,
         timer: TTSResponseTimer | None = None,
-        *,
-        started_at: float | None = None,
     ) -> Iterator[bytes | np.ndarray]:
         """Common streaming loop: log TTFA and RTF, yield int16 chunks."""
         cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
-        start = perf_counter() if started_at is None else started_at
+        start = perf_counter()
         if timer is not None:
             # Measure from here, after any MLX lock wait, so ``tts_ttfa`` matches the logged TTFA.
             timer.mark_start(start)
@@ -926,55 +935,19 @@ class Qwen3TTSHandler(BaseTTSHandler):
         max_tokens: int,
         **generation_kwargs: Any,
     ) -> Iterator[bytes | np.ndarray]:
-        # Acquire the global MLX lock per model step (and materialize mx.array
-        # to NumPy before releasing) so blocking on speculative reopen grace or
-        # downstream queues never holds the MLX lock across idle waits.
         with MLXLockContext(handler_name="Qwen3TTS", timeout=10.0) as acquired:
             if not acquired:
                 raise TimeoutError("Timed out waiting for MLX lock")
-            started_at = perf_counter()
-            if timer is not None:
-                timer.mark_start(started_at)
-            raw_iter = iter(
-                generation_fn(
-                    **self._mlx_stream_kwargs(max_tokens=max_tokens),
-                    **generation_kwargs,
-                )
+            yield from self._stream(
+                _handing_over_mlx_lock(
+                    generation_fn(
+                        **self._mlx_stream_kwargs(max_tokens=max_tokens),
+                        **generation_kwargs,
+                    ),
+                ),
+                label=label,
+                timer=timer,
             )
-            try:
-                first_item = next(raw_iter)
-            except StopIteration:
-                return
-            except BaseException:
-                close = getattr(raw_iter, "close", None)
-                if close is not None:
-                    close()
-                raise
-            first_prepared = self._prepare_audio_chunk(first_item)
-
-        def locked_steps() -> Iterator[Any]:
-            try:
-                if first_prepared[0] is not None and first_prepared[1] is not None:
-                    yield (first_prepared[0], first_prepared[1], {})
-                while True:
-                    with MLXLockContext(handler_name="Qwen3TTS", timeout=10.0) as acquired:
-                        if not acquired:
-                            raise TimeoutError("Timed out waiting for MLX lock")
-                        try:
-                            item = next(raw_iter)
-                        except StopIteration:
-                            return
-                        prepared = self._prepare_audio_chunk(item)
-                    if prepared[0] is not None and prepared[1] is not None:
-                        yield (prepared[0], prepared[1], {})
-            finally:
-                close = getattr(raw_iter, "close", None)
-                if close is not None:
-                    with MLXLockContext(handler_name="Qwen3TTS", timeout=10.0) as acquired:
-                        if acquired:
-                            close()
-
-        yield from self._stream(locked_steps(), label=label, timer=timer, started_at=started_at)
 
     def _process_voice_clone(
         self,
