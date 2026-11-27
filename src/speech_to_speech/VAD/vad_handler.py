@@ -67,7 +67,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         min_silence_ms: int = 64,
         min_speech_ms: int = 384,
         barge_in_ms: int = 0,
-        barge_in_min_confident_speech_ms: int = 0,
         min_speech_continuation_ms: int = 192,
         max_speech_ms: float = float("inf"),
         speech_pad_ms: int = 30,
@@ -94,6 +93,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         idle_min_confident_speech_ms: int = 0,
         response_playing: Event | None = None,
         has_pending_playback: Callable[[], bool] | None = None,
+        barge_in_min_confident_speech_ms: int = 0,
     ) -> None:
         if not 0 < confident_thresh <= 1:
             raise ValueError("confident_thresh must be in (0, 1]")

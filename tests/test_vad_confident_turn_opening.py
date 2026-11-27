@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 import torch
 
+from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
 from speech_to_speech.pipeline.messages import VADAudio
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.VAD.vad_handler import VADHandler
@@ -303,3 +304,20 @@ def test_barge_in_min_confident_speech_ms_applies_during_buffered_playback_and_i
 
     # Buffered playback uses barge-in requirements (256 ms), not idle requirements (384 ms).
     assert _opened_turns(handler, len(probs)) == 1
+
+
+def test_positional_continuation_threshold_keeps_its_meaning(monkeypatch) -> None:
+    args = VADHandlerArguments("silero", None, False, 0.6, 16000, 64, 384, 0, 160)
+    assert args.min_speech_continuation_ms == 160
+    assert args.barge_in_min_confident_speech_ms == 0
+
+    monkeypatch.setattr(torch.hub, "load", lambda *args, **kwargs: (_FakeVADModel([]), None))
+    handler = VADHandler(
+        Event(),
+        Queue(),
+        Queue(),
+        setup_args=(Event(), SpeculativeTurnTracker(), 0.6, 16000, 64, 384, 0, 160),
+        setup_kwargs={"smart_turn": False},
+    )
+    assert handler.min_speech_continuation_ms == 160
+    assert handler.barge_in_min_confident_speech_ms == 0

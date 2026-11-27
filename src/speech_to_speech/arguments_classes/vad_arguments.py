@@ -51,13 +51,6 @@ class VADHandlerArguments:
             "to raise the confident-speech term during playback. 0 keeps min_speech_ms. Default is 0."
         },
     )
-    barge_in_min_confident_speech_ms: int = field(
-        default=0,
-        metadata={
-            "help": "min_confident_speech_ms to use while the assistant is speaking (including buffered playback). "
-            "Requires min_confident_speech_ms > 0. 0 keeps min_confident_speech_ms. Default is 0."
-        },
-    )
     min_speech_continuation_ms: int = field(
         default=192,
         metadata={
@@ -185,4 +178,11 @@ class VADHandlerArguments:
     smart_turn_cpu_count: int = field(
         default=1,
         metadata={"help": "Number of CPU threads ONNX Runtime may use for each Smart Turn inference. Default is 1."},
+    )
+    barge_in_min_confident_speech_ms: int = field(
+        default=0,
+        metadata={
+            "help": "min_confident_speech_ms to use while the assistant is speaking (including buffered playback). "
+            "Requires min_confident_speech_ms > 0. 0 keeps min_confident_speech_ms. Default is 0."
+        },
     )
