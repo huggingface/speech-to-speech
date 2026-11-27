@@ -457,7 +457,12 @@ async def turn(game_id: str, req: TurnRequest) -> dict[str, Any]:
             )
         # For a tool call from the backend's LLM: its result, and the session
         # instructions updated to the new question state.
-        out["voice"] = {"instructions": voice.instructions(game), "output": voice.tool_output(game, out)}
+        out["voice"] = {
+            "instructions": voice.instructions(game),
+            "output": voice.tool_output(game, out),
+            # The next question's own turn, asked once the verdict is written.
+            "ask": voice.ask_next(game, out),
+        }
         return out
 
 

@@ -89,16 +89,23 @@ def test_tool_outputs(game, monkeypatch):
         }, "stub"
 
     monkeypatch.setattr(g, "_decide", wrong)
-    retry = json.loads(voice.tool_output(game, run(g.handle_turn(game, "no idea really"))))
+    retry_out = run(g.handle_turn(game, "no idea really"))
+    retry = json.loads(voice.tool_output(game, retry_out))
     assert retry["verdict"] == "incorrect" and retry["tries_left"] == 2 and retry["say"] == "Think about the order."
     assert "next_question" not in retry
 
-    skipped = json.loads(voice.tool_output(game, run(g.handle_turn(game, "(skip)", "skip"))))
-    assert skipped["verdict"] == "skipped" and skipped["next_question"] == game.question()["question"]
-    assert skipped["say"].startswith("No worries. The answer is")
-    assert game.question()["question"] not in skipped["say"]  # the next question is asked separately
+    out = run(g.handle_turn(game, "(skip)", "skip"))
+    skipped = json.loads(voice.tool_output(game, out))
+    assert skipped["verdict"] == "skipped" and skipped["say"].startswith("No worries. The answer is")
+    # The verdict is a turn of its own: the coach stops there, and the next
+    # question comes in a second turn, after a pause.
+    assert "next_question" not in skipped and "stop" in skipped["next"]
+    assert game.question()["question"] not in skipped["say"]
+    ask = voice.ask_next(game, out)
+    assert ask.endswith(f'"{game.question()["question"]}"') and "exactly as written" in ask
     # A lead-in like "Moving on." comes before the next question.
-    assert any(f'say "{t}"' in skipped["next"] for t in g.TRANSITIONS + g.LAST_TRANSITIONS)
+    assert any(f'Say "{t}"' in ask for t in g.TRANSITIONS + g.LAST_TRANSITIONS)
+    assert voice.ask_next(game, retry_out) == ""
 
     hint = json.loads(voice.tool_output(game, run(g.handle_turn(game, "(hint)", "hint"))))
     assert hint["hint"] == game.question()["hint"]

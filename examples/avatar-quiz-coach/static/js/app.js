@@ -63,6 +63,8 @@ const S = {
   /** @type {RealtimeVoice | null} */ fillersFor: null,
   /** Grader tool calls not yet answered. */
   toolsPending: 0,
+  /** The next question's own turn, asked once the verdict reply is written. @type {{ text: string, run: number, replyId: string } | null} */
+  pendingAsk: null,
   /** The server lost the quiz (it restarted): going back to the lobby. */
   expiring: false,
   /** Seconds of audio received per response id, and ids whose audio is complete. */
@@ -335,6 +337,7 @@ function setPhase(phase) {
 
 /** End the voice call: close the connection and the microphone. The next quiz dials again. */
 function hangUp() {
+  S.pendingAsk = null;
   if (!S.voice) return;
   S.voice.close();
   S.voice = null;
@@ -407,6 +410,7 @@ function backToLobby() {
  * @param {{ topic?: string, difficulty?: string, packId?: string, title?: string, emoji?: string, questionIds?: number[] }} opts
  */
 async function startRun(opts) {
+  S.pendingAsk = null;
   if (S.cfg.loginRequired && !S.cfg.user) {
     toast(`Sign in with Hugging Face (top right) to play with ${S.coach.name}.`, "info");
     $("#btn-signin").classList.add("pulse");
@@ -641,6 +645,7 @@ function wireVoice(voice) {
     }
     S.responseActive = true;
     S.responseHadAudio = false;
+    if (S.pendingAsk && !S.pendingAsk.replyId) S.pendingAsk.replyId = id;
     avatar.beginResponse(id);
     S.lineText.set(id, "");
   });
@@ -705,6 +710,19 @@ function wireVoice(voice) {
         voice.respond(undefined, { tool_choice: "required" });
       }
       return;
+    }
+    const ask = S.pendingAsk;
+    if (ask && ask.replyId === id) {
+      if (ask.run !== S.runId || S.phase !== "quiz") S.pendingAsk = null;
+      else if (/** @type {any} */ (e).detail.status === "completed" && spoken) {
+        // The verdict is written (it is still being spoken): ask for the next
+        // question now, so it is ready to play after the pause between turns.
+        S.pendingAsk = null;
+        voice.respond(ask.text);
+      } else {
+        // Cut off, or a tool call instead of words: ask after the coach's next spoken reply.
+        ask.replyId = "";
+      }
     }
     // Start recording fillers once the coach has said something (the reading-up line).
     if ((S.phase === "research" || S.phase === "quiz") && S.fillersFor !== voice) prepareFillers(voice);
@@ -1299,6 +1317,7 @@ function runTool(call) {
       }
       handleOutcome(out);
       voice.configure({ instructions: out.voice.instructions });
+      S.pendingAsk = out.voice.ask ? { text: out.voice.ask, run: S.runId, replyId: "" } : null;
       voice.sendToolOutput(call.callId, out.voice.output);
     })
     .catch((err) => {

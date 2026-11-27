@@ -22,7 +22,7 @@ TOOLS: list[dict[str, Any]] = [
         "description": (
             "Grade the student's attempt at the current quiz question. Call it as soon as they attempt an "
             "answer, even a partial, hesitant or probably wrong one, or say they don't know. Returns the "
-            "verdict and what to tell them: a clue for another try, or the result and the next question."
+            "verdict and what to tell them: a clue for another try, or the result (the app then asks the next question)."
         ),
         "parameters": {
             "type": "object",
@@ -137,6 +137,18 @@ def opening(game: Game, greeted: bool = False, rng: random.Random | None = None)
     )
 
 
+def ask_next(game: Game, out: dict[str, Any]) -> str:
+    """Instructions for the turn that asks the next question, after the verdict's own turn."""
+    q = game.public_question()
+    if not out.get("reveal") or game.finished or not q:
+        return ""
+    # A line like "Moving on." before the question.
+    lead = f'Say "{out["transition"]}", then ask' if out.get("transition") else "Ask"
+    return (
+        f'{lead} question {q["index"] + 1} of {q["total"]} exactly as written, and say nothing else: "{q["question"]}"'
+    )
+
+
 def tool_output(game: Game, out: dict[str, Any]) -> str:
     """What the backend's LLM sees after a tool runs (compact JSON)."""
     result: dict[str, Any]
@@ -161,16 +173,15 @@ def tool_output(game: Game, out: dict[str, Any]) -> str:
         }
     elif out.get("reveal"):
         q = game.public_question()
-        # A line like "Moving on." between the verdict and the next question.
-        lead = f'say "{out["transition"]}" and ' if out.get("transition") else ""
+        # The next question is a turn of its own (see ask_next): the app asks
+        # for it once this reply is written, and plays it after a short pause.
         result = {
             "verdict": out.get("verdict"),
             "points": out.get("points", 0),
             "score": game.score,
             "streak": game.streak,
             "say": out.get("feedback") or out.get("say", ""),
-            "next_question": q["question"] if q else None,
-            "next": f"Then {lead}ask question {q['index'] + 1} of {q['total']} exactly as written." if q else "",
+            "next": "Say only that, then stop. Don't ask the next question: it comes right after." if q else "",
         }
     elif out.get("hint"):
         result = {"hint": out["hint"], "say": out.get("say", ""), "next": "Then let them answer."}

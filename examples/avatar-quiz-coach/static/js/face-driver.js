@@ -13,7 +13,7 @@
  */
 
 import { HeadAudio } from "headaudio";
-import { FORCE_HEADAUDIO, JAW_LEVEL, Upsampler, VISEME_ARKIT, coarticulate, cueShape } from "./lipsync.js";
+import { coarticulate, cueShape, FORCE_HEADAUDIO, JAW_LEVEL, turnGap, Upsampler, VISEME_ARKIT } from "./lipsync.js";
 
 export const ARKIT = [
   "browDownLeft", "browDownRight", "browInnerUp", "browOuterUpLeft", "browOuterUpRight", "mouthCheekPuff",
@@ -280,7 +280,13 @@ export class FaceDriver extends EventTarget {
     const latencyMs = ((ctx.baseLatency || 0) + (ctx.outputLatency || 0)) * 1000 || 20;
     const durMs = (pcm.length / this.inRate) * 1000;
     const r0 = (this.responseSamples / this.inRate) * 1000;
-    const start = Math.max(now + latencyMs, this.cursor);
+    let start = Math.max(now + latencyMs, this.cursor);
+    const gap = this.responseSamples === 0 ? turnGap(start, this.cursor) : 0;
+    if (gap > 0) {
+      const silence = this.upsampler.process(new Int16Array(Math.round((gap * this.inRate) / 1000))).slice();
+      this.player.port.postMessage({ type: "audioData", data: silence.buffer }, [silence.buffer]);
+      start += gap;
+    }
     this.cursor = start + durMs;
     this.lineStarts.set(responseId, this.lineStarts.get(responseId) ?? start);
     if (this.responseSamples === 0) {

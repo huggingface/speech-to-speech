@@ -16,7 +16,7 @@
 
 import { TalkingHead } from "talkinghead";
 import { HeadAudio } from "headaudio";
-import { FORCE_HEADAUDIO, JAW_LEVEL, Upsampler, coarticulate, cueShape } from "./lipsync.js";
+import { FORCE_HEADAUDIO, JAW_LEVEL, Upsampler, coarticulate, cueShape, turnGap } from "./lipsync.js";
 import { COACHES } from "./coaches.js";
 
 export class Avatar extends EventTarget {
@@ -232,7 +232,12 @@ export class Avatar extends EventTarget {
     const latencyMs = ((ctx.baseLatency || 0) + (ctx.outputLatency || 0)) * 1000 || 20;
     const durMs = (pcm.length / this.inRate) * 1000;
     const r0 = (this.responseSamples / this.inRate) * 1000;
-    const start = Math.max(head.animClock + latencyMs, this.cursor);
+    let start = Math.max(head.animClock + latencyMs, this.cursor);
+    const gap = this.responseSamples === 0 ? turnGap(start, this.cursor) : 0;
+    if (gap > 0) {
+      head.streamAudio({ audio: this.upsampler.process(new Int16Array(Math.round((gap * this.inRate) / 1000))) });
+      start += gap;
+    }
     this.cursor = start + durMs;
     this.lineStarts.set(responseId, this.lineStarts.get(responseId) ?? start);
     if (this.responseSamples === 0) {

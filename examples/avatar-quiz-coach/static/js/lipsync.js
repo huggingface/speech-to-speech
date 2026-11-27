@@ -56,6 +56,19 @@ export const VISEME_ARKIT = /** @type {Record<string, Record<string, number>>} *
 });
 
 // `?lipsync=headaudio` ignores server visemes (for comparing the two sources).
+/** Silence between two coach lines that would otherwise run together, e.g. the verdict and the next question (ms). */
+export const TURN_GAP_MS = 500;
+
+/**
+ * Silence to play before a new line so it starts TURN_GAP_MS after the queued
+ * audio ends; none when the voice has already been quiet that long.
+ * @param {number} start when the line would start (audio clock, ms)
+ * @param {number} cursor when the queued audio runs out (same clock; 0 when nothing has been queued)
+ */
+export function turnGap(start, cursor) {
+  return cursor ? Math.max(0, cursor + TURN_GAP_MS - start) : 0;
+}
+
 export const FORCE_HEADAUDIO = new URLSearchParams(location.search).get("lipsync") === "headaudio";
 
 /**
