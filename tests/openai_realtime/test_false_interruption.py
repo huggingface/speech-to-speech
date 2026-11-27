@@ -64,10 +64,12 @@ _INPUT_EVENTS = {
         ("[coughs] (laughing) Hmm.", 0),
         ("Hmmmm, Uhhh, Mhmm, Yeahhh.", 0),
         ("Haha! Hehehe.", 0),
-        # Direct answers, STT mishearings, and real words count.
+        # Direct answers, STT mishearings, non-English words, and real words count.
         ("Yes.", 1),
         ("Sure.", 1),
         ("No.", 1),
+        ("Er.", 1),
+        ("Ha.", 1),
         ("A ham.", 2),
         ("He. Hi. See. Good.", 4),
         ("Okay, stop.", 1),
@@ -82,10 +84,18 @@ def test_word_counting_ignores_fillers_and_backchannels(transcript, words):
 
 def test_custom_fillers_and_backchannels_per_language():
     french = FalseInterruptionConfig(fillers=("euh",), backchannels=("ouais", "d'accord"))
-    assert french.word_count("Euh, ouais, d'accord.") == 0
-    assert french.word_count("Uh, yeah.") == 2
+    assert french.word_count("Euh, ouais, d'accord.", language="fr") == 0
+    assert french.word_count("Uh, yeah.", language="fr") == 2
     assert FalseInterruptionConfig(backchannels=()).word_count("Mm-hmm, yeah.") == 1
     assert FalseInterruptionConfig(fillers=()).word_count("Uh, yeah.") == 1
+
+    # Built-in English backchannels do not swallow non-English words (e.g. Spanish "¡Ya!").
+    default = FalseInterruptionConfig()
+    assert default.word_count("¡Ya!", language="es") == 1
+    assert default.word_count("Yeah, okay.", language="fr") == 2
+    assert default.word_count("Mm-hmm, uh.", language="es") == 0
+    assert default.word_count("Yeah.", language="en-US") == 0
+    assert default.word_count("Yeah.", language="auto") == 0
 
 
 def test_session_config_validation_and_server_default():
@@ -104,17 +114,40 @@ def test_session_config_validation_and_server_default():
     cfg = service._state(conn_id).runtime_config
     assert cfg.false_interruption == FalseInterruptionConfig()
 
-    def apply(td):
-        ev = service.parse_client_event(
-            {"type": "session.update", "session": {"type": "realtime", "audio": {"input": {"turn_detection": td}}}}
-        )
-        return service.handle_session_update(conn_id, ev)
+    def apply(td, *, extensions=None, transport_kind=None):
+        session: dict = {"type": "realtime", "audio": {"input": {"turn_detection": td}}}
+        if extensions is not None:
+            session["extensions"] = list(extensions)
+        ev = service.parse_client_event({"type": "session.update", "session": session})
+        return service.handle_session_update(conn_id, ev, transport_kind=transport_kind)
 
     err = apply({"type": "server_vad", "false_interruption": {"min_words": 0}})
     assert err is not None and "min_words" in err.error.message
-    assert apply({"type": "server_vad", "threshold": 0.6}) is None
+    assert apply({"type": "server_vad", "threshold": 0.6}, transport_kind="websocket") is None
     assert cfg.false_interruption == FalseInterruptionConfig()
-    assert apply({"type": "server_vad", "false_interruption": {"min_words": 2}}) is None
+    # Explicit WebSocket opt-in requires the interruption extension so the client can pause.
+    ws_err = apply({"type": "server_vad", "false_interruption": True}, transport_kind="websocket")
+    assert ws_err is not None and ws_err.error.type == "invalid_request_error"
+    assert "speech_to_speech.interruption" in ws_err.error.message
+    assert apply({"type": "server_vad", "false_interruption": False}, transport_kind="websocket") is None
+    assert cfg.false_interruption is None
+    assert (
+        apply(
+            {"type": "server_vad", "false_interruption": {"min_words": 2}},
+            extensions=["speech_to_speech.interruption"],
+            transport_kind="websocket",
+        )
+        is None
+    )
+    assert cfg.false_interruption == FalseInterruptionConfig(min_words=2)
+    # Subsequent WebSocket updates inherit the already-negotiated extension.
+    assert apply({"type": "server_vad", "false_interruption": {"min_words": 3}}, transport_kind="websocket") is None
+    assert cfg.false_interruption == FalseInterruptionConfig(min_words=3)
+    # WebRTC pauses server-side and needs no extension.
+    assert (
+        apply({"type": "server_vad", "false_interruption": {"min_words": 2}}, extensions=[], transport_kind="webrtc")
+        is None
+    )
     assert cfg.false_interruption == FalseInterruptionConfig(min_words=2)
     echoed = service.build_session_updated(conn_id).model_dump()["session"]["audio"]["input"]["turn_detection"]
     assert echoed["false_interruption"] == {"min_words": 2}
@@ -158,6 +191,7 @@ def test_pending_interruption_partials_and_reopened_revisions():
         pending.observe(PartialTranscriptionEvent(delta="Wait, wait", turn_id="turn_2", turn_revision=0))
         is Verdict.CONFIRM
     )
+    assert pending.transcript == "Wait, wait"
 
     pending = PendingInterruption.begin(
         SpeechStartedEvent(turn_id="turn_2", turn_revision=0), FalseInterruptionConfig()
@@ -398,6 +432,8 @@ def test_real_interruption_commits_on_two_partials_and_answers(call):
     call.partial(interruption, "Wait, wait, can")
     events = call.receive_until("input_audio_buffer.speech_started")
 
+    resolved = next(e for e in events if e["type"] == "speech_to_speech.interruption.resolved")
+    assert resolved["interrupted"] is True and resolved["transcript"] == "Wait, wait, can"
     done = next(e for e in events if e["type"] == "response.done")
     assert (done["response"]["status"], done["response"]["status_details"]["reason"]) == ("cancelled", "turn_detected")
     assert call.unit.cancel_scope.generation == gen + 1 and call.tracker.current_turn() == interruption
@@ -501,9 +537,34 @@ def test_silent_disabled_unpausable_and_reopened_unanswered_turn_do_not_hold(cal
     events = call.receive_until("input_audio_buffer.speech_started")
     assert any(e["type"] == "response.done" and e["response"]["status"] == "cancelled" for e in events)
 
-    # Option on, but a WebSocket client that did not opt in to the events cannot
-    # pause its player: it keeps the immediate barge-in instead of talking over the user.
-    call.configure(True, extensions=[])
+    # Explicitly requesting false_interruption on WebSocket without the extension is rejected.
+    call.ws.send_json(
+        {
+            "type": "session.update",
+            "session": {
+                "type": "realtime",
+                "extensions": [],
+                "audio": {"input": {"turn_detection": {"type": "server_vad", "false_interruption": True}}},
+            },
+        }
+    )
+    err = call.ws.receive_json()
+    assert err["type"] == "error" and err["error"]["type"] == "invalid_request_error"
+
+    # Server default (--false_interruption) on a WebSocket client without the extension
+    # cannot pause its player: it keeps the immediate barge-in without error.
+    call.service._state(call.conn_id).runtime_config.set_default_false_interruption(FalseInterruptionConfig())
+    call.ws.send_json(
+        {
+            "type": "session.update",
+            "session": {
+                "type": "realtime",
+                "extensions": [],
+                "audio": {"input": {"turn_detection": {"type": "server_vad"}}},
+            },
+        }
+    )
+    call.receive_until("session.updated")
     _coach_is_reading(call)
     gen = call.unit.cancel_scope.generation
     unpausable = call.speech(provisional=True)
@@ -512,6 +573,36 @@ def test_silent_disabled_unpausable_and_reopened_unanswered_turn_do_not_hold(cal
     assert any(e["type"] == "response.done" and e["response"]["status"] == "cancelled" for e in events)
     assert not any(e["type"].startswith("speech_to_speech.interruption") for e in events)
     assert _pending(call) is None and not call.tracker.is_provisional(unpausable[0])
+
+    # Text-only sessions do not speak: neither pending nor active replies hold speech.
+    call.service._state(call.conn_id).runtime_config.set_default_false_interruption(None)
+    call.ws.send_json(
+        {
+            "type": "session.update",
+            "session": {
+                "type": "realtime",
+                "output_modalities": ["text"],
+                "extensions": ["speech_to_speech.interruption"],
+                "audio": {"input": {"turn_detection": {"type": "server_vad", "false_interruption": True}}},
+            },
+        }
+    )
+    call.receive_until("session.updated")
+    call.unit.session.transport.discard_pending_audio()
+    text_turn, text_key = call.user_says("Answer in text.")
+    # Pending implicit response in a text-only session is not held.
+    gen = call.unit.cancel_scope.generation
+    text_barge = call.speech(provisional=True)
+    _wait_for(lambda: call.unit.cancel_scope.generation == gen + 1)
+    call.receive_until("input_audio_buffer.speech_started")
+    assert _pending(call) is None and not call.tracker.is_provisional(text_barge[0])
+    # Active implicit response in a text-only session is not held either.
+    call.service._state(call.conn_id).in_response = True
+    call.service._state(call.conn_id).current_response_params = None
+    active_barge = call.speech(provisional=True)
+    call.receive_until("input_audio_buffer.speech_started")
+    assert _pending(call) is None and not call.tracker.is_provisional(active_barge[0])
+    assert text_turn and text_key
 
 
 def test_timeout_failed_transcription_and_pause_events(call, monkeypatch):
@@ -609,7 +700,8 @@ def test_session_updates_during_hold(call):
     _, key = _coach_is_reading(call)
     cough = call.speech(provisional=True)
     call.receive_until("speech_to_speech.interruption.pending")
-    call.configure(True, extensions=[])
+    call.ws.send_json({"type": "session.update", "session": {"type": "realtime", "extensions": []}})
+    call.receive_until("session.updated")
     call.stop(cough)
     call.final(cough, "")
     assert call.receive_until("speech_to_speech.interruption.resolved")[-1]["interrupted"] is False
@@ -715,3 +807,46 @@ def test_websocket_transport_pause_clock():
     transport._playback_end = now + 1.0
     now += 0.6
     assert transport.unplayed_audio_ms() == pytest.approx(400.0)
+
+
+def test_non_english_session_does_not_drop_spanish_ya_as_english_backchannel(call):
+    call.ws.send_json(
+        {
+            "type": "session.update",
+            "session": {
+                "type": "realtime",
+                "extensions": ["speech_to_speech.interruption"],
+                "audio": {
+                    "input": {
+                        "transcription": {"language": "es"},
+                        "turn_detection": {
+                            "type": "server_vad",
+                            "interrupt_response": True,
+                            "false_interruption": True,
+                        },
+                    }
+                },
+            },
+        }
+    )
+    call.receive_until("session.updated")
+    turn, key = _coach_is_reading(call)
+
+    # Non-lexical filler still resumes in Spanish.
+    filler = call.speech(provisional=True)
+    call.receive_until("speech_to_speech.interruption.pending")
+    call.stop(filler, 0.3)
+    call.final(filler, "Mm-hmm.")
+    assert call.receive_until("speech_to_speech.interruption.resolved")[-1]["interrupted"] is False
+    assert call.tracker.current_turn() == turn
+
+    # "¡Ya!" is a real Spanish interruption, not an English backchannel.
+    stop = call.speech(provisional=True)
+    call.receive_until("speech_to_speech.interruption.pending")
+    call.stop(stop, 0.3)
+    call.final(stop, "¡Ya!")
+    events = call.receive_until("input_audio_buffer.speech_started")
+    resolved = next(e for e in events if e["type"] == "speech_to_speech.interruption.resolved")
+    assert resolved["interrupted"] is True and resolved["transcript"] == "¡Ya!"
+    assert call.service.text_prompt_queue.get(timeout=2).turn_id == stop[0]
+    assert key

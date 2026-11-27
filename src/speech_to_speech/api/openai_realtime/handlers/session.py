@@ -14,6 +14,7 @@ from openai.types.realtime.realtime_transcription_session_create_request import 
 )
 
 from speech_to_speech.api.openai_realtime.false_interruption import (
+    INTERRUPTION_EVENTS_EXTENSION,
     is_unset,
     parse_false_interruption,
     turn_detection_setting,
@@ -29,7 +30,13 @@ logger = logging.getLogger(__name__)
 class SessionHandler(RealtimeBaseHandler):
     """Owns session lifecycle: config updates and lifecycle events."""
 
-    def handle_session_update(self, conn_id: str, event: SessionUpdateEvent) -> Optional[RealtimeErrorEvent]:
+    def handle_session_update(
+        self,
+        conn_id: str,
+        event: SessionUpdateEvent,
+        *,
+        transport_kind: str | None = None,
+    ) -> Optional[RealtimeErrorEvent]:
         """Apply session config changes.
 
         Only ``RealtimeSessionCreateRequest`` sessions are accepted;
@@ -55,9 +62,28 @@ class SessionHandler(RealtimeBaseHandler):
         false_interruption = turn_detection_setting(turn_detection)
         if not is_unset(false_interruption):
             try:
-                parse_false_interruption(false_interruption)
+                parsed_false_interruption = parse_false_interruption(false_interruption)
             except ValueError as exc:
                 return self.make_error(message=str(exc), _type="invalid_request_error")
+            if parsed_false_interruption is not None and transport_kind == "websocket":
+                cfg = self._state(conn_id).runtime_config
+                if "extensions" in s.model_fields_set:
+                    effective_extensions = getattr(s, "extensions", None)
+                else:
+                    effective_extensions = getattr(cfg.session, "extensions", None)
+                has_interruption_extension = (
+                    isinstance(effective_extensions, (list, tuple, set))
+                    and INTERRUPTION_EVENTS_EXTENSION in effective_extensions
+                )
+                if not has_interruption_extension:
+                    return self.make_error(
+                        message=(
+                            "turn_detection.false_interruption over WebSocket requires "
+                            f"{INTERRUPTION_EVENTS_EXTENSION!r} in session.extensions so the client can "
+                            "pause and resume playback."
+                        ),
+                        _type="invalid_request_error",
+                    )
 
         transcription = s.audio.input.transcription if s.audio is not None and s.audio.input is not None else None
         if transcription is not None and isinstance(transcription.language, str):

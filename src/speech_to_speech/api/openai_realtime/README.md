@@ -615,18 +615,23 @@ Two lists decide what does not count as a word:
   laughter such as "haha", and bracketed/parenthesized annotations such as
   `[coughs]`).
 - **`backchannels`**: English listener words ("yeah", "okay", "right", "I see",
-  "got it"). Set it per session for another language, or `[]` so every
-  backchannel interrupts. Direct answers ("yes", "sure") always count as words.
+  "got it"), applied by default only for English or unspecified/`"auto"`
+  sessions and skipped when a session or transcript specifies another language.
+  Set it per session for another language, or `[]` so every backchannel
+  interrupts. Direct answers ("yes", "sure") always count as words.
 
 On **WebRTC**, the server pauses and resumes its paced audio track directly. On
 **WebSocket**, clients own their player: add `"speech_to_speech.interruption"`
 to `session.extensions` to receive `speech_to_speech.interruption.pending`
 (`audio_start_ms`) and `speech_to_speech.interruption.resolved` (`interrupted`,
 `transcript`) and pause/resume locally (while the server freezes its playback
-estimate for history truncation). For WebSocket clients that do not opt in,
-the option has no effect: they cannot pause, so speech cancels the reply at
-once, as without it. The demo client in `demo/` opts in and replays from the
-last word gap.
+estimate for history truncation). Explicitly enabling
+`turn_detection.false_interruption` over WebSocket without
+`"speech_to_speech.interruption"` in `session.extensions` is rejected with
+`invalid_request_error`; when `--false_interruption` is enabled as the server
+default, WebSocket clients that do not opt in keep the immediate barge-in
+without error. The demo client in `demo/` opts in and replays from the last
+word gap.
 
 Speech that reopens the user's own unanswered turn still cancels the stale
 reply immediately. A tool follow-up `response.create` during a held turn goes

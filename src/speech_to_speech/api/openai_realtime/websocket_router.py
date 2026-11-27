@@ -496,7 +496,7 @@ async def _dispatch_client_event(
             session.pending_output_item = None
         service.truncate_unplayed_audio(session_id, transport.discard_pending_audio())
         st = service._state(session_id)
-        if _reply_audible(st) or st.response_pending:
+        if _reply_audible(st) or _pending_reply_audible(st):
             # output_audio_buffer.clear drops buffered audio without cancelling
             # an active reply; keep the pause if a hold is still undecided.
             if st.pending_interruption is not None and _can_pause(transport, st):
@@ -505,7 +505,7 @@ async def _dispatch_client_event(
             await _release_interruption(unit, transport, session_id, "output audio cleared")
 
     elif isinstance(event, SessionUpdateEvent):
-        err = service.handle_session_update(session_id, event)
+        err = service.handle_session_update(session_id, event, transport_kind=transport_kind)
         if err:
             await send_correlated([err])
         else:
@@ -664,14 +664,28 @@ def _can_pause(transport: SessionTransport, st: Any) -> bool:
 _REPLY_ENDING_MS = 1000.0
 
 
+def _session_wants_audio(st: Any) -> bool:
+    mods = getattr(st.runtime_config.session, "output_modalities", None)
+    return not mods or "audio" in mods
+
+
 def _reply_audible(st: Any) -> bool:
     """Whether the active response speaks: out-of-band and text-only responses do not."""
     params = st.current_response_params
-    return st.in_response and response_wants_audio(params) and not is_out_of_band(params)
+    if not st.in_response or is_out_of_band(params):
+        return False
+    if params is not None and params.output_modalities:
+        return response_wants_audio(params)
+    return _session_wants_audio(st)
+
+
+def _pending_reply_audible(st: Any) -> bool:
+    """Whether a queued (not yet opened) response will speak."""
+    return st.response_pending and _session_wants_audio(st)
 
 
 def _assistant_still_speaking(transport: SessionTransport, st: Any) -> bool:
-    if _reply_audible(st) or st.response_pending:
+    if _reply_audible(st) or _pending_reply_audible(st):
         return True
     return transport.unplayed_audio_ms() > _REPLY_ENDING_MS
 
@@ -689,7 +703,7 @@ def _holds_interruption(unit: PipelineUnit, transport: SessionTransport, st: Any
         # A client that cannot pause would keep talking over a real
         # interruption until its transcript arrives: barge in at once.
         return False
-    if not (_reply_audible(st) or st.response_pending or transport.has_unplayed_audio()):
+    if not (_reply_audible(st) or _pending_reply_audible(st) or transport.has_unplayed_audio()):
         # The assistant is silent: there is no speech to protect.
         return False
     turns = unit.service.speculative_turns
@@ -847,7 +861,7 @@ async def _gate_interruption(
         pending = st.pending_interruption
     if pending is not None:
         if pending.owns(event):
-            verdict = pending.observe(event)
+            verdict = pending.observe(event, language=st.runtime_config.selected_language)
             if (
                 verdict is Verdict.DISMISS
                 and isinstance(event, TranscriptionCompletedEvent)

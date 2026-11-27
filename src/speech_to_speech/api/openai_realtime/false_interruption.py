@@ -74,12 +74,11 @@ def resume_rewind_samples(played: np.ndarray, sample_rate: int) -> int:
 
 # Non-lexical sounds across languages (hesitations, throat clears, laughter).
 # Punctuation and repeated letters are normalized away ("Hmmmm" -> "hm",
-# "mm-hmm" -> "mm hm", "haha"/"hehehe" -> "ha").
+# "mm-hmm" -> "mm hm", "haha"/"hehehe" -> "haha").
 DEFAULT_FILLERS: tuple[str, ...] = (
     "uh",
     "um",
     "uhm",
-    "er",
     "erm",
     "ah",
     "eh",
@@ -92,14 +91,15 @@ DEFAULT_FILLERS: tuple[str, ...] = (
     "mm hmm",
     "uh huh",
     "ahem",
-    "ha",
+    "haha",
     "hah",
     "heh",
     "aha",
 )
 
 # English listener backchannels. Direct answers ("yes", "sure") are omitted so
-# early answers interrupt; set per session for other languages or [] to disable.
+# early answers interrupt; applied only for English/auto/unspecified sessions
+# unless explicitly configured per session (or set to [] to disable).
 DEFAULT_BACKCHANNELS: tuple[str, ...] = (
     "yeah",
     "yea",
@@ -124,6 +124,13 @@ _LAUGHTER = re.compile(r"a?(?:h[ae]){2,}h?")
 _REPEATED_LETTER = re.compile(r"(.)\1+")
 
 
+def _uses_english_backchannels(language: str | None) -> bool:
+    if not language:
+        return True
+    normalized = language.strip().casefold()
+    return normalized in ("auto", "en") or normalized.startswith(("en-", "en_"))
+
+
 def interruption_words(text: str) -> list[str]:
     """Split a transcript into normalized words for interruption counting."""
     text = _ANNOTATION.sub(" ", text).casefold()
@@ -144,7 +151,7 @@ def _matching_words(text: str) -> tuple[str, ...]:
     words = []
     for word in interruption_words(text):
         collapsed = _REPEATED_LETTER.sub(r"\1", word)
-        words.append("ha" if _LAUGHTER.fullmatch(collapsed) else collapsed)
+        words.append("haha" if _LAUGHTER.fullmatch(collapsed) else collapsed)
     return tuple(words)
 
 
@@ -170,19 +177,29 @@ class FalseInterruptionConfig(BaseModel):
     fillers: tuple[str, ...] | None = None
     """Non-lexical sounds that never count ("uh", "mm-hmm", "ahem"). ``None`` uses ``DEFAULT_FILLERS``."""
     backchannels: tuple[str, ...] | None = None
-    """Listener words that never count on their own ("yeah", "okay", "I see"). ``None`` uses ``DEFAULT_BACKCHANNELS``."""
+    """Listener words that never count on their own ("yeah", "okay", "I see"). ``None`` uses ``DEFAULT_BACKCHANNELS`` for English sessions."""
 
+    _filler_phrases: list[tuple[str, ...]] = PrivateAttr(default_factory=list)
     _phrases: list[tuple[str, ...]] = PrivateAttr(default_factory=list)
 
     def model_post_init(self, __context: Any) -> None:
         fillers = DEFAULT_FILLERS if self.fillers is None else self.fillers
         backchannels = DEFAULT_BACKCHANNELS if self.backchannels is None else self.backchannels
+        self._filler_phrases = _phrases(fillers)
         self._phrases = _phrases((*fillers, *backchannels))
 
-    def word_count(self, transcript: str) -> int:
-        """Count the words of *transcript* that are not fillers or backchannels."""
+    def word_count(self, transcript: str, *, language: str | None = None) -> int:
+        """Count the words of *transcript* that are not fillers or backchannels.
+
+        Built-in English backchannels are skipped when *language* identifies a
+        non-English session or transcript; explicit ``backchannels`` always apply.
+        """
         words = _matching_words(transcript)
-        phrases = self._phrases
+        phrases = (
+            self._filler_phrases
+            if self.backchannels is None and not _uses_english_backchannels(language)
+            else self._phrases
+        )
         count = 0
         index = 0
         while index < len(words):
@@ -294,7 +311,7 @@ class PendingInterruption:
         now = time.monotonic() if now is None else now
         return Verdict.DISMISS if now >= deadline else None
 
-    def observe(self, event: PipelineEvent) -> Verdict:
+    def observe(self, event: PipelineEvent, *, language: str | None = None) -> Verdict:
         """Decide one event of this turn. The caller checks :meth:`owns` first."""
         from speech_to_speech.pipeline.events import (
             AudioInputCompletedEvent,
@@ -315,29 +332,36 @@ class PendingInterruption:
             self.events.append(event)
             return Verdict.HOLD
         if revision != self.revision:
-            if (
-                isinstance(event, TranscriptionCompletedEvent)
-                and self.config.word_count(event.transcript) >= self.config.min_words
-            ):
-                # "Wait." before the user went on: the words were said, whatever follows.
-                self.transcript = event.transcript
-                return Verdict.CONFIRM
+            if isinstance(event, TranscriptionCompletedEvent):
+                effective_language = (
+                    event.language_code if event.language_code and event.language_code != "auto" else language
+                )
+                if self.config.word_count(event.transcript, language=effective_language) >= self.config.min_words:
+                    # "Wait." before the user went on: the words were said, whatever follows.
+                    self.transcript = event.transcript
+                    return Verdict.CONFIRM
             return Verdict.DROP
         self.events.append(event)
         if isinstance(event, PartialTranscriptionEvent):
             # One hypothesis can hallucinate a word into a cough; two in a row rarely do.
-            words = self.config.word_count(event.delta)
+            words = self.config.word_count(event.delta, language=language)
             confirmed = words >= self.config.min_words and self.previous_words >= self.config.min_words
             self.previous_words = words
-            return Verdict.CONFIRM if confirmed else Verdict.HOLD
+            if confirmed:
+                self.transcript = event.delta
+                return Verdict.CONFIRM
+            return Verdict.HOLD
         if isinstance(event, SpeechStoppedEvent):
             self.stopped_at = time.monotonic()
             return Verdict.HOLD
         if isinstance(event, TranscriptionCompletedEvent):
             self.transcript = event.transcript
+            effective_language = (
+                event.language_code if event.language_code and event.language_code != "auto" else language
+            )
             return (
                 Verdict.CONFIRM
-                if self.config.word_count(event.transcript) >= self.config.min_words
+                if self.config.word_count(event.transcript, language=effective_language) >= self.config.min_words
                 else Verdict.DISMISS
             )
         if isinstance(event, TranscriptionFailedEvent):
