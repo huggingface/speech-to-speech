@@ -1,167 +1,192 @@
 {
  "title": "The French Revolution",
  "emoji": "🇫🇷",
- "brief": "This quiz covers the causes, key events, figures, and legacy of the French Revolution, from the Estates General to Napoleon's rise. It matters because many of its ideas, like popular sovereignty and rights of man, still shape liberal democracy today.",
+ "brief": "In ten stormy years, France went from an absolute king to a radical republic and then to Napoleon. Let's trace the pressures that drove each dramatic turn.",
  "questions": [
   {
-   "question": "Why was the Bastille stormed in July 1789, even though it held only seven prisoners?",
-   "answer": "The Bastille was a royal fortress and prison that symbolized the monarchy's abuse of power in the heart of Paris, so revolutionaries seized it as a political statement. Its fall became the flashpoint of the French Revolution.",
-   "key_points": [
-    "It symbolized royal power and its abuses, or the crowd wanted the gunpowder and arms inside",
-    "Only seven prisoners were held there",
-    "Its fall became the flashpoint of the Revolution"
-   ],
-   "hint": "Think about what the building represented rather than what it contained.",
-   "fun_fact": "The Bastille was already scheduled for demolition before the revolutionaries got to it.",
-   "difficulty": 1,
-   "source": 3,
    "id": 0,
-   "required": [
-    0
-   ]
-  },
-  {
-   "question": "What was the Estates General, and why was its 1789 meeting so significant?",
-   "answer": "It was a representative body of the three estates, clergy, nobility, and commoners, that had not met since 1614. It was summoned in 1789 to solve the financial crisis, but the Third Estate broke away to form the National Assembly, launching the revolution.",
+   "concept": "The 1789 crisis",
+   "question": "What mix of money and food crises pushed France toward revolution in 1789?",
+   "answer": "Costly foreign wars left the crown nearly bankrupt while nobles and clergy paid almost no taxes. Bad harvests then sent bread prices soaring, so ordinary families could barely feed themselves.",
    "key_points": [
-    "A body of the three estates: clergy, nobility and commoners",
-    "It had not met since 1614",
-    "The Third Estate broke away to form the National Assembly, launching the Revolution"
+    "War debt pushed the crown near bankruptcy, or unfair rules let nobles and clergy skip taxes",
+    "Poor harvests made bread prices skyrocket and left ordinary people hungry",
+    "Commoners carried almost the entire tax burden while struggling to buy daily food"
    ],
-   "hint": "Consider how long France had gone without calling this body together.",
-   "fun_fact": "The Estates General had not met for one hundred and seventy-five years before 1789.",
-   "difficulty": 1,
-   "source": 1,
-   "id": 1,
-   "required": [
-    0,
-    2
-   ]
-  },
-  {
-   "question": "What main factors caused the French Revolution?",
-   "answer": "A combination of social, political, and economic problems: a debt crisis with unfair and inconsistent taxes, poor harvests and recession raising food prices, and resistance to reform by the nobility and parlements. Enlightenment ideas and the American Revolution also shaped public demands for change.",
-   "key_points": [
-    "Two or more of: the debt crisis and unfair taxes, bad harvests and costly bread, nobles blocking reform, Enlightenment ideas",
-    "The financial crisis was the immediate trigger"
-   ],
-   "hint": "Think about money, food, and ideas all failing at once.",
-   "fun_fact": "France's debt level was actually not that high compared with Britain's, but its chaotic tax system caused far more resentment.",
-   "difficulty": 2,
-   "source": 1,
-   "id": 2,
-   "required": [
-    0
-   ]
-  },
-  {
-   "question": "How did the voting structure of the Estates General anger the Third Estate?",
-   "answer": "The Parlement of Paris ruled that the estates would meet and vote separately, with votes counted by estate rather than by head. Since the clergy and nobility were less than five percent of the population, they could always outvote the Third Estate together.",
-   "key_points": [
-    "Votes were counted by estate, not by head",
-    "So the clergy and nobility could always outvote the Third Estate",
-    "The first two estates were under five percent of the population"
-   ],
-   "hint": "The issue was whether votes were counted per estate or per person.",
-   "fun_fact": "Campaigners called the Society of Thirty pushed to double Third Estate representation and count votes by head.",
-   "difficulty": 2,
-   "source": 1,
-   "id": 3,
-   "required": [
-    0
-   ]
-  },
-  {
-   "question": "How did the Reign of Terror end?",
-   "answer": "It ended in July 1794 with the Thermidorian Reaction, the fall of Robespierre and his allies, who were executed. Power then moved away from the Committee of Public Safety.",
-   "key_points": [
-    "Robespierre fell and was executed",
-    "The Thermidorian Reaction, July 1794",
-    "The Committee of Public Safety lost power"
-   ],
-   "hint": "The event is named after the month in the revolutionary calendar when it happened.",
-   "fun_fact": "By the Terror's end, about sixteen thousand people had been officially executed, with many more dying in prison without trial.",
-   "difficulty": 2,
-   "source": 2,
-   "id": 4,
-   "required": [
-    0
-   ]
-  },
-  {
-   "question": "How did the flight to Varennes in 1791 damage the French monarchy?",
-   "answer": "King Louis the Sixteenth's attempted escape discredited the monarchy by showing he could not be trusted to support the revolution. Combined with military defeats after war broke out in 1792, it led to the insurrection of August 1792, the abolition of the monarchy, and the First Republic.",
-   "key_points": [
-    "It discredited the monarchy: the king could no longer be trusted",
-    "Louis XVI tried to flee in June 1791",
-    "It led to the 1792 insurrection and the First Republic"
-   ],
-   "hint": "The king tried to leave the country, and it went badly.",
-   "fun_fact": "The monarchy was abolished in September 1792, and Louis the Sixteenth was executed by guillotine in January 1793.",
-   "difficulty": 2,
-   "source": 1,
-   "id": 5,
-   "required": [
-    0
-   ]
-  },
-  {
-   "question": "Why did Robespierre and the Jacobins believe terror was necessary?",
-   "answer": "Drawing on Rousseau's idea of the general will and Montesquieu's idea of republican virtue, Robespierre argued that those who opposed the republic were tyrants blocking the people's true interests. With foreign armies invading and internal revolts, terror was seen as the only way to protect the revolution.",
-   "key_points": [
-    "The Revolution was under threat, from foreign invasion and internal revolts, or from enemies seen as tyrants against the people's will",
-    "Rousseau's general will and republican virtue"
-   ],
-   "hint": "Think about how Enlightenment philosophy met the panic of war.",
-   "fun_fact": "One historian said terror began as an improvised response to defeat but, once organized, became an instrument of victory.",
-   "difficulty": 3,
-   "source": 2,
-   "id": 6,
-   "required": [
-    0
-   ]
-  },
-  {
-   "question": "How did the French Revolution end, and what is its lasting legacy?",
-   "answer": "It ended with the coup of Eighteenth Brumaire in 1799, when Napoleon Bonaparte overthrew the unstable Directory and established the Consulate as First Consul. Its legacy includes ideas considered fundamental to liberal democracy, such as the Declaration of the Rights of Man, and its values remain central to French political debate today.",
-   "key_points": [
-    "It ended when Napoleon seized power in the coup of 18 Brumaire, 1799",
-    "Its ideas, like the rights of man, became foundations of modern democracy",
-    "Napoleon became First Consul"
-   ],
-   "hint": "The revolution did not end with a king but with a general.",
-   "fun_fact": "The Directory lasted only four years before falling, after the Committee of Public Safety before it proved equally unable to stabilize France.",
-   "difficulty": 3,
-   "source": 1,
-   "id": 7,
    "required": [
     0,
     1
-   ]
+   ],
+   "hint": "Think of an empty royal treasury, a lopsided bill dumped on workers, and growling stomachs after harsh winters.",
+   "fun_fact": "Paying for the American Revolution helped bankrupt King Louis the Sixteenth, and by early 1789 a single loaf of bread ate up most of a Parisian worker's daily pay.",
+   "difficulty": 1,
+   "source": 1
+  },
+  {
+   "id": 1,
+   "concept": "Storming the Bastille",
+   "question": "Why did Parisians storm a nearly empty Bastille, and why did its fall shake all of France?",
+   "answer": "The crowd attacked the fortress to grab stored gunpowder for weapons against nearby royal troops. The Bastille symbolized unchecked royal power, so its fall sparked wider revolt across France. For the first time, ordinary street crowds showed they could overpower the crown.",
+   "key_points": [
+    "Parisians stormed it to seize gunpowder for their weapons",
+    "It symbolized unchecked royal power, or its fall sparked popular revolt across France",
+    "Only seven prisoners were inside, none of them major political heroes"
+   ],
+   "required": [
+    0,
+    1
+   ],
+   "hint": "Picture citizens carrying unloaded rifles who also want to tear down the monarchy's most famous stone threat.",
+   "fun_fact": "After the fortress came down, the Marquis de Lafayette mailed its main iron key to George Washington, and it still hangs at Mount Vernon today.",
+   "difficulty": 1,
+   "source": 1
+  },
+  {
+   "id": 2,
+   "concept": "The Tennis Court Oath",
+   "question": "How did a fight over voting rules at the Estates-General spark the Tennis Court Oath?",
+   "answer": "Each estate got one collective vote, so nobles and clergy could always outvote commoners two to one. The Third Estate demanded individual votes, broke away, and declared itself the National Assembly. When guards locked their hall, deputies gathered in a tennis court and swore to write a constitution.",
+   "key_points": [
+    "Voting by estate let nobles and clergy outvote commoners two to one, while the Third Estate demanded one vote per person",
+    "That deadlock pushed commoners to break away and vow to stay together until they wrote a constitution",
+    "When royal guards locked their usual hall, deputies met in an indoor tennis court instead"
+   ],
+   "required": [
+    0,
+    1
+   ],
+   "hint": "Think about 98 percent of the country getting overruled by tiny privileged groups, and lawmakers refusing to go home.",
+   "fun_fact": "Out of 577 deputies in that court, just one man refused to sign, insisting he could not act without royal approval.",
+   "difficulty": 2,
+   "source": 1
+  },
+  {
+   "id": 3,
+   "concept": "Rights of Man and its limits",
+   "question": "What big political idea did the Declaration of the Rights of Man introduce, and who did it still leave out?",
+   "answer": "It declared that sovereign power belongs to the nation, not the king. It also promised citizens equal rights under law, ending noble birth privileges. Yet it excluded women from full citizenship and left slavery intact across France's colonies.",
+   "key_points": [
+    "Sovereignty belongs to the nation rather than the king, or citizens are born free and equal under the law",
+    "It still left out women or enslaved people in French colonies",
+    "It protected basic freedoms like speech, property, and resisting oppression"
+   ],
+   "required": [
+    0,
+    1
+   ],
+   "hint": "Ask where authority moves when a crown loses its divine claim, and notice both the narrow title and overseas sugar islands.",
+   "fun_fact": "Playwright Olympe de Gouges fired back in 1791 with her own Rights of Woman, arguing that if women could be sent to the scaffold, they deserved to speak in parliament.",
+   "difficulty": 2,
+   "source": 2
+  },
+  {
+   "id": 4,
+   "concept": "The Flight to Varennes",
+   "question": "How did King Louis the Sixteenth's failed escape at Varennes wreck the plan for a constitutional monarchy?",
+   "answer": "Sneaking out of Paris in disguise proved the king hated the revolution and never truly accepted sharing power. He tried to reach loyal troops near the border, which looked like treason to furious citizens. Public trust collapsed overnight, turning many French people away from keeping any king at all.",
+   "key_points": [
+    "Fleeing in disguise shattered public trust by proving the king opposed the revolution, or made him look like a traitor",
+    "A constitutional monarchy only worked if people believed the king would cooperate with elected lawmakers",
+    "The backlash boosted radical calls to abolish the throne and create a republic"
+   ],
+   "required": [
+    0
+   ],
+   "hint": "Imagine signing a peace deal with a partner, then catching them climbing out the back window at midnight.",
+   "fun_fact": "A sharp-eyed village postmaster named Jean-Baptiste Drouet spotted the disguised king during a carriage stop and rode ahead to halt the royal family at Varennes.",
+   "difficulty": 2,
+   "source": 3
+  },
+  {
+   "id": 5,
+   "concept": "War and radical split",
+   "question": "Why did France go to war in 1792, and how did battlefield crisis push the Montagnards past the Girondins?",
+   "answer": "Girondin leaders pushed for war against Austria to rally the nation and expose royal treason. Early defeats, internal revolts, and scarce food then sparked fierce anger among working-class Parisian sans-culottes. Montagnards backed harsh emergency measures to win street support, while hesitant Girondins were purged from power.",
+   "key_points": [
+    "Girondins wanted war to unite France, spread revolutionary ideals, or expose the king's disloyalty",
+    "War defeats and revolts drove Montagnards to back harsh emergency rules and ally with angry Paris workers, overtaking moderate Girondins",
+    "Armed Parisian sans-culottes surrounded the assembly in 1793 and forced the arrest of Girondin leaders"
+   ],
+   "required": [
+    0,
+    1
+   ],
+   "hint": "Think about gambling on foreign combat to steady a shaky government, only to watch panic reward the toughest faction.",
+   "fun_fact": "Paris's militant workers took the name sans-culottes, meaning without knee breeches, because wearing long trousers marked them against silk-clad aristocrats.",
+   "difficulty": 3,
+   "source": 1
+  },
+  {
+   "id": 6,
+   "concept": "The Reign of Terror",
+   "question": "How did Robespierre justify the Reign of Terror, and why did his own colleagues finally turn against him?",
+   "answer": "Robespierre argued that civic virtue alone was helpless in a crisis without swift terror to crush enemies. The Committee of Public Safety used that logic to arrest suspects and guillotine thousands across France. Lawmakers finally overthrew him in the Thermidorian Reaction because everyone feared his next list of traitors.",
+   "key_points": [
+    "He claimed republican virtue needed terror behind it to defend the revolution and crush internal or foreign enemies",
+    "Fellow lawmakers overthrew him out of self-preservation because they feared being accused and executed next",
+    "His fall in July 1794 launched the Thermidorian Reaction, which dismantled the Terror and closed the Jacobin Club"
+   ],
+   "required": [
+    0,
+    1
+   ],
+   "hint": "Think about guarding pure ideals with harsh force, and what happens to a room of politicians when nobody feels secure.",
+   "fun_fact": "Despite its reputation for hunting nobles, the vast majority of the roughly 17,000 people officially executed during the Terror were ordinary commoners.",
+   "difficulty": 3,
+   "source": 4
+  },
+  {
+   "id": 7,
+   "concept": "Directory collapse and Napoleon",
+   "question": "Why did the Directory fail to stabilize France, and what revolutionary bargain did Napoleon strike after seizing power?",
+   "answer": "The Directory faced raging inflation, rampant corruption, and constant attacks from both royalists and radical Jacobins. It survived only by canceling elections and leaning on the army, which invited Napoleon's coup in 1799. Napoleon kept major revolutionary gains like legal equality and property rights, while ending political freedom.",
+   "key_points": [
+    "The Directory suffered from corruption, runaway inflation, or constant clashes with royalists and radicals, forcing it to rely on the army",
+    "Napoleon preserved revolutionary gains like legal equality and property rights while taking away political freedom",
+    "His takeover in the coup of 18 Brumaire replaced the Directory with the Consulate"
+   ],
+   "required": [
+    0,
+    1
+   ],
+   "hint": "Picture a battered middle hated by opposing extremes, then ask what exhausted citizens gave up to get order.",
+   "fun_fact": "Because France's revolutionary calendar named its misty autumn month Brumaire, meaning fog, Napoleon's takeover is literally remembered as the Coup of 18 Fog.",
+   "difficulty": 3,
+   "source": 5
   }
  ],
  "id": "5b28be2560d7",
  "topic": "The French Revolution",
  "slug": "french-revolution",
  "difficulty": "pro",
- "model": "zai-org/GLM-5.3",
+ "model": "gemini",
  "sources": [
   {
    "title": "French Revolution",
-   "url": "https://en.wikipedia.org/wiki/French_Revolution",
-   "site": "wikipedia.org"
+   "url": "https://www.britannica.com/event/French-Revolution",
+   "site": "Encyclopaedia Britannica"
+  },
+  {
+   "title": "Declaration of the Rights of Man - 1789",
+   "url": "https://avalon.law.yale.edu/18th_century/rightsof.asp",
+   "site": "Yale Avalon Project"
+  },
+  {
+   "title": "Flight to Varennes",
+   "url": "https://en.wikipedia.org/wiki/Flight_to_Varennes",
+   "site": "Wikipedia"
   },
   {
    "title": "Reign of Terror",
-   "url": "https://en.wikipedia.org/wiki/Reign_of_Terror",
-   "site": "wikipedia.org"
+   "url": "https://www.britannica.com/event/Reign-of-Terror",
+   "site": "Encyclopaedia Britannica"
   },
   {
-   "title": "Storming of the Bastille",
-   "url": "https://en.wikipedia.org/wiki/Storming_of_the_Bastille",
-   "site": "wikipedia.org"
+   "title": "Coup of 18-19 Brumaire",
+   "url": "https://www.britannica.com/event/Coup-of-18-19-Brumaire",
+   "site": "Encyclopaedia Britannica"
   }
  ],
- "tagline": "Liberty, equality, and a lot of drama",
+ "tagline": "From bread riots to Napoleon in ten years",
  "order": 7
 }

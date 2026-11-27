@@ -1,165 +1,192 @@
 {
  "title": "AI Agents and Tool Use",
  "emoji": "🤖",
- "brief": "This quiz covers how LLM-based agents plan, call tools, and use retrieval to go beyond their training data. Understanding these mechanisms helps you see both what modern AI agents can do and where their autonomy becomes risky.",
+ "brief": "AI agents go beyond chatting by planning steps, running software tools, and reacting to real results. Let's test how they work, where they shine, and how they fail.",
  "questions": [
   {
-   "question": "What defines an intelligent agent, in the most general sense?",
-   "answer": "An intelligent agent is an entity that perceives its environment, takes actions autonomously to achieve goals, and may improve its performance by acquiring knowledge.",
-   "key_points": [
-    "Perceives its environment",
-    "Acts autonomously to achieve goals",
-    "Can improve by acquiring knowledge"
-   ],
-   "hint": "Think about the basic loop of sensing and acting.",
-   "fun_fact": "A simple thermostat counts as an intelligent agent by this definition, just like a human does.",
-   "difficulty": 1,
-   "source": 1,
    "id": 0,
+   "concept": "Agent Loop",
+   "question": "What makes an AI agent different from a plain chatbot that only replies to your message?",
+   "answer": "An agent runs in a loop instead of giving one single reply. It plans a step, calls external tools, reads the result, and picks the next action. It keeps repeating that cycle until it finishes the goal or gets stuck.",
+   "key_points": [
+    "It loops by calling tools, reading results, and deciding its own next step",
+    "It keeps repeating that cycle until the task is complete",
+    "A plain chatbot stops after one single text reply"
+   ],
+   "required": [
+    0
+   ],
+   "hint": "Picture a chef tasting the soup, adding salt, and checking again rather than serving the very first pour.",
+   "fun_fact": "Anthropic found that many top coding agents skip heavy frameworks and run on a simple loop with just a few well-designed tools.",
+   "difficulty": 1,
+   "source": 1
+  },
+  {
+   "id": 1,
+   "concept": "Tool Calling",
+   "question": "When an AI agent uses a tool like a calculator or web search, what actually happens under the hood?",
+   "answer": "The language model never runs the tool directly because it only outputs text. Instead, it writes a structured request naming the tool and its inputs. The surrounding program runs that code and hands the output back to the model.",
+   "key_points": [
+    "The language model outputs a structured request with the tool name and arguments",
+    "The host program runs the tool and sends the result back to the model",
+    "The model itself only produces text and cannot run external code directly"
+   ],
    "required": [
     0,
     1
-   ]
+   ],
+   "hint": "Think of a brain in a jar that must ask a helper outside to press buttons and read the screen.",
+   "fun_fact": "Because tool calls are still just generated text, a model can invent fake tool names unless the host app checks every request.",
+   "difficulty": 1,
+   "source": 1
   },
   {
-   "question": "How does the definition of an AI agent differ from a basic intelligent agent like a thermostat?",
-   "answer": "AI agents, also called agentic AI, proactively pursue goals, make decisions, and take actions over extended periods, whereas a simple agent like a thermostat responds to immediate conditions.",
-   "key_points": [
-    "Pursues goals proactively, making decisions over long periods",
-    "A thermostat only reacts to immediate conditions"
-   ],
-   "hint": "The key difference involves time and initiative.",
-   "fun_fact": "Even a firm, a state, or a biome can be modeled as an intelligent agent.",
-   "difficulty": 1,
-   "source": 1,
-   "id": 1,
-   "required": [
-    0
-   ]
-  },
-  {
-   "question": "How can a software harness extend what a large language model can do?",
-   "answer": "A software harness can provide an LLM with memory and access to tools such as web search, letting it act beyond simply generating text from static training data.",
-   "key_points": [
-    "Gives the model tools like web search, or memory",
-    "Lets it act beyond generating text from its training data"
-   ],
-   "hint": "Think about what surrounds the model rather than the model itself.",
-   "fun_fact": "The chatbot ChatGPT is an LLM inside such a harness, which is why it can remember context and search the web.",
-   "difficulty": 1,
-   "source": 2,
    "id": 2,
-   "required": [
-    0
-   ]
-  },
-  {
-   "question": "What is an objective function in the context of intelligent agents?",
-   "answer": "An objective function specifies the goals an agent is designed to achieve and serves as a measure of success. An agent is considered more intelligent if its actions consistently yield outcomes better aligned with this function.",
+   "concept": "ReAct Pattern",
+   "question": "How does the ReAct pattern pair thinking with acting, and why does each side need the other?",
+   "answer": "ReAct alternates between a short written thought, a tool action, and the returned observation. Reasoning helps the agent break down goals, track progress, and recover when an action fails. Acting brings in fresh outside facts, which stops pure reasoning from drifting into made-up claims.",
    "key_points": [
-    "Specifies the agent's goals, the measure of its success",
-    "Can capture trade-offs between conflicting goals"
+    "It repeats a thought, an action, and an observation step by step",
+    "Written thoughts help the agent plan, adjust, or recover from errors",
+    "Actions bring in real external facts so reasoning stays grounded instead of guessing"
    ],
-   "hint": "It is the yardstick the agent tries to maximize.",
-   "fun_fact": "AlphaZero's chess objective was extremely simple: plus one for a win and minus one for a loss.",
-   "difficulty": 2,
-   "source": 1,
-   "id": 3,
    "required": [
-    0
-   ]
-  },
-  {
-   "question": "Why does retrieval-augmented generation reduce the need to retrain a language model?",
-   "answer": "With RAG, when new information becomes available, you only update the model's external knowledge base rather than retraining the model, saving computational and financial costs.",
-   "key_points": [
-    "New information goes into the external knowledge base, so the model needs no retraining",
-    "Saves compute and money"
-   ],
-   "hint": "The new information lives outside the model.",
-   "fun_fact": "RAG was first proposed in a 2020 paper describing a language model combined with a non-parametric external memory.",
-   "difficulty": 2,
-   "source": 3,
-   "id": 4,
-   "required": [
-    0
-   ]
-  },
-  {
-   "question": "Describe the main stages of how RAG works.",
-   "answer": "Documents are converted into embeddings and stored in a vector database. When a query arrives, a retriever selects the most relevant documents, their content is added to the prompt, and the LLM generates an answer from both the query and the retrieved text.",
-   "key_points": [
-    "Documents are turned into embeddings in a vector database",
-    "A retriever picks the documents relevant to the query",
-    "The retrieved text is added to the prompt and the model answers from both"
-   ],
-   "hint": "Start with what happens to the documents before any question is asked.",
-   "fun_fact": "RAG can work on structured data too, including knowledge graphs, not just plain text.",
-   "difficulty": 2,
-   "source": 3,
-   "id": 5,
-   "required": [
+    0,
     1,
     2
-   ]
-  },
-  {
-   "question": "Can RAG completely eliminate hallucinations? Explain why or why not.",
-   "answer": "No. RAG reduces factual errors, but an LLM can still generate misinformation from factually correct sources if it misinterprets context, such as treating a rhetorical chapter title as a literal statement of fact.",
-   "key_points": [
-    "No: it reduces hallucinations but does not eliminate them",
-    "The model can still misread the retrieved context, or the sources themselves can be wrong"
    ],
-   "hint": "Think about whether retrieving true facts guarantees understanding them.",
-   "fun_fact": "One LLM declared that Barack Obama was America's first Muslim president, based on a rhetorical book chapter title.",
+   "hint": "Imagine a detective jotting notes on a board after each clue before choosing which lead to chase.",
+   "fun_fact": "The original ReAct paper tested the same simple loop on both Wikipedia fact-finding and text-based household puzzle games.",
    "difficulty": 2,
-   "source": 3,
-   "id": 6,
-   "required": [
-    0,
-    1
-   ]
+   "source": 2
   },
   {
-   "question": "How does rationality apply to an agent's decisions, given that agents are not omniscient?",
-   "answer": "A rational agent selects the action expected to maximize its performance measure based on its percept sequence, prior knowledge, and available actions. Rationality is about the expected outcome given available information, not about being always successful or all-knowing.",
+   "id": 3,
+   "concept": "Retrieval-Augmented Generation",
+   "question": "How does retrieval-augmented generation give an agent new knowledge without retraining, and why can it still hallucinate?",
+   "answer": "First, the system searches an outside document store for passages that match the question. It pastes those retrieved passages straight into the prompt so the model answers from fresh text. Hallucinations still happen when search pulls the wrong snippet or the model ignores the source text.",
    "key_points": [
-    "Picks the action with the best expected outcome",
-    "Judged on what it knows from its percepts and prior knowledge, not on being all-knowing or always right"
+    "It searches external documents and inserts matching passages into the prompt at answer time",
+    "It can still hallucinate if retrieval fetches wrong or outdated snippets, or if the model ignores or misreads the retrieved text",
+    "Because documents live outside the model weights, you can update facts without retraining"
    ],
-   "hint": "Rationality is judged before the outcome is known, not after.",
-   "fun_fact": "This agent-based framing is how Russell and Norvig define the entire field of artificial intelligence.",
-   "difficulty": 3,
-   "source": 1,
-   "id": 7,
    "required": [
     0,
     1
-   ]
+   ],
+   "hint": "Compare it to an open-book exam where a student can flip to a bad page or skim past a line.",
+   "fun_fact": "Researchers invented retrieval-augmented generation years before modern chatbots arrived by connecting an early text model to a searchable Wikipedia index.",
+   "difficulty": 2,
+   "source": 3
+  },
+  {
+   "id": 4,
+   "concept": "Context Rot and Memory",
+   "question": "Why does an agent get worse as tool outputs fill its context window, and how does external memory help?",
+   "answer": "As raw tool outputs pile up, the model spreads its attention thin and suffers context rot. Important instructions get buried in noise, so recall drops long before the token limit hits. External memory stores notes outside the active window and fetches only relevant pieces when needed.",
+   "key_points": [
+    "Piling up noisy tool outputs spreads the model's attention thin, buries key instructions, or hurts recall",
+    "External memory stores information outside the active prompt and loads only relevant pieces when needed",
+    "Teams also fight bloat by summarizing past turns or dropping bulky raw logs"
+   ],
+   "required": [
+    0,
+    1
+   ],
+   "hint": "Consider working at a messy desk covered in receipts versus using a neat filing cabinet across the room.",
+   "fun_fact": "Some agent systems spin up fresh helper sub-agents with blank context windows so noisy web searches never clutter the main agent's workspace.",
+   "difficulty": 2,
+   "source": 4
+  },
+  {
+   "id": 5,
+   "concept": "Indirect Prompt Injection",
+   "question": "How does indirect prompt injection hijack an agent's tools, and why do teams sandbox it with least privilege?",
+   "answer": "An attacker hides sneaky commands inside untrusted data like a webpage, email, or file. Because the model blends data and instructions together, it can obey that trap and misuse its tools. Sandboxing with least privilege limits access, so a hijacked agent cannot leak secrets or wipe data.",
+   "key_points": [
+    "Hidden instructions placed inside untrusted external data trick the model into running unauthorized tool actions",
+    "Sandboxing and least privilege restrict permissions so a hijacked agent can only cause limited harm",
+    "Language models struggle to strictly separate trusted system rules from untrusted text they read"
+   ],
+   "required": [
+    0,
+    1
+   ],
+   "hint": "Suppose a bank courier opens a letter containing a forged note ordering them to empty the vault, so you only hand them a small cash box.",
+   "fun_fact": "Security researchers showed that poisoned prompts can spread like computer worms by tricking an email assistant into forwarding the same trap to new victims.",
+   "difficulty": 3,
+   "source": 5
+  },
+  {
+   "id": 6,
+   "concept": "Compounding Agent Errors",
+   "question": "Why does an agent that gets almost every single step right still fail often on a twenty-step task?",
+   "answer": "Small error rates multiply across steps, so a 90 percent step score fails most twenty-step runs. One early mistake also poisons later decisions because the agent builds on its own bad output. Without clear checks or stop rules, agents also burn tokens repeating the same broken retry loop.",
+   "key_points": [
+    "Small per-step errors compound across long chains, so even high step accuracy yields low overall success",
+    "One early error can cascade into later steps or trap the agent in a stuck retry loop",
+    "Checkpoints, verification steps, and turn limits help stop errors from snowballing"
+   ],
+   "required": [
+    0
+   ],
+   "hint": "Try rolling dice a dozen times when you only win if you dodge snake eyes on every throw.",
+   "fun_fact": "Even an agent that nails 95 percent of individual steps clears a twenty-step chain just over one third of the time.",
+   "difficulty": 3,
+   "source": 1
+  },
+  {
+   "id": 7,
+   "concept": "Workflows vs Autonomous Agents",
+   "question": "When should you choose a fixed workflow over an autonomous agent, and what do you gain by doing that?",
+   "answer": "Pick a fixed workflow whenever the task steps are clear and predictable up front. Scripted paths run faster, cost less, and are far easier to test and debug. Save open-ended agents for messy problems where you cannot map out the steps ahead of time.",
+   "key_points": [
+    "Use a fixed workflow when the task steps are known and predictable up front",
+    "Fixed workflows bring better reliability, lower cost, lower latency, or easier debugging than autonomous loops",
+    "Save autonomous agents for open-ended problems where the needed steps cannot be mapped in advance"
+   ],
+   "required": [
+    0,
+    1
+   ],
+   "hint": "Contrast a train gliding along steel rails with an off-road truck exploring unmarked trails.",
+   "fun_fact": "Anthropic's own agent guide tells engineers to skip autonomous agents first and see if a plain prompt or scripted pipeline already solves the job.",
+   "difficulty": 3,
+   "source": 1
   }
  ],
  "id": "ad9e42e96fa6",
  "topic": "AI agents and tool use",
  "slug": "ai-agents",
  "difficulty": "pro",
- "model": "zai-org/GLM-5.3",
+ "model": "gemini",
  "sources": [
   {
-   "title": "Intelligent agent",
-   "url": "https://en.wikipedia.org/wiki/Intelligent_agent",
-   "site": "wikipedia.org"
+   "title": "Building Effective Agents",
+   "url": "https://www.anthropic.com/engineering/building-effective-agents",
+   "site": "Anthropic Engineering"
   },
   {
-   "title": "Large language model",
-   "url": "https://en.wikipedia.org/wiki/Large_language_model",
-   "site": "wikipedia.org"
+   "title": "ReAct: Synergizing Reasoning and Acting in Language Models",
+   "url": "https://arxiv.org/abs/2210.03629",
+   "site": "arXiv"
   },
   {
-   "title": "Retrieval-augmented generation",
-   "url": "https://en.wikipedia.org/wiki/Retrieval-augmented_generation",
-   "site": "wikipedia.org"
+   "title": "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
+   "url": "https://arxiv.org/abs/2005.11401",
+   "site": "arXiv"
+  },
+  {
+   "title": "Effective Context Engineering for AI Agents",
+   "url": "https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents",
+   "site": "Anthropic Engineering"
+  },
+  {
+   "title": "Not what you've signed up for: Compromising Real-World LLM-Integrated Applications with Indirect Prompt Injection",
+   "url": "https://arxiv.org/abs/2302.12173",
+   "site": "arXiv"
   }
  ],
- "tagline": "When LLMs start taking actions",
+ "tagline": "How language models plan, act, and fail",
  "order": 4
 }

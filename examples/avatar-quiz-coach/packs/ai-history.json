@@ -1,169 +1,188 @@
 {
  "title": "Milestones of AI History",
  "emoji": "🤖",
- "brief": "This quiz traces the big turning points in artificial intelligence, from Turing's imitation game to today's chatbots. Knowing this history helps you understand why AI hype, disappointment, and breakthroughs keep repeating in cycles.",
+ "brief": "Trace how artificial intelligence grew from a bold parlor game into systems that beat world champions. Along the way, explore the hype cycles, dead ends, and hard-won lessons that shaped the field.",
  "questions": [
   {
-   "question": "What does the Turing test ask a machine to do in order to pass?",
-   "answer": "A human evaluator reads a text conversation with a machine and a human without knowing which is which, and the machine passes if the evaluator cannot reliably tell them apart.",
-   "key_points": [
-    "A human judge converses with a machine and a person without knowing which is which",
-    "The machine passes if the judge cannot reliably tell it apart",
-    "Seeming human matters, not answering correctly"
-   ],
-   "hint": "Think about imitation rather than accuracy.",
-   "fun_fact": "Turing introduced it as the 'imitation game' in his 1950 paper, which opens by asking, 'Can machines think?'",
-   "difficulty": 1,
-   "source": 2,
    "id": 0,
+   "concept": "Turing's imitation game",
+   "question": "In 1950, why did Alan Turing replace the question of whether machines can think with his imitation game?",
+   "answer": "Turing thought words like think and machine were too vague to test cleanly. Instead, he judged intelligence by observable behavior in a blind text conversation with a human. If a judge could not tell the machine from a person, it passed the test.",
+   "key_points": [
+    "Asking if machines think is too vague to test, or he wanted to judge observable behavior instead",
+    "In the game, a judge chats over text and tries to tell the machine from a person",
+    "It shifted AI from arguing about inner consciousness to testing practical performance"
+   ],
    "required": [
-    1
-   ]
+    0
+   ],
+   "hint": "Picture trying to peer inside someone's skull versus simply watching how they act.",
+   "fun_fact": "Turing modeled his famous test on a party game where a judge tried to tell a hidden man and woman apart using only typed notes.",
+   "difficulty": 1,
+   "source": 1
   },
   {
-   "question": "What happened at the Dartmouth workshop of 1956, and why is it important?",
-   "answer": "It was the founding event of AI as a research field, where Allen Newell and Herbert Simon presented the Logic Theorist, the concept of the first AI program. The attendees went on to lead AI research for decades.",
-   "key_points": [
-    "The founding event of AI as a research field",
-    "Held at Dartmouth College in 1956",
-    "Newell and Simon presented the Logic Theorist",
-    "Its attendees led AI research for decades"
-   ],
-   "hint": "It is considered the birthplace of the field, even though it was seen as a failure.",
-   "fun_fact": "Despite launching the whole field, the workshop was considered a failure because it did not deliver on bold predictions of human-level intelligence within a generation.",
-   "difficulty": 1,
-   "source": 1,
    "id": 1,
-   "required": [
-    0
-   ]
-  },
-  {
-   "question": "What is an AI winter?",
-   "answer": "An AI winter is a period of reduced funding and interest in AI research, typically after hype is followed by disappointment and criticism. Two major winters lasted roughly from 1974 to 1980 and from 1987 to 2000.",
+   "concept": "AI winters",
+   "question": "What is an AI winter, and what usually triggers one?",
+   "answer": "An AI winter is a long stretch when funding, research interest, and public optimism dry up. It usually begins after big hype and bold promises collide with real-world limits. Once systems disappoint backers, governments and companies pull their money and walk away.",
    "key_points": [
-    "A period of reduced funding and interest in AI",
-    "Follows a cycle of hype and disappointment",
-    "Major winters in the mid-1970s and from the late 1980s"
+    "A period when AI funding, attention, and research activity sharply drop",
+    "Triggered when overhyped promises fail to deliver working results",
+    "AI suffered two major winters in the seventies and late eighties"
    ],
-   "hint": "The name is a metaphor for a cold season for the field.",
-   "fun_fact": "The term first appeared in 1984, when researchers Roger Schank and John McDermott warned that the 1980s hype spiral would trigger a chain reaction like a 'nuclear winter' for AI.",
-   "difficulty": 1,
-   "source": 3,
-   "id": 2,
-   "required": [
-    0
-   ]
-  },
-  {
-   "question": "Why did the 1966 ALPAC report kill funding for machine translation research?",
-   "answer": "The committee concluded that machine translation was more expensive, less accurate, and slower than human translation, so the National Research Council ended all support. Researchers had underestimated how hard it is for a machine to understand what a sentence means in order to translate it.",
-   "key_points": [
-    "The report found machine translation slower, costlier and less accurate than human translation",
-    "The National Research Council then ended all support",
-    "The root problem was understanding word meaning in context"
-   ],
-   "hint": "It came down to cost, accuracy, and speed compared with human translators.",
-   "fun_fact": "An apocryphal example of the problem translated 'the spirit is willing but the flesh is weak' back from Russian as 'the vodka is good but the meat is rotten.'",
-   "difficulty": 2,
-   "source": 3,
-   "id": 3,
-   "required": [
-    0
-   ]
-  },
-  {
-   "question": "Why did mainstream research into perceptrons stop around 1969?",
-   "answer": "Minsky and Papert's book Perceptrons emphasized the limits of single-layer neural networks, which discouraged funding. Nobody at the time knew how to train multilayered networks, since backpropagation had not yet been developed.",
-   "key_points": [
-    "Minsky and Papert's 1969 book showed the limits of single-layer perceptrons",
-    "No one knew how to train multilayer networks yet",
-    "Backpropagation was still years away"
-   ],
-   "hint": "The book attacked one specific kind of network, but the fix was not yet known.",
-   "fun_fact": "The neural network winter ended in the mid-1980s thanks to work by John Hopfield and David Rumelhart, long after the criticism.",
-   "difficulty": 2,
-   "source": 3,
-   "id": 4,
-   "required": [
-    0
-   ]
-  },
-  {
-   "question": "Why did governments cut funding for AI research in 1974?",
-   "answer": "Criticism from James Lighthill and pressure from the U.S. Congress led the U.S. and British governments to stop funding undirected AI research. Researchers had underestimated the complexity of building intelligent machines.",
-   "key_points": [
-    "AI had not delivered on its promises: researchers underestimated how hard it was, as the Lighthill report and the U.S. Congress argued",
-    "The U.S. and British governments stopped funding undirected AI research"
-   ],
-   "hint": "It took both a critical report and political pressure in two countries.",
-   "fun_fact": "Only seven years later, Japan's Fifth Generation initiative and the success of expert systems brought investment flooding back, growing AI into a billion-dollar industry.",
-   "difficulty": 2,
-   "source": 1,
-   "id": 5,
-   "required": [
-    0
-   ]
-  },
-  {
-   "question": "Why did machine learning take off in the early 2000s after the AI winters?",
-   "answer": "Powerful computer hardware became available, expansive data sets accumulated, and rigorous mathematical methods were applied, which allowed machine learning to succeed across academia and industry. Soon after, deep learning eclipsed all other methods.",
-   "key_points": [
-    "More powerful computer hardware",
-    "Large data sets",
-    "Rigorous mathematical methods",
-    "Deep learning then became a breakthrough"
-   ],
-   "hint": "It took three ingredients: machines, data, and math.",
-   "fun_fact": "Research and funding actually kept growing during the winters, just under other names like 'machine learning.'",
-   "difficulty": 2,
-   "source": 1,
-   "id": 6,
    "required": [
     0,
     1
-   ]
+   ],
+   "hint": "Imagine investors pouring cash into a wild forecast, then freezing out the whole field if the magic stalls.",
+   "fun_fact": "The 1956 Dartmouth workshop that named artificial intelligence actually proposed solving major parts of human intelligence with ten researchers in a single two-month summer.",
+   "difficulty": 1,
+   "source": 2
   },
   {
-   "question": "How did the transformer architecture lead to the rise of chatbots like ChatGPT and Claude?",
-   "answer": "The transformer architecture, introduced in 2017, was used to build generative AI and enabled the rapid scaling of large language models. This sparked the AI boom of the 2020s, with public releases of chatbots exhibiting human-like traits of knowledge and creativity, and fueled exponential investment.",
+   "id": 2,
+   "concept": "Brittleness of symbolic AI",
+   "question": "Why did early symbolic AI systems built on hand-written human rules break down in the messy real world?",
+   "answer": "Hand-coded rules worked well in tidy domains, yet they were painfully brittle outside narrow scripts. Real life is full of unwritten common sense, edge cases, and fuzzy exceptions. Programmers could never list every rule by hand, so the field shifted toward learning from data.",
    "key_points": [
-    "It made it possible to build and scale large language models for generative AI",
-    "Introduced in 2017",
-    "Sparked the 2020s AI boom and public chatbot releases"
+    "Rigid rules could not handle unwritten common sense and unexpected edge cases, or humans could never hand-code every real-world exception",
+    "Engineers called this sharp failure outside narrow domains brittleness",
+    "That wall pushed AI away from hand-written logic toward learning patterns from data"
    ],
-   "hint": "Think about what architectural innovation made large generative models practical.",
-   "fun_fact": "Despite the boom, concerns about risks and ethics of advanced AI have sparked ongoing debate about its future impact on society.",
-   "difficulty": 3,
-   "source": 1,
-   "id": 7,
    "required": [
     0
-   ]
+   ],
+   "hint": "Try making an exact checklist for spotting a cat in any lighting or awkward pose.",
+   "fun_fact": "Starting in 1984, the Cyc project spent decades manually typing millions of basic facts like water makes things wet just to give software common sense.",
+   "difficulty": 2,
+   "source": 2
+  },
+  {
+   "id": 3,
+   "concept": "Perceptrons to backpropagation",
+   "question": "Why did Minsky and Papert's 1969 book stall neural networks, and how did backpropagation break that logjam?",
+   "answer": "Minsky and Papert proved single-layer networks could not solve simple nonlinear puzzles like exclusive or. Researchers lacked a practical way to train deeper networks, so neural network funding collapsed. Backpropagation fixed this by sending error signals backward to adjust weights inside hidden layers.",
+   "key_points": [
+    "It proved single-layer networks could not solve simple nonlinear problems like exclusive or, or that researchers lacked a way to train deeper layers",
+    "Backpropagation passed error signals backward through the network to update hidden layers",
+    "A 1986 paper by Rumelhart, Hinton, and Williams popularized it and revived neural network research"
+   ],
+   "required": [
+    0,
+    1
+   ],
+   "hint": "One flat sheet could only draw a straight line, and nobody knew how to assign blame to the middle steps.",
+   "fun_fact": "Graduate student Paul Werbos actually worked out backpropagation for neural networks in his 1974 Harvard doctoral thesis, twelve years before the 1986 paper made it famous.",
+   "difficulty": 2,
+   "source": 2
+  },
+  {
+   "id": 4,
+   "concept": "AlexNet and the deep learning boom",
+   "question": "What unlocked AlexNet's shock 2012 ImageNet win, and why did it transform computer vision?",
+   "answer": "AlexNet paired fast gaming graphics chips with over a million labeled photos to train a deep network. It beat traditional systems by more than ten percentage points on the top-five error score. That huge gap proved neural networks could learn visual features better than hand-coded vision rules.",
+   "key_points": [
+    "Combining graphics chips with huge labeled image data to train a deep neural network",
+    "It crushed hand-crafted vision approaches by a wide margin, proving networks could learn visual features themselves",
+    "It dropped the contest error rate from about 26 percent to roughly 15 percent"
+   ],
+   "required": [
+    0,
+    1
+   ],
+   "hint": "Imagine silicon built to render virtual worlds meeting a giant tagged picture library, leaving old custom-built filters in the dust.",
+   "fun_fact": "Alex Krizhevsky trained AlexNet inside his bedroom at his parents' house using just two consumer gaming graphics cards.",
+   "difficulty": 2,
+   "source": 3
+  },
+  {
+   "id": 5,
+   "concept": "AlphaGo's search and intuition",
+   "question": "Why did AlphaGo beat world champion Lee Sedol a decade early when chess-style brute-force search failed at Go?",
+   "answer": "Go has far too many legal moves and subtle board patterns for brute-force search alone. AlphaGo paired tree search with two neural networks that learned promising moves and winning positions. Its successor, AlphaGo Zero, even skipped human games and mastered Go purely through self-play.",
+   "key_points": [
+    "AlphaGo paired tree search with neural networks that learned intuition for promising moves and board values",
+    "Go's enormous branching factor and subtle positions made pure brute-force calculation impossible",
+    "A year later, AlphaGo Zero ditched human game records and surpassed it purely through self-play"
+   ],
+   "required": [
+    0
+   ],
+   "hint": "Instead of checking every path mechanically, picture blending look-ahead planning with a trained gut feel.",
+   "fun_fact": "In game two against Lee Sedol, AlphaGo played a stunning move that its own software estimated only one in 10,000 human players would pick.",
+   "difficulty": 3,
+   "source": 4
+  },
+  {
+   "id": 6,
+   "concept": "Moravec's paradox",
+   "question": "According to Moravec's paradox, why is mastering chess or calculus easier for AI than walking and grabbing objects like a toddler?",
+   "answer": "Evolution spent hundreds of millions of years optimizing animal sight, balance, and physical movement. Those skills feel effortless only because huge hidden brain circuits run them automatically. Abstract math and board games are recent human add-ons with tidy rules that computers copy easily.",
+   "key_points": [
+    "Evolution spent millions of years building massive subconscious brain power for sight and movement, or formal logic is a simpler recent add-on",
+    "Perception and motor control feel effortless to us only because our brains run them automatically",
+    "Formal games and math follow neat rules that are far easier to program than messy physical skills"
+   ],
+   "required": [
+    0
+   ],
+   "hint": "Compare how long nature practiced catching prey versus how long people have studied algebra.",
+   "fun_fact": "Psychologist Steven Pinker summed up early AI history with one neat twist: the hard problems turned out easy, and the easy problems turned out hard.",
+   "difficulty": 3,
+   "source": 2
+  },
+  {
+   "id": 7,
+   "concept": "Sutton's Bitter Lesson",
+   "question": "In Richard Sutton's famous essay The Bitter Lesson, why do general search and learning methods keep beating clever human-crafted rules?",
+   "answer": "Computing power grows exponentially over time, and general methods get stronger with every wave of faster hardware. Hand-built human insights help in the short run, yet they plateau and block bigger discoveries. Sutton calls this bitter because researchers hate watching their clever domain tricks lose to raw scale.",
+   "key_points": [
+    "Computing power keeps growing exponentially, so general search and learning methods keep improving with more compute",
+    "Human-crafted domain rules bring short-term gains but hit a ceiling and cannot match open-ended scaling",
+    "Sutton called the lesson bitter because researchers dislike seeing hand-built expertise overtaken by raw computation"
+   ],
+   "required": [
+    0
+   ],
+   "hint": "Ask yourself which ingredient doubles every couple of years while our minds stay flat.",
+   "fun_fact": "Sutton wrote his essay in 2019 using chess, Go, speech recognition, and computer vision as proof, years before giant language models made scaling famous.",
+   "difficulty": 3,
+   "source": 5
   }
  ],
  "id": "e8268da26983",
  "topic": "The history of artificial intelligence",
  "slug": "ai-history",
  "difficulty": "pro",
- "model": "zai-org/GLM-5.3",
+ "model": "gemini",
  "sources": [
   {
-   "title": "History of artificial intelligence",
+   "title": "Computing Machinery and Intelligence (Alan Turing, 1950)",
+   "url": "https://doi.org/10.1093/mind/LIX.236.433",
+   "site": "Oxford Academic"
+  },
+  {
+   "title": "History of Artificial Intelligence",
    "url": "https://en.wikipedia.org/wiki/History_of_artificial_intelligence",
-   "site": "wikipedia.org"
+   "site": "Wikipedia"
   },
   {
-   "title": "Turing test",
-   "url": "https://en.wikipedia.org/wiki/Turing_test",
-   "site": "wikipedia.org"
+   "title": "ImageNet Classification with Deep Convolutional Neural Networks (AlexNet, 2012)",
+   "url": "https://papers.nips.cc/paper/4824-imagenet-classification-with-deep-convolutional-neural-networks.pdf",
+   "site": "NeurIPS"
   },
   {
-   "title": "AI winter",
-   "url": "https://en.wikipedia.org/wiki/AI_winter",
-   "site": "wikipedia.org"
+   "title": "Mastering the game of Go with deep neural networks and tree search (AlphaGo, 2016)",
+   "url": "https://www.nature.com/articles/nature16961",
+   "site": "Nature"
+  },
+  {
+   "title": "The Bitter Lesson (Richard Sutton, 2019)",
+   "url": "https://www.incompleteideas.net/IncIdeas/BitterLesson.html",
+   "site": "incompleteideas.net"
   }
  ],
- "tagline": "From Turing to ChatGPT",
+ "tagline": "Seventy years of AI booms, busts, and breakthroughs",
  "order": 6
 }

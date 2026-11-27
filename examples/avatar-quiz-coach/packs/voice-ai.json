@@ -1,176 +1,191 @@
 {
  "title": "Voice AI: STT, TTS and Voice Agents",
  "emoji": "🎙️",
- "brief": "This quiz covers how machines turn speech into text, text back into speech, and detect when someone is actually talking. These three pieces are the backbone of real-time voice assistants like Siri and Alexa.",
+ "brief": "You are talking to a live voice agent right now. Let's pop open the hood and see how speech models hear, think, and talk back in real time.",
  "questions": [
   {
-   "question": "What does a speech-to-text system do, and what is another common name for this technology?",
-   "answer": "It translates spoken language into text or other interpretable forms. It is also called automatic speech recognition or computer speech recognition.",
-   "key_points": [
-    "Turns spoken language into text",
-    "Also called automatic speech recognition (ASR), or speech recognition"
-   ],
-   "hint": "Think about what happens when you dictate a message to your phone.",
-   "fun_fact": "The first speech recognition system, Audrey, was built by Bell Labs in 1952 and could only recognize spoken digits from a single speaker.",
-   "difficulty": 1,
-   "source": 1,
    "id": 0,
+   "concept": "Cascaded voice pipeline",
+   "question": "What are the three stages in a classic cascaded voice agent from the moment you speak to when it replies?",
+   "answer": "First, a speech-to-text model turns your spoken audio into plain written words. Next, a language model reads those words and writes back a helpful reply. Finally, a text-to-speech model reads that reply out loud as audio.",
+   "key_points": [
+    "Speech-to-text turns your spoken audio into written words",
+    "A language model generates a written reply",
+    "Text-to-speech turns that written reply back into spoken audio",
+    "Written text acts as the handoff between each stage"
+   ],
    "required": [
     0,
-    1
-   ]
+    1,
+    2
+   ],
+   "hint": "Think of a three-person relay race passing a handwritten note from ears to brain to mouth.",
+   "fun_fact": "Most enterprise voice agents still use this three-step chain because engineers can swap any single stage or inspect the written log.",
+   "difficulty": 1,
+   "source": 1
   },
   {
-   "question": "What does a text-to-speech system do, and what two main parts is it typically composed of?",
-   "answer": "It converts normal written text into spoken speech. It consists of a front-end that normalizes the text and converts it to phonetic transcriptions with prosody, and a back-end synthesizer that turns that representation into sound.",
-   "key_points": [
-    "Converts written text into speech",
-    "A front-end normalizes the text and converts it to phonemes",
-    "A back-end synthesizes the sound"
-   ],
-   "hint": "One part prepares the text, the other produces the audio.",
-   "fun_fact": "In 1968, researchers in Japan built the first general English text-to-speech system, and a 1978 Italian system could even sing a cappella.",
-   "difficulty": 1,
-   "source": 2,
    "id": 1,
-   "required": [
-    0,
-    1,
-    2
-   ]
-  },
-  {
-   "question": "What is voice activity detection, and why is it useful in voice over internet protocol applications?",
-   "answer": "Voice activity detection determines whether human speech is present or absent in an audio signal. In VoIP it avoids coding and transmitting silence packets, saving computation and network bandwidth.",
+   "concept": "Voice activity detection",
+   "question": "In a live voice call, what job does voice activity detection do on the incoming microphone stream?",
+   "answer": "Voice activity detection listens to incoming audio and separates human speech from silence or background noise. It lets the agent trigger transcription only when someone talks instead of wasting work on dead air.",
    "key_points": [
-    "Detects whether human speech is present",
-    "In VoIP it avoids sending silence, saving bandwidth and computation"
+    "Distinguishes human speech from silence or background noise",
+    "Saves compute by only triggering downstream processing during speech"
    ],
-   "hint": "It answers a simple yes-or-no question about the audio, many times per second.",
-   "fun_fact": "Telemarketing firms use voice activity detection with predictive dialers to guess whether a person or an answering machine picked up the phone.",
-   "difficulty": 1,
-   "source": 3,
-   "id": 2,
-   "required": [
-    0,
-    1
-   ]
-  },
-  {
-   "question": "In a text-to-speech front-end, what is text normalization and why is it necessary?",
-   "answer": "Text normalization converts raw text containing symbols like numbers and abbreviations into their written-out word equivalents. It is necessary because the synthesizer needs actual words, not symbols, to assign phonetic transcriptions.",
-   "key_points": [
-    "Expands numbers, abbreviations and symbols into words",
-    "The synthesizer needs real words to know how to pronounce them",
-    "Also called pre-processing or tokenization"
-   ],
-   "hint": "Think about how a system should read the number 42 aloud.",
-   "fun_fact": "The earliest operating system to include a speech synthesizer was Unix in 1974, through its speak utility.",
-   "difficulty": 2,
-   "source": 2,
-   "id": 3,
-   "required": [
-    0,
-    1
-   ]
-  },
-  {
-   "question": "Describe the typical stages of a voice activity detection algorithm.",
-   "answer": "First there may be a noise reduction stage, then features are calculated from a section of the input signal, and a classification rule, often a threshold, labels the section as speech or non-speech. Feedback may also use the decision to improve the noise estimate or adapt the threshold.",
-   "key_points": [
-    "Optional noise reduction first",
-    "Features are extracted from a section of the signal",
-    "A classification rule, often a threshold, labels it speech or not",
-    "Feedback can adapt the threshold"
-   ],
-   "hint": "It follows a pipeline: clean the signal, measure it, then decide.",
-   "fun_fact": "Voice activity detection is usually independent of language, so it works the same whether you speak English or Japanese.",
-   "difficulty": 2,
-   "source": 3,
-   "id": 4,
-   "required": [
-    1,
-    2
-   ]
-  },
-  {
-   "question": "What fundamental trade-off must every voice activity detector make, and how do mobile phones typically handle it?",
-   "answer": "Every VAD must compromise between missing speech, false negatives, and falsely detecting noise as speech, false positives. In difficult conditions mobile VADs usually fail-safe by indicating speech when in doubt, to lower the chance of losing speech segments.",
-   "key_points": [
-    "A trade-off between missing speech and mistaking noise for speech",
-    "Phones fail safe: they assume speech when unsure",
-    "Losing speech is worse than sending noise"
-   ],
-   "hint": "Think about which error is more damaging when someone is talking to you.",
-   "fun_fact": "The biggest challenge for VAD in mobile environments is very low signal-to-noise ratios, where speech can be buried below the background noise.",
-   "difficulty": 2,
-   "source": 3,
-   "id": 5,
-   "required": [
-    0,
-    1
-   ]
-  },
-  {
-   "question": "How did hidden Markov models change speech recognition compared to the earlier dynamic time warping approach?",
-   "answer": "Hidden Markov models let researchers combine sources of knowledge like acoustics, language, and syntax in a single unified probabilistic model. They replaced dynamic time warping as the dominant speech recognition algorithm in the 1980s.",
-   "key_points": [
-    "HMMs combine acoustics, language and syntax in one probabilistic model",
-    "They replaced dynamic time warping",
-    "Dominant from the 1980s"
-   ],
-   "hint": "One approach matched speech frames over time; the other modeled speech statistically.",
-   "fun_fact": "Linguists criticized HMMs as too simplistic to capture many features of human language, yet the approach still proved highly useful in practice.",
-   "difficulty": 3,
-   "source": 1,
-   "id": 6,
    "required": [
     0
-   ]
+   ],
+   "hint": "Picture a gatekeeper guarding the line who ignores room hum and quiet gaps until a person pipes up.",
+   "fun_fact": "In phone networks, this same speech detector powers silence suppression so calls do not waste data sending quiet pauses.",
+   "difficulty": 1,
+   "source": 1
   },
   {
-   "question": "How do speech recognition, text-to-speech, and voice activity detection combine in a real-time voice assistant?",
-   "answer": "Voice activity detection decides when the user starts and stops speaking, so the system knows when to listen and when to respond. Speech recognition then converts the detected speech into text for processing, and text-to-speech converts the assistant's reply back into spoken audio.",
+   "id": 2,
+   "concept": "Neural speech synthesis stages",
+   "question": "How do modern neural text-to-speech models split the work between deciding how words should sound and generating the raw audio waveform?",
+   "answer": "First, one model turns text into rhythm, pitch, and compact sound features or audio tokens. Then, a neural vocoder or codec decoder converts that compact blueprint into a raw waveform. Splitting the job avoids predicting tens of thousands of raw audio samples directly from text.",
    "key_points": [
-    "Voice activity detection decides when the user starts and stops speaking",
-    "Speech recognition turns the speech into text",
-    "Text-to-speech speaks the reply",
-    "Together they allow natural turn-taking"
+    "One stage predicts pronunciation, prosody, or compact features and audio tokens from text",
+    "A second stage like a vocoder or codec decoder builds the raw audio waveform",
+    "Splitting the task avoids predicting thousands of raw waveform samples directly from text"
    ],
-   "hint": "Think about the full loop: listening, understanding, and responding.",
-   "fun_fact": "Apple's Siri relies on speech technology from Nuance, a company whose lineage traces back through Dragon Systems and Lernout and Hauspie.",
-   "difficulty": 3,
-   "source": 3,
-   "id": 7,
    "required": [
     0,
-    1,
-    2
-   ]
+    1
+   ],
+   "hint": "Think of a composer writing sheet music before a musician performs every vibration on a real instrument.",
+   "fun_fact": "Kyutai's Mimi codec compresses spoken audio down to just 12.5 frames per second while keeping a voice crisp and natural.",
+   "difficulty": 2,
+   "source": 3
+  },
+  {
+   "id": 3,
+   "concept": "Streaming for low latency",
+   "question": "Why must a voice agent stream partial outputs across every stage instead of waiting for each model to finish completely?",
+   "answer": "Waiting for each stage to finish stacks up delays and creates awkward multi-second silences. Streaming sends partial transcripts, early reply words, and small audio chunks forward right away. That overlap slashes time to first audio so the agent starts talking in under a second.",
+   "key_points": [
+    "Cuts perceived delay and time to first audio instead of stacking full delays from every stage",
+    "Overlaps speech recognition, reply generation, and audio synthesis in small chunks"
+   ],
+   "required": [
+    0
+   ],
+   "hint": "Think of a kitchen serving each dish fresh from the stove rather than cooking a whole banquet before anyone eats.",
+   "fun_fact": "Across ten languages, humans leave an average gap of only 200 milliseconds between turns, so pauses past 600 milliseconds feel robotic.",
+   "difficulty": 2,
+   "source": 1
+  },
+  {
+   "id": 4,
+   "concept": "Handling barge-in interruptions",
+   "question": "When you interrupt a voice agent mid-sentence, what must it cancel immediately and what must it fix in its conversation history?",
+   "answer": "First, the agent stops audio playback, clears queued sound buffers, and cancels ongoing text generation. Second, it trims the unsaid words out of conversation history so memory matches what you heard. Otherwise, the agent later refers to facts it generated but never actually spoke out loud.",
+   "key_points": [
+    "Stops audio playback, flushes buffered audio, or cancels ongoing reply generation",
+    "Trims the unsaid portion from conversation history so memory only keeps what was actually spoken",
+    "Prevents the agent from referring later to things you never heard"
+   ],
+   "required": [
+    0,
+    1
+   ],
+   "hint": "Imagine a radio host cutting the broadcast mid-sentence and crossing the unread lines off their script.",
+   "fun_fact": "Smart interruption handlers also learn to ignore brief nods like uh-huh or yeah so polite listening noises do not cut the agent off.",
+   "difficulty": 2,
+   "source": 2
+  },
+  {
+   "id": 5,
+   "concept": "Semantic turn detection",
+   "question": "Why do fixed silence timers fail at conversational turn-taking, and how does semantic turn detection do better?",
+   "answer": "Short silence timers interrupt people pausing to think, while long timers make every reply feel sluggish. Semantic turn detection runs a small fast model to judge whether your words form a complete thought. It holds back after unfinished phrases like book a flight to, then answers quickly once you finish.",
+   "key_points": [
+    "Fixed silence timers either cut off pauses mid-thought if too short or feel sluggish if too long",
+    "Semantic turn detection checks the meaning or grammar of what was said to predict if the turn is finished",
+    "A lightweight model inspects the partial transcript or audio cues in real time"
+   ],
+   "required": [
+    0,
+    1
+   ],
+   "hint": "Compare counting empty seconds on a stopwatch against listening to whether someone reached a period or a comma.",
+   "fun_fact": "Since planning a spoken reply takes our brain about 600 milliseconds, people start predicting when a partner will finish long before silence arrives.",
+   "difficulty": 3,
+   "source": 2
+  },
+  {
+   "id": 6,
+   "concept": "Acoustic echo cancellation",
+   "question": "What goes wrong when a voice agent runs on open speakers without echo cancellation, and how does echo cancellation fix it?",
+   "answer": "Without echo cancellation, the microphone picks up the speaker output so the agent hears and interrupts itself. Echo cancellation uses the outgoing speaker audio as a reference signal to model how sound bounces back. It subtracts that predicted echo from the microphone feed, leaving behind only the human caller's voice.",
+   "key_points": [
+    "The microphone captures the agent's own speaker audio, making the agent interrupt itself or treat its own voice as user speech",
+    "Echo cancellation uses the outgoing audio as a reference and subtracts the returning echo from the microphone signal",
+    "An adaptive filter keeps adjusting as sound bounces around the room differently"
+   ],
+   "required": [
+    0,
+    1
+   ],
+   "hint": "Think of a studio engineer who already owns the backing track and strips that exact melody out of a live recording.",
+   "fun_fact": "Even moving your coffee mug or leaning back in your chair changes how sound bounces off the desk, forcing the echo filter to retune on the fly.",
+   "difficulty": 3,
+   "source": 5
+  },
+  {
+   "id": 7,
+   "concept": "Native speech-to-speech trade-offs",
+   "question": "What do native speech-to-speech models gain over cascaded pipelines, and what engineering challenges get harder without an intermediate text layer?",
+   "answer": "Native speech models skip text conversion, cutting delay while keeping tone, emotion, and natural timing intact. Without a clean text middle layer, reliable tool calling, strict safety checks, and factual grounding get harder. Teams also lose an easy text audit trail, making bugs and policy slips much harder to trace.",
+   "key_points": [
+    "Cuts latency or preserves vocal tone, emotion, and natural timing that written text loses",
+    "Makes tool calling, safety checks, factual grounding, or debugging and auditing harder without a text middle layer",
+    "Direct audio in and audio out removes the modular boundary where teams normally inspect or filter messages"
+   ],
+   "required": [
+    0,
+    1
+   ],
+   "hint": "Compare chatting face to face versus passing typed memos that a supervisor can review, stamp, and file.",
+   "fun_fact": "Kyutai's open-source Moshi model still predicts a silent inner monologue of text tokens alongside its speech so it stays smart while keeping latency near 200 milliseconds.",
+   "difficulty": 3,
+   "source": 4
   }
  ],
  "id": "b697d9a8cba6",
  "topic": "Voice AI: speech recognition, text-to-speech and voice agents",
  "slug": "voice-ai",
  "difficulty": "pro",
- "model": "zai-org/GLM-5.3",
+ "model": "gemini",
  "sources": [
   {
-   "title": "Speech recognition",
-   "url": "https://en.wikipedia.org/wiki/Speech_recognition",
-   "site": "wikipedia.org"
+   "title": "Voice AI & Voice Agents: An Illustrated Primer",
+   "url": "https://voiceaiandvoiceagents.com/",
+   "site": "Voice AI Primer"
   },
   {
-   "title": "Speech synthesis",
-   "url": "https://en.wikipedia.org/wiki/Speech_synthesis",
-   "site": "wikipedia.org"
+   "title": "Turn Detection and Interruption Handling",
+   "url": "https://docs.livekit.io/agents/turn-detection/",
+   "site": "LiveKit Docs"
   },
   {
-   "title": "Voice activity detection",
-   "url": "https://en.wikipedia.org/wiki/Voice_activity_detection",
-   "site": "wikipedia.org"
+   "title": "High Fidelity Neural Audio Compression (EnCodec)",
+   "url": "https://arxiv.org/abs/2210.13438",
+   "site": "arXiv"
+  },
+  {
+   "title": "Moshi: a speech-text foundation model for real-time dialogue",
+   "url": "https://arxiv.org/abs/2410.00037",
+   "site": "arXiv"
+  },
+  {
+   "title": "Echo Suppression and Cancellation",
+   "url": "https://en.wikipedia.org/wiki/Echo_suppression_and_cancellation",
+   "site": "Wikipedia"
   }
  ],
- "tagline": "The tech that is talking to you right now",
+ "tagline": "How live voice agents hear, think, and speak",
  "order": 2
 }

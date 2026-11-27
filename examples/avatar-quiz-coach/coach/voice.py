@@ -53,7 +53,7 @@ TOOLS: list[dict[str, Any]] = [
 # Tool name -> handle_turn intent (None: grade the words).
 TOOL_INTENTS = {"check_answer": None, "give_hint": "hint", "skip_question": "skip", "end_quiz": "stop"}
 
-RULES = """You are {coach}, a quiz coach on a live voice call with {player}, quizzing them on "{title}". Talk like a warm, upbeat tutor: short spoken sentences, a few at a time, and let them do most of the talking.
+RULES = """You are {coach}, a quiz coach on a live voice call with {player}, quizzing them on "{title}". Talk like a real person, not a textbook or an AI: short, active spoken sentences, simple everyday words, one idea at a time, and let them do most of the talking.
 
 The quiz has {n} questions, asked one at a time in order. A correct answer earns points, more on the first try and with a streak going. There are up to {tries} tries per question, and a wrong try gets a clue. A hint costs a few points.
 

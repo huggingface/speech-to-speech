@@ -1,169 +1,182 @@
 {
  "title": "Transformers and Self-Attention",
  "emoji": "🤖",
- "brief": "Transformers are the neural network architecture behind modern large language models, built around the attention mechanism. This quiz covers how self-attention works, why it replaced recurrent networks, and what made the 2017 breakthrough so impactful.",
+ "brief": "Transformers ditched step-by-step reading so models could connect every word at once. Let's test your intuition on self-attention, positional tricks, and the memory walls behind long context.",
  "questions": [
   {
-   "question": "What is the attention mechanism in machine learning, in simple terms?",
-   "answer": "Attention determines the importance of each component in a sequence relative to the others, assigning weights so the model can focus on the most relevant parts, like important words in a sentence.",
-   "key_points": [
-    "Weighs how important each part of the input is, so the model can focus on the relevant parts",
-    "The weights are relative to the other parts"
-   ],
-   "hint": "Think about what the word attention means when you listen to someone in a noisy room.",
-   "fun_fact": "The attention mechanism was partly inspired by the cocktail party effect, a phenomenon studied in audition research back in 1953.",
-   "difficulty": 1,
-   "source": 2,
    "id": 0,
+   "concept": "Self-attention intuition",
+   "question": "In plain words, what does self-attention let each token in a sentence do?",
+   "answer": "Self-attention lets every token look across the whole sentence and weigh which other words matter most. Each token then blends information from those relevant words to sharpen its meaning in context. That is how a model tells a river bank apart from a savings bank.",
+   "key_points": [
+    "Each token weighs and pulls context from other relevant tokens in the sequence",
+    "Blending neighbor information updates each token's meaning to fit the sentence"
+   ],
    "required": [
     0
-   ]
-  },
-  {
-   "question": "What year was the transformer architecture introduced, and in which famous paper?",
-   "answer": "The transformer was introduced in 2017 in the paper Attention Is All You Need, written by eight researchers at Google.",
-   "key_points": [
-    "2017",
-    "Attention Is All You Need",
-    "Written by Google researchers"
    ],
-   "hint": "The paper's title plays on a famous Beatles song.",
-   "fun_fact": "The paper has been cited more than 150,000 times, making it one of the top ten most-cited papers of the 21st century.",
+   "hint": "Think about how you figure out who the word she refers to while reading a story.",
+   "fun_fact": "In a real Transformer, different attention heads split up the job, with some tracking grammar while others link pronouns to nouns.",
    "difficulty": 1,
-   "source": 3,
+   "source": 1
+  },
+  {
    "id": 1,
+   "concept": "Parallelism and long-range links",
+   "question": "What two big advantages helped Transformers replace recurrent neural networks?",
+   "answer": "Transformers process all tokens in parallel instead of reading a sequence one word at a time. That parallelism makes training much faster on modern GPUs. They also link distant tokens directly in one step, so early context does not fade away.",
+   "key_points": [
+    "Process all tokens in parallel instead of sequentially for much faster training",
+    "Connect distant tokens directly in one step without losing long-range context"
+   ],
    "required": [
     0,
     1
-   ]
+   ],
+   "hint": "Compare an assembly line moving one piece per beat against an open room where everyone talks at once.",
+   "fun_fact": "The original Transformer beat the world's best translation models after just three and a half days on eight GPUs.",
+   "difficulty": 1,
+   "source": 1
   },
   {
-   "question": "Why do transformers need positional encodings or positional embeddings?",
-   "answer": "Because self-attention by itself is permutation-invariant, meaning it treats the input as an unordered set. Positional information must be injected so that token order can affect the output.",
-   "key_points": [
-    "Attention alone ignores word order, so position information has to be added",
-    "Without it, shuffling the words would not change the output"
-   ],
-   "hint": "What would the model know about word order if attention treated all tokens equally?",
-   "fun_fact": "The original paper used sine and cosine wave functions for positional encoding, partly because they might allow the model to handle sequences longer than those seen during training.",
-   "difficulty": 2,
-   "source": 1,
    "id": 2,
+   "concept": "Order blindness and position signals",
+   "question": "Why can raw self-attention not tell the difference between dog bites man and man bites dog?",
+   "answer": "Raw self-attention compares every pair of tokens symmetrically and has no built-in sense of word order. Without extra cues, shuffling a sentence gives the exact same attention scores. Models fix this with position signals, such as rotating queries and keys with rotary embeddings.",
+   "key_points": [
+    "Self-attention compares all token pairs symmetrically and has no built-in awareness of word order",
+    "Models add positional encodings or rotary position embeddings so attention tracks position and distance"
+   ],
    "required": [
     0
-   ]
+   ],
+   "hint": "Imagine dumping puzzle pieces into a bowl and checking which ones match without looking at their spots.",
+   "fun_fact": "Rotary position embeddings rotate each query and key like hands on a clock so their dot product naturally reflects the gap between two words.",
+   "difficulty": 2,
+   "source": 2
   },
   {
-   "question": "Why did recurrent neural networks struggle to process long sentences, and how did LSTM help?",
-   "answer": "Recurrent networks suffered from the vanishing gradient problem, so information from early tokens faded by the end of a long sequence. LSTM introduced gating mechanisms that mitigated this problem and enabled efficient learning on longer sequences.",
-   "key_points": [
-    "Information from early words fades over long sequences, the vanishing gradient problem",
-    "LSTM added gates that control what to keep",
-    "LSTM reduced but did not remove the problem"
-   ],
-   "hint": "Think about what happens to a signal that passes through many steps in a row.",
-   "fun_fact": "Even with LSTM, reversing the input sentence improved early translation systems, showing how poorly information from the start of a sentence was preserved.",
-   "difficulty": 2,
-   "source": 1,
    "id": 3,
+   "concept": "Scaling dot-product attention",
+   "question": "In scaled dot-product attention, why do we divide query and key scores before applying softmax?",
+   "answer": "When query and key vectors have many dimensions, their dot products grow huge. Huge scores push softmax to extremes where one token takes almost all the weight. Gradients nearly vanish there, so dividing by the square root of the key dimension keeps learning alive.",
+   "key_points": [
+    "Stop huge dot products from saturating softmax into flat extremes where gradients nearly vanish",
+    "Dot product size grows with vector dimension, so dividing by the square root of the key dimension keeps scores balanced"
+   ],
    "required": [
-    0,
-    1
-   ]
+    0
+   ],
+   "hint": "Think about what happens to a steep curve when you feed it gigantic numbers and try to measure its slope.",
+   "fun_fact": "With unit-spread inputs, a dot product's variance equals the vector length, so dividing by its square root snaps the spread right back to one.",
+   "difficulty": 2,
+   "source": 1
   },
   {
-   "question": "What is the main computational advantage transformers have over recurrent networks during training?",
-   "answer": "Transformers process all tokens in parallel rather than one at a time, so their computations can be parallelized across sequence positions and accelerated on GPUs, enabling faster training and larger models.",
-   "key_points": [
-    "Processes all tokens in parallel",
-    "Recurrent networks must go one token at a time",
-    "This makes GPU acceleration and bigger models possible"
-   ],
-   "hint": "Consider whether a recurrent network can compute anything about the last word before reading the first word.",
-   "fun_fact": "The parallelizability of transformers is a key reason they became the main architecture of most modern large language models.",
-   "difficulty": 2,
-   "source": 1,
    "id": 4,
+   "concept": "Causal masking",
+   "question": "Why do decoder language models apply a causal mask during training instead of letting tokens attend everywhere?",
+   "answer": "During training, the model sees the entire sentence at once to stay parallel. Without a causal mask, each token would cheat by peeking at future words it must predict. The mask blocks all later positions, unlike bidirectional encoders that read both ways for understanding.",
+   "key_points": [
+    "Stop each token from peeking at future words it is trying to predict during parallel training",
+    "Bidirectional encoders attend in both directions because they build understanding instead of predicting left to right",
+    "Future attention scores are set to negative infinity before softmax so their weights drop to zero"
+   ],
    "required": [
     0
-   ]
+   ],
+   "hint": "Picture taking a fill-in-the-blank exam while the full solution sits uncovered beside your desk.",
+   "fun_fact": "Thanks to causal masking, one parallel pass over a thousand-word page trains the model on nearly a thousand separate next-word quizzes at once.",
+   "difficulty": 2,
+   "source": 1
   },
   {
-   "question": "In self-attention, what are the query, key, and value vectors, and where do they come from?",
-   "answer": "Query, key, and value vectors are generated from the same input sequence, which is what distinguishes self-attention from cross-attention. Each token's query is compared against all keys to produce weights that combine the values.",
-   "key_points": [
-    "Queries, keys and values all come from the same input sequence",
-    "Each query is compared with the keys to get weights",
-    "The weights combine the values"
-   ],
-   "hint": "The word self in self-attention tells you something important about where the vectors come from.",
-   "fun_fact": "Self-attention was once called intra-attention or intra-sentence attention when it was first proposed for LSTMs.",
-   "difficulty": 2,
-   "source": 2,
    "id": 5,
+   "concept": "FlashAttention and memory tiling",
+   "question": "How does FlashAttention run exact long-context attention much faster with far less memory?",
+   "answer": "Standard attention slows down by shuttling a giant quadratic score matrix to slow main memory. FlashAttention splits attention into small tiles that stay inside fast on-chip memory instead. It updates softmax block by block, avoiding slow memory traffic while keeping exact math.",
+   "key_points": [
+    "Tile queries, keys, and values into small blocks inside fast on-chip memory without writing the full attention matrix to slow memory",
+    "Update softmax incrementally across tiles so the output stays mathematically exact",
+    "Standard attention hits a memory-bandwidth wall because the full score matrix grows quadratically with sequence length"
+   ],
+   "required": [
+    0
+   ],
+   "hint": "Imagine cooking from ingredients right on your cutting board instead of walking back to a distant warehouse after every chop.",
+   "fun_fact": "FlashAttention actually does extra math by recomputing attention during training, yet finishes faster because slow memory transfers cost far more than arithmetic.",
+   "difficulty": 3,
+   "source": 3
+  },
+  {
+   "id": 6,
+   "concept": "Key-value cache and grouped-query attention",
+   "question": "During token-by-token generation, why does the key-value cache create a memory bottleneck, and how does grouped-query attention ease it?",
+   "answer": "For each new token, the chip must reload every past key and value from slow memory. Streaming that growing cache saturates memory bandwidth while the math cores sit mostly idle. Grouped-query attention lets several query heads share one key-value head, shrinking the cache to load.",
+   "key_points": [
+    "Each new token reloads the entire stored key-value cache from memory, saturating memory bandwidth",
+    "Grouped-query attention shares one key and value head across multiple query heads to shrink the cache",
+    "Sharing heads keeps most of multi-head attention's quality while approaching single-head cache speeds"
+   ],
    "required": [
     0,
-    1,
-    2
-   ]
-  },
-  {
-   "question": "What does multi-head attention add beyond a single attention mechanism?",
-   "answer": "Multi-head attention runs several attention heads in parallel, each learning different linear projections of the queries, keys, and values. This lets the model capture different types of relationships between words simultaneously.",
-   "key_points": [
-    "Several attention heads run in parallel, each with its own projections",
-    "Lets the model capture different kinds of relationships at once",
-    "Head outputs are concatenated and projected"
-   ],
-   "hint": "Imagine several people reading the same sentence but each looking for something different.",
-   "fun_fact": "The heads' outputs are concatenated and passed through a final learned linear transformation to produce the layer's output.",
-   "difficulty": 2,
-   "source": 3,
-   "id": 6,
-   "required": [
     1
-   ]
+   ],
+   "hint": "Picture hauling a giant filing cabinet to your desk for every word you type, then pooling one cabinet across teammates.",
+   "fun_fact": "In long conversations or busy servers, the saved key-value cache can easily grow larger than the model's own weights.",
+   "difficulty": 3,
+   "source": 4
   },
   {
-   "question": "What is the main computational drawback of standard self-attention as sequences get longer?",
-   "answer": "The computational and memory costs of self-attention grow quadratically with sequence length, which makes handling very long sequences expensive.",
-   "key_points": [
-    "Costs grow quadratically with sequence length",
-    "Affects both computation and memory",
-    "The main weakness of standard self-attention"
-   ],
-   "hint": "Think about how many pairwise comparisons are needed if every token attends to every other token.",
-   "fun_fact": "This quadratic cost is why researchers have explored local attention with sliding windows, which was found to reduce translation time in early attention models.",
-   "difficulty": 3,
-   "source": 1,
    "id": 7,
+   "concept": "Pre-norm residual stability",
+   "question": "Why did modern deep Transformers move layer normalization before each sublayer instead of after the residual addition?",
+   "answer": "Normalizing before each sublayer leaves the main residual path completely untouched from start to finish. Gradients travel straight down that clean highway without blowing up or fading in deep stacks. Putting normalization after the addition causes wild early gradients and needs delicate warmup schedules.",
+   "key_points": [
+    "Keep an unbroken residual path for smooth gradient flow or keep early gradients stable in very deep networks",
+    "Post-norm puts normalization on the main path, causing large early gradients near the output and needing fragile warmup"
+   ],
    "required": [
     0
-   ]
+   ],
+   "hint": "Think of an express lane running directly through a tall tower with no toll booths slowing down the central line.",
+   "fun_fact": "Moving layer normalization before each sublayer lets deep Transformers train smoothly even without any learning-rate warmup at all.",
+   "difficulty": 3,
+   "source": 5
   }
  ],
  "id": "7afe97751daf",
  "topic": "Transformers and the attention mechanism",
  "slug": "transformers",
  "difficulty": "pro",
- "model": "zai-org/GLM-5.3",
+ "model": "gemini",
  "sources": [
   {
-   "title": "Transformer (deep learning)",
-   "url": "https://en.wikipedia.org/wiki/Transformer_(deep_learning)",
-   "site": "wikipedia.org"
-  },
-  {
-   "title": "Attention (machine learning)",
-   "url": "https://en.wikipedia.org/wiki/Attention_(machine_learning)",
-   "site": "wikipedia.org"
-  },
-  {
    "title": "Attention Is All You Need",
-   "url": "https://en.wikipedia.org/wiki/Attention_Is_All_You_Need",
-   "site": "wikipedia.org"
+   "url": "https://arxiv.org/abs/1706.03762",
+   "site": "arXiv"
+  },
+  {
+   "title": "RoFormer: Enhanced Transformer with Rotary Position Embedding",
+   "url": "https://arxiv.org/abs/2104.09864",
+   "site": "arXiv"
+  },
+  {
+   "title": "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness",
+   "url": "https://arxiv.org/abs/2205.14135",
+   "site": "arXiv"
+  },
+  {
+   "title": "GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints",
+   "url": "https://arxiv.org/abs/2305.13245",
+   "site": "arXiv"
+  },
+  {
+   "title": "On Layer Normalization in the Transformer Architecture",
+   "url": "https://arxiv.org/abs/2002.04745",
+   "site": "arXiv"
   }
  ],
- "tagline": "Queries, keys, values and why attention won",
+ "tagline": "How self-attention actually works under the hood",
  "order": 0
 }

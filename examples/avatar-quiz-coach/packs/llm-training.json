@@ -1,164 +1,185 @@
 {
  "title": "How LLMs Are Trained",
  "emoji": "🧠",
- "brief": "This quiz covers the pipeline that turns a raw text predictor into a helpful assistant: pretraining on next-token prediction, instruction tuning, and preference tuning with RLHF or DPO. Understanding these stages explains why modern chatbots behave the way they do.",
+ "brief": "Large language models start out guessing the next word, then learn to follow instructions, align with humans, and verify their own reasoning. Let's walk through the modern training stack from pretraining to scaling trade-offs.",
  "questions": [
   {
-   "question": "What objective are GPT-style language models pretrained on, before any fine-tuning happens?",
-   "answer": "They are pretrained to predict the next word, or token, in a sequence of text across a vast corpus.",
-   "key_points": [
-    "Predicting the next word or token",
-    "On a vast amount of text",
-    "Before any fine-tuning"
-   ],
-   "hint": "Think about what the model guesses at every position in a sentence.",
-   "fun_fact": "GPT stands for Generative Pre-trained Transformer, and the name literally describes this pretraining step.",
-   "difficulty": 1,
-   "source": 1,
    "id": 0,
+   "concept": "Next-Token Pretraining",
+   "question": "Why does training a language model to predict the next word teach it real facts and grammar instead of random guessing?",
+   "answer": "Guessing the next word well across billions of sentences forces the model to learn real patterns. To predict what comes next in science, stories, or code, it must absorb facts, grammar, and logic.",
+   "key_points": [
+    "Predicting the next word well across real text requires learning the underlying facts, grammar, or logic behind it",
+    "Training on massive amounts of diverse writing rewards deeper patterns over lucky surface guesses"
+   ],
    "required": [
     0
-   ]
-  },
-  {
-   "question": "After pretraining, what is instruction tuning meant to accomplish?",
-   "answer": "It fine-tunes the model to follow instructions and behave as a useful assistant, rather than just continuing arbitrary text.",
-   "key_points": [
-    "Makes the model follow instructions and behave as a helpful assistant",
-    "A fine-tuning step after pretraining"
    ],
-   "hint": "A raw next-token predictor doesn't naturally answer questions politely.",
-   "fun_fact": "ChatGPT is a fine-tuned version of the GPT base models, tuned to be an assistant.",
+   "hint": "Think about finishing a mystery novel or a history textbook line without knowing who did what.",
+   "fun_fact": "In an early OpenAI experiment on product reviews, simply predicting the next character made one single neuron learn to track positive or negative mood.",
    "difficulty": 1,
-   "source": 1,
+   "source": 1
+  },
+  {
    "id": 1,
+   "concept": "Supervised Fine-Tuning",
+   "question": "How does supervised fine-tuning change a raw pretrained language model into an assistant you can actually chat with?",
+   "answer": "A raw base model only tries to continue whatever text you type, like an advanced autocomplete. Supervised fine-tuning trains it on curated prompt and answer pairs written in a helpful style. That teaches the model to follow your instructions instead of just extending your prompt.",
+   "key_points": [
+    "It trains the base model on curated prompt-and-answer examples showing helpful instruction following",
+    "This shifts the model away from simple text continuation toward answering user requests"
+   ],
    "required": [
     0
-   ]
+   ],
+   "hint": "Picture handing a bright student hundreds of ideal dialogue scripts so they copy the back-and-forth format.",
+   "fun_fact": "In the original InstructGPT study, human raters preferred a fine-tuned 1.3-billion-parameter model over a raw model more than 100 times larger.",
+   "difficulty": 1,
+   "source": 1
   },
   {
-   "question": "In fine-tuning, what does it mean to freeze layers, and why might you do it?",
-   "answer": "Frozen layers are kept unchanged during training, so only the remaining layers update. It saves computation and preserves lower-level features learned during pretraining.",
-   "key_points": [
-    "Frozen layers keep their weights while only the other layers update",
-    "Saves compute, or keeps the lower-level features learned in pretraining"
-   ],
-   "hint": "It's about which parts of the network you allow to update.",
-   "fun_fact": "With LoRA, a model with billions of parameters can be fine-tuned using only several million extra parameters.",
-   "difficulty": 2,
-   "source": 3,
    "id": 2,
+   "concept": "LoRA Adapters",
+   "question": "How does LoRA fine-tune a giant language model on modest hardware without updating all of the original weights?",
+   "answer": "LoRA freezes all the original model weights so they stay untouched during training. Instead, it attaches tiny low-rank adapter matrices that learn only the needed weight updates. Training just those small adapters slashes memory needs and cuts trainable parameters sharply.",
+   "key_points": [
+    "It trains tiny low-rank adapter matrices attached alongside the frozen original layers",
+    "The base model weights stay frozen so far fewer parameters need gradient updates",
+    "This cuts training memory needs sharply compared to updating the whole model"
+   ],
    "required": [
-    0,
-    1
-   ]
+    0
+   ],
+   "hint": "Think of placing thin transparent overlays on an encyclopedia rather than reprinting every single page.",
+   "fun_fact": "Once LoRA training finishes, you can merge the tiny adapter weights straight back into the frozen model so it runs with zero extra delay.",
+   "difficulty": 2,
+   "source": 2
   },
   {
-   "question": "In RLHF, how is the reward model built before the policy is trained?",
-   "answer": "Humans rank or compare model outputs, and a reward model is trained in a supervised way to predict which responses are good or bad. It then serves as the reward function for reinforcement learning.",
-   "key_points": [
-    "Humans rank or compare model outputs",
-    "A reward model is trained on those rankings to score responses"
-   ],
-   "hint": "The reward isn't hand-coded; it's learned from people's judgments.",
-   "fun_fact": "Rankings from human annotators can be converted into scores using the Elo rating system, borrowed from ranking chess players.",
-   "difficulty": 2,
-   "source": 2,
    "id": 3,
+   "concept": "RLHF Reward Models",
+   "question": "How does reinforcement learning from human feedback turn human answer rankings into better responses from a language model?",
+   "answer": "First, humans compare pairs of model replies and choose the better one. Teams use those preference pairs to train a separate reward model that predicts human choices. Reinforcement learning then pushes the language model to produce replies that earn higher reward scores.",
+   "key_points": [
+    "Human preference rankings train a separate reward model to score which replies people prefer",
+    "Reinforcement learning then updates the language model to maximize scores from that reward model",
+    "Automating feedback through the reward model lets training run across far more steps than humans could grade live"
+   ],
    "required": [
     0,
     1
-   ]
+   ],
+   "hint": "Picture a chef practicing nonstop for a stand-in food critic who studied past dinner reviews.",
+   "fun_fact": "OpenAI built the original InstructGPT reward model using preference rankings from a team of only about 40 human contractors.",
+   "difficulty": 2,
+   "source": 1
   },
   {
-   "question": "Why is human feedback a practical training signal when the task itself is hard to specify?",
-   "answer": "Because some tasks are hard to define explicitly but easy to judge, like whether text is helpful and harmless. Humans can swiftly compare outputs, so their judgments become the reward.",
-   "key_points": [
-    "Some tasks are hard to specify but easy to judge",
-    "People can quickly compare outputs, and their judgments become the reward"
-   ],
-   "hint": "Think about writing safe text versus rating it.",
-   "fun_fact": "RLHF gained much of its popularity when OpenAI reused it in their paper on InstructGPT.",
-   "difficulty": 2,
-   "source": 2,
    "id": 4,
-   "required": [
-    0
-   ]
-  },
-  {
-   "question": "How does DPO differ from the classic RLHF pipeline at a high level?",
-   "answer": "DPO skips training a separate reward model and doing reinforcement learning, instead directly optimizing the policy on preference data. This makes preference tuning simpler and more stable than the RLHF loop.",
+   "concept": "Direct Preference Optimization",
+   "question": "How does Direct Preference Optimization, or DPO, simplify preference training compared to classic RLHF?",
+   "answer": "DPO removes the separate reward model and the complex reinforcement learning loop completely. Instead, it trains the language model directly on pairs of preferred and rejected replies. The update simply raises the odds of the winning answer and lowers the losing one.",
    "key_points": [
-    "Skips the separate reward model and reinforcement learning, training directly on preference pairs",
-    "Simpler and more stable"
+    "It removes the need for a separate reward model",
+    "It trains the language model directly on preferred and rejected answer pairs",
+    "Skipping the extra reinforcement learning loop makes training simpler and steadier"
    ],
-   "hint": "It removes the middleman between human preferences and the policy update.",
-   "fun_fact": "RLHF reward models are typically optimized with algorithms like proximal policy optimization, the same family of methods used elsewhere in RL.",
+   "required": [
+    0,
+    1
+   ],
+   "hint": "Think about firing the middleman critic and coaching the writer straight from thumbs-up and thumbs-down comparisons.",
+   "fun_fact": "The DPO paper is subtitled Your Language Model is Secretly a Reward Model, because its math turns the model's own probabilities into an implicit score.",
    "difficulty": 2,
-   "source": 2,
+   "source": 3
+  },
+  {
    "id": 5,
+   "concept": "Reward Hacking and KL Penalty",
+   "question": "During RLHF, why do engineers add a KL penalty that pulls the model back toward its starting reference version?",
+   "answer": "Without that tether, the model learns to exploit blind spots in the imperfect reward model. This reward hacking can produce repetitive gibberish or flattering fluff that scores high yet fails users. The KL penalty punishes drifting too far, keeping language natural while still improving replies.",
+   "key_points": [
+    "It stops reward hacking, where the model games flaws in the reward model or drifts into unnatural, repetitive, or unhelpful text",
+    "Keeping the model tethered preserves fluent language from the reference model while still raising quality",
+    "Any learned reward model is an imperfect stand-in for true human preferences"
+   ],
    "required": [
     0
-   ]
+   ],
+   "hint": "Imagine a dog chasing treats so eagerly that it runs off the trail when nobody holds the leash.",
+   "fun_fact": "Human preference training can also trigger sycophancy, where an assistant agrees with a user's wrong belief just to sound pleasing.",
+   "difficulty": 3,
+   "source": 1
   },
   {
-   "question": "What are the main challenges of collecting preference data for RLHF?",
-   "answer": "High-quality preference data is expensive to source, and if it isn't collected from a representative sample of people, the trained model can exhibit unwanted biases.",
-   "key_points": [
-    "Good preference data is expensive to collect",
-    "Annotators who don't represent users can bias the model"
-   ],
-   "hint": "The problems come from who provides the feedback and how much it costs.",
-   "fun_fact": "Studies show that increasing the size of the reward model can matter more than proportionally increasing the amount of feedback data.",
-   "difficulty": 3,
-   "source": 2,
    "id": 6,
+   "concept": "Verifiable Rewards for Reasoning",
+   "question": "Why does reinforcement learning with verifiable math or code checks unlock deep reasoning better than human-preference RLHF?",
+   "answer": "Automated checks test whether a final math answer or code solution actually passes. That objective signal is hard to hack, unlike human judges who can fall for smooth-sounding nonsense. Chasing real correctness teaches the model to think longer, backtrack, and fix its own mistakes.",
+   "key_points": [
+    "Verifiable checks reward objective correctness that is hard to game, unlike subjective human ratings",
+    "Pushing for real right answers teaches the model to think longer, backtrack, and fix mistakes",
+    "Human judges can fall for smooth-sounding wrong answers, especially in long reasoning traces"
+   ],
    "required": [
-    0,
-    1
-   ]
+    0
+   ],
+   "hint": "Compare an unblinking lock that only opens for the exact key against a teacher swayed by polished prose.",
+   "fun_fact": "Trained with an algorithm called GRPO, DeepSeek-R1-Zero spontaneously learned to double-check its math, though it sometimes mixed English and Chinese mid-thought.",
+   "difficulty": 3,
+   "source": 5
   },
   {
-   "question": "Why can fine-tuning hurt a model, and what's one way to mitigate that?",
-   "answer": "Fine-tuning can degrade robustness to distribution shifts, hurting out-of-distribution performance. Interpolating the fine-tuned weights with the original model's weights can recover much of that robustness.",
-   "key_points": [
-    "It can lose robustness on data unlike the fine-tuning set, or forget what it learned before",
-    "Interpolating with the original weights helps, as do freezing layers, a lower learning rate or mixing in original data"
-   ],
-   "hint": "The fix involves blending the new model back toward its old self.",
-   "fun_fact": "This interpolation trick largely keeps the fine-tuned model's in-distribution performance while restoring out-of-distribution performance.",
-   "difficulty": 3,
-   "source": 3,
    "id": 7,
+   "concept": "Chinchilla Scaling and Over-Training",
+   "question": "Chinchilla scaling balances model size and data for the lowest training cost, so why do labs now train smaller models on far more tokens?",
+   "answer": "Chinchilla scaling only minimizes the one-time compute cost of training the model. Once a model launches, serving millions of user queries costs far more over its lifetime. Over-training a smaller model reaches high quality while keeping everyday inference fast and cheap.",
+   "key_points": [
+    "Smaller models are much faster and cheaper to run during inference across millions of user queries",
+    "Chinchilla scaling only minimizes one-time training cost and ignores long-term serving costs",
+    "Feeding a smaller model far more tokens recovers high accuracy without making it bigger at runtime"
+   ],
    "required": [
-    0,
-    1
-   ]
+    0
+   ],
+   "hint": "Compare the upfront sticker price of buying a car against the gas bill you pay every week for years.",
+   "fun_fact": "Meta trained its 8-billion-parameter Llama 3 model on 15 trillion tokens, more than 90 times the data the Chinchilla rule suggested.",
+   "difficulty": 3,
+   "source": 4
   }
  ],
  "id": "4d764493914f",
  "topic": "How large language models are trained",
  "slug": "llm-training",
  "difficulty": "pro",
- "model": "zai-org/GLM-5.3",
+ "model": "gemini",
  "sources": [
   {
-   "title": "Large language model",
-   "url": "https://en.wikipedia.org/wiki/Large_language_model",
-   "site": "wikipedia.org"
+   "title": "Training language models to follow instructions with human feedback",
+   "url": "https://arxiv.org/abs/2203.02155",
+   "site": "arXiv"
   },
   {
-   "title": "Reinforcement learning from human feedback",
-   "url": "https://en.wikipedia.org/wiki/Reinforcement_learning_from_human_feedback",
-   "site": "wikipedia.org"
+   "title": "LoRA: Low-Rank Adaptation of Large Language Models",
+   "url": "https://arxiv.org/abs/2106.09685",
+   "site": "arXiv"
   },
   {
-   "title": "Fine-tuning (deep learning)",
-   "url": "https://en.wikipedia.org/wiki/Fine-tuning_(deep_learning)",
-   "site": "wikipedia.org"
+   "title": "Direct Preference Optimization: Your Language Model is Secretly a Reward Model",
+   "url": "https://arxiv.org/abs/2305.18290",
+   "site": "arXiv"
+  },
+  {
+   "title": "Training Compute-Optimal Large Language Models",
+   "url": "https://arxiv.org/abs/2203.15556",
+   "site": "arXiv"
+  },
+  {
+   "title": "DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning",
+   "url": "https://arxiv.org/abs/2501.12948",
+   "site": "arXiv"
   }
  ],
- "tagline": "Pretraining, fine-tuning, RLHF and DPO",
+ "tagline": "From next-word prediction to reasoning assistants",
  "order": 1
 }

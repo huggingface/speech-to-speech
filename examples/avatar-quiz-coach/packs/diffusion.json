@@ -1,168 +1,193 @@
 {
  "title": "Diffusion Models for Image Generation",
  "emoji": "🎨",
- "brief": "Diffusion models generate images by learning to reverse a gradual noising process, turning pure random noise into realistic pictures. They power tools like Stable Diffusion and DALL-E, so understanding them explains how modern AI art actually works.",
+ "brief": "See how modern image generators turn pure random static into sharp pictures. We move from basic noise removal to latent spaces, guidance dials, and modern flow transformers.",
  "questions": [
   {
-   "question": "What are the two major components of a diffusion model?",
-   "answer": "A diffusion model has a forward diffusion process that gradually adds noise to data, and a reverse sampling process that learns to undo the noise step by step.",
-   "key_points": [
-    "A forward process gradually adds noise to the data",
-    "A reverse process learns to remove the noise step by step"
-   ],
-   "hint": "Think of one process that destroys and one that restores.",
-   "fun_fact": "The name 'diffusion' comes from thermodynamics, where particles spread out over time, just like noise spreading through an image.",
-   "difficulty": 1,
-   "source": 1,
    "id": 0,
+   "concept": "Forward and reverse diffusion",
+   "question": "How does a diffusion model actually learn to create images during training?",
+   "answer": "During training, you gradually add random noise to real photos until only static remains. The neural network practices predicting the added noise at each stage. Learning to undo that corruption teaches it what real pictures look like.",
+   "key_points": [
+    "Random noise is gradually added to real training images",
+    "The network trains to predict or remove the noise at each step",
+    "Undoing noise across many levels teaches the model how real images are structured"
+   ],
    "required": [
     0,
     1
-   ]
-  },
-  {
-   "question": "After training, how does a diffusion model create a brand new image?",
-   "answer": "It starts with an image made of pure random noise and applies the trained network iteratively to denoise it, gradually revealing a new image.",
-   "key_points": [
-    "Starts from pure random noise",
-    "Applies the denoising network repeatedly",
-    "The result is a new image from the learned distribution"
    ],
-   "hint": "The starting point contains no picture at all.",
-   "fun_fact": "Because the starting noise is random, the same prompt can produce a different image every single time.",
+   "hint": "Imagine slowly burying a crisp painting under snow, then guessing how to sweep each layer away.",
+   "fun_fact": "Diffusion models borrowed their core math from thermodynamics, mimicking how a drop of ink spreads in water and trying to play the movie backward.",
    "difficulty": 1,
-   "source": 1,
+   "source": 1
+  },
+  {
    "id": 1,
+   "concept": "Sampling from Gaussian noise",
+   "question": "When a trained diffusion model generates a brand new picture, what does it start from and how does the image appear?",
+   "answer": "It starts from a grid of pure random Gaussian noise, like old television static. The model then runs that grid through many small denoising steps. Each pass strips away a little noise until a sharp new picture appears.",
+   "key_points": [
+    "Generation starts from pure random noise, such as Gaussian static",
+    "The model repeatedly removes noise over many small steps until a clear image forms",
+    "Starting from a different random grid produces a brand new image"
+   ],
    "required": [
     0,
     1
-   ]
+   ],
+   "hint": "Imagine a sculptor who begins with a blank block of marble and chips off tiny flecks one tap at a time.",
+   "fun_fact": "The 2020 paper that kicked off the diffusion boom needed a full thousand cleanup passes just to finish one small picture.",
+   "difficulty": 1,
+   "source": 1
   },
   {
-   "question": "Why is the forward noising process designed so that the final result approaches a Gaussian distribution?",
-   "answer": "Because the Gaussian is a simple, well-understood distribution that is easy to sample from, so at generation time we can start from pure Gaussian noise and reverse the process to get realistic data.",
-   "key_points": [
-    "Generation can then start from pure Gaussian noise, which is simple and easy to sample",
-    "By the end, all traces of the original image are gone"
-   ],
-   "hint": "Think about what makes a convenient starting point for sampling.",
-   "fun_fact": "This mirrors physics: the Gaussian is the equilibrium distribution, like how gas particles spread until they fill a room evenly.",
-   "difficulty": 2,
-   "source": 1,
    "id": 2,
+   "concept": "Latent space compression",
+   "question": "Why does Stable Diffusion run inside a compressed latent space instead of raw pixels, and what detail can that compression lose?",
+   "answer": "Raw pixels hold huge amounts of redundant data, so denoising them directly costs massive compute. A variational autoencoder shrinks each image into a compact code that keeps main shapes and colors. Because that compression drops tiny high-frequency details, small text or distant faces can look blurry or warped.",
+   "key_points": [
+    "Working in a compact latent space saves massive compute because raw pixels hold lots of redundant data",
+    "The variational autoencoder preserves main shapes and colors while shrinking the image",
+    "Compression can blur or warp tiny high-frequency details like small text, hands, or distant faces"
+   ],
    "required": [
-    0
-   ]
+    0,
+    2
+   ],
+   "hint": "Think about editing a mini thumbnail to save hard work, and notice what goes fuzzy when you zoom back in.",
+   "fun_fact": "Early Stable Diffusion shrank pictures by 48 times in size, while newer versions widened that bottleneck to 16 channels to keep tiny letters crisp.",
+   "difficulty": 2,
+   "source": 2
   },
   {
-   "question": "What kinds of neural networks are typically used as the denoising backbone of a diffusion model?",
-   "answer": "The backbone can be any network, but U-Nets and transformers are the typical choices for the denoising component.",
-   "key_points": [
-    "U-Nets, the classic choice",
-    "Transformers, increasingly used"
-   ],
-   "hint": "One architecture has a shape named after a letter.",
-   "fun_fact": "Stable Diffusion 3 switched from a U-Net to a rectified flow transformer, mixing text and image encodings inside each block.",
-   "difficulty": 2,
-   "source": 1,
    "id": 3,
+   "concept": "Text conditioning via cross-attention",
+   "question": "During image generation, how does a text prompt actually steer the diffusion network to draw the words you typed?",
+   "answer": "First, a separate text encoder converts your prompt into numeric vectors that capture word meanings. At every denoising step, cross-attention links regions of the noisy image to those word vectors. That repeated link nudges each part of the canvas toward the objects and styles you asked for.",
+   "key_points": [
+    "A text encoder converts the written prompt into numeric vectors representing word meanings",
+    "Cross-attention feeds those text vectors into the denoising network at every step to guide image regions",
+    "Repeating that link across steps aligns objects, colors, and styles with the prompt"
+   ],
    "required": [
     0,
     1
-   ]
+   ],
+   "hint": "Think of a translator turning your sentence into secret codes and whispering directions to the painter on every brushstroke.",
+   "fun_fact": "That same cross-attention hook works beyond words, letting diffusion models follow rough sketches, depth maps, or layouts just like text prompts.",
+   "difficulty": 2,
+   "source": 2
   },
   {
-   "question": "How do text-to-image diffusion models use the text prompt to guide image generation?",
-   "answer": "A text encoder converts the prompt into an embedding, and that embedding is fed to the denoising network through a cross-attention mechanism, so each denoising step is conditioned on the text.",
-   "key_points": [
-    "A text encoder turns the prompt into an embedding",
-    "The denoising network is conditioned on that embedding at every step, through cross-attention"
-   ],
-   "hint": "The text doesn't paint the image directly; it steers the denoising.",
-   "fun_fact": "Stable Diffusion used a frozen CLIP text encoder, a model originally built for matching images with captions.",
-   "difficulty": 2,
-   "source": 2,
    "id": 4,
+   "concept": "Diffusion Transformers and flow matching",
+   "question": "Why did modern models like Stable Diffusion 3 and Flux move from U-Net diffusion to Diffusion Transformers and flow matching?",
+   "answer": "Diffusion Transformers scale much more predictably with extra compute than older convolutional U-Nets do. Pairing them with flow matching swaps winding denoising curves for straight paths from noise to image. Straighter paths make each step easier to predict and cut down total sampling steps.",
+   "key_points": [
+    "Diffusion Transformers scale more predictably with extra data and compute than convolutional U-Nets",
+    "Flow matching connects noise to images along straighter paths instead of curved diffusion trajectories",
+    "Straighter trajectories are easier to predict and cut down total sampling steps"
+   ],
    "required": [
     0,
     1
-   ]
-  },
-  {
-   "question": "What is a latent diffusion model, and why perform diffusion in latent space instead of pixel space?",
-   "answer": "A latent diffusion model runs the noising and denoising process in a compressed latent space created by an autoencoder, rather than directly on pixels. This is much more computationally efficient for both training and generation.",
-   "key_points": [
-    "Diffusion runs in a compressed latent space from an autoencoder, not on pixels",
-    "The main advantage is computational efficiency"
    ],
-   "hint": "Think about working on a compressed file instead of the full image.",
-   "fun_fact": "Latent diffusion is why Stable Diffusion can run on consumer GPUs with as little as 2.4 gigabytes of memory.",
+   "hint": "Think about one upgrade that improves steadily on bigger hardware, and another that trades a twisty detour for a fast highway.",
+   "fun_fact": "When training Stable Diffusion 3, engineers found that middle noise levels matter most because pure static is too vague and nearly clean photos are too easy.",
    "difficulty": 2,
-   "source": 2,
-   "id": 5,
-   "required": [
-    0,
-    1
-   ]
+   "source": 4
   },
   {
-   "question": "In Stable Diffusion, what are the three main components of the architecture and what does each do?",
-   "answer": "The variational autoencoder compresses images into latent space and decodes latents back to pixels, the U-Net performs the denoising in latent space, and the text encoder converts the prompt into an embedding for conditioning.",
+   "id": 5,
+   "concept": "Classifier-free guidance trade-off",
+   "question": "How does classifier-free guidance make a model follow your prompt more tightly, and what goes wrong if you crank its strength too high?",
+   "answer": "Training randomly drops the prompt sometimes, teaching the same network both prompted and generic guesses. At generation time, it extrapolates away from the generic guess toward the prompted one. Turning that dial too high kills variety and causes over-saturated colors or harsh visual artifacts.",
    "key_points": [
-    "The VAE compresses images into latent space and decodes them back to pixels",
-    "The U-Net does the denoising",
-    "The text encoder turns the prompt into an embedding"
+    "Training randomly drops prompts sometimes so the same model can make both prompted and unprompted predictions",
+    "At sampling time, it pushes the prediction away from the unconditional guess and further toward the prompted one",
+    "Turning guidance too high shrinks diversity or causes over-saturated colors and harsh artifacts"
    ],
-   "hint": "One compresses, one denoises, one understands language.",
-   "fun_fact": "The U-Net in Stable Diffusion has about 860 million parameters, which was considered lightweight by 2022 standards.",
-   "difficulty": 3,
-   "source": 2,
-   "id": 6,
    "required": [
-    0,
     1,
     2
-   ]
+   ],
+   "hint": "Picture comparing a plain sketch with a themed one, exaggerating their gap, and seeing what happens when you overshoot.",
+   "fun_fact": "Standard classifier-free guidance literally doubles the compute at every step because the network must run both the prompted and empty versions.",
+   "difficulty": 3,
+   "source": 3
   },
   {
-   "question": "Why is randomness essential in the reverse diffusion process, rather than just doing pure denoising steps?",
-   "answer": "If the process were purely deterministic, every starting noise point would collapse to the same output, destroying diversity. Randomness keeps the generated distribution spread out, so different noise samples yield different, varied images.",
+   "id": 6,
+   "concept": "Multi-step denoising and consistency models",
+   "question": "Why can't a standard diffusion model jump straight from pure noise to a sharp image in one step, and how do consistency models shortcut that?",
+   "answer": "From pure static, countless valid photos fit the noise, so one big guess averages them into blur. Many small steps let the model gradually commit to one coherent picture along a curved path. Consistency models train every noisy point on that path to map directly to the same clean image.",
    "key_points": [
-    "Without randomness the outputs would collapse and lose their diversity",
-    "Different random noise then gives different images"
+    "One big jump averages many valid clean images into blur or misses the curved denoising path",
+    "Many small steps let the model commit gradually to one sharp, coherent picture",
+    "Consistency models train any noisy point along the path to map directly to the same final clean image"
    ],
-   "hint": "Consider what would happen if every generation followed the exact same path.",
-   "fun_fact": "This mirrors thermodynamics: if particles only underwent gradient descent, they would all fall to the origin and the distribution would collapse.",
-   "difficulty": 3,
-   "source": 1,
-   "id": 7,
    "required": [
-    0
-   ]
+    0,
+    2
+   ],
+   "hint": "Think about blending ten different faces into one mushy portrait, versus teaching a fast pupil to leap to the finish line.",
+   "fun_fact": "Even a one-step consistency model still lets you trade speed for sharper detail by running two or four quick refine passes.",
+   "difficulty": 3,
+   "source": 5
+  },
+  {
+   "id": 7,
+   "concept": "Language encoders and multimodal attention",
+   "question": "Why did early diffusion models butcher spelled words and object counts, and what architectural shift fixed that in newer models?",
+   "answer": "Early models relied on CLIP, which packs prompts like a bag of words and drops exact order. Newer models add deep language encoders like T5 that preserve exact letters, grammar, and object counts. They also let text and image streams exchange information both ways instead of using one-way lookups.",
+   "key_points": [
+    "Early models used weak text encoders like CLIP that act like a bag of words and lose spelling, word order, or counts",
+    "Newer models add stronger language encoders like T5 or bidirectional text-and-image attention",
+    "Widening the autoencoder from 4 to 16 channels also helped keep sharp letters"
+   ],
+   "required": [
+    0,
+    1
+   ],
+   "hint": "Compare a quick caption matcher that jumbles your sentence with a true reader that follows phrasing and talks back to the canvas.",
+   "fun_fact": "Early Stable Diffusion cut every prompt off at 77 tokens because of CLIP, silently ignoring everything you typed past that limit.",
+   "difficulty": 3,
+   "source": 4
   }
  ],
  "id": "9a5049b70649",
  "topic": "Diffusion models for image generation",
  "slug": "diffusion",
  "difficulty": "pro",
- "model": "zai-org/GLM-5.3",
+ "model": "gemini",
  "sources": [
   {
-   "title": "Diffusion model",
-   "url": "https://en.wikipedia.org/wiki/Diffusion_model",
-   "site": "wikipedia.org"
+   "title": "Denoising Diffusion Probabilistic Models",
+   "url": "https://arxiv.org/abs/2006.11239",
+   "site": "arXiv"
   },
   {
-   "title": "Stable Diffusion",
-   "url": "https://en.wikipedia.org/wiki/Stable_Diffusion",
-   "site": "wikipedia.org"
+   "title": "High-Resolution Image Synthesis with Latent Diffusion Models",
+   "url": "https://arxiv.org/abs/2112.10752",
+   "site": "arXiv"
   },
   {
-   "title": "Text-to-image model",
-   "url": "https://en.wikipedia.org/wiki/Text-to-image_model",
-   "site": "wikipedia.org"
+   "title": "Classifier-Free Diffusion Guidance",
+   "url": "https://arxiv.org/abs/2207.12598",
+   "site": "arXiv"
+  },
+  {
+   "title": "Scaling Rectified Flow Transformers for High-Resolution Image Synthesis",
+   "url": "https://arxiv.org/abs/2403.03206",
+   "site": "arXiv"
+  },
+  {
+   "title": "Consistency Models",
+   "url": "https://arxiv.org/abs/2303.01469",
+   "site": "arXiv"
   }
  ],
- "tagline": "From noise to pictures",
+ "tagline": "Sculpting sharp images out of pure noise",
  "order": 3
 }

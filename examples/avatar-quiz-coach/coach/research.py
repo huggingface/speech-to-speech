@@ -35,7 +35,7 @@ MAX_TOTAL_CHARS = 26000
 # A repository or paper read first-hand gets a larger reading budget.
 MAX_PRIMARY_CHARS = 80000
 # Bumped when research changes, so cached packs from older research are redone.
-RESEARCH_VERSION = 4
+RESEARCH_VERSION = 5
 SPARE_QUESTIONS = 3
 
 DIFFICULTIES = {
@@ -186,6 +186,7 @@ REQUIRED_RULE = (
 WRITER_SYSTEM = (
     """You are an expert examiner preparing a SPOKEN quiz. A voice avatar will read each question aloud and a student will answer out loud, so:
 - Ask open questions answerable in one or two spoken sentences. Never multiple choice, never "which of the following", no true/false.
+- Write every answer, key point, hint, and fun fact in plain, everyday spoken English (like Simplified Technical English / ASD-STE100, but warm and natural, the way a sharp friend explains an idea aloud). Use short, active sentences (10 to 18 words, one idea per sentence) and simple common words. Never sound like a textbook, encyclopedia, or AI assistant: avoid stiff words like "mitigate", "facilitate", "utilize", "exhibit", "leverage", "fundamental", "crucial", "enabling", "thereby", or stacked multi-clause sentences. Keep technical terms only when the question is about them, and explain them plainly.
 - No formulas, code, symbols, tables or long lists in questions or answers. Write numbers and acronyms the way people say them.
 - Each question tests one clear idea, and every question tests a DIFFERENT idea: no two questions share an answer, and none rephrases or is a sub-part of another.
 - Ask about what matters most in the material, not incidental details. No trick questions and no trivia (exact dates, counts, defaults, names) unless it is the point.
@@ -199,17 +200,17 @@ Return ONLY a JSON object:
 {
   "title": "short display title for the topic (max 40 chars)",
   "emoji": "one emoji for the topic",
-  "brief": "two sentences the coach says before starting: what this topic is and why it matters",
+  "brief": "one or two short plain-English sentences the coach says before starting: what this topic is and why it matters",
   "concepts": ["the ideas to test, most important first"],
   "questions": [
     {
       "concept": "the concept this question tests",
       "question": "the question, max 30 words",
-      "answer": "the model answer, one or two sentences",
-      "key_points": ["2 to 4 short atomic facts a complete answer contains"],
+      "answer": "plain spoken model answer: one or two short, active sentences in everyday words",
+      "key_points": ["2 to 4 short atomic facts in plain everyday words"],
       "required": [indices of the key points the question explicitly asks for],
-      "hint": "a nudge that does not give the answer away",
-      "fun_fact": "one short surprising related fact",
+      "hint": "a short plain nudge that does not give the answer away",
+      "fun_fact": "one short surprising related fact in plain speech",
       "difficulty": 1,
       "source": 1
     }
