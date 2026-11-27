@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from time import perf_counter
 from typing import Any, Iterator
 
@@ -14,6 +15,13 @@ from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
 
 logger = logging.getLogger(__name__)
+
+# FunASR joins every output token with a space, Chinese characters included.
+# Only the spaces between two Chinese characters are artifacts; English words
+# need theirs.
+_SPACE_BETWEEN_HAN = re.compile(
+    r"(?<=[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff])\s+(?=[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff])"
+)
 
 
 class ParaformerSTTHandler(BaseSTTHandler):
@@ -57,7 +65,7 @@ class ParaformerSTTHandler(BaseSTTHandler):
         logger.debug("infering paraformer...")
 
         started_at_s = perf_counter()
-        pred_text = self.model.generate(vad_audio.audio)[0]["text"].strip().replace(" ", "")
+        pred_text = _SPACE_BETWEEN_HAN.sub("", self.model.generate(vad_audio.audio)[0]["text"].strip())
         # Same idea as ChatTTSHandler: MPS cache clear only on Apple Silicon.
         if self.device == "mps":
             torch.mps.empty_cache()
