@@ -30,6 +30,7 @@ from speech_to_speech.evals.big_bench_audio.dataset import (
     load_pcm16_mono,
     resolve_audio,
 )
+from speech_to_speech.evals.big_bench_audio.noise import BackgroundNoise
 from speech_to_speech.evals.big_bench_audio.report import ItemResult
 from speech_to_speech.evals.big_bench_audio.scoring import grade
 
@@ -369,6 +370,7 @@ async def run_subset(
     config: RunnerConfig,
     *,
     progress: Optional[ProgressCallback] = None,
+    noise: BackgroundNoise | None = None,
 ) -> list[ItemResult]:
     """Run every item in *subset* sequentially and return one result per item."""
     results: list[ItemResult] = []
@@ -378,7 +380,8 @@ async def run_subset(
         for attempt in range(config.retries + 1):
             try:
                 if pcm is None:
-                    pcm = load_pcm16_mono(resolve_audio(item, subset))
+                    source_pcm = load_pcm16_mono(resolve_audio(item, subset))
+                    pcm = source_pcm if noise is None else noise.mix(source_pcm, item.id)
             except Exception as exc:  # noqa: BLE001 — retain other items when an asset fails
                 result = ItemResult(
                     id=item.id,

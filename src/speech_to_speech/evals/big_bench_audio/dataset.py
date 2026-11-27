@@ -11,6 +11,7 @@ import json
 import random
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Optional
 
@@ -233,13 +234,13 @@ def resolve_audio(item: EvalItem, subset: Subset) -> Path:
     )
 
 
-def load_pcm16_mono(path: Path, rate: int = SAMPLE_RATE_HZ) -> bytes:
+def load_pcm16_mono(path: Path | BytesIO, rate: int = SAMPLE_RATE_HZ) -> bytes:
     """Decode any dataset recording to mono little-endian PCM16 at *rate*."""
     import numpy as np
     import soundfile as sf
     from scipy.signal import resample_poly
 
-    data, source_rate = sf.read(str(path), always_2d=True, dtype="float32")
+    data, source_rate = sf.read(str(path) if isinstance(path, Path) else path, always_2d=True, dtype="float32")
     mono = data.mean(axis=1) if data.shape[1] > 1 else data[:, 0]
     if source_rate != rate:
         mono = resample_poly(mono, rate, source_rate)
