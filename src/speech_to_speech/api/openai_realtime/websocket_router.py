@@ -796,7 +796,7 @@ async def _gate_interruption(
     config = st.runtime_config.false_interruption
     assert config is not None
     playback = _interruption_playback(transport, st, config)
-    st.pending_interruption = PendingInterruption.begin(event, config, paused=playback == "pause")
+    st.pending_interruption = PendingInterruption.begin(event, config)
     transport.set_playback(playback)
     logger.info(
         "Pipeline %d: speech during response held until it has words (turn=%s, playback=%s)",

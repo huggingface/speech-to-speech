@@ -35,10 +35,6 @@ INTERRUPTION_EVENTS_EXTENSION = "speech_to_speech.interruption"
 PlaybackMode = Literal["continue", "pause", "duck"]
 PLAYBACK_MODES: tuple[PlaybackMode, ...] = ("continue", "pause", "duck")
 
-# Speech that commits an interruption before its words are known, while the
-# reply keeps playing over it.
-DEFAULT_MIN_SPEECH_MS = 1200
-
 # Resuming a paused reply replays from the last gap between words within this
 # much of the audio played before the pause, rather than from the middle of a word.
 RESUME_REWIND_MAX_MS = 600
@@ -177,15 +173,15 @@ class FalseInterruptionConfig(BaseModel):
 
     min_words: int = Field(default=1, ge=1, le=50)
     """Words that are not fillers or backchannels needed to commit an interruption."""
-    min_speech_ms: int | None = Field(default=None, ge=0, le=30000)
+    min_speech_ms: int = Field(default=1200, ge=0, le=30000)
     """Active speech that commits an interruption even before its words are known; 0 turns it off.
 
-    By default (``None``) it is off while the reply is paused, which costs
-    nothing to wait on and keeps a long cough from cancelling it, and
-    ``DEFAULT_MIN_SPEECH_MS`` while the reply keeps playing over the user:
-    words can come late, since VAD splits "Wait, wait, can you..." into short
-    segments and a busy STT may skip partial transcripts while the reply is
-    being synthesized.
+    Words can come late: VAD splits "Wait, wait, can you..." into short
+    segments, and an STT that shares the GPU with the TTS can be slow while
+    the reply is still being synthesized. Committing stops that synthesis,
+    and it keeps real speech from being dropped as a false interruption when
+    its transcript misses ``timeout_ms``. A cough or a backchannel is well
+    under a second.
     """
     playback: PlaybackMode = "pause"
     """What happens to the assistant's audio while the decision is pending.
@@ -206,12 +202,6 @@ class FalseInterruptionConfig(BaseModel):
 
     def model_post_init(self, __context: Any) -> None:
         self._phrases = _phrases(DEFAULT_IGNORE_WORDS if self.ignore_words is None else self.ignore_words)
-
-    def speech_threshold_ms(self, paused: bool) -> int:
-        """The ``min_speech_ms`` that applies when playback is (or is not) paused."""
-        if self.min_speech_ms is not None:
-            return self.min_speech_ms
-        return 0 if paused else DEFAULT_MIN_SPEECH_MS
 
     def word_count(self, transcript: str) -> int:
         """Count the words of *transcript* that are not ignored fillers or backchannels."""
@@ -294,7 +284,6 @@ class PendingInterruption:
     revision: int | None
     config: FalseInterruptionConfig
     audio_start_ms: int = 0
-    min_speech_ms: int = 0
     events: list[PipelineEvent] = field(default_factory=list)
     revisions: set[int | None] = field(default_factory=set)
     started_at: float = field(default_factory=time.monotonic)
@@ -307,20 +296,13 @@ class PendingInterruption:
     speaking_active_ms: float = 0.0
 
     @classmethod
-    def begin(
-        cls,
-        event: SpeechStartedEvent,
-        config: FalseInterruptionConfig,
-        *,
-        paused: bool = False,
-    ) -> PendingInterruption:
+    def begin(cls, event: SpeechStartedEvent, config: FalseInterruptionConfig) -> PendingInterruption:
         assert event.turn_id is not None
         pending = cls(
             turn_id=event.turn_id,
             revision=event.turn_revision,
             config=config,
             audio_start_ms=event.audio_start_ms,
-            min_speech_ms=config.speech_threshold_ms(paused),
         )
         pending.events.append(event)
         pending.revisions.add(event.turn_revision)
@@ -342,12 +324,12 @@ class PendingInterruption:
         return getattr(event, "turn_id", None) == self.turn_id
 
     def _long_enough(self, now: float | None = None) -> bool:
-        return bool(self.min_speech_ms) and self.speech_ms(now) >= self.min_speech_ms
+        return bool(self.config.min_speech_ms) and self.speech_ms(now) >= self.config.min_speech_ms
 
     def deadline(self) -> float | None:
         """When :meth:`due` next changes without a new event, if ever."""
-        if self.speaking_since is not None and self.min_speech_ms:
-            remaining_ms = self.min_speech_ms - self.speech_ms(self.speaking_since)
+        if self.speaking_since is not None and self.config.min_speech_ms:
+            remaining_ms = self.config.min_speech_ms - self.speech_ms(self.speaking_since)
             return self.speaking_since + max(0.0, remaining_ms) / 1000.0
         if self.stopped_at is not None:
             return self.stopped_at + self.config.timeout_ms / 1000.0

@@ -577,7 +577,7 @@ make the assistant pause instead, and carry on if the speech had no words:
         "turn_detection": {
           "type": "server_vad",
           "interrupt_response": true,
-          "false_interruption": {"playback": "pause", "min_words": 1, "timeout_ms": 2000}
+          "false_interruption": {"playback": "pause", "min_words": 1, "min_speech_ms": 1200, "timeout_ms": 2000}
         }
       }
     }
@@ -613,15 +613,15 @@ them alone is handled as before. Then:
   arrives when the reply is fully generated and has at most a second of audio
   left to play answers it rather than backchannels over it, so it becomes an
   ordinary user turn.
-- **Long speech commits too, if the reply keeps playing.** With `continue` or
-  `duck`, or a WebSocket client that is not told to pause, the assistant talks
-  over the user until the decision, so `min_speech_ms` of active speech (1.2 s
-  by default) commits the interruption before its words are known: VAD splits
-  "Wait, wait, can you..." into short segments, and an STT that shares a GPU
-  lock with the TTS may skip partial transcripts while the reply is being
-  synthesized. A paused reply costs nothing to wait on, so by default only
-  words decide, and a long coughing fit cannot cancel it. `0` turns the rule
-  off; a number sets it for every playback mode.
+- **So does long speech.** `min_speech_ms` of active speech (1.2 s by default;
+  0 turns it off) commits the interruption before its words are known. Words
+  can come late: VAD splits "Wait, wait, can you..." into short segments, and
+  an STT that shares a GPU with the TTS can be slow while the reply is still
+  being synthesized. Committing stops that synthesis, and keeps real speech
+  from being dropped when its transcript misses `timeout_ms`. Coughs and
+  backchannels are well under a second of speech. Since the reply is already
+  paused, this changes when the client sees the user's turn, not when the
+  assistant goes quiet.
 
 The built-in list of ignored words is English: hesitations ("uh", "um",
 "hmm", "mm-hmm"), backchannels ("yeah", "okay", "right", "I see", "got it")

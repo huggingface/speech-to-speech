@@ -358,8 +358,7 @@ def prepare_module_args(module_kwargs: ModuleArguments, llm_backend: BackendSele
         raise ValueError("--false_interruption must be one of: off, continue, pause, duck.")
     if module_kwargs.false_interruption_min_words < 1:
         raise ValueError("--false_interruption_min_words must be at least 1.")
-    min_speech_ms = module_kwargs.false_interruption_min_speech_ms
-    if min_speech_ms is not None and not 0 <= min_speech_ms <= 30000:
+    if not 0 <= module_kwargs.false_interruption_min_speech_ms <= 30000:
         raise ValueError("--false_interruption_min_speech_ms must be between 0 and 30000.")
     for kind in ("stt", "tts"):
         declared = getattr(module_kwargs, f"{kind}_supported_languages")

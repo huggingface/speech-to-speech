@@ -14,7 +14,6 @@ import pytest
 from starlette.testclient import TestClient
 
 from speech_to_speech.api.openai_realtime.false_interruption import (
-    DEFAULT_MIN_SPEECH_MS,
     FalseInterruptionConfig,
     PendingInterruption,
     Verdict,
@@ -156,23 +155,6 @@ def test_duration_rule_can_be_turned_off():
     )
     assert pending.due(pending.started_at + 10) is None
     assert pending.deadline() is None
-
-
-def test_duration_rule_applies_only_while_the_reply_keeps_playing():
-    """A paused reply costs nothing to wait on: only words decide, so a long cough cannot cancel it."""
-    config = FalseInterruptionConfig()
-    assert (config.speech_threshold_ms(paused=True), config.speech_threshold_ms(paused=False)) == (
-        0,
-        DEFAULT_MIN_SPEECH_MS,
-    )
-    assert FalseInterruptionConfig(min_speech_ms=800).speech_threshold_ms(paused=True) == 800
-
-    started = SpeechStartedEvent(turn_id="turn_2", turn_revision=0, active_speech_ms=5000)
-    paused = PendingInterruption.begin(started, config, paused=True)
-    assert paused.due(paused.started_at + 10) is None
-    assert paused.deadline() is None
-    playing = PendingInterruption.begin(started, config, paused=False)
-    assert playing.due(playing.started_at) is Verdict.CONFIRM
 
 
 def _tone(ms, value=8000, rate=48_000):
@@ -728,27 +710,16 @@ def test_opt_in_events_announce_the_pending_decision(call):
     assert resolved["interrupted"] is True
 
 
-def test_default_pauses_a_client_that_can_pause_and_waits_for_its_words(call):
+def test_default_pauses_a_client_that_can_pause(call):
     """``true`` pauses; a WebSocket client must opt in to the events to be told to."""
     call.configure(True, extensions=["speech_to_speech.interruption"])
     _coach_is_reading(call)
 
     cough = call.speech()
     assert call.receive_until("speech_to_speech.interruption.pending")[-1]["playback"] == "pause"
-    assert _pending(call).min_speech_ms == 0
     call.stop(cough)
     call.final(cough, "")
     assert call.receive_until("speech_to_speech.interruption.resolved")[-1]["interrupted"] is False
-
-
-def test_reply_that_keeps_playing_still_commits_long_speech(call):
-    """Without the events a WebSocket client keeps playing, so long speech still cuts it."""
-    call.configure(True)
-    _coach_is_reading(call)
-
-    call.speech()
-    _wait_for(lambda: _pending(call) is not None)
-    assert _pending(call).min_speech_ms == DEFAULT_MIN_SPEECH_MS
 
 
 def test_tool_follow_up_during_a_cough_is_answered(call):
@@ -873,8 +844,6 @@ def test_server_flags_build_the_session_default():
     assert _default_false_interruption(flags) is None
     flags.false_interruption = "duck"
     assert _default_false_interruption(flags) == FalseInterruptionConfig(playback="duck", min_words=2, min_speech_ms=0)
-    flags.false_interruption, flags.false_interruption_min_speech_ms = "pause", None
-    assert _default_false_interruption(flags) == FalseInterruptionConfig(playback="pause", min_words=2)
 
 
 def test_router_pauses_playback_while_pending_and_resumes_after(call, monkeypatch):
