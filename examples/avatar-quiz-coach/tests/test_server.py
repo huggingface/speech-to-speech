@@ -42,6 +42,8 @@ def test_anonymous_visitor_must_sign_in_before_the_load_balancer_is_asked(server
     assert resp.json() == {"reason": "login_required", "loginUrl": "oauth/huggingface/login"}
     cfg = client.get("/api/config").json()
     assert cfg["loginRequired"] and cfg["user"] is None and cfg["loginUrl"]
+    pack_id = next(iter(server.FEATURED))
+    assert client.post("/api/game", json={"pack_id": pack_id}).status_code == 401
 
 
 def test_signed_in_visitor_opens_the_session_with_their_own_token(server, monkeypatch):
@@ -50,8 +52,11 @@ def test_signed_in_visitor_opens_the_session_with_their_own_token(server, monkey
     headers = server._upstream_headers(req, {})
     assert headers["Authorization"] == "Bearer hf_oauth_ada"
     assert headers["X-Reachy-Mini-Authorization"] == "Bearer hf_oauth_ada"
-    cfg = TestClient(server.app).get("/api/config").json()
+    client = TestClient(server.app)
+    cfg = client.get("/api/config").json()
     assert cfg["user"] == "ada" and cfg["avatar"].endswith("ada.png") and cfg["logoutUrl"]
+    game = client.post("/api/game", json={"pack_id": next(iter(server.FEATURED)), "player": "someone else"}).json()
+    assert game["player"] == "ada" and game["verified"]
 
 
 def test_expired_sign_in_counts_as_signed_out(server, monkeypatch):

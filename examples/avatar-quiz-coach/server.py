@@ -390,6 +390,9 @@ class StartRequest(BaseModel):
 
 @app.post("/api/game")
 def start_game(req: StartRequest, request: Request) -> dict[str, Any]:
+    # Grading spends the deployment's token, so on a Space only signed-in visitors play.
+    if _login_required(request):
+        raise HTTPException(status_code=401, detail="Sign in with Hugging Face to play.")
     pack = PACKS.get(req.pack_id)
     if pack is None:
         raise HTTPException(status_code=404, detail="Unknown topic pack.")
