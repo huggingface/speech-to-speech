@@ -1,16 +1,21 @@
 """One question per connection: the runner streams audio, reads the answer, and grades it."""
 
 import asyncio
+import base64
 import json
 import sys
+from hashlib import sha256
 from queue import Queue
 from threading import Event
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import numpy as np
 import pytest
+import soundfile as sf
 
 from speech_to_speech.api.openai_realtime.service import RealtimeService, build_error_event
+from speech_to_speech.evals.big_bench_audio import __main__ as cli
 from speech_to_speech.evals.big_bench_audio import runner as bba
 from speech_to_speech.evals.big_bench_audio.dataset import EvalItem, Subset
 from speech_to_speech.evals.big_bench_audio.report import aggregate
@@ -525,3 +530,69 @@ async def test_rejected_session_update_never_streams_audio(monkeypatch):
     result = await run_item(config(), ITEM, pcm_for(config()))
     assert "invalid session settings" in result.error
     assert socket.appends == 0
+
+
+@pytest.mark.parametrize("noisy", [False, True], ids=["clean", "background-noise"])
+async def test_run_report_preserves_question_identity_and_retries_same_pcm(monkeypatch, tmp_path, noisy):
+    from contextlib import asynccontextmanager
+
+    cfg = config(retries=1)
+    original = np.full(cfg.chunk_bytes, 30000, dtype="<i2")
+    noise_path = tmp_path / "ambient.wav"
+    sf.write(noise_path, np.tile([0.25, -0.25], 160), 16000)
+    output = tmp_path / "report.json"
+    argv = ["run", "--out", str(output)]
+    if noisy:
+        argv += ["--noise-file", str(noise_path), "--noise-snr-db", "0", "--noise-seed", "11"]
+    args = cli.build_parser().parse_args(argv)
+
+    @asynccontextmanager
+    async def ready_server(*args):
+        yield
+
+    clones = [
+        FakeSocket([{"type": "error", "error": {"message": "transient"}}], respond_after=4),
+        FakeSocket(transcript_events("Final answer: Yes."), respond_after=4),
+    ]
+    sessions = iter(clones)
+    monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(connect=lambda *a, **kw: next(sessions)))
+    monkeypatch.setattr(cli, "load_subset", lambda name: Subset("sample", (ITEM,)))
+    monkeypatch.setattr(cli, "_runner_config", lambda *args: cfg)
+    monkeypatch.setattr(cli, "_server", ready_server)
+    monkeypatch.setattr(bba, "resolve_audio", lambda *args: None)
+    decode = Mock(return_value=original.tobytes())
+    monkeypatch.setattr(bba, "load_pcm16_mono", decode)
+
+    assert await cli._run(args, []) == 0
+    decode.assert_called_once()
+    payloads = [
+        [base64.b64decode(event["audio"]) for event in socket.sent if event["type"] == "input_audio_buffer.append"]
+        for socket in clones
+    ]
+    assert payloads[0] == payloads[1]
+    question = b"".join(payloads[0][:2])
+    assert len(question) == original.nbytes
+    assert b"".join(payloads[0][2:]) == bytes(2 * cfg.chunk_bytes)
+
+    report = json.loads(output.read_text())
+    assert report["subset"]["ids"] == [ITEM.id]
+    assert [item["id"] for item in report["items"]] == [ITEM.id]
+    assert report["totals"]["correct"] == 1
+    condition = report["target"]["audio_condition"]
+    if noisy:
+        assert condition == {
+            "kind": "background_noise",
+            "version": 1,
+            "file_sha256": sha256(noise_path.read_bytes()).hexdigest(),
+            "snr_db": 0.0,
+            "seed": 11,
+        }
+        samples = np.frombuffer(question, dtype="<i2").astype(float)
+        # With equal-energy alternating noise, the mix alternates between full scale and zero.
+        assert np.all(np.sort(samples[:2]) == [0, 32767])
+        scaled_speech = np.full_like(samples, 32767 / 2)
+        measured_snr = 20 * np.log10(np.linalg.norm(scaled_speech) / np.linalg.norm(samples - scaled_speech))
+        assert measured_snr == pytest.approx(0.0, abs=0.001)
+    else:
+        assert question == original.tobytes()
+        assert condition == {"kind": "clean"}

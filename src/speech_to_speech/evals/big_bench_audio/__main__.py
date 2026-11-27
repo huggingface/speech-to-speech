@@ -31,6 +31,7 @@ from speech_to_speech.evals.big_bench_audio.dataset import (
 )
 from speech_to_speech.evals.big_bench_audio.hub import load_report, push_report
 from speech_to_speech.evals.big_bench_audio.judge import JudgeConfig, judge_results
+from speech_to_speech.evals.big_bench_audio.noise import BackgroundNoise
 from speech_to_speech.evals.big_bench_audio.report import (
     ItemResult,
     build_report,
@@ -217,10 +218,22 @@ async def _run(args: argparse.Namespace, server_args: list[str]) -> int:
     url = args.url or (_url_from_server_args(server_args) if args.spawn else DEFAULT_URL)
     config = _runner_config(args, url)
 
+    noise = None
+    if args.noise_file is not None:
+        try:
+            noise = BackgroundNoise.from_file(
+                args.noise_file,
+                snr_db=10.0 if args.noise_snr_db is None else args.noise_snr_db,
+                seed=0 if args.noise_seed is None else args.noise_seed,
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"Invalid background noise: {exc}", file=sys.stderr)
+            return 2
+
     started_at = datetime.now(timezone.utc)
     started = time.monotonic()
     async with _server(args, config, server_args):
-        results = await run_subset(subset, config, progress=_print_progress)
+        results = await run_subset(subset, config, progress=_print_progress, noise=noise)
     duration_s = time.monotonic() - started
 
     judge_meta: Optional[dict[str, Any]] = None
@@ -246,6 +259,7 @@ async def _run(args: argparse.Namespace, server_args: list[str]) -> int:
             "silence_ms": config.silence_duration_ms,
             "trailing_silence_ms": config.trailing_silence_ms,
             **runtime_metadata(),
+            "audio_condition": noise.metadata() if noise is not None else {"kind": "clean"},
         },
         judge=judge_meta,
         started_at=started_at,
@@ -318,6 +332,9 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
 
     parser.add_argument("--instructions", default=None, help="Override the eval system prompt.")
     parser.add_argument("--instructions-file", default=None, help="Read the eval system prompt from a file.")
+    parser.add_argument("--noise-file", type=Path, help="Local background audio to mix into each question.")
+    parser.add_argument("--noise-snr-db", type=float, help="Signal-to-noise ratio in dB (default 10).")
+    parser.add_argument("--noise-seed", type=int, help="Seed for selecting noise offsets (default 0).")
     parser.add_argument("--voice", default=None, help="TTS voice to request.")
     parser.add_argument("--speed", type=float, default=1.0, help="Audio send pacing, 1.0 = real time.")
     parser.add_argument("--silence-ms", type=int, default=900, help="server_vad silence_duration_ms for the run.")
@@ -380,6 +397,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _show(args)
     if args.command == "build-subset":
         return _build_subset(args)
+    if args.noise_file is None and (args.noise_snr_db is not None or args.noise_seed is not None):
+        parser.error("--noise-snr-db and --noise-seed require --noise-file")
     return asyncio.run(_run(args, server_args))
 
 

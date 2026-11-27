@@ -219,6 +219,32 @@ Use matched question sets, judge settings, and engine configurations; pinned
 questions do not make hosted models/providers immutable. Inspect individual
 failures before claiming an improvement.
 
+### Background noise in Big Bench Audio
+
+Use a local background recording that you have permission to use. Run the same
+subset and server configuration once with the original audio and once with noise.
+
+```bash
+python -m speech_to_speech.evals.big_bench_audio run --out clean.json
+python -m speech_to_speech.evals.big_bench_audio run --out noisy.json \
+  --noise-file ambient.wav --noise-snr-db 10 --noise-seed 0 --compare clean.json
+```
+
+The level is a signal-to-noise ratio in dB measured over the entire question
+recording before PCM rounding, including its embedded pauses. Higher values
+mean quieter noise. The runner chooses an offset using the seed and question ID,
+loops the recording when necessary, and attenuates both signals equally if their
+sum would clip. Entirely silent questions remain silent. An empty or silent
+background file is rejected. A selected silent window produces an item error.
+The runner leaves the appended trailing silence unchanged so the server can
+still detect the end of the question.
+
+The report records the condition under `target.audio_condition`, including the
+noise source's SHA-256, target dB, seed and mixing version when enabled. Keep the
+original noise file to reproduce the experiment. Join `items` by question ID
+to inspect which verdicts changed or which questions failed. Keep the dataset
+revision, question IDs, engine settings and judge fixed between runs.
+
 ### Tests
 
 ```bash

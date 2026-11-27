@@ -76,9 +76,9 @@ async def test_item_failure_preserves_and_uploads_other_results(monkeypatch, tmp
             error=error,
         )
 
-    async def run_subset(subset, config, progress):
+    async def run_subset(subset, config, progress, *, noise):
         config.settle_s = 0
-        return await runner.run_subset(subset, config, progress=progress)
+        return await runner.run_subset(subset, config, progress=progress, noise=noise)
 
     def push_report(report, repo_id, *, token):
         assert repo_id == "me/results"
