@@ -22,6 +22,8 @@ class Leaderboard:
         os.makedirs(self._dir, exist_ok=True)
         self._path = os.path.join(self._dir, FILENAME)
         self._lock = threading.Lock()
+        # Create the file up front, so a read-only or broken mount fails at startup, not after a quiz.
+        open(self._path, "a", encoding="utf-8").close()
         self._entries = self._load()
 
     def _load(self) -> list[dict[str, Any]]:

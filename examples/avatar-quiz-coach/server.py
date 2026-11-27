@@ -526,7 +526,7 @@ def leaderboard(slug: str | None = None, period: str = "all", limit: int = 10) -
 
 @app.get("/healthz", include_in_schema=False)
 def healthz() -> dict[str, Any]:
-    return {"ok": True, "packs": len(PACKS), "games": len(GAMES._games)}
+    return {"ok": True, "packs": len(PACKS), "games": len(GAMES._games), "data_dir": str(DATA_DIR)}
 
 
 if __name__ == "__main__":
