@@ -8,7 +8,13 @@ from typing import Iterator, Literal
 import numpy as np
 import pytest
 
-from speech_to_speech.pipeline.messages import PIPELINE_END, PartialTranscription, Transcription, VADAudio
+from speech_to_speech.pipeline.messages import (
+    PIPELINE_END,
+    PartialTranscription,
+    Transcription,
+    TranscriptionFailure,
+    VADAudio,
+)
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
@@ -43,14 +49,12 @@ def _vad_audio(
     turn_id: str = "turn_1",
     revision: int = 0,
     mode: Literal["progressive", "final"] | None = None,
-    processing_delay_s: float = 0.0,
 ) -> VADAudio:
     return VADAudio(
         audio=np.zeros(512, dtype=np.float32),
         mode=mode,
         turn_id=turn_id,
         turn_revision=revision,
-        processing_delay_s=processing_delay_s,
     )
 
 
@@ -191,28 +195,6 @@ def test_stt_handler_waits_for_final_revision_stability_window():
     handler = _handler(tracker, queue_in, queue_out, final_revision_settle_s=0.2)
 
     queue_in.put(_vad_audio(revision=0, mode="final"))
-    queue_in.put(PIPELINE_END)
-    thread = Thread(target=handler.run)
-    thread.start()
-
-    sleep(0.05)
-    candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
-    assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
-    thread.join(timeout=1.0)
-
-    assert not thread.is_alive()
-    assert handler.processed == []
-    assert queue_out.get_nowait() == PIPELINE_END
-
-
-def test_stt_handler_uses_per_endpoint_processing_delay():
-    tracker = SpeculativeTurnTracker()
-    tracker.start_turn()
-    queue_in = Queue()
-    queue_out = Queue()
-    handler = _handler(tracker, queue_in, queue_out)
-
-    queue_in.put(_vad_audio(revision=0, mode="final", processing_delay_s=0.2))
     queue_in.put(PIPELINE_END)
     thread = Thread(target=handler.run)
     thread.start()
@@ -386,27 +368,6 @@ def test_bulk_progressive_cleanup_preserves_same_revision_queued_final_latency()
     assert current.mlx_lock_wait_s == 0.02
 
 
-def test_stt_does_not_restart_expired_tracker_processing_delay(monkeypatch):
-    clock = [10.0]
-    monkeypatch.setattr("speech_to_speech.pipeline.speculative_turns.time.monotonic", lambda: clock[0])
-    monkeypatch.setattr("speech_to_speech.STT.base_stt_handler.monotonic", lambda: clock[0])
-    tracker = SpeculativeTurnTracker()
-    tracker.start_turn()
-    tracker.segment_finalized(1000, output_hold_ms=2000, processing_delay_ms=600)
-    clock[0] = 10.7
-    handler = _handler(tracker, Queue(), Queue())
-    item = _vad_audio(mode="final", processing_delay_s=0.6)
-    result = []
-    thread = Thread(target=lambda: result.append(handler.should_process_input(item)))
-    thread.start()
-    thread.join(timeout=0.2)
-    completed_without_new_wait = not thread.is_alive()
-    tracker.start_turn()
-    thread.join(timeout=1.0)
-    assert completed_without_new_wait
-    assert result == [True]
-
-
 class _SignalingSTTHandler(BaseSTTHandler):
     def setup(
         self,
@@ -431,13 +392,14 @@ def _start_smart_turn_stt(
     output_hold_ms: int = 2000,
     settle_s: float = 0.0,
     store: TurnLatencyStore | None = None,
-) -> tuple[SpeculativeTurnTracker, _SignalingSTTHandler, Queue, Thread]:
+) -> tuple[SpeculativeTurnTracker, object, _SignalingSTTHandler, Queue, Thread]:
     tracker = SpeculativeTurnTracker()
     tracker.start_turn()
-    tracker.segment_finalized(1000, pending_smart_turn_s=2.0)
+    token = tracker.segment_finalized(1000, pending_smart_turn_s=2.0)
+    assert token is not None
     if resolved_delay_ms is not None:
         assert tracker.resolve_smart_turn(
-            "turn_1", 0, output_hold_ms=output_hold_ms, processing_delay_ms=resolved_delay_ms
+            "turn_1", 0, output_hold_ms=output_hold_ms, processing_delay_ms=resolved_delay_ms, token=token
         )
     queue_in, queue_out = Queue(), Queue()
     handler = _SignalingSTTHandler(
@@ -452,16 +414,16 @@ def _start_smart_turn_stt(
     queue_in.put(PIPELINE_END)
     thread = Thread(target=handler.run)
     thread.start()
-    return tracker, handler, queue_out, thread
+    return tracker, token, handler, queue_out, thread
 
 
 def test_stt_runs_in_parallel_with_pending_smart_turn_and_emits_on_complete():
-    tracker, handler, queue_out, thread = _start_smart_turn_stt()
+    tracker, token, handler, queue_out, thread = _start_smart_turn_stt()
     assert handler.started.wait(1.0)
     sleep(0.03)
     assert queue_out.empty()
 
-    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=800, processing_delay_ms=0)
+    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=800, processing_delay_ms=0, token=token)
     thread.join(timeout=1.0)
     assert not thread.is_alive() and handler.processed == [("turn_1", 0)]
     emitted = queue_out.get_nowait()
@@ -470,9 +432,9 @@ def test_stt_runs_in_parallel_with_pending_smart_turn_and_emits_on_complete():
 
 
 def test_stt_enforces_incomplete_delay_after_parallel_transcription_and_drops_on_reopen():
-    tracker, handler, queue_out, thread = _start_smart_turn_stt()
+    tracker, token, handler, queue_out, thread = _start_smart_turn_stt()
     assert handler.started.wait(1.0)
-    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=2000, processing_delay_ms=300)
+    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=2000, processing_delay_ms=300, token=token)
     sleep(0.04)
     assert queue_out.empty()
 
@@ -484,12 +446,12 @@ def test_stt_enforces_incomplete_delay_after_parallel_transcription_and_drops_on
 @pytest.mark.parametrize(("settle_s", "delay_ms", "min_vad_settle"), [(0.0, 70, 0.05), (0.07, 180, 0.15)])
 def test_stt_emits_after_incomplete_delay_and_accumulates_vad_settle(settle_s, delay_ms, min_vad_settle):
     store = TurnLatencyStore()
-    tracker, handler, queue_out, thread = _start_smart_turn_stt(
+    tracker, token, handler, queue_out, thread = _start_smart_turn_stt(
         resolved_delay_ms=delay_ms if settle_s > 0 else None, output_hold_ms=500, settle_s=settle_s, store=store
     )
     if settle_s == 0:
         assert handler.started.wait(1.0)
-        assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=500, processing_delay_ms=delay_ms)
+        assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=500, processing_delay_ms=delay_ms, token=token)
     thread.join(timeout=1.0)
     assert not thread.is_alive() and isinstance(queue_out.get_nowait(), Transcription)
     assert queue_out.get_nowait() == PIPELINE_END
@@ -498,7 +460,7 @@ def test_stt_emits_after_incomplete_delay_and_accumulates_vad_settle(settle_s, d
 
 
 def test_stt_starts_immediately_when_incomplete_smart_turn_finishes_before_dequeue():
-    _, handler, queue_out, thread = _start_smart_turn_stt(resolved_delay_ms=200)
+    _, _, handler, queue_out, thread = _start_smart_turn_stt(resolved_delay_ms=200)
     assert handler.started.wait(0.08)
     sleep(0.04)
     assert queue_out.empty()
@@ -508,10 +470,33 @@ def test_stt_starts_immediately_when_incomplete_smart_turn_finishes_before_deque
 
 
 def test_stt_preserves_input_revision_settle_with_resolved_async_smart_turn():
-    tracker, handler, queue_out, thread = _start_smart_turn_stt(resolved_delay_ms=300, settle_s=0.08)
+    tracker, _, handler, queue_out, thread = _start_smart_turn_stt(resolved_delay_ms=300, settle_s=0.08)
     assert not handler.started.wait(0.03)
     assert handler.started.wait(0.15)
     assert queue_out.empty()
     reopen(tracker, "turn_1", 0)
     thread.join(timeout=1.0)
     assert not thread.is_alive() and queue_out.get_nowait() == PIPELINE_END
+
+
+def test_rejected_stale_transcription_failure_discards_pending_latency():
+    tracker = SpeculativeTurnTracker()
+    tracker.start_turn()
+    token = tracker.segment_finalized(1000, pending_smart_turn_s=2.0)
+    assert token is not None
+    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=2000, processing_delay_ms=300, token=token)
+    handler = _handler(tracker, Queue(), Queue())
+    store = handler.turn_latency_store = TurnLatencyStore()
+    store.get_or_create_for_turn("turn_1", 0).vad_decision_s = 0.2
+    result: list[bool] = []
+    thread = Thread(
+        target=lambda: result.append(
+            handler.should_emit_output(TranscriptionFailure(message="boom", turn_id="turn_1", turn_revision=0))
+        )
+    )
+    thread.start()
+    sleep(0.03)
+    reopen(tracker, "turn_1", 0)
+    thread.join(timeout=1.0)
+    assert not thread.is_alive() and result == [False]
+    assert store.pending_for_turn("turn_1", 0) is None

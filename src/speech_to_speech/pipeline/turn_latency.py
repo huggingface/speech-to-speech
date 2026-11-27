@@ -11,6 +11,7 @@ from time import perf_counter
 from typing import Callable, Literal
 
 TurnLatencyStatus = Literal["completed", "cancelled", "failed", "incomplete"]
+SmartTurnStatus = Literal["disabled", "complete", "incomplete", "failed", "timeout"]
 TURN_LATENCY_METADATA_KEY = "speech_to_speech.turn_latency"
 
 _active_tracker: ContextVar[TurnLatencyTracker | None] = ContextVar(
@@ -115,7 +116,7 @@ class TurnLatencyTracker:
     vad_settle_s: float | None = None
     vad_decision_s: float | None = None
     smart_turn_analysis_s: float | None = None
-    smart_turn_status: Literal["disabled", "complete", "incomplete", "failed"] | None = None
+    smart_turn_status: SmartTurnStatus | None = None
     smart_turn_grace_s: float | None = None
     smart_turn_processing_delay_s: float | None = None
     smart_turn_wait_s: float | None = None
@@ -188,7 +189,7 @@ class TurnLatencyTracker:
 
     def record_smart_wait(self, started_at_s: float, ended_at_s: float) -> None:
         """Count the union of actual gate waits, since workers can wait together."""
-        if self.smart_turn_status not in ("complete", "incomplete", "failed") or ended_at_s <= started_at_s:
+        if self.smart_turn_status not in ("complete", "incomplete", "failed", "timeout") or ended_at_s <= started_at_s:
             return
         intervals = self._smart_wait_intervals or []
         intervals.append((started_at_s, ended_at_s))
@@ -428,7 +429,7 @@ class TurnLatencyStore:
         turn_id: str | None,
         turn_revision: int | None,
         *,
-        status: Literal["disabled", "complete", "incomplete", "failed"],
+        status: SmartTurnStatus,
         analysis_s: float | None,
         grace_s: float | None = None,
         processing_delay_s: float | None = None,

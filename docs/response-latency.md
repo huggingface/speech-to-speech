@@ -146,8 +146,9 @@ that lock is not contended, and hold is omitted entirely when nothing held it.
   captured before processing limit its accuracy. It is
   `null` if the iterator provides no speech-end sample position.
 - `smart_status` is the Smart Turn decision: `complete`, `incomplete`, `failed`,
-  or `disabled`. Failure still falls back to the ordinary short reopen grace
-  without an extra processing delay; no inference or speculation policy changes.
+  `timeout`, or `disabled`. Failure or timeout still falls back to the ordinary
+  short reopen grace without an extra processing delay; no inference or
+  speculation policy changes.
 - `hold` in logs (`hold_s` in metadata) is the elapsed time workers actually
   spend blocked by the Smart Turn processing delay or output grace. Overlapping
   waits count once. A grace window with no blocked worker adds no hold time.

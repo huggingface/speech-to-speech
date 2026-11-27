@@ -7,7 +7,7 @@ from typing import Any
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
-from speech_to_speech.pipeline.messages import PartialTranscription, Transcription, VADAudio
+from speech_to_speech.pipeline.messages import PartialTranscription, Transcription, TranscriptionFailure, VADAudio
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
 logger = logging.getLogger(__name__)
@@ -128,7 +128,7 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
         if is_latest and not is_partial and gate_wait_s >= self._GATE_WAIT_REPORT_S:
             self._record_vad_settle(output, gate_wait_s)
         if not is_latest:
-            if isinstance(output, (Transcription, PartialTranscription)):
+            if isinstance(output, (Transcription, PartialTranscription, TranscriptionFailure)):
                 # Rejected output never reaches the service's final-STT cleanup.
                 self._discard_pending_latency(output)
             self._log_stale_turn_item(output, "output")
@@ -162,12 +162,9 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
                 hold_for_processing=True,
             )
         if wait_for_stability:
-            hold_s = self.final_revision_settle_s
-            item_delay_s = getattr(item, "processing_delay_s", 0.0)
-            if item_delay_s > 0.0 and self.speculative_turns.processing_deadline(turn_id, turn_revision) is None:
-                hold_s = max(hold_s, item_delay_s - self._item_age_s(item))
+            hold_until = monotonic() + self.final_revision_settle_s if self.final_revision_settle_s > 0 else None
             return self.speculative_turns.wait_for_gate(
-                turn_id, turn_revision, hold_for_grace=False, hold_until=monotonic() + hold_s if hold_s > 0 else None
+                turn_id, turn_revision, hold_for_grace=False, hold_until=hold_until
             )
         if wait_for_pending_reopen:
             return self.speculative_turns.wait_for_gate(turn_id, turn_revision, hold_for_grace=False)

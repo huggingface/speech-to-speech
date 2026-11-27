@@ -835,7 +835,6 @@ def test_vad_complete_smart_turn_selects_shorter_speculative_grace():
         _wait_for_smart_turn(handler)
 
         assert len(outputs) == 1
-        assert outputs[0].processing_delay_s == 0.0
         deadline = handler.speculative_turns.processing_deadline("turn_1", 0)
         assert deadline is not None and deadline <= time.monotonic()
         grace = handler.speculative_turns._reopen_grace
@@ -855,7 +854,6 @@ def test_vad_incomplete_smart_turn_selects_longer_speculative_grace():
         _wait_for_smart_turn(handler)
 
         assert len(outputs) == 1
-        assert outputs[0].processing_delay_s == 0.0
         deadline = handler.speculative_turns.processing_deadline("turn_1", 0)
         assert deadline is not None
         assert 0.4 < deadline - time.monotonic() <= 0.6
@@ -1544,15 +1542,16 @@ def test_vad_smart_turn_runs_in_parallel_without_blocking_vad_process():
     analyzer = _BlockingSmartTurnAnalyzer([SmartTurnResult(complete=False, probability=0.2, inference_ms=40.0)])
     with _smart_turn_vad(analyzer) as handler:
         outputs = _drive_final_segment(handler)
-        assert len(outputs) == 1 and outputs[0].processing_delay_s == 0.0
+        assert len(outputs) == 1
         assert analyzer.started_events[0].wait(1.0)
-        assert handler.speculative_turns.has_pending_smart_turn("turn_1", 0)
+        pending = handler.speculative_turns._pending_smart_turn
+        assert pending is not None and handler.speculative_turns.has_pending_smart_turn(pending.token)
         handler.iterator = _StaticVADIterator(triggered=False, vad_output=None)
         assert list(handler.process(_audio_bytes())) == []
 
         analyzer.release_events[0].set()
         _wait_for_smart_turn(handler)
-        assert not handler.speculative_turns.has_pending_smart_turn("turn_1", 0)
+        assert not handler.speculative_turns.has_pending_smart_turn(pending.token)
         deadline = handler.speculative_turns.processing_deadline("turn_1", 0)
         assert deadline is not None and 0.3 < deadline - time.monotonic() <= 0.6
 
@@ -1609,17 +1608,18 @@ def test_vad_smart_turn_session_end_invalidates_inflight_and_late_publish(monkey
             handler.turn_latency_store = store_b
             handler.smart_turn_analyzer = analyzer_b
             _drive_final_segment(handler)
-            assert handler.speculative_turns.has_pending_smart_turn("turn_1", 0)
+            pending_b_slot = handler.speculative_turns._pending_smart_turn
+            assert pending_b_slot is not None and handler.speculative_turns.has_pending_smart_turn(pending_b_slot.token)
 
             resume_publish.set()
             assert analyzer_b.started_events[0].wait(1.0)
-            assert handler.speculative_turns.has_pending_smart_turn("turn_1", 0)
+            assert handler.speculative_turns.has_pending_smart_turn(pending_b_slot.token)
             pending_b = store_b.pending_for_turn("turn_1", 0)
             assert pending_b is None or pending_b.smart_turn_status is None
 
             analyzer_b.release_events[0].set()
             _wait_for_smart_turn(handler)
-            assert not handler.speculative_turns.has_pending_smart_turn("turn_1", 0)
+            assert not handler.speculative_turns.has_pending_smart_turn(pending_b_slot.token)
             pending_b = store_b.pending_for_turn("turn_1", 0)
             assert pending_b is not None and pending_b.smart_turn_status == "complete"
         finally:
@@ -1631,10 +1631,11 @@ def test_vad_smart_turn_session_end_invalidates_inflight_and_late_publish(monkey
 def test_resolve_smart_turn_anchors_deadlines_to_finalized_at(clock):
     tracker = SpeculativeTurnTracker()
     tracker.speech_started(0)
-    tracker.segment_finalized(1000, pending_smart_turn_s=2.0)
+    token = tracker.segment_finalized(1000, pending_smart_turn_s=2.0)
+    assert token is not None
     clock[0] += 0.15
-    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=2000, processing_delay_ms=600)
-    assert not tracker.has_pending_smart_turn("turn_1", 0)
+    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=2000, processing_delay_ms=600, token=token)
+    assert not tracker.has_pending_smart_turn(token)
     assert tracker.processing_deadline("turn_1", 0) == pytest.approx(100.6)
     assert tracker._reopen_grace is not None and tracker._reopen_grace.deadline == pytest.approx(102.0)
 
@@ -1645,7 +1646,8 @@ def test_wait_for_gate_hold_for_processing_excludes_smart_turn_wait_and_charges_
     observed: list[tuple[str, int, float, float]] = []
     tracker.wait_observer = lambda tid, rev, start, end: observed.append((tid, rev, start, end))
     tracker.start_turn()
-    tracker.segment_finalized(1000, pending_smart_turn_s=2.0)
+    token = tracker.segment_finalized(1000, pending_smart_turn_s=2.0)
+    assert token is not None
 
     results: list[bool] = []
     thread = Thread(
@@ -1657,7 +1659,7 @@ def test_wait_for_gate_hold_for_processing_excludes_smart_turn_wait_and_charges_
     time.sleep(0.03)
     assert thread.is_alive()
     resolved_at = time.perf_counter()
-    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=800, processing_delay_ms=delay_ms)
+    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=800, processing_delay_ms=delay_ms, token=token)
     thread.join(timeout=1.0)
     assert not thread.is_alive() and results == [True]
     if expect_observed:
@@ -1677,7 +1679,7 @@ def test_vad_smart_turn_unexpected_worker_exception_logs_and_releases_pending(ca
         with caplog.at_level(logging.ERROR, logger="speech_to_speech.VAD.vad_handler"):
             _drive_final_segment(handler)
             _wait_for_smart_turn(handler)
-        assert not handler.speculative_turns.has_pending_smart_turn("turn_1", 0)
+        assert handler.speculative_turns._pending_smart_turn is None
         deadline = handler.speculative_turns.processing_deadline("turn_1", 0)
         assert deadline is not None and deadline <= time.monotonic()
         assert handler.speculative_turns._reopen_grace is not None
@@ -1685,6 +1687,66 @@ def test_vad_smart_turn_unexpected_worker_exception_logs_and_releases_pending(ca
         pending = store.pending_for_turn("turn_1", 0)
         assert pending is not None and pending.smart_turn_status == "failed"
         assert any("Smart Turn worker failed" in record.getMessage() for record in caplog.records)
+
+
+def test_vad_smart_turn_rejects_late_result_after_window_and_records_timeout(monkeypatch):
+    from speech_to_speech.pipeline.messages import Transcription
+    from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
+
+    analyzer = _BlockingSmartTurnAnalyzer([SmartTurnResult(complete=False, probability=0.1, inference_ms=50.0)])
+    store = TurnLatencyStore()
+    resolve_returns: list[bool] = []
+    with _smart_turn_vad(analyzer, store=store) as handler:
+        orig_finalize = handler.speculative_turns.segment_finalized
+        monkeypatch.setattr(
+            handler.speculative_turns,
+            "segment_finalized",
+            lambda audio_ms, **kw: orig_finalize(audio_ms, **{**kw, "pending_smart_turn_s": 0.05}),
+        )
+        orig_resolve = handler.speculative_turns.resolve_smart_turn
+
+        def spy_resolve(*args, **kwargs):
+            res = orig_resolve(*args, **kwargs)
+            resolve_returns.append(res)
+            return res
+
+        monkeypatch.setattr(handler.speculative_turns, "resolve_smart_turn", spy_resolve)
+        _drive_final_segment(handler)
+        assert analyzer.started_events[0].wait(1.0)
+
+        stt = object.__new__(BaseSTTHandler)
+        stt.speculative_turns = handler.speculative_turns
+        stt.turn_latency_store = store
+        # Hold classifier past the 50ms pending window: final transcript emits on timeout.
+        assert stt.should_emit_output(Transcription(text="hello", turn_id="turn_1", turn_revision=0))
+        pending = store.pending_for_turn("turn_1", 0)
+        assert pending is not None and pending.smart_turn_status == "timeout"
+
+        # Releasing the late incomplete decision must be rejected and keep the timeout status.
+        analyzer.release_events[0].set()
+        _wait_for_smart_turn(handler)
+        assert resolve_returns == [False]
+        assert pending.smart_turn_status == "timeout"
+        assert handler.speculative_turns.processing_deadline("turn_1", 0) is None
+
+
+def test_vad_smart_turn_skips_expired_job_before_classify_and_records_timeout(clock, monkeypatch):
+    analyzer = _StaticSmartTurnAnalyzer(SmartTurnResult(complete=False, probability=0.1, inference_ms=10.0))
+    store = TurnLatencyStore()
+    submitted: list[tuple] = []
+    with _smart_turn_vad(analyzer, store=store) as handler:
+        monkeypatch.setattr(handler, "_submit_smart_turn", lambda *args: submitted.append(args))
+        _drive_final_segment(handler)
+        assert len(submitted) == 1
+        turn_id, turn_revision, audio, submitted_analyzer, token = submitted[0]
+        clock[0] += 3.0
+        handler._run_smart_turn(turn_id, turn_revision, audio, handler.sample_rate, submitted_analyzer, token)
+        assert analyzer.calls == []
+        pending = store.pending_for_turn("turn_1", 0)
+        assert pending is not None and pending.smart_turn_status == "timeout"
+        assert not handler.speculative_turns.resolve_smart_turn(
+            turn_id, turn_revision, output_hold_ms=800, processing_delay_ms=600, token=token
+        )
 
 
 @pytest.mark.parametrize("stopping", [True, False])

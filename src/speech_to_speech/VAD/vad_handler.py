@@ -640,6 +640,18 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             self._run_smart_turn, turn_id, turn_revision, audio.copy(), self.sample_rate, analyzer, token
         )
 
+    def _record_smart_turn_timeout(self, turn_id: str | None, turn_revision: int | None, store: Any) -> None:
+        logger.warning("Smart Turn timed out for turn=%s rev=%s; releasing without decision", turn_id, turn_revision)
+        if store is not None:
+            store.record_smart_turn(
+                turn_id,
+                turn_revision,
+                status="timeout",
+                analysis_s=None,
+                grace_s=self.speculative_reopen_ms / 1000.0,
+                processing_delay_s=0.0,
+            )
+
     def _run_smart_turn(
         self,
         turn_id: str | None,
@@ -649,7 +661,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         analyzer: Any,
         token: object,
     ) -> None:
-        if not self.speculative_turns.has_pending_smart_turn(token=token):
+        if not self.speculative_turns.has_pending_smart_turn(token):
             return
         try:
             status, analysis_s, reopen_grace_ms, processing_delay_ms = self._classify_smart_turn(
@@ -1026,6 +1038,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     pending_smart_turn_s=max(2.0, self.smart_turn_max_wait_ms / 1000.0)
                     if analyzer is not None
                     else None,
+                    on_smart_turn_timeout=partial(self._record_smart_turn_timeout, turn_id, turn_revision, store)
+                    if analyzer is not None
+                    else None,
                 )
                 if analyzer is not None and smart_turn_token is not None:
                     self._submit_smart_turn(turn_id, turn_revision, analysis_audio, analyzer, smart_turn_token)
@@ -1039,7 +1054,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     mode="final",
                     turn_id=turn_id,
                     turn_revision=turn_revision,
-                    processing_delay_s=0.0,
                     speech_end_at_s=speech_end_at_s,
                 )
                 self.last_process_time = 0.0

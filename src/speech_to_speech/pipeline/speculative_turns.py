@@ -68,7 +68,8 @@ class _PendingSmartTurn:
     revision: int
     finalized_at: float
     deadline: float
-    token: object | None = None
+    token: object
+    on_timeout: Callable[[], None] | None = None
 
 
 class SpeculativeTurnTracker:
@@ -164,6 +165,7 @@ class SpeculativeTurnTracker:
         processing_delay_ms: int = 0,
         *,
         pending_smart_turn_s: float | None = None,
+        on_smart_turn_timeout: Callable[[], None] | None = None,
     ) -> object | None:
         """Record audio timing and Smart Turn deadlines for this revision."""
         with self._condition:
@@ -181,6 +183,7 @@ class SpeculativeTurnTracker:
                     now,
                     now + max(0.0, pending_smart_turn_s),
                     token,
+                    on_smart_turn_timeout,
                 )
                 self._processing_deadline = None
             else:
@@ -197,18 +200,19 @@ class SpeculativeTurnTracker:
         *,
         output_hold_ms: int,
         processing_delay_ms: int = 0,
-        token: object | None = None,
+        token: object,
         on_resolve: Callable[[], None] | None = None,
     ) -> bool:
         """Apply a background Smart Turn result anchored to segment finalization."""
         if turn_id is None or revision is None:
             return False
         with self._condition:
+            self._expire_pending_smart_turn_locked()
             pending = self._pending_smart_turn
             if (
                 pending is None
                 or (pending.turn_id, pending.revision) != (turn_id, revision)
-                or (token is not None and pending.token is not token)
+                or pending.token is not token
             ):
                 return False
             finalized_at = pending.finalized_at
@@ -229,20 +233,11 @@ class SpeculativeTurnTracker:
                 self._condition.notify_all()
             return True
 
-    def has_pending_smart_turn(
-        self,
-        turn_id: str | None = None,
-        revision: int | None = None,
-        *,
-        token: object | None = None,
-    ) -> bool:
+    def has_pending_smart_turn(self, token: object) -> bool:
         with self._condition:
+            self._expire_pending_smart_turn_locked()
             pending = self._pending_smart_turn
-            if pending is None or pending.deadline <= time.monotonic():
-                return False
-            if token is not None and pending.token is not token:
-                return False
-            return (turn_id is None and revision is None) or (pending.turn_id, pending.revision) == (turn_id, revision)
+            return pending is not None and pending.token is token
 
     def segment_discarded(self) -> None:
         """End detected speech that VAD cannot release as a valid segment."""
@@ -589,13 +584,24 @@ class SpeculativeTurnTracker:
             and pending.deadline > time.monotonic()
         )
 
+    def _expire_pending_smart_turn_locked(self) -> None:
+        pending = self._pending_smart_turn
+        if pending is None or pending.deadline > time.monotonic():
+            return
+        self._pending_smart_turn = None
+        try:
+            if pending.on_timeout is not None:
+                pending.on_timeout()
+        finally:
+            self._condition.notify_all()
+
     def _smart_turn_holds_locked(self, turn_id: str, revision: int) -> bool:
+        self._expire_pending_smart_turn_locked()
         pending = self._pending_smart_turn
         return (
             pending is not None
             and (pending.turn_id, pending.revision) == (turn_id, revision)
             and self._is_current_locked(turn_id, revision)
-            and pending.deadline > time.monotonic()
         )
 
     def _grace_matches_locked(self, turn_id: str, revision: int) -> bool:

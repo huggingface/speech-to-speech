@@ -25,30 +25,6 @@ def _notifier(
     return notifier
 
 
-def test_audio_input_notifier_uses_per_endpoint_processing_delay():
-    tracker = SpeculativeTurnTracker()
-    tracker.start_turn()
-    notifier = _notifier(speculative_turns=tracker)
-    item = VADAudio(
-        audio=np.zeros(1600, dtype=np.float32),
-        mode="final",
-        turn_id="turn_1",
-        turn_revision=0,
-        processing_delay_s=0.2,
-    )
-    result: list[bool] = []
-    thread = Thread(target=lambda: result.append(notifier.should_process_input(item)))
-    thread.start()
-
-    sleep(0.05)
-    candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
-    assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
-    thread.join(timeout=1.0)
-
-    assert not thread.is_alive()
-    assert result == [False]
-
-
 def test_audio_input_notifier_ignores_progressive_audio():
     notifier = _notifier()
     audio = np.zeros(1600, dtype=np.float32)
@@ -97,39 +73,10 @@ def test_audio_input_notifier_routes_final_audio_through_realtime_service_queue(
     assert event.turn_revision == 2
 
 
-def test_notifier_does_not_restart_expired_tracker_processing_delay(monkeypatch):
-    clock = [10.0]
-    monkeypatch.setattr("speech_to_speech.pipeline.speculative_turns.time.monotonic", lambda: clock[0])
-    monkeypatch.setattr("speech_to_speech.LLM.audio_input_notifier.monotonic", lambda: clock[0])
-    tracker = SpeculativeTurnTracker()
+def _run_notifier_smart_turn(tracker: SpeculativeTurnTracker) -> tuple[object, Thread, list[bool]]:
     tracker.start_turn()
-    tracker.segment_finalized(1000, output_hold_ms=2000, processing_delay_ms=600)
-    clock[0] = 10.7
-    # Audio processing can finish after the original debounce deadline. Its
-    # later message creation must not start a second wait from that point.
-    item = VADAudio(
-        audio=np.zeros(1600, dtype=np.float32),
-        mode="final",
-        turn_id="turn_1",
-        turn_revision=0,
-        processing_delay_s=0.6,
-    )
-    notifier = _notifier(speculative_turns=tracker)
-    result = []
-    thread = Thread(target=lambda: result.append(notifier.should_process_input(item)))
-    thread.start()
-    thread.join(timeout=0.2)
-    completed_without_new_wait = not thread.is_alive()
-    # Always release a failed baseline waiter before asserting.
-    tracker.start_turn()
-    thread.join(timeout=1.0)
-    assert completed_without_new_wait
-    assert result == [True]
-
-
-def _run_notifier_smart_turn(tracker: SpeculativeTurnTracker) -> tuple[Thread, list[bool]]:
-    tracker.start_turn()
-    tracker.segment_finalized(1000, pending_smart_turn_s=2.0)
+    token = tracker.segment_finalized(1000, pending_smart_turn_s=2.0)
+    assert token is not None
     notifier = _notifier(speculative_turns=tracker)
     item = VADAudio(audio=np.zeros(1600, dtype=np.float32), mode="final", turn_id="turn_1", turn_revision=0)
     result: list[bool] = []
@@ -137,13 +84,13 @@ def _run_notifier_smart_turn(tracker: SpeculativeTurnTracker) -> tuple[Thread, l
     thread.start()
     sleep(0.03)
     assert thread.is_alive()
-    return thread, result
+    return token, thread, result
 
 
 def test_audio_input_notifier_waits_for_pending_smart_turn_and_incomplete_delay():
     tracker = SpeculativeTurnTracker()
-    thread, result = _run_notifier_smart_turn(tracker)
-    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=2000, processing_delay_ms=250)
+    token, thread, result = _run_notifier_smart_turn(tracker)
+    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=2000, processing_delay_ms=250, token=token)
     sleep(0.04)
     assert thread.is_alive()
     reopen(tracker, "turn_1", 0)
@@ -153,7 +100,7 @@ def test_audio_input_notifier_waits_for_pending_smart_turn_and_incomplete_delay(
 
 def test_audio_input_notifier_proceeds_immediately_when_smart_turn_resolves_complete():
     tracker = SpeculativeTurnTracker()
-    thread, result = _run_notifier_smart_turn(tracker)
-    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=800, processing_delay_ms=0)
+    token, thread, result = _run_notifier_smart_turn(tracker)
+    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=800, processing_delay_ms=0, token=token)
     thread.join(timeout=1.0)
     assert not thread.is_alive() and result == [True]
