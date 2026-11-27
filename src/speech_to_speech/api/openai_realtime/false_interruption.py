@@ -367,6 +367,12 @@ class PendingInterruption:
             self._speech_started(event, time.monotonic())
             return Verdict.CONFIRM if self._long_enough() else Verdict.HOLD
         if revision != self.revision:
+            if (
+                isinstance(event, TranscriptionCompletedEvent)
+                and self.config.word_count(event.transcript) >= self.config.min_words
+            ):
+                # "Wait." before the user went on: the words were said, whatever follows.
+                return Verdict.CONFIRM
             return Verdict.DROP
         self.events.append(event)
         if isinstance(event, PartialTranscriptionEvent):

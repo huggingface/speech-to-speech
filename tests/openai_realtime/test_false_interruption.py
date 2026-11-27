@@ -199,6 +199,16 @@ def test_events_of_a_replaced_revision_are_dropped():
     assert pending.revisions == {0, 1}
 
 
+def test_words_of_a_replaced_revision_still_commit():
+    """VAD split "Wait. Wait, can you..." and reopened the turn before "Wait." was transcribed."""
+    pending = PendingInterruption.begin(
+        SpeechStartedEvent(turn_id="turn_2", turn_revision=0), FalseInterruptionConfig()
+    )
+    pending.observe(SpeechStartedEvent(turn_id="turn_2", turn_revision=1, reopened=True))
+    late = TranscriptionCompletedEvent(transcript="Wait.", turn_id="turn_2", turn_revision=0)
+    assert pending.observe(late) is Verdict.CONFIRM
+
+
 # ── Session configuration ────────────────────────────────────────────
 
 
