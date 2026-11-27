@@ -18,7 +18,7 @@ from typing import Any, Iterator, Optional
 import numpy as np
 
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.console import console
+from speech_to_speech.pipeline.console import console as console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -360,8 +360,6 @@ class KokoroTTSHandler(BaseTTSHandler):
                 except Exception as e:
                     logger.warning(f"Failed to switch language/voice: {e}. Keeping current language: {self.lang_code}")
 
-            console.print(f"[green]ASSISTANT: {llm_sentence}")
-
             timer = self._latency_timer(tts_input, gen)
 
             # Generate audio using the preloaded pipeline directly
@@ -371,6 +369,9 @@ class KokoroTTSHandler(BaseTTSHandler):
                 voice=self.voice,
                 speed=self.speed,
             ):
+                if self._is_stale(gen):
+                    logger.info("TTS generation cancelled (interruption)")
+                    return
                 if result.audio is None:
                     continue
                 # result.audio is an mx.array with shape (1, samples), convert to numpy and squeeze
@@ -442,11 +443,12 @@ class KokoroTTSHandler(BaseTTSHandler):
             new_voice = self._load_requested_voice(self.pipeline, new_voice)
         self.voice = new_voice
 
-        console.print(f"[green]ASSISTANT: {llm_sentence}")
-
         # Generate audio using Kokoro
         # The pipeline yields tuples of (graphemes, phonemes, audio)
         for gs, ps, audio in self.pipeline(llm_sentence, voice=self.voice, speed=self.speed):
+            if self._is_stale(gen):
+                logger.info("TTS generation cancelled (interruption)")
+                return
             if audio is None:
                 continue
 

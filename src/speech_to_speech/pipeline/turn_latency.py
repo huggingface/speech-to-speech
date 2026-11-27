@@ -521,13 +521,18 @@ class TTSResponseTimer:
         response_key: str | None,
         speech_stopped_at_s: float | None,
         is_cancelled: Callable[[], bool] | None = None,
+        *,
+        defer_until_commit: bool = False,
     ) -> None:
         self._store = store
         self._response_key = response_key
         self._speech_stopped_at_s = speech_stopped_at_s
         self._is_cancelled = is_cancelled
+        self._defer_until_commit = defer_until_commit
         self._provider_done = False
         self._yield_done = False
+        self._pending_provider_ttfa_s: float | None = None
+        self.provider_ttfa_s: float | None = None
         self.started_at_s = perf_counter()
 
     def _cancelled(self) -> bool:
@@ -549,23 +554,44 @@ class TTSResponseTimer:
         return perf_counter() - self._speech_stopped_at_s
 
     def first_provider_audio(self, at_s: float | None = None) -> bool:
-        """Record synthesis start to first model/provider audio; once per timer."""
+        """Record synthesis start to first model/provider audio; once per timer.
+
+        When ``defer_until_commit`` is enabled for an uncommitted speculative
+        turn, the measurement is captured locally and only published once
+        :meth:`publish_provider_audio` is called after the turn commits.
+        """
         if self._provider_done or self._cancelled():
             return False
         self._provider_done = True
         now = perf_counter() if at_s is None else at_s
-        record_response_tts_ttfa(self._store, self._response_key, now - self.started_at_s)
+        ttfa_s = max(0.0, now - self.started_at_s)
+        self.provider_ttfa_s = ttfa_s
+        if self._defer_until_commit:
+            self._pending_provider_ttfa_s = ttfa_s
+        else:
+            record_response_tts_ttfa(self._store, self._response_key, ttfa_s)
         return True
+
+    def publish_provider_audio(self) -> float | None:
+        """Publish deferred provider TTFA once speculative first audio commits."""
+        self._defer_until_commit = False
+        pending = self._pending_provider_ttfa_s
+        self._pending_provider_ttfa_s = None
+        if pending is None:
+            return None
+        record_response_tts_ttfa(self._store, self._response_key, pending)
+        return pending
 
     def first_yield(self, *, ignore_cancel: bool = False) -> float | None:
         """Record speech stop to first yielded block.
 
         Returns the recorded seconds, or None when nothing was recorded (already
-        done, cancelled, unknown speech stop, or the response is not tracked).
-        ``ignore_cancel`` is for callers that yield the block regardless of a
-        cancel flag that flipped after their own last check.
+        done, deferred pending speculative commit, cancelled, unknown speech
+        stop, or the response is not tracked). ``ignore_cancel`` is for callers
+        that yield the block regardless of a cancel flag that flipped after
+        their own last check.
         """
-        if self._yield_done or (not ignore_cancel and self._cancelled()):
+        if self._yield_done or self._defer_until_commit or (not ignore_cancel and self._cancelled()):
             return None
         self._yield_done = True
         elapsed_s = self.speech_stop_elapsed_s()

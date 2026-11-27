@@ -10,7 +10,6 @@ from typing import Any, Callable, Iterator, cast
 import numpy as np
 
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
@@ -307,8 +306,6 @@ class PocketTTSHandler(BaseTTSHandler):
         language_code = tts_input.tts_language_code
         text = tts_input.text
         logger.debug(f"Received language code: {language_code}")
-
-        console.print(f"[green]ASSISTANT: {text}")
 
         # Generate audio stream
         logger.debug("Generating audio: %s", transcript_for_log(text))

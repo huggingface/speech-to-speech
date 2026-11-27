@@ -5,7 +5,13 @@ import time
 
 import pytest
 
-from speech_to_speech.utils.mlx_lock import MLXLockContext, hand_over_mlx_lock
+from speech_to_speech.utils.mlx_lock import (
+    MLXLockContext,
+    acquire_mlx_lock,
+    hand_over_mlx_lock,
+    release_mlx_lock,
+    suspend_mlx_lock,
+)
 
 
 def _waiter(order: list[str], name: str, priority: bool, started: threading.Event) -> threading.Thread:
@@ -87,3 +93,29 @@ def test_hand_over_without_waiters_or_without_the_lock_does_nothing():
         with MLXLockContext(handler_name="TTS"):
             # Held re-entrantly: releasing once would not free it.
             assert hand_over_mlx_lock("TTS") is False
+
+
+def test_suspend_mlx_lock_releases_and_restores_reentrant_owner():
+    def try_acquire(timeout: float) -> bool:
+        got: list[bool] = []
+
+        def run() -> None:
+            ok = acquire_mlx_lock(timeout=timeout, handler_name="Other")
+            got.append(ok)
+            if ok:
+                release_mlx_lock(handler_name="Other")
+
+        t = threading.Thread(target=run)
+        t.start()
+        t.join(1.0)
+        return got == [True]
+
+    # Non-owner suspension must release _mlx_lock_state before yielding so
+    # unrelated MLX threads can acquire an idle lock during the suspension.
+    with suspend_mlx_lock():
+        assert try_acquire(0.1) is True
+
+    with MLXLockContext(handler_name="TTS"), MLXLockContext(handler_name="TTS"):
+        with suspend_mlx_lock():
+            assert try_acquire(0.1) is True
+        assert try_acquire(0.02) is False

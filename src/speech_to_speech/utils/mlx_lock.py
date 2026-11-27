@@ -23,6 +23,8 @@ fix does not remove the need for this lock.
 
 import logging
 import types
+from collections.abc import Iterator
+from contextlib import contextmanager
 from threading import Lock, RLock, current_thread, get_ident
 from time import perf_counter, sleep
 from typing import Literal
@@ -240,6 +242,29 @@ def hand_over_mlx_lock(handler_name: str = "Unknown") -> bool:
         sleep(0.0005)
     acquire_mlx_lock(handler_name=handler_name)
     return True
+
+
+@contextmanager
+def suspend_mlx_lock() -> Iterator[None]:
+    """Release the MLX lock while its owner blocks on non-MLX work, then re-acquire."""
+    with _mlx_lock_state:
+        if _lock_owner_ident == get_ident() and _lock_depth > 0:
+            depth = _lock_depth
+            handler_name = _lock_owner_handler or "Unknown"
+        else:
+            depth = 0
+            handler_name = "Unknown"
+    if depth == 0:
+        yield
+        return
+    _synchronize_mlx()
+    for _ in range(depth):
+        release_mlx_lock(handler_name=handler_name)
+    try:
+        yield
+    finally:
+        for _ in range(depth):
+            acquire_mlx_lock(handler_name=handler_name)
 
 
 class MLXLockContext:

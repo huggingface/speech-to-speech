@@ -2238,3 +2238,49 @@ def test_cancellation_while_visemes_send_does_not_restart_audio(setup, monkeypat
             time.sleep(0.1)
             assert audio_sends == []
             assert not service._state(conn_id).in_response
+
+
+def test_response_cancel_unblocks_pending_speculative_output_during_reopen_grace():
+    unit, tracker = _make_unit(0), SpeculativeTurnTracker()
+    unit.service.speculative_turns = tracker
+    with TestClient(create_app(pool=[unit], stop_event=ThreadingEvent())) as client:
+        with client.websocket_connect("/v1/realtime") as ws:
+            ws.receive_json()
+            assert unit.session is not None
+            state = unit.service._state(unit.session.session_id)
+            turn_id, rev = tracker.start_turn()
+            tracker.start_reopen_grace(turn_id, rev, grace_s=1.0)
+            state.mark_response_pending("resp_spec")
+
+            unit.output_queue.put(
+                AssistantOutputEvent(
+                    text="stale",
+                    response_key="resp_spec",
+                    turn_id=turn_id,
+                    turn_revision=rev,
+                    cancel_generation=unit.cancel_scope.generation,
+                )
+            )
+            deadline = time.monotonic() + 1.0
+            while unit.session.pending_output_item is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert isinstance(unit.session.pending_output_item, AssistantOutputEvent)
+
+            started_at = time.monotonic()
+            ws.send_json({"type": "response.cancel"})
+            ws.send_json({"type": "response.create"})
+            assert ws.receive_json()["type"] == "response.created"
+            fresh_key, fresh_gen = state.current_response_key, unit.cancel_scope.generation
+            for item in (
+                AssistantOutputEvent(text="fresh", response_key=fresh_key, cancel_generation=fresh_gen),
+                AssistantResponseDoneEvent(response_key=fresh_key, cancel_generation=fresh_gen),
+                AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=fresh_key, cancel_generation=fresh_gen),
+            ):
+                unit.output_queue.put(item)
+
+            events = []
+            while not events or events[-1]["type"] != "response.done":
+                events.append(ws.receive_json())
+            assert time.monotonic() - started_at < 0.5
+            assert [e["delta"] for e in events if e["type"] == "response.output_audio_transcript.delta"] == ["fresh"]
+            assert events[-1]["response"]["status"] == "completed"

@@ -13,7 +13,7 @@ import numpy as np
 import scipy.signal
 
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.console import console
+from speech_to_speech.pipeline.console import console as console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -115,8 +115,6 @@ class IrodoriTTSHandler(BaseTTSHandler):
             return
 
         cancel_generation = self.cancel_scope.generation if self.cancel_scope else None
-
-        console.print(f"[green]ASSISTANT: {text}")
         # Synthesis start: after the speculative gate, before provider work.
         timer = self._latency_timer(tts_input, cancel_generation)
         result = self.runtime.synthesize(self._request(text=text))

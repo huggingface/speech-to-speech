@@ -26,7 +26,7 @@ from openai.types.realtime.realtime_response_create_params import RealtimeRespon
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.api.openai_realtime.utils import StreamingPcm16Resampler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.console import console
+from speech_to_speech.pipeline.console import console as console
 from speech_to_speech.pipeline.control import SESSION_END, is_control_message
 from speech_to_speech.pipeline.events import AssistantOutputEvent
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
@@ -784,7 +784,8 @@ class Qwen3TTSHandler(BaseTTSHandler):
 
     def _coalesce_pending_tts_input(self, current_input: TTSInput) -> tuple[str, Optional[str]]:
         """Combine already-queued text chunks before the next TTS synthesis call."""
-        if not hasattr(self.queue_in, "mutex") or not hasattr(self.queue_in, "queue"):
+        queue_in = getattr(self, "queue_in", None)
+        if not hasattr(queue_in, "mutex") or not hasattr(queue_in, "queue"):
             return current_input.text, current_input.tts_language_code
 
         text = current_input.text
@@ -843,6 +844,15 @@ class Qwen3TTSHandler(BaseTTSHandler):
         combined_text = " ".join(parts).strip()
         return combined_text, language_code
 
+    def _assistant_text_for_print(self, tts_input: TTSInput) -> str:
+        spoken = getattr(self, "_spoken_text", None)
+        return spoken if isinstance(spoken, str) else tts_input.text
+
+    def _on_first_audio_committed(self, tts_input: TTSInput, timer: TTSResponseTimer | None) -> None:
+        super()._on_first_audio_committed(tts_input, timer)
+        if timer is not None:
+            self._log_first_audio_latency(tts_input, timer)
+
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         if isinstance(tts_input, EndOfResponse):
             if self._gate_end_of_response(tts_input):
@@ -858,13 +868,12 @@ class Qwen3TTSHandler(BaseTTSHandler):
         coalesced_text, language_code = self._coalesce_pending_tts_input(tts_input)
 
         text = coalesced_text or "Hello."
+        self._spoken_text: str | None = text
 
         model_type = self._model_type()
         self._apply_session_voice_override(model_type, runtime_config, response)
 
         request_language = self._language_for_utterance(language_code, tts_input.selected_language)
-
-        console.print(f"[green]ASSISTANT: {text}")
 
         logger.info("Qwen3-TTS language=%s (input_code=%s)", request_language, language_code)
         store = getattr(self, "turn_latency_store", None)
@@ -884,14 +893,11 @@ class Qwen3TTSHandler(BaseTTSHandler):
                         "Qwen3-TTS Base model requires a voice-clone reference. "
                         "Provide qwen3_tts_ref_audio or qwen3_tts_ref_spk, or use a CustomVoice/VoiceDesign model."
                     )
-                first_audio = True
-                for audio_chunk in audio_iter:
-                    if first_audio:
-                        self._log_first_audio_latency(tts_input, timer)
-                        first_audio = False
-                    yield audio_chunk
+                yield from audio_iter
         except Exception as exc:
             log_exception(logger, "Error during Qwen3-TTS generation", exc)
+        finally:
+            self._spoken_text = None
 
     def _log_first_audio_latency(self, tts_input: TTSInput, timer: TTSResponseTimer) -> None:
         elapsed_s = timer.speech_stop_elapsed_s()

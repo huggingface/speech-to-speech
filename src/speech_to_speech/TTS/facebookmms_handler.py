@@ -158,8 +158,6 @@ class FacebookMMSTTSHandler(BaseTTSHandler):
         if language_code is None and runtime_config is not None and tts_input.selected_language == "auto":
             language_code = self._initial_language
         text = tts_input.text
-
-        console.print(f"[green]ASSISTANT: {text}")
         logger.debug("Processing text: %s", transcript_for_log(text))
         logger.debug(f"Language code: {language_code}")
 

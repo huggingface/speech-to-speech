@@ -15,6 +15,7 @@ from speech_to_speech.pipeline import transcript_logging
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.turn_latency import TurnLatencyTracker
 
 
@@ -278,3 +279,51 @@ def test_session_end_cancels_pending_stream_without_reporting_failure(adapter):
         release.set()
         thread.join(2)
     assert closed.wait(1)
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_zerogpu_speculative_reopen_grace_timing_and_cancellation(adapter, cancel):
+    handler, worker, scope, _ = adapter
+    tracker = SpeculativeTurnTracker()
+    turn_id, rev, _ = tracker.speech_started(0)
+    tracker.segment_finalized(1000, output_hold_ms=300 if cancel else 80)
+    handler.speculative_turns = tracker
+    latency = TurnLatencyTracker()
+    handler.turn_latency_store = SimpleNamespace(get_response=lambda key: latency)
+
+    chunk_ready = Event()
+
+    def synthesize(*args, **kwargs):
+        chunk_ready.set()
+        yield np.ones(512, dtype=np.int16)
+
+    worker.synthesize_chunks = synthesize
+    done, outputs = Event(), []
+    item = TTSInput(
+        text="Hello.",
+        turn_id=turn_id,
+        turn_revision=rev,
+        response_key="resp",
+        speech_stopped_at_s=perf_counter(),
+        cancel_generation=scope.generation,
+    )
+
+    thread = Thread(target=lambda: (outputs.extend(handler.process(item)), done.set()))
+    thread.start()
+    try:
+        assert chunk_ready.wait(0.5)
+        assert not done.wait(0.02)
+        if cancel:
+            scope.cancel()
+        assert done.wait(0.5)
+    finally:
+        thread.join(2)
+
+    if cancel:
+        assert outputs == [] and latency.tts_ttfa_s is None and latency.e2e_s is None
+        assert not tracker.is_committed(turn_id, rev)
+        assert tracker.can_reopen(1100) and tracker.speech_started(1100) == (turn_id, 1, True)
+    else:
+        assert len(outputs) == 1 and tracker.is_committed(turn_id, rev)
+        assert latency.tts_ttfa_s is not None and latency.tts_ttfa_s < 0.05
+        assert latency.e2e_s is not None and latency.e2e_s >= 0.07

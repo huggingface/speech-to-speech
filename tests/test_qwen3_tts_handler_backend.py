@@ -641,12 +641,31 @@ def test_process_waits_for_pending_reopen_and_drops_stale_end_of_response():
     assert outputs == []
 
 
-def test_process_waits_for_reopen_grace_and_drops_stale_tts_input():
+def test_process_waits_for_reopen_grace_and_drops_stale_tts_input(monkeypatch):
     tracker = SpeculativeTurnTracker()
     tracker.start_turn()
     tracker.start_reopen_grace("turn_1", 0, grace_s=0.5)
     handler = object.__new__(Qwen3TTSHandler)
     handler.speculative_turns = tracker
+    handler.cancel_scope = None
+    handler.ref_audio = "TTS/ref_audio.wav"
+    handler.speaker = None
+    handler.instruct = None
+    handler.language = "English"
+    handler.backend = "mlx"
+    handler.queue_in = Queue()
+    handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
+    handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
+    synth_started = Event()
+
+    def _process_voice_clone(text, language=None, timer=None):
+        synth_started.set()
+        yield np.zeros(512, dtype=np.int16)
+
+    handler._process_voice_clone = _process_voice_clone
+    printed: list[str] = []
+    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda msg, *args, **kwargs: printed.append(msg))
+
     done = Event()
     outputs = []
 
@@ -665,13 +684,19 @@ def test_process_waits_for_reopen_grace_and_drops_stale_tts_input():
     thread = Thread(target=run_process)
     thread.start()
 
+    # Synthesis begins speculatively during grace, then holds before committing
+    # or yielding the first audio block.
+    assert synth_started.wait(0.5)
     assert not done.wait(0.05)
+    assert outputs == [] and printed == []
+    assert not tracker.is_committed("turn_1", 0)
     candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
     assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
     assert done.wait(1.0)
     thread.join(timeout=1.0)
 
-    assert outputs == []
+    assert outputs == [] and printed == []
+    assert not tracker.is_committed("turn_1", 0)
 
 
 def test_process_waits_for_reopen_grace_and_drops_stale_end_of_response():
@@ -699,7 +724,7 @@ def test_process_waits_for_reopen_grace_and_drops_stale_end_of_response():
     assert outputs == []
 
 
-def test_process_commits_turn_before_generating_audio(monkeypatch, caplog):
+def test_process_commits_turn_before_yielding_first_audio(monkeypatch, caplog):
     tracker = SpeculativeTurnTracker()
     tracker.start_turn()
     handler = object.__new__(Qwen3TTSHandler)
@@ -716,7 +741,7 @@ def test_process_commits_turn_before_generating_audio(monkeypatch, caplog):
     handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
 
     def _process_voice_clone(text, language=None, timer=None):
-        assert tracker.is_committed("turn_1", 0)
+        assert not tracker.is_committed("turn_1", 0)
         yield np.zeros(512, dtype=np.int16)
 
     handler._process_voice_clone = _process_voice_clone

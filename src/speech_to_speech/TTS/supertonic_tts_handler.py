@@ -9,7 +9,7 @@ import numpy as np
 import scipy.signal
 
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.console import console
+from speech_to_speech.pipeline.console import console as console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -156,8 +156,6 @@ class SupertonicTTSHandler(BaseTTSHandler):
             # A detected language Supertonic cannot speak keeps the session language.
             language_code = selected
         lang = self._resolve_language(language_code)
-
-        console.print(f"[green]ASSISTANT: {text}")
 
         # Synthesis start: after speculative gate / language resolve, before provider work.
         timer = self._latency_timer(tts_input, cancel_gen)

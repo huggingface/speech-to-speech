@@ -228,10 +228,14 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
     def _turn_is_latest(self, turn_id: str | None, turn_revision: int | None) -> bool:
         return self.speculative_turns is None or self.speculative_turns.is_latest(turn_id, turn_revision)
 
-    def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
+    def _turn_output_allowed(
+        self, turn_id: str | None, turn_revision: int | None, *, hold_for_grace: bool = True
+    ) -> bool:
         if self.speculative_turns is None:
             return True
-        return self.speculative_turns.wait_for_gate(turn_id, turn_revision)
+        if hold_for_grace:
+            return self.speculative_turns.wait_for_gate(turn_id, turn_revision)
+        return self.speculative_turns.wait_for_gate(turn_id, turn_revision, hold_for_grace=False)
 
     @abstractmethod
     def _load_model(
@@ -577,7 +581,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 runtime_config,
                 response,
             )
-            if chunks and not self._turn_output_allowed(ctx.turn_id, ctx.turn_revision):
+            if chunks and not self._turn_output_allowed(ctx.turn_id, ctx.turn_revision, hold_for_grace=not wants_audio):
                 ctx.cancelled = True
                 logger.info("LLM generation cancelled (stale speculative turn)")
                 break
@@ -600,7 +604,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 leftover = ctx.printable_text.strip()
                 ctx.sentence_batch.append(remove_markdown(leftover) if wants_audio else leftover)
                 ctx.printable_text = ""
-            if not self._turn_output_allowed(ctx.turn_id, ctx.turn_revision):
+            if not self._turn_output_allowed(ctx.turn_id, ctx.turn_revision, hold_for_grace=not wants_audio):
                 ctx.cancelled = True
                 logger.info("LLM generation cancelled (stale speculative turn)")
                 return
@@ -725,7 +729,9 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if ctx.stopped:
                 return
 
-            turn_output_allowed = not ctx.cancelled and self._turn_output_allowed(ctx.turn_id, ctx.turn_revision)
+            turn_output_allowed = not ctx.cancelled and self._turn_output_allowed(
+                ctx.turn_id, ctx.turn_revision, hold_for_grace=not response_wants_audio(response)
+            )
             # Out-of-band responses still emit output, but never write back to the default
             # conversation (their context was a throwaway chat).
             commit_allowed = turn_output_allowed and not out_of_band

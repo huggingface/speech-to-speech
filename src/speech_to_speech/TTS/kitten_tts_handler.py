@@ -11,7 +11,7 @@ import numpy as np
 from scipy.signal import resample_poly
 
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.console import console
+from speech_to_speech.pipeline.console import console as console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -126,7 +126,6 @@ class KittenTTSHandler(BaseTTSHandler):
             return
         cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
         voice = self._resolve_voice(tts_input)
-        console.print(f"[green]ASSISTANT: {text}")
         logger.debug("KittenTTS synthesizing: %s", transcript_for_log(text))
 
         # Synthesis start: after speculative gate / voice resolve, before provider work.

@@ -8,7 +8,6 @@ import numpy as np
 import soxr
 
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
@@ -188,14 +187,7 @@ class PhononTTSHandler(BaseTTSHandler):
         return voice
 
     def _is_cancelled(self, generation: int | None, tts_input: TTSInput) -> bool:
-        return (
-            self.stop_event.is_set()
-            or self._is_stale(generation)
-            or (
-                self.speculative_turns is not None
-                and not self.speculative_turns.is_latest(tts_input.turn_id, tts_input.turn_revision)
-            )
-        )
+        return self.stop_event.is_set() or self._is_stale(generation, tts_input)
 
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         identity = (tts_input.cancel_generation, tts_input.response_key, tts_input.turn_id, tts_input.turn_revision)
@@ -241,7 +233,6 @@ class PhononTTSHandler(BaseTTSHandler):
 
     def _synthesize(self, tts_input: TTSInput, generation: int | None) -> Iterator[TTSOut]:
         voice = self._resolve_voice(tts_input)
-        console.print(f"[green]ASSISTANT: {tts_input.text}")
         timer = self._latency_timer(tts_input, also_cancelled=lambda: self._is_cancelled(generation, tts_input))
         first_audio = True
         pcm_blocks = PCMBlockBuffer(self.blocksize)

@@ -729,10 +729,17 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self._async_runner = None
         self._async_client = None
 
-    def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
+    def _turn_output_allowed(
+        self, turn_id: str | None, turn_revision: int | None, *, hold_for_grace: bool = True
+    ) -> bool:
         if self.speculative_turns is None:
             return True
-        return self.speculative_turns.wait_for_gate(turn_id, turn_revision)
+        if hold_for_grace:
+            return self.speculative_turns.wait_for_gate(turn_id, turn_revision)
+        return self.speculative_turns.wait_for_gate(turn_id, turn_revision, hold_for_grace=False)
+
+    def _turn_allowed(self, turn: _Turn) -> bool:
+        return self._turn_output_allowed(turn.turn_id, turn.turn_revision, hold_for_grace=not turn.wants_audio)
 
     def _apply_config(
         self,
@@ -810,7 +817,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             fc_item = ResponsesFunctionCall(
                 **fc_item.model_dump(exclude_unset=True), response_item=event.response_item.model_copy(deep=True)
             )
-        if self._turn_is_cancelled(turn) or not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
+        if self._turn_is_cancelled(turn) or not self._turn_allowed(turn):
             logger.info("LLM generation cancelled (stale speculative turn)")
             return
         state.history_items.append(fc_item)
@@ -840,7 +847,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         def _flush(batch: list[str]) -> Iterator[LLMOut]:
             if not batch:
                 return
-            if not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
+            if not self._turn_allowed(turn):
                 logger.info("LLM generation cancelled (stale speculative turn)")
                 return
             yield self._chunk(turn, state, text=" ".join(batch))
@@ -878,7 +885,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     sentence_batch.append(remove_markdown(printable_text.strip()))
                     printable_text = ""
                 if sentence_batch:
-                    if not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
+                    if not self._turn_allowed(turn):
                         logger.info("LLM generation cancelled (stale speculative turn)")
                         cancelled = True
                         break
@@ -907,7 +914,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     for s in sentences[:-1]:
                         sentence_batch.append(remove_markdown(s))
                         if len(sentence_batch) >= self.stream_batch_sentences:
-                            if not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
+                            if not self._turn_allowed(turn):
                                 logger.info("LLM generation cancelled (stale speculative turn)")
                                 cancelled = True
                                 break
@@ -931,7 +938,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             not cancelled
             and not self._turn_is_cancelled(turn)
             and self._turn_is_latest(turn.turn_id, turn.turn_revision)
-            and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
+            and self._turn_allowed(turn)
         )
 
     def _consume_nonstreaming(
@@ -974,11 +981,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 spoken = event.text if not turn.wants_audio else remove_markdown(remove_unspeechable(event.text))
                 state.clean_text += spoken
                 out = spoken if not turn.wants_audio else spoken.strip()
-                if (
-                    out
-                    and not self._turn_is_cancelled(turn)
-                    and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
-                ):
+                if out and not self._turn_is_cancelled(turn) and self._turn_allowed(turn):
                     yield self._chunk(turn, state, text=out)
         logger.debug("Clean text: %s", transcript_for_log(state.clean_text))
         logger.info("Tools: %s", transcript_for_log(state.tools))
@@ -986,7 +989,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             not cancelled
             and not self._turn_is_cancelled(turn)
             and self._turn_is_latest(turn.turn_id, turn.turn_revision)
-            and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
+            and self._turn_allowed(turn)
         )
 
     # ── orchestration ─────────────────────────────────────────────────────────
@@ -1207,7 +1210,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 and generation_completed
                 and not self._turn_is_cancelled(turn)
                 and self._turn_is_latest(turn.turn_id, turn.turn_revision)
-                and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
+                and self._turn_allowed(turn)
             )
             if proposal_allowed and not is_out_of_band(turn.response):
                 history = ResponseHistory.capture(
