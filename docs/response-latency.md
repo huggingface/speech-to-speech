@@ -202,8 +202,11 @@ times. Stages can overlap; these fields are not an additive breakdown.
 
 ## Smart Turn timing
 
-For a speculative speech turn, both timers start when the pipeline records the
-finalized segment, after Smart Turn analysis and any audio enhancement.
+For a speculative speech turn, both timers start when VAD finalizes the segment,
+before Smart Turn analysis and any audio enhancement. Both of those run inside
+the windows instead of lengthening them. Enhancement is opt-in and normally far
+shorter than the grace. If it took longer, the VAD could still be catching up on
+resumed speech when the grace ends.
 Audio-enabled batches flow through the reopen grace window so TTS can synthesize
 speculatively in parallel; the output grace sets the earliest time the first
 audio block (and client output events) can commit and be emitted for that

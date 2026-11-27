@@ -921,8 +921,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     turn_id,
                     turn_revision,
                 )
-                # Smart Turn's grace and processing delay run from finalization,
-                # so its inference time is not added on top of either window.
+                # Smart Turn's grace and processing delay run from finalization, so
+                # its inference and any audio enhancement happen inside both windows.
                 finalized_at = time.monotonic()
                 analysis_audio = self._combined_raw_turn_audio(array)
                 reopen_grace_ms, processing_delay_ms = self._smart_turn_timing_ms(analysis_audio)
