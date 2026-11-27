@@ -1,12 +1,13 @@
 from threading import Event, Lock
 from types import SimpleNamespace
 
+import pytest
 from openai.types.realtime import RealtimeSessionCreateRequest
 
 import speech_to_speech.LLM.language_model as language_model
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.chat import Chat, make_user_message
-from speech_to_speech.LLM.language_model import LanguageModelHandler
+from speech_to_speech.LLM.language_model import LanguageModelHandler, VisionLanguageModelHandler
 from speech_to_speech.pipeline.messages import GenerateResponseRequest, TokenUsage
 from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 
@@ -61,3 +62,23 @@ def test_transformers_input_tokens_count_the_prompt_sent_to_the_model():
     assert len(prompts) == 1
     assert len(usage) == 1
     assert usage[0].input_tokens == len(handler.tokenizer.encode(prompts[0]))
+
+
+@pytest.mark.parametrize("enable_thinking", [False, True])
+def test_vision_prompt_uses_thinking_setting(enable_thinking):
+    from unittest.mock import MagicMock
+
+    handler = object.__new__(VisionLanguageModelHandler)
+    handler.device = "cpu"
+    handler.enable_thinking = enable_thinking
+    handler.processor = MagicMock()
+    handler.processor.apply_chat_template.side_effect = ChatMLTokenizer().apply_chat_template
+    messages = [{"role": "user", "content": "Hi"}]
+    expected = ChatMLTokenizer().apply_chat_template(
+        messages, add_generation_prompt=True, enable_thinking=enable_thinking
+    )
+
+    handler._prepare_vlm_inputs(messages)
+    assert handler.processor.call_args.kwargs["text"] == [expected]
+    _, mlx_prompt = handler._prepare_mlx_vlm_inputs(messages)
+    assert mlx_prompt == expected
