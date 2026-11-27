@@ -8,7 +8,7 @@ app_port: 7860
 pinned: false
 hf_oauth: true
 hf_oauth_expiration_minutes: 10080
-short_description: An avatar coach that researches any topic and quizzes you aloud
+short_description: A coach that reads up on any topic and quizzes you aloud
 ---
 
 # Viva: a voice quiz coach with a talking avatar
