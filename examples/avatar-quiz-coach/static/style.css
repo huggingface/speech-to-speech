@@ -458,3 +458,4 @@ code { font-size: 12.5px; background: rgba(255, 255, 255, 0.08); padding: 1px 5p
   .name-field input { width: 130px; }
 }
 @media (max-width: 860px) { .account-name { display: none; } }
+.call-ended { margin: 10px 0 0; text-align: center; }

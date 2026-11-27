@@ -57,9 +57,9 @@ const S = {
   dropped: new Set(),
   echoAt: 0,
   overCoach: false,
-  /** Short fillers in the coach's voice, played while the grader works. @type {{ pcm: Int16Array, plays: number }[]} */
+  /** Short fillers in the coach's voice, played while the grader works; kept across calls. @type {{ pcm: Int16Array, plays: number, line: string }[]} */
   fillers: [],
-  /** @type {{ pcm: Int16Array, plays: number } | null} */ lastFiller: null,
+  /** @type {{ pcm: Int16Array, plays: number, line: string } | null} */ lastFiller: null,
   /** @type {RealtimeVoice | null} */ fillersFor: null,
   /** Grader tool calls not yet answered. */
   toolsPending: 0,
@@ -325,6 +325,37 @@ function setPhase(phase) {
   $("#panel").scrollTop = 0;
 }
 
+/** End the voice call: close the connection and the microphone. The next quiz dials again. */
+function hangUp() {
+  if (!S.voice) return;
+  S.voice.close();
+  S.voice = null;
+  S.voiceOk = false;
+  S.coachTalking = false;
+  setVoiceLine("Call ended", "");
+}
+
+/**
+ * After the results: once the coach has said goodbye and nobody has spoken
+ * for a moment, end the call, so the microphone isn't left open.
+ * @param {number} run
+ */
+async function endCallWhenDone(run) {
+  const started = performance.now();
+  let quietSince = 0;
+  while (performance.now() - started < 60000) {
+    await sleep(300);
+    if (S.runId !== run || S.phase !== "results" || !S.voice) return;
+    const busy = S.coachTalking || S.voice.replying || S.voice.speaking || S.avatar?.playing || S.toolsPending;
+    if (busy) quietSince = 0;
+    else if (!quietSince) quietSince = performance.now();
+    else if (performance.now() - quietSince > 2500) break;
+  }
+  if (S.runId !== run || S.phase !== "results") return;
+  hangUp();
+  $("#r-call").hidden = false;
+}
+
 const RESET_LINE = "Sorry, I lost our place because the app just restarted. Pick the topic again and we'll start fresh.";
 
 /**
@@ -354,8 +385,7 @@ const isExpired = (err) => /** @type {any} */ (err)?.status === 404;
 function backToLobby() {
   S.runId++;
   S.researchAbort?.abort();
-  S.voice?.cancel();
-  S.voice?.reset();
+  hangUp();
   S.game = null;
   S.avatar?.interrupt();
   hideCaption();
@@ -941,10 +971,11 @@ const canRecordFiller = (voice) =>
 /** Record the fillers once per voice session, a line at a time. @param {RealtimeVoice} voice */
 async function prepareFillers(voice) {
   S.fillersFor = voice;
-  S.fillers = [];
-  S.lastFiller = null;
+  // Recordings from an earlier call are in the same voice (a coach change
+  // reloads the page): only record the lines still missing.
+  const have = new Set(S.fillers.map((f) => f.line));
   // A different order each session, so the first ones ready aren't always the same.
-  const todo = [...FILLER_LINES];
+  const todo = FILLER_LINES.filter((line) => !have.has(line));
   for (let i = todo.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [todo[i], todo[j]] = [todo[j], todo[i]];
@@ -963,7 +994,7 @@ async function prepareFillers(voice) {
       todo.push(line);
       failures++;
     } else if (wordsOf(rec.text).join(" ") === wordsOf(line).join(" ")) {
-      S.fillers.push({ pcm: rec.pcm, plays: 0 });
+      S.fillers.push({ pcm: rec.pcm, plays: 0, line });
     } else {
       // Keep it only if the coach said that line (a model once "answered" the
       // filler with "Take your time." and that played after every answer).
@@ -1474,6 +1505,8 @@ function pop(big, small, good) {
 async function showResults(summary) {
   if (!summary) return;
   setPhase("results");
+  $("#r-call").hidden = true;
+  if (S.voice) endCallWhenDone(S.runId);
   const game = S.game;
   $("#r-topic").textContent = `${S.pack.emoji} ${S.pack.title}${game.practice ? " · practice" : ""}`;
   $("#r-rank-icon").textContent = summary.rank.icon;
