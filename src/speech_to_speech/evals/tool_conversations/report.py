@@ -35,7 +35,12 @@ METRICS = (
     ("call_markup_spoken", "Call markup in spoken text", "call_markup_spoken", "user_turns"),
     ("extra_call", "Call when none was needed", "extra_call", "free_turns"),
     ("late_result_spoken", "Late result spoken", "late_result_spoken", "late_results"),
-    ("late_result_recalled", "Long-running tool called again", "repeated_long_running", "late_results"),
+    (
+        "late_result_recalled",
+        "Late results that trigger another long-running tool call",
+        "late_results_with_recall",
+        "late_results",
+    ),
     ("crashed", "Conversations that crashed", "crashed", "conversations"),
 )
 
@@ -81,6 +86,10 @@ def _count_arguments(turn: dict[str, Any], counts: dict[str, int]) -> None:
                 )
 
 
+def _has_long_running_call(turn: dict[str, Any]) -> bool:
+    return any(name in LONG_RUNNING_TOOLS for name in turn["calls"])
+
+
 def summarize(results: list[dict[str, Any]]) -> dict[str, int]:
     """Count outcomes over all conversations."""
     c: dict[str, int] = {key: 0 for metric in METRICS for key in metric[2:]}
@@ -95,7 +104,7 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, int]:
             if turn["kind"] == "late_result":
                 c["late_results"] += 1
                 c["late_result_spoken"] += bool(turn["text"])
-                c["repeated_long_running"] += any(name in LONG_RUNNING_TOOLS for name in turn["calls"])
+                c["late_results_with_recall"] += _has_long_running_call(turn)
                 continue
             c["user_turns"] += 1
             rounds = turn["rounds"]
@@ -103,8 +112,6 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, int]:
             called = [name for r in rounds for name in r["calls"]]
             expected = turn["expected_tool"]
             c["call_markup_spoken"] += any(CALL_MARKUP.search(r["text"] or "") for r in rounds)
-            long_calls = sum(called.count(name) for name in LONG_RUNNING_TOOLS)
-            c["repeated_long_running"] += max(0, long_calls - (expected in LONG_RUNNING_TOOLS))
             if expected:
                 _count_arguments(turn, c)
                 c["tool_turns"] += 1
@@ -128,6 +135,28 @@ def build_report(meta: dict[str, Any], results: list[dict[str, Any]]) -> dict[st
     return {"schema": REPORT_SCHEMA, **meta, "summary": summarize(results), "results": results}
 
 
+def _late_recall_counts(report: dict[str, Any]) -> dict[str, int]:
+    summary = report["summary"]
+    if "late_results_with_recall" in summary:
+        return summary
+
+    # The historical numerator also counted calls from user turns.
+    results = report.get("results")
+    if results is None:
+        return {}
+    late_results = [
+        turn
+        for row in results
+        if "crash" not in row
+        for turn in row.get("turns") or []
+        if turn["kind"] == "late_result"
+    ]
+    return {
+        "late_results_with_recall": sum(_has_long_running_call(turn) for turn in late_results),
+        "late_results": len(late_results),
+    }
+
+
 def _rate(summary: dict[str, int], num: str, den: str) -> str:
     if not summary.get(den):
         return "-"
@@ -144,7 +173,10 @@ def render_report(report: dict[str, Any]) -> str:
         "| Metric | Result |",
         "|---|---|",
     ]
-    lines += [f"| {label} | {_rate(s, num, den)} |" for _key, label, num, den in METRICS]
+    late_recall = _late_recall_counts(report)
+    for key, label, num, den in METRICS:
+        counts = late_recall if key == "late_result_recalled" else s
+        lines.append(f"| {label} | {_rate(counts, num, den)} |")
     return "\n".join(lines)
 
 
@@ -166,11 +198,12 @@ def render_comparison(reports: list[dict[str, Any]]) -> str:
     names = [r.get("label") or r.get("url") or f"run {i}" for i, r in enumerate(reports)]
     header = "| Metric | " + " | ".join(names) + " |"
     lines = [header, "|" + "---|" * (len(reports) + 1)]
-    base = reports[0]["summary"]
-    for _key, label, num, den in METRICS:
+    late_recalls = [_late_recall_counts(report) for report in reports]
+    for key, label, num, den in METRICS:
+        summaries = late_recalls if key == "late_result_recalled" else [r["summary"] for r in reports]
+        base = summaries[0]
         cells = []
-        for i, report in enumerate(reports):
-            s = report["summary"]
+        for i, s in enumerate(summaries):
             cell = _rate(s, num, den)
             if i and s.get(den) and base.get(den):
                 pval = fisher_exact(base[num], base[den] - base[num], s[num], s[den] - s[num])
