@@ -299,9 +299,17 @@ export class FaceDriver extends EventTarget {
       }
       this.pendingCues = later;
     }
+    this.onChunk(pcm, start);
     const chunk = this.upsampler.process(pcm).slice();
     this.player.port.postMessage({ type: "audioData", data: chunk.buffer }, [chunk.buffer]);
   }
+
+  /**
+   * A chunk of the voice was queued to play at `startMs` (audio clock), for
+   * renderers that analyse the voice themselves.
+   * @param {Int16Array} pcm @param {number} startMs
+   */
+  onChunk(pcm, startMs) {}
 
   /**
    * Same envelope as TalkingHead's: rise from 2/3 of a duration before the

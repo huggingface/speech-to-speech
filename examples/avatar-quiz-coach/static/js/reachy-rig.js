@@ -1,4 +1,5 @@
-// Reachy Mini rig (pose, Stewart-platform legs, antennas, exploded view), unmodified apart from this header.
+// Reachy Mini rig (pose, Stewart-platform legs, antennas, exploded view), unmodified apart from this
+// header and UNITS_PER_M (see below).
 // From Pollen Robotics' reachy-mini-yo-its-your-boy Space (https://huggingface.co/spaces/pollen-robotics/reachy-mini-yo-its-your-boy),
 // as redistributed in https://github.com/FabienDanieau/reachy_mini_intro (assets/robot.js). Apache-2.0.
 
@@ -10,7 +11,9 @@ import { clone as skeletonClone } from 'three/addons/utils/SkeletonUtils.js';
 
 const MODEL_SCALE = 0.5;
 const DISPLAY_YAW = -Math.PI;
-const UNITS_PER_M = 1.7;
+// 2, as in Pollen's newer reachy-mini-3d-voice rig, so recorded moves keep
+// their full head translations (this copy had 1.7).
+const UNITS_PER_M = 2;
 const HEAD_FIX = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI / 2);
 const HEAD_FIX_INV = HEAD_FIX.clone().invert();
 const ANT_AXIS = new THREE.Vector3(0, 0, 1);
