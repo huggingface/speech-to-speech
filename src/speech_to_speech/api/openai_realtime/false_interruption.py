@@ -97,7 +97,6 @@ class AssistantAudioBuffer:
     response_key: str | None
     root_item_id: str
     current_item_id: str
-    root_start_sample: int = 0
     wire_start_sample: int = 0
     turn_id: str | None = None
     turn_revision: int | None = None
@@ -198,36 +197,6 @@ class AssistantAudioBuffer:
 
     def full_text(self) -> str:
         return " ".join(seg.text for seg in self.segments if seg.text)
-
-    def as_audio_segments(self) -> list[list[object]]:
-        return [
-            [seg.text, seg.end_sample - seg.start_sample, seg.end_sample - seg.start_sample] for seg in self.segments
-        ]
-
-    def text_for_range(self, start_sample: int, end_sample: int) -> str:
-        """Return transcript text spoken within ``[start_sample, end_sample]``."""
-        from speech_to_speech.api.openai_realtime.handlers.response import _heard_transcript
-
-        if end_sample <= start_sample:
-            return ""
-        if start_sample <= 0:
-            return (
-                self.full_text()
-                if end_sample >= self.total_samples
-                else _heard_transcript(self.as_audio_segments(), end_sample)
-            )
-        segs: list[list[Any]] = []
-        for seg in self.segments:
-            seg_len = seg.end_sample - seg.start_sample
-            if seg_len <= 0 or seg.end_sample <= start_sample:
-                continue
-            if seg.start_sample < start_sample:
-                text = _unheard_text_suffix(seg.text, start_sample - seg.start_sample, seg_len)
-                dur = seg.end_sample - start_sample
-            else:
-                text, dur = seg.text, seg_len
-            segs.append([text, dur, dur])
-        return _heard_transcript(segs, end_sample - start_sample)
 
 
 @dataclass

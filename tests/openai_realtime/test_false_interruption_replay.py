@@ -211,10 +211,19 @@ def test_cough_during_completed_websocket_playback_replays_from_client_truncate(
             / RATE
         )
         assert 2.05 <= replayed_s <= 2.75
-        assert [(m.role, m.status, m.content[0].text) for m in chat.buffer] == [
-            ("user", None, "Explain photosynthesis."),
-            ("assistant", "completed", full),
+        # Stored history mirrors the two wire items; model serializers merge them without repeating rewound words.
+        assert [(m.role, m.status) for m in chat.buffer] == [
+            ("user", None),
+            ("assistant", "incomplete"),
+            ("assistant", "completed"),
         ]
+        assert chat.to_transformers_chat() == [
+            {"role": "user", "content": "Explain photosynthesis."},
+            {"role": "assistant", "content": full},
+        ]
+        resp_items = chat.to_responses_api_chat()
+        assert [item["role"] for item in resp_items] == ["user", "assistant"]
+        assert resp_items[1]["status"] == "completed" and resp_items[1]["content"][0]["text"] == full
 
 
 def test_cough_during_long_generating_turn_buffers_and_streams_seamlessly() -> None:
@@ -563,6 +572,14 @@ def test_timeout_explicit_cancel_and_tool_call_recovery() -> None:
         )
         created = _drain_until(ws, "conversation.item.created")[-1]
         assert created["item"]["call_id"] == "call_score"
+        # Serialized history folds any split assistant speech and the tool call into one valid assistant turn.
+        tf_msgs = chat.to_transformers_chat()
+        assert [m["role"] for m in tf_msgs] == ["user", "assistant", "tool"]
+        assert tf_msgs[1]["content"] == "Checking your score."
+        assert [tc["function"]["name"] for tc in tf_msgs[1]["tool_calls"]] == ["get_score"]
+        resp_msgs = chat.to_responses_api_chat()
+        assert [m["type"] for m in resp_msgs] == ["message", "message", "function_call", "function_call_output"]
+        assert resp_msgs[1]["content"][0]["text"] == "Checking your score."
 
     # 3b. Tool call arriving during a real interruption is discarded and never delivered.
     with _ws_session(min_words=1) as (unit, ws, sid):
@@ -635,11 +652,15 @@ def test_real_interruption_during_resumed_reply_and_zero_audio_cough_history() -
         retrieved = _drain_until(ws, "conversation.item.retrieved")[-1]
         assert retrieved["item"]["id"] == item_2 and retrieved["item"]["status"] == "incomplete"
 
-        assistant_msgs = [m for m in chat.buffer if m.role == "assistant"]
-        assert len(assistant_msgs) == 1 and assistant_msgs[0].status == "incomplete"
-        assert (
-            "Apple is sweet." in assistant_msgs[0].content[0].text and "Cherry" not in assistant_msgs[0].content[0].text
-        )
+        assert [(m.role, m.status) for m in chat.buffer] == [
+            ("user", None),
+            ("assistant", "incomplete"),
+            ("assistant", "incomplete"),
+        ]
+        tf_msgs = chat.to_transformers_chat()
+        assert [m["role"] for m in tf_msgs] == ["user", "assistant"]
+        assert "Apple is sweet." in tf_msgs[1]["content"] and "Cherry" not in tf_msgs[1]["content"]
+        assert tf_msgs[1]["content"].count("sweet.") == 1
 
     # 2. Cough after AssistantOutputEvent but before first PCM chunk still restores completed history.
     with _ws_session(min_words=1) as (unit, ws, sid):
@@ -815,11 +836,20 @@ def test_wire_item_retrieve_preserves_original_cut_and_delete_works_on_replay_it
         )
         assert item_2 != item_1
 
-        # Model history has the combined completed turn, while item_1 keeps its original truncated wire view.
-        assert [(m.role, m.status, m.content[0].text) for m in chat.buffer] == [
-            ("user", None, "Tell me two sentences."),
-            ("assistant", "completed", "First sentence. Last sentence."),
+        # Stored history mirrors the two wire items; model serializers merge them with rewound overlap deduplicated.
+        assert [(m.role, m.status) for m in chat.buffer] == [
+            ("user", None),
+            ("assistant", "incomplete"),
+            ("assistant", "completed"),
         ]
+        assert chat.to_transformers_chat() == [
+            {"role": "user", "content": "Tell me two sentences."},
+            {"role": "assistant", "content": "First sentence. Last sentence."},
+        ]
+        resp_msgs = chat.to_responses_api_chat()
+        assert [m["role"] for m in resp_msgs] == ["user", "assistant"]
+        assert resp_msgs[1]["status"] == "completed"
+        assert resp_msgs[1]["content"][0]["text"] == "First sentence. Last sentence."
         ws.send_json({"type": "conversation.item.retrieve", "item_id": item_1})
         after_1 = _drain_until(ws, "conversation.item.retrieved")[-1]["item"]
         assert after_1["status"] == "incomplete"
@@ -830,7 +860,7 @@ def test_wire_item_retrieve_preserves_original_cut_and_delete_works_on_replay_it
         assert after_2["status"] == "completed"
         assert "Last sentence." in after_2["content"][0]["transcript"]
 
-        # Deleting item_2 succeeds, rolls Chat back to item_1's heard prefix, and removes item_2 from retrieval.
+        # Deleting item_2 removes only item_2, leaving item_1's heard prefix in Chat and removing item_2 from retrieval.
         ws.send_json({"type": "conversation.item.delete", "item_id": item_2})
         deleted = _drain_until(ws, "conversation.item.deleted")[-1]
         assert deleted["item_id"] == item_2
@@ -928,12 +958,23 @@ def test_double_recovery_retrieval_and_deletion_history_reconciliation() -> None
         # Deleting newest replay (item_3) removes "Last sentence." from model history while keeping first + middle.
         ws.send_json({"type": "conversation.item.delete", "item_id": item_3})
         assert _drain_until(ws, "conversation.item.deleted")[-1]["item_id"] == item_3
-        assistant_msgs = [m for m in chat.buffer if m.role == "assistant"]
-        assert len(assistant_msgs) == 1 and assistant_msgs[0].status == "incomplete"
-        text_after = assistant_msgs[0].content[0].text
+        assert [(m.role, m.status) for m in chat.buffer] == [
+            ("user", None),
+            ("assistant", "incomplete"),
+            ("assistant", "incomplete"),
+        ]
+        tf_after = chat.to_transformers_chat()
+        assert [m["role"] for m in tf_after] == ["user", "assistant"]
+        text_after = tf_after[1]["content"]
         assert (
-            "First sentence." in text_after and "Middle sentence." in text_after and "Last sentence." not in text_after
+            "First sentence." in text_after
+            and "Middle sentence." in text_after
+            and "Last sentence." not in text_after
+            and text_after.count("sentence.") == 2
         )
+        resp_after = chat.to_responses_api_chat()
+        assert [m["role"] for m in resp_after] == ["user", "assistant"] and resp_after[1]["status"] == "incomplete"
+        assert resp_after[1]["content"][0]["text"] == text_after
 
     # 2. Deleting original item_1 after one replay keeps surviving item_2 in model history at the same position.
     with _ws_session(min_words=1) as (unit, ws, sid):
@@ -1040,13 +1081,17 @@ def test_double_recovery_retrieval_and_deletion_history_reconciliation() -> None
             ev["item"]["id"] for ev in _drain_until(ws, "response.done") if ev["type"] == "response.output_item.added"
         )
 
-        # Delete item_1 -> "First" disappears from Chat.
+        # Delete item_1 -> "First" disappears from Chat and serialized model history.
         ws.send_json({"type": "conversation.item.delete", "item_id": item_1})
         assert _drain_until(ws, "conversation.item.deleted")[-1]["item_id"] == item_1
-        assistant_msgs = [m for m in chat.buffer if m.role == "assistant"]
-        assert len(assistant_msgs) == 1
-        assert "First" not in assistant_msgs[0].content[0].text
-        assert "Second sentence." in assistant_msgs[0].content[0].text
+        assert [(m.role, m.status) for m in chat.buffer] == [
+            ("user", None),
+            ("assistant", "incomplete"),
+            ("assistant", "completed"),
+        ]
+        tf_before_trunc = chat.to_transformers_chat()
+        assert [m["role"] for m in tf_before_trunc] == ["user", "assistant"]
+        assert "First" not in tf_before_trunc[1]["content"] and "Second sentence." in tf_before_trunc[1]["content"]
 
         # Truncating surviving item_3 must NOT restore deleted "First".
         ws.send_json(
@@ -1055,10 +1100,14 @@ def test_double_recovery_retrieval_and_deletion_history_reconciliation() -> None
         ws.send_json({"type": "conversation.item.retrieve", "item_id": item_3})
         got_3 = _drain_until(ws, "conversation.item.retrieved")[-1]["item"]
         assert got_3["status"] == "incomplete"
-        assistant_msgs = [m for m in chat.buffer if m.role == "assistant"]
-        assert len(assistant_msgs) == 1 and assistant_msgs[0].status == "incomplete"
-        assert "First" not in assistant_msgs[0].content[0].text
-        assert "Second sentence." in assistant_msgs[0].content[0].text
+        tf_after_trunc = chat.to_transformers_chat()
+        assert [m["role"] for m in tf_after_trunc] == ["user", "assistant"]
+        assert "First" not in tf_after_trunc[1]["content"] and "Second sentence." in tf_after_trunc[1]["content"]
+        resp_after_trunc = chat.to_responses_api_chat()
+        assert [m["role"] for m in resp_after_trunc] == ["user", "assistant"]
+        assert (
+            resp_after_trunc[1]["status"] == "incomplete" and "First" not in resp_after_trunc[1]["content"][0]["text"]
+        )
 
 
 def test_mid_reply_opt_in_takes_effect_on_next_response() -> None:
@@ -1206,3 +1255,49 @@ def test_per_session_false_interruption_config_via_session_update() -> None:
         _drain_until(ws, "session.updated")
         assert u.session.pending_false_interruption is None
         assert u.cancel_scope.generation == gen + 1
+
+
+def test_chat_serializers_merge_consecutive_assistant_items_and_deduplicate_rewind() -> None:
+    from openai.types.realtime import RealtimeConversationItemFunctionCall, RealtimeConversationItemFunctionCallOutput
+
+    from speech_to_speech.LLM.chat import Chat
+
+    chat = Chat(10)
+    chat.add_item(make_user_message("What is the capital of France?"))
+    chat.add_heard_assistant_message("item_1", "The capital of France is", status="incomplete")
+    chat.add_heard_assistant_message("item_2", "France is Paris.", status="completed")
+
+    assert chat.to_transformers_chat() == [
+        {"role": "user", "content": "What is the capital of France?"},
+        {"role": "assistant", "content": "The capital of France is Paris."},
+    ]
+    resp_chat = chat.to_responses_api_chat()
+    assert [m["role"] for m in resp_chat] == ["user", "assistant"]
+    assert resp_chat[1]["status"] == "completed"
+    assert resp_chat[1]["content"][0]["text"] == "The capital of France is Paris."
+
+    # Following tool call attaches cleanly to the merged assistant turn.
+    chat.add_ordered_function_call(
+        RealtimeConversationItemFunctionCall(
+            id="fc_1", type="function_call", call_id="call_1", name="lookup", arguments="{}"
+        )
+    )
+    chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            id="fco_1", type="function_call_output", call_id="call_1", output='{"ok": true}'
+        )
+    )
+    tf = chat.to_transformers_chat()
+    assert [m["role"] for m in tf] == ["user", "assistant", "tool"]
+    assert tf[1]["content"] == "The capital of France is Paris."
+    assert [tc["function"]["name"] for tc in tf[1]["tool_calls"]] == ["lookup"]
+
+    # Two completed assistant messages merge for strict templates without stripping legitimate repeated words.
+    chat2 = Chat(10)
+    chat2.add_item(make_user_message("Repeat."))
+    chat2.add_heard_assistant_message("a1", "Hello.", status="completed")
+    chat2.add_heard_assistant_message("a2", "Hello.", status="completed")
+    assert chat2.to_transformers_chat() == [
+        {"role": "user", "content": "Repeat."},
+        {"role": "assistant", "content": "Hello. Hello."},
+    ]

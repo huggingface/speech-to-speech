@@ -1040,8 +1040,6 @@ class ResponseHandler(RealtimeBaseHandler):
                 oldest = next(iter(segments_by_item))
                 del segments_by_item[oldest]
                 st.assistant_audio_cuts.pop(oldest, None)
-                st.resumed_audio_origins.pop(oldest, None)
-                st.resumed_root_wire_cuts.pop(oldest, None)
         return segments
 
     def _record_audio_text(self, conn_id: str, item_id: str, text: str) -> None:
@@ -1157,17 +1155,6 @@ class ResponseHandler(RealtimeBaseHandler):
         # Cuts are measured from the original segments, so a client position
         # replaces an earlier server estimate instead of compounding it.
         st.assistant_audio_cuts[item_id] = played_samples
-        if (origin := st.resumed_audio_origins.get(item_id)) is not None:
-            self.rebuild_replay_family_history(conn_id, origin[1], status_override="incomplete", source=source)
-            return
-        if item_id in st.resumed_root_wire_cuts:
-            st.resumed_root_wire_cuts[item_id] = played_samples
-            family_buf = next(
-                (buf for _, buf in st.resumed_audio_origins.values() if buf.root_item_id == item_id), None
-            )
-            if family_buf is not None:
-                self.rebuild_replay_family_history(conn_id, family_buf, source=source)
-            return
         text = _heard_transcript(segments, played_samples)
         st.runtime_config.chat.truncate_assistant_message(item_id, text)
         _log_heard(item_id, segments, text, source)
@@ -1243,103 +1230,6 @@ class ResponseHandler(RealtimeBaseHandler):
         )
         return events
 
-    def rebuild_replay_family_history(
-        self,
-        conn_id: str,
-        audio_buf: Any,
-        *,
-        deleted_item_id: str | None = None,
-        status_override: Literal["completed", "incomplete"] | None = None,
-        source: str | None = None,
-    ) -> None:
-        """Reconcile Chat's single assistant entry from surviving items in *audio_buf*'s replay family."""
-        st = self._state(conn_id)
-        chat = st.runtime_config.chat
-        root_id = audio_buf.root_item_id
-        if not root_id:
-            return
-        root_deleted = deleted_item_id == root_id
-        if deleted_item_id is not None:
-            st.resumed_audio_origins.pop(deleted_item_id, None)
-
-        survivors: list[tuple[str, int, int, Literal["completed", "incomplete"], str]] = []
-        root_exists = not root_deleted and (
-            root_id in chat.item_ids()
-            or root_id in chat.unheard_assistant_item_ids()
-            or root_id in st.resumed_root_wire_cuts
-        )
-        if root_exists:
-            root_segs = st.assistant_audio_segments.get(root_id, [])
-            root_delivered = sum(seg[1] for seg in root_segs)
-            if root_id in st.resumed_root_wire_cuts:
-                root_cut = st.assistant_audio_cuts.get(root_id, st.resumed_root_wire_cuts[root_id])
-                root_status: Literal["completed", "incomplete"] = "incomplete"
-            else:
-                root_cut = st.assistant_audio_cuts.get(root_id, root_delivered)
-                root_status = "incomplete" if root_id in st.assistant_audio_cuts else "completed"
-            root_start = audio_buf.root_start_sample
-            survivors.append(
-                (root_id, root_start, root_start + root_cut, root_status, _heard_transcript(root_segs, root_cut))
-            )
-
-        for rid, (r_start, r_buf) in list(st.resumed_audio_origins.items()):
-            if r_buf.root_item_id != root_id:
-                continue
-            r_segs = st.assistant_audio_segments.get(rid, [])
-            r_delivered = sum(seg[1] for seg in r_segs)
-            r_cut = st.assistant_audio_cuts.get(rid, r_delivered)
-            r_status: Literal["completed", "incomplete"] = (
-                "incomplete" if rid in st.assistant_audio_cuts else "completed"
-            )
-            survivors.append((rid, r_start, r_start + r_cut, r_status, _heard_transcript(r_segs, r_cut)))
-
-        if not survivors:
-            chat.delete_item(root_id)
-            st.resumed_root_wire_cuts.pop(root_id, None)
-            return
-
-        new_root, new_root_start = survivors[0][0], survivors[0][1]
-        final_status = status_override or survivors[-1][3]
-        if len(survivors) == 1:
-            merged_text = survivors[0][4]
-        else:
-            ranges: list[list[int]] = []
-            for _, start_s, end_s, _, _ in sorted(survivors, key=lambda entry: entry[1]):
-                if end_s <= start_s:
-                    continue
-                if ranges and start_s <= ranges[-1][1]:
-                    ranges[-1][1] = max(ranges[-1][1], end_s)
-                else:
-                    ranges.append([start_s, end_s])
-            merged_text = " ".join(chunk for s, e in ranges if (chunk := audio_buf.text_for_range(s, e)))
-
-        if source is not None:
-            _log_heard(new_root, audio_buf.as_audio_segments(), merged_text, source)
-
-        if new_root != root_id:
-            audio_buf.root_item_id = new_root
-            audio_buf.root_start_sample = new_root_start
-            for _, r_buf in st.resumed_audio_origins.values():
-                if r_buf.root_item_id == root_id:
-                    r_buf.root_item_id = new_root
-                    r_buf.root_start_sample = new_root_start
-            st.resumed_root_wire_cuts.pop(root_id, None)
-            if merged_text:
-                st.resumed_audio_origins.pop(new_root, None)
-                st.audio_output_item_ids[new_root] = None
-                if len(survivors) > 1:
-                    new_segs = st.assistant_audio_segments.get(new_root, [])
-                    st.resumed_root_wire_cuts[new_root] = st.assistant_audio_cuts.get(
-                        new_root, sum(seg[1] for seg in new_segs)
-                    )
-            if not chat.replace_assistant_message(root_id, new_root, merged_text, status=final_status) and merged_text:
-                chat.add_heard_assistant_message(new_root, merged_text, status=final_status)
-        else:
-            if len(survivors) == 1:
-                st.resumed_root_wire_cuts.pop(root_id, None)
-            if not chat.truncate_assistant_message(root_id, merged_text, status=final_status) and merged_text:
-                chat.add_heard_assistant_message(root_id, merged_text, status=final_status)
-
     def _emit_text_part(self, conn_id: str, resp_id: str, text: str, *, wants_audio: bool) -> list[ServerEvent]:
         st = self._state(conn_id)
         output_idx, item_id = self._output_part_context(conn_id, "text")
@@ -1384,9 +1274,7 @@ class ResponseHandler(RealtimeBaseHandler):
         self._service.conversation.record_acknowledged_item(conn_id, item_id)
         return events
 
-    def begin_resumed_audio_response(
-        self, conn_id: str, audio_buf: Any, resume_sample: int, cut_samples: int
-    ) -> list[ServerEvent]:
+    def begin_resumed_audio_response(self, conn_id: str, audio_buf: Any, resume_sample: int) -> list[ServerEvent]:
         """Open a standard Realtime audio response to replay unplayed audio."""
         st = self._state(conn_id)
         st.current_response_id = _generate_id("resp")
@@ -1398,16 +1286,7 @@ class ResponseHandler(RealtimeBaseHandler):
         st.in_response = True
         st.replay_enabled_for_response = True
         new_item_id = self._start_item(conn_id)
-        prev_item_id = audio_buf.current_item_id
-        if prev_item_id and prev_item_id in st.resumed_audio_origins and prev_item_id not in st.assistant_audio_cuts:
-            st.assistant_audio_cuts[prev_item_id] = max(0, cut_samples - audio_buf.wire_start_sample)
-        st.active_resumed_audio = st.resumed_audio_origins[new_item_id] = (resume_sample, audio_buf)
-        if audio_buf.root_item_id and (cut_samples < audio_buf.total_samples or not audio_buf.generation_done):
-            st.resumed_root_wire_cuts.setdefault(
-                audio_buf.root_item_id, st.assistant_audio_cuts.get(audio_buf.root_item_id, cut_samples)
-            )
-        while len(st.resumed_audio_origins) > _AUDIO_ITEM_HISTORY:
-            st.resumed_audio_origins.pop(next(iter(st.resumed_audio_origins)))
+        st.active_resumed_audio = audio_buf
         audio_buf.current_item_id, audio_buf.wire_start_sample = new_item_id, resume_sample
         return [
             ResponseCreatedEvent(
@@ -1503,37 +1382,57 @@ class ResponseHandler(RealtimeBaseHandler):
                     st.answered_tool_call_ids.pop(next(iter(st.answered_tool_call_ids)))
             if status == "completed":
                 if resumed is not None:
-                    self.rebuild_replay_family_history(conn_id, resumed[1], status_override="completed")
+                    output_items = terminal_response.output or []
+                    for idx, output_item in enumerate(output_items):
+                        if isinstance(output_item, RealtimeConversationItemAssistantMessage) and output_item.id:
+                            text = " ".join(
+                                transcript.strip()
+                                for part in (output_item.content or [])
+                                if (transcript := getattr(part, "transcript", None)) and transcript.strip()
+                            )
+                            if text:
+                                next_call = next(
+                                    (
+                                        later.call_id
+                                        for later in output_items[idx + 1 :]
+                                        if isinstance(later, RealtimeConversationItemFunctionCall)
+                                        and later.call_id is not None
+                                    ),
+                                    None,
+                                )
+                                st.runtime_config.chat.add_heard_assistant_message(
+                                    output_item.id,
+                                    text,
+                                    kept_call_after=next_call,
+                                    status="completed",
+                                )
                 else:
                     st.runtime_config.chat.bind_assistant_item_ids(
                         st.current_response_key,
                         terminal_response.output or [],
                     )
                     self._service.history.finalize(conn_id, st.current_response_key)
-            heard = self._heard_output(conn_id, open_item_id) if status == "cancelled" and resumed is None else []
-            resumed_delivered = (
-                sum(
-                    sum(seg[1] for seg in st.assistant_audio_segments.get(str(p["item_id"]), []))
-                    for p in st.pending_text_outputs
-                )
-                if status == "cancelled" and resumed is not None
-                else 0
+            heard = self._heard_output(conn_id, open_item_id) if status == "cancelled" else []
+            resumed_calls_by_index = sorted(st.pending_function_calls.items()) if resumed is not None else []
+            resumed_msg_index = (
+                {str(p["item_id"]): int(p["output_index"]) for p in st.pending_text_outputs}
+                if resumed is not None
+                else {}
             )
             anchor = self._service.history.anchor(conn_id, st.current_response_key)
             # Ending the response closes its key, which rolls back unfinalized
             # history before deferred client items are applied below.
             self._end_response(conn_id, status, keep_turn_open=keep_turn_open)
-            if status == "cancelled" and resumed is not None:
-                _, audio_buf = resumed
-                if audio_buf.current_item_id:
-                    st.assistant_audio_cuts[audio_buf.current_item_id] = resumed_delivered
-                self.rebuild_replay_family_history(
-                    conn_id, audio_buf, status_override="incomplete", source="audio sent before cancel"
-                )
             # Speech already delivered stays in history, cut to its audio; a
             # client truncate or WebRTC playback position can cut it further.
             for item_id, text in heard:
                 before, following = kept_calls.get(item_id, ([], None))
+                if resumed is not None and following is None and item_id in resumed_msg_index:
+                    msg_idx = resumed_msg_index[item_id]
+                    following = next(
+                        (call.call_id for c_idx, call in resumed_calls_by_index if c_idx > msg_idx and call.call_id),
+                        None,
+                    )
                 st.runtime_config.chat.add_heard_assistant_message(
                     item_id,
                     text,

@@ -890,40 +890,6 @@ class Chat:
             self._set_replied_past_locked(heard, replied_past)
             return True
 
-    def replace_assistant_message(
-        self,
-        old_item_id: str,
-        new_item_id: str,
-        text: str,
-        *,
-        status: Literal["completed", "incomplete"] = "incomplete",
-    ) -> bool:
-        """Replace assistant message *old_item_id* in-place with *new_item_id* and *text*."""
-        with self._lock:
-            self._unheard_assistant_items.pop(old_item_id, None)
-            target_ids = self._assistant_item_aliases.get(old_item_id, {old_item_id})
-            index = next(
-                (
-                    i
-                    for i, item in enumerate(self.buffer)
-                    if item.id in target_ids and isinstance(item, RealtimeConversationItemAssistantMessage)
-                ),
-                None,
-            )
-            if index is None:
-                return False
-            preceding_ids = [item.id for item in self.buffer[:index]]
-            replied_past = self._take_replied_past_locked(target_ids)
-            self._delete_item_locked(old_item_id)
-            if not text:
-                return True
-            retained_ids = {item.id for item in self.buffer}
-            heard = self._heard_message_locked(new_item_id, text)
-            heard.status = status
-            self.buffer.insert(sum(pid in retained_ids for pid in preceding_ids), heard)
-            self._set_replied_past_locked(heard, replied_past)
-            return True
-
     def bind_assistant_item_ids(self, response_key: str | None, output_items: Sequence[ConversationItem]) -> None:
         """Give delivered assistant history the IDs exposed by Realtime."""
         with self._lock:
@@ -1321,9 +1287,11 @@ class Chat:
                     type="message",
                 )
             )
+        prev_plain_assistant_incomplete = False
         for item in buffer_items:
             assert item.id is not None and item.id != "", f"item.id is {item.id}"
             if isinstance(item, RealtimeConversationItemUserMessage):
+                prev_plain_assistant_incomplete = False
                 content: ResponseInputMessageContentListParam = []
                 audio_placeholder_added = False
                 for user_part in item.content:
@@ -1340,6 +1308,7 @@ class Chat:
                 if content:
                     _append_user_input(result, content)
             elif isinstance(item, ResponsesAssistantMessage):
+                prev_plain_assistant_incomplete = False
                 result.append(
                     cast(ResponseInputItemParam, item.response_item.model_dump(exclude_unset=True, by_alias=True))
                 )
@@ -1351,22 +1320,20 @@ class Chat:
                             ResponseOutputTextParam(text=assistant_part.text, type="output_text", annotations=[])
                         )
                 if assistant_content:
-                    result.append(
-                        ResponseOutputMessageParam(
-                            id=item.id,
-                            content=assistant_content,
-                            role="assistant",
-                            status=item.status or "completed",
-                            type="message",
-                        )
+                    _append_assistant_output(
+                        result, item, assistant_content, merge_previous=prev_plain_assistant_incomplete
                     )
+                    prev_plain_assistant_incomplete = item.status == "incomplete"
             elif isinstance(item, ResponseReasoningItem):
+                prev_plain_assistant_incomplete = False
                 result.append(cast(ResponseInputItemParam, item.model_dump(exclude_unset=True, by_alias=True)))
             elif isinstance(item, ResponsesFunctionCall):
+                prev_plain_assistant_incomplete = False
                 result.append(
                     cast(ResponseInputItemParam, item.response_item.model_dump(exclude_unset=True, by_alias=True))
                 )
             elif isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None:
+                prev_plain_assistant_incomplete = False
                 assert item.call_id is not None and item.call_id != ""
                 function_call = ResponseFunctionToolCallParam(
                     arguments=item.arguments,
@@ -1381,6 +1348,7 @@ class Chat:
                     function_call["status"] = item.status
                 result.append(function_call)
             elif isinstance(item, RealtimeConversationItemFunctionCallOutput):
+                prev_plain_assistant_incomplete = False
                 function_call_output = FunctionCallOutput(
                     call_id=provider_call_ids.get(item.call_id, item.call_id),
                     output=item.output,
@@ -1405,8 +1373,10 @@ class Chat:
             if self.init_chat_message:
                 text = " ".join(p.text for p in self.init_chat_message.content if p.text)
                 messages.append(TransformersSystemMessage(content=text))
+            prev_assistant_incomplete = False
             for item in self._model_history_locked(self.buffer):
                 if isinstance(item, RealtimeConversationItemUserMessage):
+                    prev_assistant_incomplete = False
                     has_media = any(p.type in {"input_image", "input_audio"} for p in item.content)
                     content: str | list[dict[str, Any]]
                     if has_media:
@@ -1416,8 +1386,10 @@ class Chat:
                     _append_user_message(messages, content)
                 elif isinstance(item, RealtimeConversationItemAssistantMessage):
                     text = " ".join(p.text for p in item.content if p.text)
-                    messages.append(TransformersAssistantMessage(content=text))
+                    _append_assistant_message(messages, text, deduplicate_overlap=prev_assistant_incomplete)
+                    prev_assistant_incomplete = item.status == "incomplete"
                 elif isinstance(item, RealtimeConversationItemFunctionCall):
+                    prev_assistant_incomplete = False
                     assert item.call_id is not None and item.call_id != ""
                     args: Any = item.arguments
                     try:
@@ -1439,6 +1411,7 @@ class Chat:
                     else:
                         messages.append(TransformersFunctionCallMessage(tool_calls=[call]))
                 elif isinstance(item, RealtimeConversationItemFunctionCallOutput):
+                    prev_assistant_incomplete = False
                     name = ""
                     for prev in reversed(messages):
                         if isinstance(prev, TransformersFunctionCallMessage):
@@ -1862,6 +1835,70 @@ TransformersChatMessage = Union[
     TransformersFunctionCallMessage,
     TransformersToolMessage,
 ]
+
+
+def _merge_assistant_text(previous: str, following: str, *, deduplicate_overlap: bool) -> str:
+    if not previous:
+        return following
+    if not following:
+        return previous
+    if deduplicate_overlap:
+        prev_words = previous.split()
+        next_words = following.split()
+        for overlap in range(min(len(prev_words), len(next_words)), 0, -1):
+            if prev_words[-overlap:] == next_words[:overlap]:
+                return " ".join([*prev_words, *next_words[overlap:]])
+    return f"{previous} {following}"
+
+
+def _append_assistant_message(
+    messages: list[TransformersChatMessage], text: str, *, deduplicate_overlap: bool = False
+) -> None:
+    """Append assistant text, merging into a directly preceding assistant message.
+
+    Mirrors :func:`_append_user_message`: strict templates such as Gemma's and
+    Mistral's reject two assistant messages in a row, while stored history keeps
+    each wire item (such as an interrupted reply followed by its audio replay).
+    """
+    previous = messages[-1] if messages else None
+    if isinstance(previous, TransformersAssistantMessage):
+        previous.content = _merge_assistant_text(previous.content, text, deduplicate_overlap=deduplicate_overlap)
+    else:
+        messages.append(TransformersAssistantMessage(content=text))
+
+
+def _append_assistant_output(
+    result: list[ResponseInputItemParam],
+    item: RealtimeConversationItemAssistantMessage,
+    content: list[ResponseOutputTextParam],
+    *,
+    merge_previous: bool = False,
+) -> None:
+    """Merge a resumed plain assistant reply into a directly preceding incomplete one."""
+    previous = result[-1] if result else None
+    if (
+        merge_previous
+        and previous is not None
+        and previous.get("type") == "message"
+        and previous.get("role") == "assistant"
+    ):
+        prev_msg = cast(ResponseOutputMessageParam, previous)
+        prev_text = " ".join(part["text"] for part in prev_msg["content"] if part["type"] == "output_text")
+        next_text = " ".join(part["text"] for part in content)
+        merged = _merge_assistant_text(prev_text, next_text, deduplicate_overlap=True)
+        prev_msg["content"] = [ResponseOutputTextParam(text=merged, type="output_text", annotations=[])]
+        prev_msg["status"] = item.status or "completed"
+        return
+    assert item.id is not None
+    result.append(
+        ResponseOutputMessageParam(
+            id=item.id,
+            content=content,
+            role="assistant",
+            status=item.status or "completed",
+            type="message",
+        )
+    )
 
 
 def _append_user_message(messages: list[TransformersChatMessage], content: str | list[dict[str, Any]]) -> None:

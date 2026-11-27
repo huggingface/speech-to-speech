@@ -306,12 +306,8 @@ class ConnState(BaseModel):
     assistant_audio_segments: dict[str, list[list[Any]]] = Field(default_factory=dict)
     # Played position (pipeline samples) each truncated assistant item was cut to.
     assistant_audio_cuts: dict[str, int] = Field(default_factory=dict)
-    # Resumed wire item_id -> (resume_sample, AssistantAudioBuffer).
-    resumed_audio_origins: dict[str, tuple[int, Any]] = Field(default_factory=dict)
-    # Superseded root item_id -> original wire cut (pipeline samples) preserved for item.retrieve.
-    resumed_root_wire_cuts: dict[str, int] = Field(default_factory=dict)
-    # Active resumed response metadata: (resume_sample, AssistantAudioBuffer).
-    active_resumed_audio: tuple[int, Any] | None = None
+    # Active resumed AssistantAudioBuffer while replaying/continuing a falsely interrupted reply.
+    active_resumed_audio: Any | None = None
     # Active false-interruption candidate turn_id (suppresses chat/LLM while under min_interruption_words).
     false_interruption_turn_id: str | None = None
     # Dismissed false-interruption turn IDs retained until their late terminal transcription arrives.

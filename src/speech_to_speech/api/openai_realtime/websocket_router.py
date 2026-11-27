@@ -475,7 +475,7 @@ def _record_replay(
         str(st.pending_text_outputs[-1]["item_id"]) if st.pending_text_outputs else ""
     )
     if st.active_resumed_audio is not None:
-        buf = st.active_resumed_audio[1]
+        buf = st.active_resumed_audio
     else:
         buf = session.last_assistant_audio
         if buf is None or buf.generation_done or buf.response_key != response_key:
@@ -571,7 +571,7 @@ async def _resume_false_interruption(
             else buf.pcm_base_sample + resume_rewind_samples(buf.pcm, cut - buf.pcm_base_sample)
         )
         remaining = buf.remaining_segments_from(resume_sample)
-        created_events = unit.service.response.begin_resumed_audio_response(session_id, buf, resume_sample, cut)
+        created_events = unit.service.response.begin_resumed_audio_response(session_id, buf, resume_sample)
         session.last_assistant_audio = buf
         logger.info(
             "Pipeline %d: resuming after false interruption (%s, cut=%dms, resume=%dms, generating=%s)",
