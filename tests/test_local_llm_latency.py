@@ -184,3 +184,31 @@ def test_vision_sampling_requires_positive_temperature_before_loading(monkeypatc
     expected = Loaded if temperature else ValueError
     with pytest.raises(expected):
         handler._load_model("model", "cpu", "float32", gen_kwargs)
+
+
+def test_transformers_stops_at_chat_end_before_generating_another_role(monkeypatch):
+    import torch
+    from transformers import GPT2Config, GPT2LMHeadModel
+
+    model = GPT2LMHeadModel(
+        GPT2Config(vocab_size=8, n_embd=8, n_layer=1, n_head=1, bos_token_id=0, eos_token_id=2, pad_token_id=2)
+    ).eval()
+    prompt = torch.tensor([[0]])
+    # A completed assistant turn (3, 1), then an invented user turn (4, 2).
+    continuation = [3, 1, 4, 2]
+    kwargs = dict(
+        max_new_tokens=4,
+        do_sample=False,
+        attention_mask=torch.ones_like(prompt),
+        prefix_allowed_tokens_fn=lambda _, ids: [continuation[len(ids) - 1]],
+    )
+    assert model.generate(prompt, **kwargs).tolist() == [[0, 3, 1, 4, 2]]
+    handler = object.__new__(VisionLanguageModelHandler)
+    handler.backend = "transformers"
+    processor = SimpleNamespace(tokenizer=SimpleNamespace(eos_token_id=1))
+    monkeypatch.setattr(language_model.AutoProcessor, "from_pretrained", lambda *args, **kwargs: processor)
+    monkeypatch.setattr(language_model.AutoModelForImageTextToText, "from_pretrained", lambda *args, **kwargs: model)
+    handler._load_model("model", "cpu", "float32", {})
+    assert model.generate(prompt, **kwargs).tolist() == [[0, 3, 1]]
+    # Explicit generation overrides still take precedence.
+    assert model.generate(prompt, eos_token_id=2, **kwargs).tolist() == [[0, 3, 1, 4, 2]]
