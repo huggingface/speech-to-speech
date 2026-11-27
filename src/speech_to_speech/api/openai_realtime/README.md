@@ -358,7 +358,7 @@ Without it, aiortc defaults apply (host candidates + Google STUN). Deployments w
 
 Tool calling works through two distinct paths depending on the LLM backend, but both converge to the same wire protocol for the client.
 
-### Local LLM path (`LanguageModelHandler` -- transformers / mlx-lm)
+### Local model path (Transformers, MLX and ZeroGPU)
 
 Tools defined in `session.update` are converted to `FunctionTool` objects. Each tool's JSON Schema `parameters` are turned into a Python `inspect.Signature` (via `signature_from_schema`), and `to_code_prompt()` renders a human-readable `def name(...): """docstring"""` block.
 
@@ -370,7 +370,9 @@ function_name(arg_name_1=value1, arg_name_2='string_value')
 </code>
 ```
 
-After generation, `_extract_tools` uses a regex to find `<code>` blocks, then `extract_function_calls_from_text` parses each `name(kwargs)` call and validates it against registered tools. Valid calls become `ResponseFunctionToolCall` dicts with generated `call_id`s.
+Qwen3.5 normally renders earlier calls in its own function-tag format. When a previous call can be expressed with the available signatures, the local handlers show it in the same `<code>` format as the prompt. The stored conversation and the tool results keep their original call IDs.
+
+The streaming parser accepts Python calls and native `<tool_call>` blocks containing JSON or Qwen function and parameter tags. For Qwen tags, it checks each value against the tool’s schema. It keeps text when the schema accepts a string, so a code such as `007` keeps its leading zeros. Schema references resolve locally. The client receives the parsed name and JSON arguments in a `ResponseFunctionToolCall`.
 
 ### OpenAI API path (`ResponsesApiModelHandler`)
 

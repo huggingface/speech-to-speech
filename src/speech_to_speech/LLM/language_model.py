@@ -48,10 +48,12 @@ from speech_to_speech.LLM.tool_call.function_call import (
     JSON_TOOL_CALL_END,
     JSON_TOOL_CALL_ENTER,
     extract_function_calls_from_text,
-    find_json_tool_call_end,
-    parse_json_tool_call_block,
+    find_tool_call_end,
+    format_history_call,
+    parse_tool_call_block,
 )
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
+from speech_to_speech.LLM.tool_call.signature_from_schema import parameter_names_from_schema
 from speech_to_speech.LLM.tool_call.tool_prompt import END_CODE, ENTER_CODE, build_block_regex, build_tool_system_prompt
 from speech_to_speech.LLM.utils import (
     current_date_for_prompt,
@@ -292,6 +294,33 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
     # Shared helpers
     # ------------------------------------------------------------------
 
+    def _chat_messages(self, chat: Chat, tools: list[FunctionTool]) -> list[dict[str, Any]]:
+        """Show Qwen past calls in the same Python format as the system prompt."""
+        messages = chat.to_transformers_chat()
+        formatter = getattr(self, "processor", None) or getattr(self, "tokenizer", None)
+        template = getattr(formatter, "chat_template", None)
+        if not tools or not isinstance(template, str) or "<function=" not in template or "<tool_call>" not in template:
+            return messages
+
+        aliases = {tool.name: parameter_names_from_schema(tool.parameters) for tool in tools}
+        for message in messages:
+            calls = message.get("tool_calls")
+            if not calls:
+                continue
+            parts = [message["content"]] if message["content"] else []
+            for call in calls:
+                function = call["function"]
+                name = function["name"]
+                block = format_history_call(name, function["arguments"], aliases.get(name))
+                if block is None:
+                    # The tool list can change between turns. Keep the original group intact.
+                    break
+                parts.append(block)
+            else:
+                del message["tool_calls"]
+                message["content"] = "\n".join(parts)
+        return messages
+
     def _apply_instructions(
         self,
         chat: Chat,
@@ -384,12 +413,9 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 cancel_generation=ctx.cancel_generation,
             )
 
-        # Tool-call blocks we recognise: the prompted ``<code>name(...)</code>``
-        # form, plus the ``<tool_call>{json}</tool_call>`` form many models fall
-        # back to. Only active when tools are in play.
         markers: list[tuple[str, str, str]] = []
         if ctx.enter_code and ctx.end_code:
-            markers = [(ctx.enter_code, ctx.end_code, "code"), (JSON_TOOL_CALL_ENTER, JSON_TOOL_CALL_END, "json")]
+            markers = [(ctx.enter_code, ctx.end_code, "code"), (JSON_TOOL_CALL_ENTER, JSON_TOOL_CALL_END, "native")]
 
         while True:
             found = [(printable_text.index(m[0]), m) for m in markers if m[0] in printable_text]
@@ -407,8 +433,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if ctx.sentence_batch:
                 chunks.append(text_chunk(" ".join(ctx.sentence_batch)))
                 ctx.sentence_batch = []
-            if kind == "json":
-                block_end = find_json_tool_call_end(code_and_after)
+            if kind == "native":
+                block_end = find_tool_call_end(code_and_after)
             else:
                 block_end = code_and_after.index(end) + len(end) if ctx.block_regex and end in code_and_after else None
             if block_end is None:
@@ -421,7 +447,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 assert ctx.block_regex is not None
                 _, func_calls = extract_function_calls_from_text(complete_block, ctx.block_regex)
             else:
-                func_calls = parse_json_tool_call_block(complete_block)
+                func_calls = parse_tool_call_block(complete_block, ctx.function_tools)
             parsed_tools: list[ResponseFunctionToolCall] = []
             for fc in func_calls:
                 try:
@@ -873,7 +899,7 @@ class LanguageModelHandler(BaseLanguageModelHandler):
         runtime_config: RuntimeConfig | None = None,
         response: RealtimeResponseCreateParams | None = None,
     ) -> Iterator[LLMResponseChunk]:
-        chat_messages = chat.to_transformers_chat()
+        chat_messages = self._chat_messages(chat, ctx.function_tools)
         # Count the same prompt the model receives, generation prompt included.
         chat_input = self.tokenizer.apply_chat_template(
             chat_messages, tokenize=True, add_generation_prompt=True, enable_thinking=False
@@ -1077,7 +1103,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
         runtime_config: RuntimeConfig | None = None,
         response: RealtimeResponseCreateParams | None = None,
     ) -> Iterator[LLMResponseChunk]:
-        prepared = chat.to_transformers_chat()
+        prepared = self._chat_messages(chat, ctx.function_tools)
         if self.backend == "mlx":
             images, formatted_prompt = self._prepare_mlx_vlm_inputs(prepared)
             ctx.input_tokens += len(self.tokenizer.encode(formatted_prompt))
