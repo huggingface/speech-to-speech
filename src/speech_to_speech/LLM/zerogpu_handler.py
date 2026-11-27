@@ -24,7 +24,7 @@ class ZeroGPULLMHandler(BaseLanguageModelHandler):
         self.gen_kwargs = dict(gen_kwargs)
 
     def _generate(self, chat, language_code, gen, ctx, runtime_config=None, response=None):
-        messages = chat.to_transformers_chat()
+        messages = self._chat_messages(chat, ctx.function_tools)
         ids = self.tokenizer.apply_chat_template(
             messages, tokenize=True, add_generation_prompt=True, enable_thinking=False
         )

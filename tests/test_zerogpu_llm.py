@@ -80,6 +80,34 @@ def test_history_stays_host_owned_and_next_turn_sees_it(adapter):
     assert any(m["role"] == "assistant" and "Ada" in str(m["content"]) for m in seen[1])
 
 
+def test_qwen_tools_reach_worker_and_calls_reach_client(adapter):
+    from openai.types.realtime import RealtimeSessionCreateRequest
+
+    module, worker = adapter
+    config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(
+            type="realtime",
+            tools=[{"type": "function", "name": "check_weather", "description": "Check the forecast."}],
+        )
+    )
+    config.chat.add_item(make_user_message("Check the weather."))
+    h = handler(module, CancelScope())
+    h.tokenizer.chat_template = "<tool_call><function=example>"
+
+    def tokens(messages, kwargs, *, cancelled=None):
+        system = messages[0]["content"]
+        assert messages[0]["role"] == "system"
+        assert "check_weather" in system and "Check the forecast." in system
+        yield "<tool_call>\n<function=check_weather>\n</function>\n</tool_call>"
+
+    worker.tokens = tokens
+    results = list(h.process(request(config)))
+    assert results[-1].error is None
+    assert [t.name for chunk in results if isinstance(chunk, LLMResponseChunk) for t in chunk.tools] == [
+        "check_weather"
+    ]
+
+
 def test_interrupt_while_waiting_for_first_token_cancels_worker(adapter):
     module, worker = adapter
     started = Event()
