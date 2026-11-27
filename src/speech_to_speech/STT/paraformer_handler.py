@@ -16,12 +16,14 @@ from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
 
 logger = logging.getLogger(__name__)
 
-# FunASR joins every output token with a space, Chinese characters included.
-# Only the spaces between two Chinese characters are artifacts; English words
-# need theirs.
-_SPACE_BETWEEN_HAN = re.compile(
-    r"(?<=[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff])\s+(?=[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff])"
-)
+# FunASR's timestamp path joins every token with a space ("我 有 3 个"); the
+# plain path does not ("我有3个"). Keep only the spaces between two Latin or
+# digit words, so Chinese text reads the same on both paths.
+_TOKEN_SPACE = re.compile(r"(?<![A-Za-z0-9'])\s+|\s+(?![A-Za-z0-9'])")
+
+
+def _join_tokens(text: str) -> str:
+    return _TOKEN_SPACE.sub("", text.strip())
 
 
 class ParaformerSTTHandler(BaseSTTHandler):
@@ -59,13 +61,13 @@ class ParaformerSTTHandler(BaseSTTHandler):
         n_steps = 1
         dummy_input = np.array([0] * 512, dtype=np.float32)
         for _ in range(n_steps):
-            _ = self.model.generate(dummy_input)[0]["text"].strip().replace(" ", "")
+            _ = _join_tokens(self.model.generate(dummy_input)[0]["text"])
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         logger.debug("infering paraformer...")
 
         started_at_s = perf_counter()
-        pred_text = _SPACE_BETWEEN_HAN.sub("", self.model.generate(vad_audio.audio)[0]["text"].strip())
+        pred_text = _join_tokens(self.model.generate(vad_audio.audio)[0]["text"])
         # Same idea as ChatTTSHandler: MPS cache clear only on Apple Silicon.
         if self.device == "mps":
             torch.mps.empty_cache()
