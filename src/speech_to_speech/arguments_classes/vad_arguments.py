@@ -47,15 +47,8 @@ class VADHandlerArguments:
         default=0,
         metadata={
             "help": "min_speech_ms to use while the assistant is speaking (including buffered playback) to interrupt it. "
-            "When min_confident_speech_ms is set, this replaces the ordinary-speech term; use barge_in_min_confident_speech_ms "
-            "to raise the confident-speech term during playback. 0 keeps min_speech_ms. Default is 0."
-        },
-    )
-    barge_in_min_confident_speech_ms: int = field(
-        default=0,
-        metadata={
-            "help": "min_confident_speech_ms to use while the assistant is speaking (including buffered playback). "
-            "Requires min_confident_speech_ms > 0. 0 keeps min_confident_speech_ms. Default is 0."
+            "When min_confident_speech_ms is set, this replaces only the ordinary-speech term; confident speech still uses min_confident_speech_ms. "
+            "0 keeps min_speech_ms. Default is 0."
         },
     )
     min_speech_continuation_ms: int = field(

@@ -58,7 +58,6 @@ def test_release_defaults_match_local_qwen35_parakeet_qwen3_profile():
     assert vad_args.min_silence_ms == 64
     assert vad_args.min_speech_ms == 384
     assert vad_args.barge_in_ms == 0
-    assert vad_args.barge_in_min_confident_speech_ms == 0
     assert vad_args.min_speech_continuation_ms == 192
     assert vad_args.realtime_processing_pause == 0.5
     assert vad_args.smart_turn is True
@@ -98,14 +97,11 @@ def test_false_interruption_cli_options_validate_and_parse():
             "1500",
             "--barge_in_ms",
             "600",
-            "--barge_in_min_confident_speech_ms",
-            "256",
         ]
     )
     assert args.module_kwargs.min_interruption_words == 2
     assert args.module_kwargs.false_interruption_timeout_ms == 1500
     assert args.vad_handler_kwargs.barge_in_ms == 600
-    assert args.vad_handler_kwargs.barge_in_min_confident_speech_ms == 256
 
     bad_words = parse_arguments(["--min_interruption_words", "-1"])
     with pytest.raises(ValueError, match="min_interruption_words"):
@@ -120,7 +116,7 @@ def test_false_interruption_cli_options_validate_and_parse():
         prepare_module_args(no_stt.module_kwargs, no_stt.llm_backend)
 
 
-def test_yaml_config_supports_barge_in_confident_and_false_interruption_options(tmp_path):
+def test_yaml_config_supports_false_interruption_options(tmp_path):
     from speech_to_speech import configured_runtime as runtime
     from speech_to_speech.config import load_config, resolve_config
 
@@ -135,7 +131,6 @@ blocks:
       min_speech_ms: 800
       min_confident_speech_ms: 128
       barge_in_ms: 1000
-      barge_in_min_confident_speech_ms: 256
   stt: {kind: stt, backend: openai}
   llm: {kind: llm, backend: chat-completions}
   tts: {kind: tts, backend: openai}
@@ -150,7 +145,6 @@ pipelines:
     resolved = resolve_config(load_config(path), include_client=False, environ={})
     adapted = runtime._adapt(resolved)["primary"]
     assert adapted.vad_handler_kwargs.barge_in_ms == 1000
-    assert adapted.vad_handler_kwargs.barge_in_min_confident_speech_ms == 256
     assert adapted.module_kwargs.min_interruption_words == 2
     assert adapted.module_kwargs.false_interruption_timeout_ms == 1500
 

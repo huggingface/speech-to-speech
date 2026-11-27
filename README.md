@@ -852,9 +852,8 @@ See [VADHandlerArguments](./src/speech_to_speech/arguments_classes/vad_arguments
 
 - `--thresh`: threshold value to trigger voice activity detection.
 - `--min_speech_ms`: minimum duration of detected voice activity to be considered speech (default 384 ms).
-- `--barge_in_ms`: optional override for `--min_speech_ms` while the assistant is speaking (including buffered playback) to interrupt it; `0` (default) keeps `--min_speech_ms`.
-- `--barge_in_min_confident_speech_ms`: optional override for `--min_confident_speech_ms` while the assistant is speaking (including buffered playback); requires `--min_confident_speech_ms > 0`; `0` (default) keeps `--min_confident_speech_ms`.
-- `--min_interruption_words`: minimum transcribed words required to confirm an interruption during assistant playback (`0` disables; `1` replays unplayed audio if STT returns an empty transcript or fails, e.g. after a cough; higher values also ignore short backchannels in any language). `--false_interruption_timeout_ms` (default 2000 ms) caps the STT wait.
+- `--barge_in_ms`: optional override for `--min_speech_ms` while the assistant is speaking (including buffered playback) to interrupt it; under `--min_confident_speech_ms`, it replaces only the ordinary-speech term while confident speech still uses `--min_confident_speech_ms`. `0` (default) keeps `--min_speech_ms`.
+- `--min_interruption_words`: minimum transcribed words required to confirm an interruption during assistant playback (`0` disables; `1` replays unplayed audio if STT returns an empty transcript or fails, e.g. after a cough; higher values also suppress shorter utterances in any language). `--false_interruption_timeout_ms` (default 2000 ms) sets the grace timeout after speech stops (and caps continuing speech). Both can also be overridden per session via `session.update` under `audio.input.turn_detection`.
 - `--min_speech_continuation_ms`: sustain-bar hysteresis threshold for speech that continues a reopenable soft-ended, uncommitted turn within the reopen window. The default and recommended pairing is `--min_speech_ms 384 --min_speech_continuation_ms 192`.
 - `--min_silence_ms`: minimum length of silence intervals for segmenting speech. Default is 64 ms.
 - `--short_segment_merge_ms`: optional merge window for stitching adjacent VAD segments that are each shorter than `--min_speech_ms`.

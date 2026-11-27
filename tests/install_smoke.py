@@ -149,7 +149,6 @@ def _validate_package_defaults() -> None:
     assert vad_args.min_silence_ms == 64
     assert vad_args.min_speech_ms == 384
     assert vad_args.barge_in_ms == 0
-    assert vad_args.barge_in_min_confident_speech_ms == 0
     assert vad_args.min_speech_continuation_ms == 192
     assert vad_args.realtime_processing_pause == 0.5
     assert vad_args.smart_turn is True
