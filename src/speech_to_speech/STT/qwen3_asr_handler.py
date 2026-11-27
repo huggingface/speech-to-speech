@@ -8,16 +8,15 @@ from typing import Any, Iterator, Optional
 import numpy as np
 import torch
 import transformers
-from rich.console import Console
 from transformers.models.qwen3_asr.processing_qwen3_asr import LANGUAGE_CODE_TO_NAME
 
+from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription
 from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
 
 logger = logging.getLogger(__name__)
-console = Console()
 
 DEFAULT_MODEL = "Qwen/Qwen3-ASR-0.6B-hf"
 DEFAULT_LANGUAGE = "en"
@@ -72,6 +71,7 @@ class Qwen3ASRSTTHandler(BaseSTTHandler):
         language: Optional[str] = "auto",
         prompt: Optional[str] = None,
         gen_kwargs: Optional[dict[str, Any]] = None,
+        revision: Optional[str] = None,
     ) -> None:
         logger.info("Loading Qwen3-ASR STT model: %s", model_name)
         self.device = resolve_device(device, TORCH_DEVICES, "Qwen3-ASR")
@@ -80,11 +80,13 @@ class Qwen3ASRSTTHandler(BaseSTTHandler):
         self.gen_kwargs = dict(gen_kwargs or {})
         self.configure_language(language)
 
-        self.processor = transformers.AutoProcessor.from_pretrained(model_name)
+        self.processor = transformers.AutoProcessor.from_pretrained(model_name, revision=revision)
         if self.prompt and not _accepts_prompt(self.processor):
             logger.warning("Ignoring the Qwen3-ASR prompt: passing context needs transformers>=5.15.1.")
             self.prompt = None
-        model = transformers.AutoModelForMultimodalLM.from_pretrained(model_name, dtype=self.torch_dtype)
+        model = transformers.AutoModelForMultimodalLM.from_pretrained(
+            model_name, revision=revision, dtype=self.torch_dtype
+        )
         self.model = model.to(self.device).eval()
         self.warmup()
 

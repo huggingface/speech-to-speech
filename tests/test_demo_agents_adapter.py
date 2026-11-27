@@ -20,10 +20,6 @@ def _run_node(script: str) -> None:
     )
 
 
-def test_websocket_playback_buffer():
-    _run_node('await import("./demo/tests/playback.test.mjs");')
-
-
 def test_adapter_uses_stock_sdk_transport_for_each_mode():
     _run_node(
         """
@@ -35,10 +31,12 @@ globalThis.CustomEvent = class CustomEvent extends Event {
 globalThis.Audio = class Audio { constructor() { this.autoplay = false; this.srcObject = null; } };
 
 const sessions = [];
+const outgoing = [];
 class Transport {
   constructor(options) { this.options = options; this.listeners = new Map(); }
   on(name, callback) { this.listeners.set(name, callback); }
   requestResponse() {}
+  sendEvent(event) { outgoing.push(event); }
 }
 class WebSocketTransport extends Transport {}
 class WebRtcTransport extends Transport {}
@@ -53,7 +51,7 @@ class RealtimeSession {
   }
   on(name, callback) { this.listeners.set(name, callback); }
   async connect(options) { this.connectOptions = options; }
-  sendMessage(message) { this.messages.push(message); }
+  sendMessage(message) { this.messages.push(message); outgoing.push({ greeting: message }); }
   mute() {}
   close() {}
 }
@@ -71,6 +69,7 @@ for (const [transport, url] of [
   ["websocket", "ws://example.test/v1/realtime"],
   ["webrtc", "api/calls"],
 ]) {
+  outgoing.length = 0;
   const client = new S2sRealtimeClient({
     transport,
     directUrl: transport === "websocket" ? url : "",
@@ -80,10 +79,18 @@ for (const [transport, url] of [
     startupGreeting: "Say hello.",
     micStream,
   });
-  client._setupAudio = async () => {};
+  client._loadLanguageCapabilities = async () => { client._autoLanguageSupported = true; };
+client._setupAudio = async () => {};
   client._attachRtcOutput = () => {};
   await client.connect();
   const session = sessions.at(-1);
+  const expectedLanguageUpdate = {
+    type: "session.update",
+    session: { type: "realtime", audio: { input: { transcription: { language: "auto" } } } },
+  };
+  if (JSON.stringify(outgoing) !== JSON.stringify([expectedLanguageUpdate, { greeting: "Say hello." }])) {
+    throw new Error("Auto language must be sent before the startup greeting on both transports");
+  }
   const expectedUrl = transport === "webrtc" ? "https://demo.test/api/calls" : url;
   if (session.connectOptions.url !== expectedUrl) throw new Error(`wrong ${transport} URL`);
   if (session.messages.join("|") !== "Say hello.") throw new Error("startup greeting missing");
@@ -129,6 +136,7 @@ async function setupAudio(captureConfig) {
     audioWorklet: { async addModule(url) { modules.push(url); } },
     createMediaStreamSource() { return { connect() {} }; },
     createAnalyser: analyser,
+    createGain() { return { connect() {} }; },
   };
   globalThis.AudioWorkletNode = class AudioWorkletNode {
     constructor(_context, name, options) {
@@ -281,7 +289,10 @@ class RealtimeSession {
   sendMessage(message) { timeline.push(`greeting:${message}`); }
   mute(muted) { track.enabled = !muted; }
 }
-class Transport { on() {} }
+class Transport {
+  on() {}
+  sendEvent(event) { timeline.push(`language:${event.session.audio.input.transcription.language}`); }
+}
 globalThis.OpenAIAgentsRealtime = {
   OpenAIRealtimeWebRTC: Transport,
   RealtimeAgent: class RealtimeAgent {},
@@ -298,10 +309,11 @@ const client = new S2sRealtimeClient({
   startupGreeting: "Say hello.",
   micStream: { getAudioTracks() { return [track]; } },
 });
+client._loadLanguageCapabilities = async () => { client._autoLanguageSupported = true; };
 client._setupAudio = async () => {};
 client._attachRtcOutput = () => {};
 await client.connect();
-const expected = ["mic:false", "connect", "greeting:Say hello.", "mic:true"];
+const expected = ["mic:false", "connect", "language:auto", "greeting:Say hello.", "mic:true"];
 if (JSON.stringify(timeline) !== JSON.stringify(expected)) {
   throw new Error(`unexpected startup ordering: ${JSON.stringify(timeline)}`);
 }

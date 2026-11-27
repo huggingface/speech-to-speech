@@ -39,7 +39,7 @@ def _quiet_console(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_records_ttfa_before_resample_and_e2e_on_first_yield(monkeypatch: pytest.MonkeyPatch) -> None:
     clock = [100.0]
-    monkeypatch.setattr(facebookmms_handler, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
 
     def slow_resample(chunk, *, orig_sr, target_sr):
         clock[0] = 100.40
@@ -76,7 +76,7 @@ def test_records_ttfa_before_resample_and_e2e_on_first_yield(monkeypatch: pytest
 
 def test_preserves_first_audio_across_later_segments(monkeypatch: pytest.MonkeyPatch) -> None:
     clock = [50.0]
-    monkeypatch.setattr(facebookmms_handler, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     monkeypatch.setattr(
         facebookmms_handler,
         "librosa",
@@ -132,7 +132,7 @@ def test_preserves_first_audio_across_later_segments(monkeypatch: pytest.MonkeyP
 
 def test_language_reload_is_excluded_from_ttfa(monkeypatch: pytest.MonkeyPatch) -> None:
     clock = [10.0]
-    monkeypatch.setattr(facebookmms_handler, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     monkeypatch.setattr(
         facebookmms_handler,
         "librosa",
@@ -174,7 +174,7 @@ def test_language_reload_is_excluded_from_ttfa(monkeypatch: pytest.MonkeyPatch) 
 
 def test_empty_audio_leaves_latency_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     clock = [1.0]
-    monkeypatch.setattr(facebookmms_handler, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
 
     handler = _handler(waveform=torch.empty(0))
     store = handler.turn_latency_store = TurnLatencyStore()
@@ -191,7 +191,7 @@ def test_ttfa_waits_for_waveform_readiness_before_cpu_copy(
     monkeypatch: pytest.MonkeyPatch, device_type: str, cancel_during_wait: bool
 ) -> None:
     clock = [100.0]
-    monkeypatch.setattr(facebookmms_handler, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     scope = CancelScope()
     synchronized_devices = []
     device = SimpleNamespace(type=device_type)
@@ -255,7 +255,7 @@ def test_cancelled_or_discarded_audio_cannot_record_another_response(
     monkeypatch: pytest.MonkeyPatch, cancel_at: str
 ) -> None:
     clock = [10.0]
-    monkeypatch.setattr(facebookmms_handler, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     handler = _handler()
     handler.cancel_scope = CancelScope()
     store = handler.turn_latency_store = TurnLatencyStore()
@@ -295,3 +295,16 @@ def test_cancelled_or_discarded_audio_cannot_record_another_response(
         assert tracker.tts_ttfa_s == (None if cancel_at == "generation" else pytest.approx(0.12))
     assert other.tts_ttfa_s is None
     assert other.e2e_s is None
+
+
+def test_clips_pcm_instead_of_wrapping(monkeypatch: pytest.MonkeyPatch) -> None:
+    # librosa.resample can overshoot a peak near full scale; int16 must saturate, not wrap.
+    resampled = np.array([1.0, 1.2, -1.2, 0.5], dtype=np.float32)
+    monkeypatch.setattr(facebookmms_handler, "librosa", SimpleNamespace(resample=lambda *_a, **_k: resampled))
+    handler = _handler(waveform=_waveform(6))
+
+    blocks = list(handler.process(TTSInput(text="hello")))
+
+    assert len(blocks) == 1
+    np.testing.assert_array_equal(blocks[0][:4], np.array([32767, 32767, -32768, 16384], dtype=np.int16))
+    assert not np.any(blocks[0][4:])

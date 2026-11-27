@@ -19,8 +19,7 @@ from openai.types.realtime import RealtimeConversationItemFunctionCall, Realtime
 from starlette.testclient import TestClient
 
 import speech_to_speech.api.openai_realtime.websocket_router as router_module
-from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
-from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES, RealtimeService
+from speech_to_speech.api.openai_realtime.service import CHUNK_SIZE_BYTES
 from speech_to_speech.api.openai_realtime.tool_followup import (
     TOOL_FOLLOWUP_COVERED,
     TOOL_FOLLOWUP_METADATA_KEY,
@@ -30,7 +29,6 @@ from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.LLM.chat import make_assistant_message, make_user_message
 from speech_to_speech.LLM.language_model import LanguageModelHandler
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
-from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
@@ -59,7 +57,9 @@ from speech_to_speech.pipeline.messages import (
     ResponsePrefetchTransaction,
 )
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+from speech_to_speech.speech_languages import SpeechLanguageCapabilities
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
+from tests.openai_realtime.conftest import make_pipeline_unit
 from tests.test_response_overrides import _RecordingLocalHandler
 from tests.turns import reopen
 
@@ -168,42 +168,19 @@ def setup():
     service unregistered) must drain SESSION_END themselves — see
     `_simulate_session_end_drain` below.
     """
-    text_prompt_queue: Queue = Queue()
-    should_listen = ThreadingEvent()
-    should_listen.set()
-    service = RealtimeService(
-        text_prompt_queue=text_prompt_queue,
-        should_listen=should_listen,
-    )
-    input_queue: Queue = Queue()
-    output_queue: Queue = Queue()
-    text_output_queue: Queue = Queue()
+    unit = make_pipeline_unit()
     stop_event = ThreadingEvent()
-    response_playing = ThreadingEvent()
-    cancel_scope = CancelScope()
-    unit = PipelineUnit(
-        index=0,
-        service=service,
-        cancel_scope=cancel_scope,
-        should_listen=should_listen,
-        response_playing=response_playing,
-        input_queue=input_queue,
-        output_queue=output_queue,
-        text_output_queue=text_output_queue,
-        text_prompt_queue=text_prompt_queue,
-        handlers=[],
-    )
     app = create_app(pool=[unit], stop_event=stop_event)
     return (
         app,
-        service,
-        input_queue,
-        output_queue,
-        text_output_queue,
-        should_listen,
+        unit.service,
+        unit.input_queue,
+        unit.output_queue,
+        unit.text_output_queue,
+        unit.should_listen,
         stop_event,
-        response_playing,
-        cancel_scope,
+        unit.response_playing,
+        unit.cancel_scope,
     )
 
 
@@ -624,7 +601,12 @@ class TestClientEventDispatch:
                 output_queue.put(_pcm_bytes(256))
                 output_queue.put(AssistantOutputEvent(text="stale"))
                 ws.send_json({"type": "response.cancel"})
-                assert ws.receive_json()["type"] == "response.done"
+                # Event-driven wakeup (#692) can deliver a chunk that already left
+                # the queue before cancel runs; drain until the cancel terminal.
+                while True:
+                    event = ws.receive_json()
+                    if event["type"] == "response.done":
+                        break
                 time.sleep(0.1)
                 assert output_queue.empty()
                 assert text_output_queue.empty()
@@ -829,12 +811,19 @@ class TestSendLoop:
 
     def test_audio_output_batches_immediately_available_chunks(self, setup):
         app, _, _, output_queue, *_ = setup
+        chunks = [b"\x01\x00" * 256, b"\x02\x00" * 256]
+
+        async def enqueue_available_chunks():
+            # No await: both chunks must be queued before the send loop resumes.
+            for chunk in chunks:
+                output_queue.put(chunk)
+            output_queue.put(PIPELINE_END)
+
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()  # session.created
-                output_queue.put(_pcm_bytes(256))
-                output_queue.put(_pcm_bytes(256))
-                output_queue.put(PIPELINE_END)
+                assert client.portal is not None
+                client.portal.call(enqueue_available_chunks)
 
                 msg1 = ws.receive_json()
                 assert msg1["type"] == "response.created"
@@ -846,7 +835,7 @@ class TestSendLoop:
                 msg4 = ws.receive_json()
                 assert msg4["type"] == "response.output_audio.delta"
                 decoded = base64.b64decode(msg4["delta"])
-                assert len(decoded) == len(_pcm_bytes(512))
+                assert decoded == b"".join(chunks)
 
                 terminal = [ws.receive_json() for _ in range(4)]
                 assert [event["type"] for event in terminal] == [
@@ -855,6 +844,48 @@ class TestSendLoop:
                     "response.output_item.done",
                     "response.done",
                 ]
+                assert_response_lifecycle_contract(
+                    parse_wire_events([msg1, msg2, msg3, msg4, *terminal]),
+                    wants_audio=True,
+                    expected_status="completed",
+                )
+
+    def test_audio_output_delivers_chunk_before_next_chunk_is_produced(self, setup):
+        app, _, _, output_queue, *_ = setup
+        chunks = [b"\x01\x00" * 256, b"\x02\x00" * 256]
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                output_queue.put(chunks[0])
+
+                opening = [ws.receive_json() for _ in range(4)]
+                assert [event["type"] for event in opening] == [
+                    "response.created",
+                    "response.output_item.added",
+                    "response.content_part.added",
+                    "response.output_audio.delta",
+                ]
+                assert base64.b64decode(opening[-1]["delta"]) == chunks[0]
+
+                # Receiving A establishes delivery before B even exists in the queue.
+                output_queue.put(chunks[1])
+                output_queue.put(PIPELINE_END)
+                second = ws.receive_json()
+                assert second["type"] == "response.output_audio.delta"
+                assert base64.b64decode(second["delta"]) == chunks[1]
+
+                terminal = [ws.receive_json() for _ in range(4)]
+                assert [event["type"] for event in terminal] == [
+                    "response.output_audio.done",
+                    "response.content_part.done",
+                    "response.output_item.done",
+                    "response.done",
+                ]
+                assert_response_lifecycle_contract(
+                    parse_wire_events([*opening, second, *terminal]),
+                    wants_audio=True,
+                    expected_status="completed",
+                )
 
     def test_end_marker_sends_finish_events(self, setup):
         app, _, _, output_queue, *_ = setup
@@ -1939,25 +1970,76 @@ class TestDrainRelease:
 # ===================================================================
 
 
-def _make_unit(index: int) -> PipelineUnit:
-    text_prompt_queue: Queue = Queue()
-    should_listen = ThreadingEvent()
-    should_listen.set()
-    return PipelineUnit(
-        index=index,
-        service=RealtimeService(text_prompt_queue=text_prompt_queue, should_listen=should_listen),
-        cancel_scope=CancelScope(),
-        should_listen=should_listen,
-        response_playing=ThreadingEvent(),
-        input_queue=Queue(),
-        output_queue=Queue(),
-        text_output_queue=Queue(),
-        text_prompt_queue=text_prompt_queue,
-        handlers=[],
-    )
+def _make_unit(index: int):
+    return make_pipeline_unit(index=index)
 
 
 class TestPool:
+    @pytest.mark.parametrize(
+        ("stt_languages", "tts_languages", "selection", "shared", "selectable"),
+        [
+            ({"en", "es"}, {"en", "fr"}, True, ["en"], ["en"]),
+            ({"en", "es"}, {"en", "es"}, False, ["en", "es"], []),
+            (None, {"en"}, True, None, None),
+            ({"en"}, None, True, None, None),
+            (None, None, False, None, []),
+            (set(), {"en"}, True, [], []),
+            ({"es"}, {"en"}, True, [], []),
+        ],
+    )
+    def test_language_capabilities_preserve_unknown_and_separate_coverage_from_selection(
+        self, stt_languages, tts_languages, selection, shared, selectable
+    ):
+        unit = _make_unit(0)
+        service = unit.service
+        service.stt_language_capabilities = SpeechLanguageCapabilities(
+            None if stt_languages is None else frozenset(stt_languages), selection, True
+        )
+        service.tts_language_capabilities = SpeechLanguageCapabilities(
+            None if tts_languages is None else frozenset(tts_languages), True, None
+        )
+        service.stt_supported_languages = stt_languages
+        service.tts_supported_languages = tts_languages
+        service.stt_auto_reset_supported = False
+        app = create_app(pool=[unit, _make_unit(1)], stop_event=ThreadingEvent())
+        with TestClient(app) as client:
+            response = client.get("/v1/realtime/capabilities")
+            assert response.status_code == 200
+            pipelines = response.json()["pipelines"]
+            assert [pipeline["index"] for pipeline in pipelines] == [0, 1]
+            discovered = pipelines[0]
+
+            def codes(languages):
+                return None if languages is None else [language["code"] for language in languages]
+
+            assert codes(discovered["stt"]["languages"]) == (None if stt_languages is None else sorted(stt_languages))
+            assert codes(discovered["tts"]["languages"]) == (None if tts_languages is None else sorted(tts_languages))
+            assert codes(discovered["conversation"]["languages"]) == shared
+            assert codes(discovered["conversation"]["selectable_languages"]) == selectable
+            assert discovered["stt"]["supports_language_selection"] is selection
+            assert discovered["stt"]["supports_auto"] is True
+            assert discovered["tts"]["supports_auto"] is None
+            assert discovered["conversation"]["session_auto_supported"] is False
+            assert pipelines[1]["conversation"]["languages"] is None
+            assert client.get("/v1/pool").json()["in_use"] == 0
+            assert service.get_usage()["connections"] == 0
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()
+                assert client.get("/v1/realtime/capabilities").json() == response.json()
+                for language in discovered["conversation"]["selectable_languages"] or []:
+                    ws.send_json(
+                        {
+                            "type": "session.update",
+                            "session": {
+                                "type": "realtime",
+                                "audio": {"input": {"transcription": {"language": language["name"].title()}}},
+                            },
+                        }
+                    )
+                    updated = ws.receive_json()
+                    assert updated["type"] == "session.updated"
+                    assert updated["session"]["audio"]["input"]["transcription"]["language"] == language["code"]
+
     def test_pool_endpoint_reports_idle_state(self):
         pool = [_make_unit(0), _make_unit(1)]
         app = create_app(pool=pool, stop_event=ThreadingEvent())
@@ -2156,3 +2238,85 @@ def test_cancellation_while_visemes_send_does_not_restart_audio(setup, monkeypat
             time.sleep(0.1)
             assert audio_sends == []
             assert not service._state(conn_id).in_response
+
+
+def test_response_cancel_unblocks_pending_speculative_output_during_reopen_grace():
+    unit, tracker = _make_unit(0), SpeculativeTurnTracker()
+    unit.service.speculative_turns = tracker
+    with TestClient(create_app(pool=[unit], stop_event=ThreadingEvent())) as client:
+        with client.websocket_connect("/v1/realtime") as ws:
+            ws.receive_json()
+            assert unit.session is not None
+            state = unit.service._state(unit.session.session_id)
+            turn_id, rev = tracker.start_turn()
+            tracker.start_reopen_grace(turn_id, rev, grace_s=1.0)
+            state.mark_response_pending("resp_spec")
+
+            unit.output_queue.put(
+                AssistantOutputEvent(
+                    text="stale",
+                    response_key="resp_spec",
+                    turn_id=turn_id,
+                    turn_revision=rev,
+                    cancel_generation=unit.cancel_scope.generation,
+                )
+            )
+            deadline = time.monotonic() + 1.0
+            while unit.session.pending_output_item is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert isinstance(unit.session.pending_output_item, AssistantOutputEvent)
+
+            started_at = time.monotonic()
+            ws.send_json({"type": "response.cancel"})
+            ws.send_json({"type": "response.create"})
+            assert ws.receive_json()["type"] == "response.created"
+            fresh_key, fresh_gen = state.current_response_key, unit.cancel_scope.generation
+            for item in (
+                AssistantOutputEvent(text="fresh", response_key=fresh_key, cancel_generation=fresh_gen),
+                AssistantResponseDoneEvent(response_key=fresh_key, cancel_generation=fresh_gen),
+                AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=fresh_key, cancel_generation=fresh_gen),
+            ):
+                unit.output_queue.put(item)
+
+            events = []
+            while not events or events[-1]["type"] != "response.done":
+                events.append(ws.receive_json())
+            assert time.monotonic() - started_at < 0.5
+            assert [e["delta"] for e in events if e["type"] == "response.output_audio_transcript.delta"] == ["fresh"]
+            assert events[-1]["response"]["status"] == "completed"
+
+
+def test_response_cancel_does_not_park_generation_done_during_reopen_grace():
+    unit, tracker = _make_unit(0), SpeculativeTurnTracker()
+    unit.service.speculative_turns = tracker
+    with TestClient(create_app(pool=[unit], stop_event=ThreadingEvent())) as client:
+        with client.websocket_connect("/v1/realtime") as ws:
+            ws.receive_json()
+            assert unit.session is not None
+            state = unit.service._state(unit.session.session_id)
+            turn_id, rev = tracker.start_turn()
+            tracker.start_reopen_grace(turn_id, rev, grace_s=1.0)
+            state.mark_response_pending("resp_spec")
+            stale_gen = unit.cancel_scope.generation
+
+            ws.send_json({"type": "response.cancel"})
+            deadline = time.monotonic() + 1.0
+            while not unit.cancel_scope.is_stale(stale_gen) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert unit.cancel_scope.is_stale(stale_gen)
+
+            unit.text_output_queue.put(
+                ResponseGenerationDoneEvent(
+                    response_key="resp_spec",
+                    succeeded=False,
+                    turn_id=turn_id,
+                    turn_revision=rev,
+                    cancel_generation=stale_gen,
+                )
+            )
+            deadline = time.monotonic() + 1.0
+            while not unit.text_output_queue.empty() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            time.sleep(0.03)
+            assert unit.session.pending_text_output_items == []
+            assert router_module._send_loop_wait_timeout(unit) == router_module.SEND_LOOP_WAIT_TIMEOUT_S

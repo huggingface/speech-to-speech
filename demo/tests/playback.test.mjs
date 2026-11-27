@@ -213,6 +213,7 @@ test("a chunk crossing beyond the threshold is released whole", () => {
 
 test("disconnect discards pending audio even before the UI closes the client", async () => {
   class Transport {
+    sendEvent() {}
     listeners = new Map();
     on(name, callback) { this.listeners.set(name, callback); }
   }
@@ -245,7 +246,7 @@ test("disconnect discards pending audio even before the UI closes the client", a
 test("SDK interruption signal drops pending audio", async () => {
   const listeners = new Map();
   globalThis.OpenAIAgentsRealtime = {
-    OpenAIRealtimeWebSocket: class { on() {} },
+    OpenAIRealtimeWebSocket: class { on() {} sendEvent() {} },
     RealtimeSession: class {
       on(name, callback) { listeners.set(name, callback); }
       async connect() {}
@@ -281,12 +282,23 @@ test("settings persist the reserve, normalize invalid values, and hide it for We
     allowDirect: true, pinnedUrl: "http://server", rtcAvailable: true,
     transportField: field(), inputTransport: field(), transportHint: field(), gateField: field(),
     playbackBufferField: field(), inputPlaybackBuffer: field(), inputLbUrl: field(),
+    inputLanguage: { value: "auto" },
     inputVoice: field(), inputInstructions: field(), inputNoiseGate: { value: "-50" },
+    inputLocalVad: field(),
+    inputShowReasoning: { checked: false },
     inputAudioInput: field(), inputAudioOutput: field(),
   });
   vm.runInContext(`${prefix}\n${functions}\nglobalThis.api = {loadSettings, saveSettings, readSettingsFromForm, syncTransportUi};`, context);
   const { api } = context;
   assert.equal(api.loadSettings().playbackBufferMs, DEFAULT_PLAYBACK_BUFFER_MS);
+  assert.equal(api.loadSettings().localVad, true);
+  context.settings = api.loadSettings();
+  context.inputLocalVad.value = "off";
+  api.saveSettings(api.readSettingsFromForm());
+  assert.equal(api.loadSettings().localVad, false);
+  context.inputLocalVad.value = "on";
+  api.saveSettings(api.readSettingsFromForm());
+  assert.equal(api.loadSettings().localVad, true);
   for (const raw of ["", "bad", "NaN", "Infinity", "-1", "   "]) {
     stored.set("s2s.ws.playbackBufferMs", raw);
     assert.equal(api.loadSettings().playbackBufferMs, DEFAULT_PLAYBACK_BUFFER_MS);

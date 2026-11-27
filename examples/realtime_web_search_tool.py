@@ -7,7 +7,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
-import httpx
+import httpx2
 
 from speech_to_speech.api.openai_realtime.audio_client import ToolResult
 
@@ -60,13 +60,13 @@ async def execute_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
 
     logger.info("web_search query=%s max_results=%d", query, MAX_RESULTS)
     try:
-        async with httpx.AsyncClient(timeout=12.0) as client:
+        async with httpx2.AsyncClient(timeout=12.0) as client:
             response = await client.post(
                 SERPER_URL,
                 headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
                 json={"q": query, "num": MAX_RESULTS},
             )
-    except httpx.RequestError as exc:
+    except httpx2.RequestError as exc:
         logger.warning("Serper unreachable for %r: %s", query, exc)
         return ToolResult(
             {

@@ -18,11 +18,12 @@ from time import perf_counter
 from typing import Any, Iterator, Optional
 
 import numpy as np
-from rich.console import Console
 from rich.text import Text
 
+from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
 from speech_to_speech.pipeline.language_detection import (
+    PARAKEET_TDT_LANGUAGES,
     detect_language_from_text,
     warm_language_detector,
 )
@@ -34,36 +35,9 @@ from speech_to_speech.utils.mlx_lock import MLXLockContext
 from speech_to_speech.utils.utils import resolve_device
 
 logger = logging.getLogger(__name__)
-console = Console()
 
 # Parakeet TDT v3 supports 25 European languages
-SUPPORTED_LANGUAGES = [
-    "en",
-    "de",
-    "fr",
-    "es",
-    "it",
-    "pt",
-    "nl",
-    "pl",
-    "ru",
-    "uk",
-    "cs",
-    "sk",
-    "hu",
-    "ro",
-    "bg",
-    "hr",
-    "sl",
-    "sr",
-    "da",
-    "no",
-    "sv",
-    "fi",
-    "et",
-    "lv",
-    "lt",
-]
+SUPPORTED_LANGUAGES = list(PARAKEET_TDT_LANGUAGES)
 
 
 class ParakeetTDTSTTHandler(BaseSTTHandler):
@@ -239,7 +213,10 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
             lock_scope_start_s = perf_counter()
             try:
                 with bind_active_turn_latency_tracker(tracker):
-                    with self._compute_lock_context(handler_name="ParakeetSTT-Progressive", timeout=0.01) as acquired:
+                    # A busy lock only skips this progressive update, so a miss is not a warning.
+                    with self._compute_lock_context(
+                        handler_name="ParakeetSTT-Progressive", timeout=0.01, miss_log_level=logging.DEBUG
+                    ) as acquired:
                         if acquired:
                             try:
                                 inference_start_s = perf_counter()
@@ -295,7 +272,10 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
 
                 # Acquire lock with longer timeout for final transcription
                 lock_scope_start_s = perf_counter()
-                with self._compute_lock_context(handler_name="ParakeetSTT-Final", timeout=5.0) as acquired:
+                # A final ends the user's turn: a reply being synthesized lets it in between steps.
+                with self._compute_lock_context(
+                    handler_name="ParakeetSTT-Final", timeout=5.0, priority=True
+                ) as acquired:
                     lock_scope_s = perf_counter() - lock_scope_start_s
                     if not acquired:
                         logger.error("Failed to acquire compute lock for final transcription")
@@ -393,9 +373,13 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         return language
 
     @contextmanager
-    def _compute_lock_context(self, handler_name: str, timeout: float) -> Iterator[bool]:
+    def _compute_lock_context(
+        self, handler_name: str, timeout: float, miss_log_level: int = logging.WARNING, priority: bool = False
+    ) -> Iterator[bool]:
         if self.backend == "mlx":
-            with MLXLockContext(handler_name=handler_name, timeout=timeout) as acquired:
+            with MLXLockContext(
+                handler_name=handler_name, timeout=timeout, miss_log_level=miss_log_level, priority=priority
+            ) as acquired:
                 yield acquired
             return
 
@@ -410,7 +394,13 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
                 logger.debug("%s: compute lock acquired after %.3fs", handler_name, wait_s)
             hold_start_s = perf_counter()
         else:
-            logger.warning("%s: Failed to acquire compute lock after %.3fs (timeout=%s)", handler_name, wait_s, timeout)
+            logger.log(
+                miss_log_level,
+                "%s: Failed to acquire compute lock after %.3fs (timeout=%s)",
+                handler_name,
+                wait_s,
+                timeout,
+            )
         try:
             yield acquired
         finally:
@@ -446,6 +436,8 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         return progressive_text
 
     def _print_live_transcription(self, rich_text: Text, progressive_text: str) -> None:
+        if getattr(console, "quiet", False):
+            return
         is_terminal = bool(getattr(console, "is_terminal", False))
         if is_terminal:
             self._write_live_control("\r\x1b[2K")
@@ -471,6 +463,8 @@ class ParakeetTDTSTTHandler(BaseSTTHandler):
         self._live_transcription_active = False
 
     def _write_live_control(self, sequence: str) -> None:
+        if getattr(console, "quiet", False):
+            return
         file = getattr(console, "file", None)
         if file is None:
             return

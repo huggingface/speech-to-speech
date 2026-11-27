@@ -12,21 +12,18 @@ import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from queue import Queue
 from threading import Event as ThreadingEvent
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 import uvicorn
 from pydantic import BaseModel
 from starlette.testclient import TestClient
 
 from speech_to_speech.api.openai_realtime.llm_proxy import LLMProxyConfig
-from speech_to_speech.api.openai_realtime.pipeline_unit import PipelineUnit
-from speech_to_speech.api.openai_realtime.service import RealtimeService
 from speech_to_speech.api.openai_realtime.websocket_router import create_app
-from speech_to_speech.pipeline.cancel_scope import CancelScope
+from tests.openai_realtime.conftest import make_pipeline_unit
 
 # ---------------------------------------------------------------------------
 # Fake upstream provider
@@ -96,7 +93,8 @@ class FakeUpstream:
                 pass
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        # shutdown() waits for the serving loop to poll.
+        self._thread = threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         self._thread.start()
 
     @property
@@ -149,33 +147,19 @@ class LiveApp:
 # ---------------------------------------------------------------------------
 
 
-def _make_unit(index: int = 0) -> PipelineUnit:
-    text_prompt_queue: Queue = Queue()
-    should_listen = ThreadingEvent()
-    should_listen.set()
-    return PipelineUnit(
-        index=index,
-        service=RealtimeService(text_prompt_queue=text_prompt_queue, should_listen=should_listen),
-        cancel_scope=CancelScope(),
-        should_listen=should_listen,
-        response_playing=ThreadingEvent(),
-        input_queue=Queue(),
-        output_queue=Queue(),
-        text_output_queue=Queue(),
-        text_prompt_queue=text_prompt_queue,
-        handlers=[],
-    )
+def _make_unit(index: int = 0):
+    return make_pipeline_unit(index=index)
 
 
 def _make_app(config: LLMProxyConfig | None):
     return create_app(pool=[_make_unit()], stop_event=ThreadingEvent(), llm_proxy_config=config)
 
 
-def _proxy_config(upstream: FakeUpstream, **overrides: Any) -> LLMProxyConfig:
+def _proxy_config(upstream: FakeUpstream | None = None, **overrides: Any) -> LLMProxyConfig:
     defaults: dict[str, Any] = dict(
         enabled=True,
         llm_backend="chat-completions",
-        upstream_base_url=upstream.base_url,
+        upstream_base_url=upstream.base_url if upstream else "http://127.0.0.1:1/v1",
         upstream_api_key="sk-server-secret",
         model_name="server-model",
     )
@@ -195,17 +179,13 @@ CHAT_BODY = {
 
 
 class TestChatCompletionsPassthrough:
-    def test_upstream_response_arrives_verbatim(self, upstream):
+    def test_forwards_request_with_server_credentials_and_returns_upstream_response(self, upstream):
         app = _make_app(_proxy_config(upstream))
         with TestClient(app) as client:
             r = client.post("/v1/chat/completions", json=CHAT_BODY)
         assert r.status_code == 200
         assert r.json() == {"id": "chatcmpl-1", "object": "chat.completion", "choices": []}
 
-    def test_upstream_receives_forced_model_and_server_key(self, upstream):
-        app = _make_app(_proxy_config(upstream))
-        with TestClient(app) as client:
-            client.post("/v1/chat/completions", json=CHAT_BODY)
         (request,) = upstream.requests
         assert request["path"] == "/v1/chat/completions"
         assert request["body"]["model"] == "server-model"
@@ -263,8 +243,8 @@ class TestUnavailableContract:
         with TestClient(app) as client:
             return client.post(path, json=CHAT_BODY)
 
-    def test_flag_off_is_501(self, upstream):
-        app = _make_app(_proxy_config(upstream, enabled=False))
+    def test_flag_off_is_501(self):
+        app = _make_app(_proxy_config(enabled=False))
         r = self._post(app, "/v1/chat/completions")
         assert r.status_code == 501
         assert "disabled" in r.json()["error"]["message"]
@@ -276,16 +256,16 @@ class TestUnavailableContract:
         assert r.status_code == 501
 
     @pytest.mark.parametrize("backend", ["transformers", "mlx-lm"])
-    def test_local_backend_is_501_naming_remote_backends(self, upstream, backend):
-        app = _make_app(_proxy_config(upstream, llm_backend=backend))
+    def test_local_backend_is_501_naming_remote_backends(self, backend):
+        app = _make_app(_proxy_config(llm_backend=backend))
         r = self._post(app, "/v1/chat/completions")
         assert r.status_code == 501
         message = r.json()["error"]["message"]
         assert "chat-completions" in message
         assert "responses-api" in message
 
-    def test_responses_path_is_501_under_chat_completions_backend(self, upstream):
-        app = _make_app(_proxy_config(upstream))
+    def test_responses_path_is_501_under_chat_completions_backend(self):
+        app = _make_app(_proxy_config())
         r = self._post(app, "/v1/responses")
         assert r.status_code == 501
         assert "/v1/chat/completions" in r.json()["error"]["message"]
@@ -319,7 +299,7 @@ class TestStreamingPassthrough:
         )
         with LiveApp(_make_app(_proxy_config(upstream))) as live:
             arrivals: list[float] = []
-            with httpx.stream(
+            with httpx2.stream(
                 "POST",
                 f"http://127.0.0.1:{live.port}/v1/chat/completions",
                 json=STREAM_BODY,
@@ -393,10 +373,10 @@ RESPONSES_SSE_FRAMES = [
 
 
 class TestResponsesPassthrough:
-    def _config(self, upstream, **overrides):
+    def _config(self, upstream=None, **overrides):
         return _proxy_config(upstream, llm_backend="responses-api", **overrides)
 
-    def test_non_streaming_passes_through_verbatim(self, upstream):
+    def test_forwards_request_with_store_disabled_and_returns_upstream_response(self, upstream):
         upstream.responder = lambda request: (200, {"id": "resp_1", "object": "response", "output": []})
         app = _make_app(self._config(upstream))
         with TestClient(app) as client:
@@ -404,10 +384,6 @@ class TestResponsesPassthrough:
         assert r.status_code == 200
         assert r.json() == {"id": "resp_1", "object": "response", "output": []}
 
-    def test_upstream_receives_store_false_and_forced_model(self, upstream):
-        app = _make_app(self._config(upstream))
-        with TestClient(app) as client:
-            client.post("/v1/responses", json=RESPONSES_BODY)
         (request,) = upstream.requests
         assert request["path"] == "/v1/responses"
         assert request["body"]["store"] is False
@@ -425,18 +401,18 @@ class TestResponsesPassthrough:
         (request,) = upstream.requests
         assert request["body"]["store"] is False
 
-    def test_chat_completions_path_is_501_under_responses_backend(self, upstream):
-        app = _make_app(self._config(upstream))
+    def test_chat_completions_path_is_501_under_responses_backend(self):
+        app = _make_app(self._config())
         with TestClient(app) as client:
             r = client.post("/v1/chat/completions", json=CHAT_BODY)
         assert r.status_code == 501
         assert "/v1/responses" in r.json()["error"]["message"]
 
     @pytest.mark.parametrize("backend", ["transformers", "mlx-lm"])
-    def test_flag_off_and_local_backend_are_501_on_responses_path(self, upstream, backend):
+    def test_flag_off_and_local_backend_are_501_on_responses_path(self, backend):
         for config in (
-            self._config(upstream, enabled=False),
-            _proxy_config(upstream, llm_backend=backend),
+            self._config(enabled=False),
+            _proxy_config(llm_backend=backend),
         ):
             app = _make_app(config)
             with TestClient(app) as client:

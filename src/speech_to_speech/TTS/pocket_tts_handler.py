@@ -2,30 +2,29 @@ from __future__ import annotations
 
 import logging
 import re
+from itertools import chain
 from threading import Event
 from time import perf_counter
 from typing import Any, Callable, Iterator, cast
 
 import numpy as np
-from rich.console import Console
 
-from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.messages import EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import transcript_for_log
-from speech_to_speech.pipeline.turn_latency import record_response_e2e, record_response_tts_ttfa
+from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
+from speech_to_speech.TTS.pcm_blocks import PCMBlockBuffer
 from speech_to_speech.TTS.persian_normalization import normalize
 from speech_to_speech.TTS.pocket_tts_farsi import PersianPhonemizer
 from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
 
 logger = logging.getLogger(__name__)
-console = Console()
 
 
-class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
+class PocketTTSHandler(BaseTTSHandler):
     """
     Handler for Pocket TTS model from Kyutai Labs.
     Supports streaming audio generation with voice cloning.
@@ -159,19 +158,16 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
         generation: int | None,
         on_first_provider_audio: Callable[[float], None] | None = None,
     ) -> Iterator[Any]:
-        def cancelled() -> bool:
-            return generation is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(generation)
-
         phonemizer = getattr(self, "phonemizer", None)
         if phonemizer is None:
-            if not cancelled():
+            if not self._is_stale(generation):
                 for audio in self.model.generate_audio_stream(
                     self.voice_state,
                     text,
                     max_tokens=self.max_tokens,
                     copy_state=True,
                 ):
-                    if cancelled():
+                    if self._is_stale(generation):
                         return
                     if on_first_provider_audio is not None and audio.numel():
                         on_first_provider_audio(perf_counter())
@@ -182,10 +178,10 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
         # Spell decimals before splitting, and recognize adjacent sentences too.
         sentences = [part.strip() for part in re.split(r"[.!؟?]+", normalize(text)) if part.strip()]
         for index, sentence in enumerate(sentences):
-            if cancelled():
+            if self._is_stale(generation):
                 return
             phonemes = phonemizer(sentence)
-            if cancelled():
+            if self._is_stale(generation):
                 return
             if not phonemes:
                 continue
@@ -194,7 +190,7 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
                 yield torch.zeros(int(self.model.sample_rate * 0.25))
             for chunk in self._phoneme_chunks(phonemes):
-                if cancelled():
+                if self._is_stale(generation):
                     return
                 yield from self._synthesize_farsi_chunk(chunk, generation, on_first_provider_audio)
 
@@ -242,14 +238,11 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
     ) -> Iterator[Any]:
         import torch
 
-        def cancelled() -> bool:
-            return generation is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(generation)
-
         tokens = len(self.model.flow_lm.conditioner.tokenizer.sp.encode(phonemes))
         cap_seconds = tokens / 3.0 + 2.0
         first_audio_at_s = None
         for _ in range(2):
-            if cancelled():
+            if self._is_stale(generation):
                 return
             parts = []
             # The public API reinterprets glottal stops as punctuation. The pinned
@@ -260,12 +253,12 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 frames_after_eos=0,
                 copy_state=True,
             ):
-                if cancelled():
+                if self._is_stale(generation):
                     return
                 if on_first_provider_audio is not None and first_audio_at_s is None and audio.numel():
                     first_audio_at_s = perf_counter()
                 parts.append(audio)
-            if cancelled():
+            if self._is_stale(generation):
                 return
             if not parts:
                 continue
@@ -295,28 +288,11 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
         """
         return 0.1  # 100ms threshold
 
-    def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
-        speculative_turns = getattr(self, "speculative_turns", None)
-        if isinstance(tts_input, EndOfResponse):
-            self._failed_responses.discard(self._response_identity(tts_input))
-            if speculative_turns and not speculative_turns.wait_for_gate(
-                tts_input.turn_id,
-                tts_input.turn_revision,
-            ):
-                if tts_input.response_key is None:
-                    return
-                tts_input.cleanup_only = True
-            yield AUDIO_RESPONSE_DONE
-            return
+    def _on_end_of_response(self, end: EndOfResponse) -> None:
+        self._failed_responses.discard(self._response_identity(end))
 
+    def _synthesize_input(self, tts_input: TTSInput) -> Iterator[TTSOut]:
         if self._response_identity(tts_input) in self._failed_responses:
-            return
-        if speculative_turns and not speculative_turns.wait_for_gate(
-            tts_input.turn_id,
-            tts_input.turn_revision,
-            commit=True,
-        ):
-            logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
             return
 
         gen = tts_input.cancel_generation
@@ -326,8 +302,6 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
         text = tts_input.text
         logger.debug(f"Received language code: {language_code}")
 
-        console.print(f"[green]ASSISTANT: {text}")
-
         # Generate audio stream
         logger.debug("Generating audio: %s", transcript_for_log(text))
 
@@ -336,7 +310,7 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
         except Exception:
             if getattr(self, "phonemizer", None) is None:
                 raise
-            if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
+            if self._is_stale(gen):
                 logger.info("TTS generation cancelled (interruption)")
                 return
             self._failed_responses.add(self._response_identity(tts_input))
@@ -362,45 +336,19 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self._failed_responses.clear()
 
     def _stream_pcm(self, tts_input: TTSInput, text: str, gen: int | None) -> Iterator[TTSOut]:
-        pipeline_start = perf_counter()
-        first_chunk = True
-        first_yielded = True
+        timer = self._latency_timer(tts_input, gen)
 
         from speech_to_speech.api.openai_realtime.utils import StreamingPcm16Resampler
 
         resampler = StreamingPcm16Resampler(self.model.sample_rate, self.sample_rate)
-        pending = np.empty(0, dtype="<i2")
-
-        def cancelled() -> bool:
-            return gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen)
+        blocks = PCMBlockBuffer(self.blocksize)
 
         def record_first_provider_audio(first_audio_at_s: float) -> None:
-            nonlocal first_chunk
-            if first_chunk and not cancelled():
-                ttfa_s = first_audio_at_s - pipeline_start
-                logger.debug("Time to first audio: %.3fs", ttfa_s)
-                record_response_tts_ttfa(
-                    getattr(self, "turn_latency_store", None),
-                    tts_input.response_key,
-                    ttfa_s,
-                )
-                first_chunk = False
-
-        def emit(block: np.ndarray) -> Iterator[TTSOut]:
-            nonlocal first_yielded
-            if first_yielded:
-                if tts_input.speech_stopped_at_s is not None:
-                    latency_s = max(0.0, perf_counter() - tts_input.speech_stopped_at_s)
-                    record_response_e2e(
-                        getattr(self, "turn_latency_store", None),
-                        tts_input.response_key,
-                        latency_s,
-                    )
-                first_yielded = False
-            yield block
+            if timer.first_provider_audio(first_audio_at_s):
+                logger.debug("Time to first audio: %.3fs", first_audio_at_s - timer.started_at_s)
 
         for audio_chunk in self._generate_audio(text, gen, record_first_provider_audio):
-            if cancelled():
+            if self._is_stale(gen):
                 logger.info("TTS generation cancelled (interruption)")
                 return
             # Saturate before converting, so peaks cannot wrap around as int16.
@@ -409,21 +357,15 @@ class PocketTTSHandler(BaseHandler[TTSIn, TTSOut]):
             # Keep filter history across chunks instead of restarting at every
             # playback block, which introduces periodic boundary artifacts.
             converted = np.frombuffer(resampler.push(pcm.tobytes()), dtype="<i2")
-            pending = np.concatenate((pending, converted))
-            while len(pending) >= self.blocksize:
-                if cancelled():
+            for block in blocks.push(converted):
+                if self._is_stale(gen):
                     return
-                yield from emit(pending[: self.blocksize].copy())
-                pending = pending[self.blocksize :]
+                yield block
 
-        if cancelled():
+        if self._is_stale(gen):
             return
         tail = np.frombuffer(resampler.flush(), dtype="<i2")
-        pending = np.concatenate((pending, tail))
-        for index in range(0, len(pending), self.blocksize):
-            if cancelled():
+        for block in chain(blocks.push(tail), blocks.flush()):
+            if self._is_stale(gen):
                 return
-            block = pending[index : index + self.blocksize]
-            if len(block) < self.blocksize:
-                block = np.pad(block, (0, self.blocksize - len(block)))
-            yield from emit(block.copy())
+            yield block

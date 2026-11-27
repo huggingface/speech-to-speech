@@ -2,10 +2,14 @@ import base64
 import io
 import re
 from collections.abc import Callable
+from datetime import datetime, tzinfo
 from typing import Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests  # type: ignore[import-untyped]
 from PIL import Image
+
+from speech_to_speech.language_codes import LANGUAGE_NAMES as WHISPER_LANGUAGE_TO_LLM_LANGUAGE
 
 SMART_PUNCT_TRANSLATION = str.maketrans(
     {
@@ -17,7 +21,7 @@ SMART_PUNCT_TRANSLATION = str.maketrans(
 )
 
 SPEECHABLE_PATTERN = re.compile(
-    r"[^\w\s.,!?;:'\"\-()\/\\@#%&*+=$€£¥₹₽¢\[\]{}<>~`^|…—–，。！？；：、\n\r\t]",
+    r"[^\w\s.,!?;:'\"\-()\/\\@#%&*+=$€£¥₹₽¢\[\]{}<>~`^|…—–，。！？；：、｡؟।॥\n\r\t]",
     flags=re.UNICODE,
 )
 
@@ -98,6 +102,32 @@ def _has_unclosed_markdown_fence(text: str) -> bool:
     return opening_ticks is not None
 
 
+# NLTK's Punkt tokenizer only ends a sentence at ASCII ". ? !", so CJK, Arabic
+# and Devanagari replies would otherwise stay one sentence until the stream
+# ends. Split again after those terminators, keeping closing quotes and brackets
+# with the sentence they close.
+_NON_LATIN_SENTENCE_END_PATTERN = re.compile(r"[。！？｡؟।॥]+[」』）”’\"')]*")
+
+
+def _split_after_non_latin_terminators(sentence: str) -> list[str]:
+    # Complete Markdown code and emphasis are already masked. A delimiter left
+    # here may open a span that is still streaming, so leave the sentence whole,
+    # as Punkt alone would, rather than send half a span to TTS.
+    if "`" in sentence or "*" in sentence:
+        return [sentence]
+    parts: list[str] = []
+    start = 0
+    for match in _NON_LATIN_SENTENCE_END_PATTERN.finditer(sentence):
+        parts.append(sentence[start : match.end()].strip())
+        start = match.end()
+    if not parts:
+        return [sentence]
+    remainder = sentence[start:].strip()
+    if remainder:
+        parts.append(remainder)
+    return parts
+
+
 def sent_tokenize_preserving_markdown_code(
     text: str,
     tokenizer: Callable[[str], list[str]],
@@ -108,8 +138,9 @@ def sent_tokenize_preserving_markdown_code(
     protected_text, protected_code = _protect_markdown_code(text, keep_delimiters=True)
     protected_text, protected_emphasis = _protect_matched_emphasis(protected_text)
     return [
-        _restore_markdown_code(_restore_matched_emphasis(sentence, protected_emphasis), protected_code)
+        _restore_markdown_code(_restore_matched_emphasis(part, protected_emphasis), protected_code)
         for sentence in tokenizer(protected_text)
+        for part in _split_after_non_latin_terminators(sentence)
     ]
 
 
@@ -138,123 +169,6 @@ def remove_unspeechable(text: str) -> str:
     return SPEECHABLE_PATTERN.sub("", text)
 
 
-# Maps an STT language code to the language name used in the "Please reply ... in {name}"
-# prompt. Every language any bundled STT backend can report needs an entry here, otherwise
-# `--enable_lang_prompt` silently emits no instruction for it. The names are lowercase
-# because they are interpolated mid-sentence.
-#
-# `tests/test_llm_utils.py` asserts this covers the SUPPORTED_LANGUAGES of every bundled STT
-# handler, so adding a language to a handler without adding it here fails CI.
-WHISPER_LANGUAGE_TO_LLM_LANGUAGE = {
-    "en": "english",
-    "fr": "french",
-    "es": "spanish",
-    "zh": "chinese",
-    "ja": "japanese",
-    "ko": "korean",
-    "hi": "hindi",
-    "de": "german",
-    "pt": "portuguese",
-    "pl": "polish",
-    "it": "italian",
-    "nl": "dutch",
-    # The remaining languages Parakeet TDT v3 (the default STT) detects and reports.
-    "ru": "russian",
-    "uk": "ukrainian",
-    "cs": "czech",
-    "sk": "slovak",
-    "hu": "hungarian",
-    "ro": "romanian",
-    "bg": "bulgarian",
-    "hr": "croatian",
-    "sl": "slovenian",
-    "sr": "serbian",
-    "da": "danish",
-    "no": "norwegian",
-    "sv": "swedish",
-    "fi": "finnish",
-    "et": "estonian",
-    "lv": "latvian",
-    "lt": "lithuanian",
-    # The rest of Whisper's language set, which the Whisper-family backends (including
-    # faster-whisper) can detect and report. Without a name here the prompt is silently
-    # skipped for that language, so coverage has to match what the backends can emit.
-    "tr": "turkish",
-    "ca": "catalan",
-    "ar": "arabic",
-    "id": "indonesian",
-    "vi": "vietnamese",
-    "he": "hebrew",
-    "el": "greek",
-    "ms": "malay",
-    "ta": "tamil",
-    "th": "thai",
-    "ur": "urdu",
-    "la": "latin",
-    "mi": "maori",
-    "ml": "malayalam",
-    "cy": "welsh",
-    "te": "telugu",
-    "fa": "persian",
-    "bn": "bengali",
-    "az": "azerbaijani",
-    "kn": "kannada",
-    "mk": "macedonian",
-    "br": "breton",
-    "eu": "basque",
-    "is": "icelandic",
-    "hy": "armenian",
-    "ne": "nepali",
-    "mn": "mongolian",
-    "bs": "bosnian",
-    "kk": "kazakh",
-    "sq": "albanian",
-    "sw": "swahili",
-    # Qwen3-ASR reports Filipino as "fil"; Whisper only knows "tl" (Tagalog) above.
-    "fil": "filipino",
-    "gl": "galician",
-    "mr": "marathi",
-    "pa": "punjabi",
-    "si": "sinhala",
-    "km": "khmer",
-    "sn": "shona",
-    "yo": "yoruba",
-    "so": "somali",
-    "af": "afrikaans",
-    "oc": "occitan",
-    "ka": "georgian",
-    "be": "belarusian",
-    "tg": "tajik",
-    "sd": "sindhi",
-    "gu": "gujarati",
-    "am": "amharic",
-    "yi": "yiddish",
-    "lo": "lao",
-    "uz": "uzbek",
-    "fo": "faroese",
-    "ht": "haitian creole",
-    "ps": "pashto",
-    "tk": "turkmen",
-    "nn": "nynorsk",
-    "mt": "maltese",
-    "sa": "sanskrit",
-    "lb": "luxembourgish",
-    "my": "myanmar",
-    "bo": "tibetan",
-    "tl": "tagalog",
-    "mg": "malagasy",
-    "as": "assamese",
-    "tt": "tatar",
-    "haw": "hawaiian",
-    "ln": "lingala",
-    "ha": "hausa",
-    "ba": "bashkir",
-    "jw": "javanese",
-    "su": "sundanese",
-    "yue": "cantonese",
-}
-
-
 def format_language_instruction(lang_name: str) -> str:
     """Build the opt-in language instruction for ``--enable_lang_prompt``."""
     return f"Please reply to my message in {lang_name}."
@@ -266,6 +180,30 @@ def language_name_for_prompt(language_code: Optional[str], *, enable: bool) -> O
         return None
     _, lang_name = resolve_auto_language(language_code)
     return lang_name
+
+
+def format_current_date(now: datetime) -> str:
+    """Build the ``--llm_current_date`` line, e.g. 'Today is Wednesday, November 4, 2026.'"""
+    return f"Today is {now:%A}, {now:%B} {now.day}, {now.year}."
+
+
+def current_date_for_prompt(*, enable: bool, timezone: Optional[tzinfo] = None) -> Optional[str]:
+    """Today's date line for the system prompt; call per request so it rolls over at midnight."""
+    if not enable:
+        return None
+    return format_current_date(datetime.now(timezone))
+
+
+def prompt_timezone(name: Optional[str]) -> Optional[ZoneInfo]:
+    """Resolve ``--llm_timezone`` to a ``ZoneInfo``, or ``None`` for the server's local time."""
+    if not name:
+        return None
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        raise ValueError(
+            f"Unknown --llm_timezone {name!r}: use an IANA name like 'America/New_York' (on Windows, install 'tzdata')"
+        ) from None
 
 
 def resolve_auto_language(language_code: Optional[str]) -> tuple[Optional[str], Optional[str]]:

@@ -9,7 +9,7 @@ import torch
 
 from speech_to_speech.utils.utils import resolve_device
 
-DIARIZATION_DEVICES = ("cuda", "mps", "cpu")
+DIARIZATION_DEVICES = ("cuda", "npu", "mps", "cpu")
 
 
 @dataclass(frozen=True)

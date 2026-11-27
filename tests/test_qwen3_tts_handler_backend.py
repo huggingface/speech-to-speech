@@ -11,6 +11,7 @@ from openai.types.realtime import RealtimeSessionCreateRequest
 
 import speech_to_speech.TTS.qwen3_tts_handler as qwen3_tts_module
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.pipeline.console import console as pipeline_console
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, AudioOutput, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
@@ -516,9 +517,9 @@ def test_process_only_reenables_listening_after_end_of_response(monkeypatch):
     handler.queue_in = Queue()
     handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
     handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
-    handler._process_voice_clone = lambda text, language=None: iter([np.zeros(512, dtype=np.int16)])
+    handler._process_voice_clone = lambda text, language=None, timer=None: iter([np.zeros(512, dtype=np.int16)])
 
-    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline_console, "print", lambda *args, **kwargs: None)
 
     outputs = list(handler.process(TTSInput(text="Hello there.", runtime_config=RuntimeConfig())))
 
@@ -543,11 +544,11 @@ def test_process_passes_selected_language_without_changing_setup_default(monkeyp
     handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
     handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
     requested = []
-    handler._process_voice_clone = lambda text, language: (
+    handler._process_voice_clone = lambda text, language, timer=None: (
         requested.append(language),
         iter([np.zeros(512, dtype=np.int16)]),
     )[1]
-    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline_console, "print", lambda *args, **kwargs: None)
     config = RuntimeConfig(
         session=RealtimeSessionCreateRequest(
             type="realtime",
@@ -641,12 +642,31 @@ def test_process_waits_for_pending_reopen_and_drops_stale_end_of_response():
     assert outputs == []
 
 
-def test_process_waits_for_reopen_grace_and_drops_stale_tts_input():
+def test_process_waits_for_reopen_grace_and_drops_stale_tts_input(monkeypatch):
     tracker = SpeculativeTurnTracker()
     tracker.start_turn()
     tracker.start_reopen_grace("turn_1", 0, grace_s=0.5)
     handler = object.__new__(Qwen3TTSHandler)
     handler.speculative_turns = tracker
+    handler.cancel_scope = None
+    handler.ref_audio = "TTS/ref_audio.wav"
+    handler.speaker = None
+    handler.instruct = None
+    handler.language = "English"
+    handler.backend = "mlx"
+    handler.queue_in = Queue()
+    handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
+    handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
+    synth_started = Event()
+
+    def _process_voice_clone(text, language=None, timer=None):
+        synth_started.set()
+        yield np.zeros(512, dtype=np.int16)
+
+    handler._process_voice_clone = _process_voice_clone
+    printed: list[str] = []
+    monkeypatch.setattr(pipeline_console, "print", lambda msg, *args, **kwargs: printed.append(msg))
+
     done = Event()
     outputs = []
 
@@ -665,13 +685,19 @@ def test_process_waits_for_reopen_grace_and_drops_stale_tts_input():
     thread = Thread(target=run_process)
     thread.start()
 
+    # Synthesis begins speculatively during grace, then holds before committing
+    # or yielding the first audio block.
+    assert synth_started.wait(0.5)
     assert not done.wait(0.05)
+    assert outputs == [] and printed == []
+    assert not tracker.is_committed("turn_1", 0)
     candidate_revision = tracker.begin_reopen_candidate("turn_1", 0)
     assert tracker.confirm_reopen_candidate("turn_1", 0, candidate_revision)
     assert done.wait(1.0)
     thread.join(timeout=1.0)
 
-    assert outputs == []
+    assert outputs == [] and printed == []
+    assert not tracker.is_committed("turn_1", 0)
 
 
 def test_process_waits_for_reopen_grace_and_drops_stale_end_of_response():
@@ -699,7 +725,7 @@ def test_process_waits_for_reopen_grace_and_drops_stale_end_of_response():
     assert outputs == []
 
 
-def test_process_commits_turn_before_generating_audio(monkeypatch, caplog):
+def test_process_commits_turn_before_yielding_first_audio(monkeypatch, caplog):
     tracker = SpeculativeTurnTracker()
     tracker.start_turn()
     handler = object.__new__(Qwen3TTSHandler)
@@ -715,13 +741,13 @@ def test_process_commits_turn_before_generating_audio(monkeypatch, caplog):
     handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
     handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
 
-    def _process_voice_clone(text, language=None):
-        assert tracker.is_committed("turn_1", 0)
+    def _process_voice_clone(text, language=None, timer=None):
+        assert not tracker.is_committed("turn_1", 0)
         yield np.zeros(512, dtype=np.int16)
 
     handler._process_voice_clone = _process_voice_clone
 
-    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline_console, "print", lambda *args, **kwargs: None)
 
     with caplog.at_level(logging.INFO, logger="speech_to_speech.TTS.qwen3_tts_handler"):
         outputs = list(
@@ -754,13 +780,13 @@ def test_process_does_not_set_should_listen_when_generation_fails(monkeypatch):
     handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
     handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
 
-    def _boom(text):
+    def _boom(text, language=None, timer=None):
         raise RuntimeError("boom")
         yield  # pragma: no cover
 
     handler._process_voice_clone = _boom
 
-    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline_console, "print", lambda *args, **kwargs: None)
 
     outputs = list(handler.process(TTSInput(text="Hello there.")))
 
@@ -794,7 +820,7 @@ def test_process_voice_clone_passes_non_streaming_mode_to_faster_backend(monkeyp
         )[1],
     )
 
-    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline_console, "print", lambda *args, **kwargs: None)
 
     outputs = list(handler.process(TTSInput(text="Hello there.")))
 
@@ -828,7 +854,7 @@ def test_process_voice_clone_passes_none_non_streaming_mode_when_unset(monkeypat
         )[1],
     )
 
-    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline_console, "print", lambda *args, **kwargs: None)
 
     outputs = list(handler.process(TTSInput(text="Hello there.")))
 
@@ -865,7 +891,7 @@ def test_process_voice_clone_uses_precomputed_ggml_references_without_audio(monk
         )[1],
     )
 
-    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline_console, "print", lambda *args, **kwargs: None)
 
     outputs = list(handler.process(TTSInput(text="Hello there.")))
 
@@ -902,7 +928,7 @@ def test_process_custom_voice_passes_non_streaming_mode_to_faster_backend(monkey
         )[1],
     )
 
-    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline_console, "print", lambda *args, **kwargs: None)
 
     outputs = list(handler.process(TTSInput(text="Hello there.")))
 
@@ -937,7 +963,7 @@ def test_process_voice_design_passes_non_streaming_mode_to_faster_backend(monkey
         )[1],
     )
 
-    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline_console, "print", lambda *args, **kwargs: None)
 
     outputs = list(handler.process(TTSInput(text="Hello there.")))
 
@@ -1023,7 +1049,7 @@ def test_process_voice_clone_scales_max_new_tokens_for_faster_backend(monkeypatc
         )[1],
     )
 
-    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline_console, "print", lambda *args, **kwargs: None)
 
     long_text = " ".join(["This is a deliberately long sentence for the faster Qwen3 TTS backend."] * 12)
     outputs = list(handler.process(TTSInput(text=long_text)))
@@ -1073,7 +1099,7 @@ def test_process_voice_clone_scales_max_tokens_for_mlx_backend(monkeypatch):
     )
     handler._prepare_mlx_ref_audio = lambda ref_audio: ref_audio
 
-    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline_console, "print", lambda *args, **kwargs: None)
     monkeypatch.setattr(qwen3_tts_module, "MLXLockContext", _FakeMLXLockContext)
 
     long_text = " ".join(["This is a deliberately long sentence for the MLX Qwen3 TTS backend."] * 12)
@@ -1140,7 +1166,7 @@ def test_process_custom_voice_uses_assistant_language_only_when_enabled(
     )
     handler._apply_session_voice_override = lambda *args: None
 
-    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline_console, "print", lambda *args, **kwargs: None)
     monkeypatch.setattr(qwen3_tts_module, "MLXLockContext", _FakeMLXLockContext)
 
     config = (
@@ -1165,3 +1191,47 @@ def test_process_custom_voice_uses_assistant_language_only_when_enabled(
     assert captured["language"] == expected
     assert handler.language == configured_language
     assert not hasattr(handler, "_active_language")
+
+
+@pytest.mark.parametrize("cuts", [[], [15360, 30720], [7680, 15360, 23040], [1, 17, 1920, 9999, 20000]])
+def test_stream_resampling_matches_whole_signal_across_chunk_boundaries(cuts):
+    from scipy.signal import resample_poly
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.cancel_scope = None
+    handler.blocksize = 512
+    samples = (0.5 * np.sin(2 * np.pi * 220 * np.arange(36001) / 24000)).astype(np.float32)
+    native_pcm = handler._to_int16(samples).astype(float)
+    expected = np.clip(np.round(resample_poly(native_pcm, 2, 3)), -32768, 32767).astype(np.int16)
+
+    chunks = ((part, 24000, None) for part in np.split(samples, cuts))
+    actual = np.concatenate(list(handler._stream(chunks, "test")))
+
+    np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize("sample_count", [700, 769, 1300])
+@pytest.mark.parametrize("sample_rate", [16000, 24000])
+@pytest.mark.parametrize("cancel_after_first", [False, True])
+def test_stream_preserves_short_tail_and_discards_pending_audio_on_cancel(
+    cancel_after_first, sample_rate, sample_count
+):
+    from scipy.signal import resample_poly
+
+    from speech_to_speech.pipeline.cancel_scope import CancelScope
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.blocksize = 512
+    handler.cancel_scope = CancelScope()
+    samples = np.full(sample_count, 0.25, dtype=np.float32)
+    expected = handler._to_int16(samples)
+    if sample_rate != 16000:
+        expected = np.clip(np.round(resample_poly(expected.astype(float), 2, 3)), -32768, 32767).astype(np.int16)
+    stream = handler._stream(iter([(samples[:100], sample_rate, None), (samples[100:], sample_rate, None)]), "test")
+    first = next(stream)
+    assert first.size == min(512, len(expected))
+    if cancel_after_first:
+        handler.cancel_scope.cancel()
+        assert list(stream) == []
+    else:
+        np.testing.assert_array_equal(np.concatenate([first, *stream]), expected)

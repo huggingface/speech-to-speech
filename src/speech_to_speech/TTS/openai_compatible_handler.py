@@ -11,19 +11,21 @@ from threading import Event, Lock, Thread
 from time import perf_counter
 from typing import Any, Iterator, cast
 
-import httpx
+import httpx2
 import numpy as np
-from scipy.signal import firwin, lfilter
+from scipy.signal import firwin, upfirdn
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
-from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.utils import WHISPER_LANGUAGE_TO_LLM_LANGUAGE
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import ResponseFailedEvent
-from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.handler_types import TTSOut
+from speech_to_speech.pipeline.messages import EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
-from speech_to_speech.pipeline.turn_latency import record_response_e2e, record_response_tts_ttfa
+from speech_to_speech.pipeline.turn_latency import TTSResponseTimer
+from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
+from speech_to_speech.TTS.pcm_blocks import PCMBlockBuffer
+from speech_to_speech.utils.request_tracing import HttpRequestContext, HttpRequestTrace
 
 logger = logging.getLogger(__name__)
 
@@ -74,18 +76,22 @@ class HttpSpeechOperation:
         self._worker_loop: asyncio.AbstractEventLoop | None = None
         self._worker_task: asyncio.Task[None] | None = None
         self._deadline_exceeded = Event()
+        self.trace: HttpRequestTrace | None = None
 
     def iter_bytes(self, cancel_check: Callable[[], bool]) -> Iterator[bytes]:
+        trace = self.trace
         deadline_at_s = perf_counter() + self.timeout_s
         self._raise_if_stopped(cancel_check)
         results: Queue[tuple[bool, object]] = Queue(maxsize=_SPEECH_STREAM_QUEUE_MAXSIZE)
         headers = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        if trace is not None:
+            headers.update(trace.headers())
 
         worker = Thread(
             target=self._read_stream,
-            args=(headers, results, cancel_check),
+            args=(headers, results, cancel_check, trace),
             name="tts-http-reader",
             daemon=True,
         )
@@ -121,10 +127,11 @@ class HttpSpeechOperation:
         headers: dict[str, str],
         results: Queue[tuple[bool, object]],
         cancel_check: Callable[[], bool],
+        trace: HttpRequestTrace | None = None,
     ) -> None:
         result: tuple[bool, object] = (True, _SPEECH_STREAM_DONE)
         loop = asyncio.new_event_loop()
-        task = loop.create_task(self._read_stream_async(headers, results, cancel_check))
+        task = loop.create_task(self._read_stream_async(headers, results, cancel_check, trace))
         with self._transport_lock:
             self._worker_loop = loop
             self._worker_task = task
@@ -152,17 +159,20 @@ class HttpSpeechOperation:
         headers: dict[str, str],
         results: Queue[tuple[bool, object]],
         cancel_check: Callable[[], bool],
+        trace: HttpRequestTrace | None = None,
     ) -> None:
-        client = httpx.AsyncClient(timeout=self.timeout_s)
+        client = httpx2.AsyncClient(timeout=self.timeout_s)
         try:
             if self._cancelled.is_set() or cancel_check():
                 self._cancelled.set()
                 raise SpeechRequestCancelled
 
+            if trace is not None:
+                trace.dispatch()
             async with client.stream("POST", self.endpoint_url, headers=headers, json=self.payload) as response:
                 try:
                     response.raise_for_status()
-                except httpx.HTTPStatusError as exc:
+                except httpx2.HTTPStatusError as exc:
                     raise SpeechRequestError(f"speech server returned HTTP {exc.response.status_code}") from exc
                 self._validate_content_type(response)
                 async for chunk in response.aiter_bytes():
@@ -187,7 +197,7 @@ class HttpSpeechOperation:
             return True
         return False
 
-    def _validate_content_type(self, response: httpx.Response) -> None:
+    def _validate_content_type(self, response: httpx2.Response) -> None:
         headers = getattr(response, "headers", None)
         if headers is None:
             return
@@ -209,9 +219,9 @@ class HttpSpeechOperation:
     def _normalize_error(self, exc: Exception) -> BaseException:
         if isinstance(exc, (SpeechRequestCancelled, SpeechRequestError)):
             return exc
-        if isinstance(exc, httpx.TimeoutException):
+        if isinstance(exc, httpx2.TimeoutException):
             return SpeechRequestError("speech request timed out")
-        if isinstance(exc, httpx.HTTPError):
+        if isinstance(exc, httpx2.HTTPError):
             if self._deadline_exceeded.is_set():
                 return SpeechRequestError("speech request timed out")
             if self._cancelled.is_set():
@@ -258,13 +268,12 @@ class _StreamingFIRResampler:
         self._up = target_rate // gcd
         self._down = source_rate // gcd
         self._input_samples = 0
-        self._upsampled_samples = 0
         self._output_samples = 0
         self._finalized = False
+        self._history = np.empty(0, dtype=np.float64)
 
         if self._up == self._down:
             self._taps = np.ones(1, dtype=np.float64)
-            self._filter_state = np.empty(0, dtype=np.float64)
             self._delay = 0
             return
 
@@ -278,7 +287,6 @@ class _StreamingFIRResampler:
             )
             * self._up
         )
-        self._filter_state = np.zeros(self._taps.size - 1, dtype=np.float64)
         self._delay = (self._taps.size - 1) // 2
 
     def push(self, samples: np.ndarray, *, final: bool = False) -> np.ndarray:
@@ -286,47 +294,36 @@ class _StreamingFIRResampler:
             raise RuntimeError("resampler has already been finalized")
 
         incoming = np.asarray(samples, dtype=np.float64).reshape(-1)
+        # History starts on an input-sample boundary in the global upsampled grid.
+        origin = (self._input_samples - self._history.size) * self._up
         self._input_samples += incoming.size
         if self._up == self._down:
-            if final:
-                self._finalized = True
+            self._finalized = final
             return self._to_int16(incoming)
 
-        output_parts: list[np.ndarray] = []
-        if incoming.size:
-            upsampled = np.zeros(incoming.size * self._up, dtype=np.float64)
-            upsampled[:: self._up] = incoming
-            output_parts.append(self._filter_and_decimate(upsampled))
-
+        source = np.concatenate((self._history, incoming))
         if final:
-            self._finalized = True
-            # Flush the FIR tail so the centered final samples are not truncated.
-            output_parts.append(self._filter_and_decimate(np.zeros(self._taps.size - 1, dtype=np.float64)))
+            target_total = (self._input_samples * self._up + self._down - 1) // self._down
+        else:
+            # Emit only samples whose centered FIR has all its required input.
+            target_total = max(0, (self._input_samples * self._up - self._delay + self._down - 1) // self._down)
+        count = target_total - self._output_samples
+        if count and source.size:
+            # Align the local polyphase grid with delay + k * down globally.
+            prepad = (origin - self._delay) % self._down
+            taps = np.pad(self._taps, (prepad, 0)) if prepad else self._taps
+            filtered = upfirdn(taps, source, up=self._up, down=self._down)
+            start = (self._delay + self._output_samples * self._down - origin + prepad) // self._down
+            output = filtered[start : start + count]
+        else:
+            output = np.empty(0, dtype=np.float64)
 
-        output = np.concatenate(output_parts) if output_parts else np.empty(0, dtype=np.float64)
-        target_total = (self._input_samples * self.target_rate + self.source_rate - 1) // self.source_rate
-        remaining = max(0, target_total - self._output_samples)
-        if output.size > remaining:
-            output = output[:remaining]
+        # Keep only the FIR's input support, copying to release the full chunk.
+        history_size = (self._taps.size - 1 + self._up - 1) // self._up + 1
+        self._history = source[-history_size:].copy() if not final else np.empty(0, dtype=np.float64)
         self._output_samples += output.size
+        self._finalized = final
         return self._to_int16(output)
-
-    def _filter_and_decimate(self, upsampled: np.ndarray) -> np.ndarray:
-        filtered, self._filter_state = lfilter(
-            self._taps,
-            np.ones(1, dtype=np.float64),
-            upsampled,
-            zi=self._filter_state,
-        )
-        global_start = self._upsampled_samples
-        self._upsampled_samples += upsampled.size
-        minimum_index = max(global_start, self._delay)
-        phase = (minimum_index - self._delay) % self._down
-        first_index = minimum_index if phase == 0 else minimum_index + self._down - phase
-        local_start = first_index - global_start
-        if local_start >= filtered.size:
-            return np.empty(0, dtype=np.float64)
-        return filtered[local_start :: self._down]
 
     @staticmethod
     def _to_int16(samples: np.ndarray) -> np.ndarray:
@@ -361,8 +358,10 @@ class _StreamingByteReader(io.RawIOBase):
         return True
 
 
-class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
+class OpenAICompatibleTTSHandler(BaseTTSHandler):
     """Client handler for POST /v1/audio/speech with cancellable audio streaming."""
+
+    _print_assistant_text = False
 
     def setup(
         self,
@@ -371,6 +370,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         api_key: str | None = None,
         model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
         voice: str = "aiden",
+        voice_override: str | None = None,
         language: str | None = None,
         task_type: str | None = None,
         instructions: str | None = None,
@@ -402,6 +402,12 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.api_key = api_key if api_key is not None else os.getenv("OPENAI_API_KEY")
         self.model = model
         self.voice = voice
+        self.voice_override = voice_override.strip() if voice_override and voice_override.strip() else None
+        if self.voice_override:
+            logger.info(
+                "OpenAI-compatible TTS voice override active: %s (client-requested voices are ignored)",
+                self.voice_override,
+            )
         self.language = language
         self.task_type = task_type
         self.instructions = instructions
@@ -426,7 +432,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         started_at_s = perf_counter()
         operation = self._make_operation(
             text="Warmup",
-            voice=self.voice,
+            voice=self.voice_override or self.voice,
         )
 
         source_chunks = operation.iter_bytes(self.stop_event.is_set)
@@ -448,29 +454,29 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
             perf_counter() - started_at_s,
         )
 
-    def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
-        if isinstance(tts_input, EndOfResponse):
-            if self.speculative_turns and not self.speculative_turns.wait_for_gate(
-                tts_input.turn_id,
-                tts_input.turn_revision,
-            ):
-                if tts_input.response_key is None:
-                    return
-                tts_input.cleanup_only = True
-            with self._operation_lock:
-                self._failed_responses.discard(self._response_identity(tts_input))
-            yield AUDIO_RESPONSE_DONE
-            return
+    def _is_commit_cancelled(self, tts_input: TTSInput | None) -> bool:
+        lock = getattr(self, "_operation_lock", None)
+        if lock is None:
+            return False
+        with lock:
+            op = self._active_operation
+        ev = getattr(op, "_cancelled", None) if op is not None else None
+        return bool(ev.is_set()) if ev is not None else bool(getattr(op, "cancelled", False))
 
-        if self.speculative_turns and not self.speculative_turns.wait_for_gate(
-            tts_input.turn_id,
-            tts_input.turn_revision,
-        ):
-            logger.debug(
-                "Dropping stale remote TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision
-            )
-            return
+    def _on_end_of_response(self, end: EndOfResponse) -> None:
+        with self._operation_lock:
+            self._failed_responses.discard(self._response_identity(end))
 
+    def _on_first_audio_committed(
+        self,
+        tts_input: TTSInput,
+        timer: TTSResponseTimer | None,
+        e2e_s: float | None = None,
+    ) -> None:
+        if timer is not None:
+            self._log_first_audio_latency(tts_input, timer, e2e_s)
+
+    def _synthesize_input(self, tts_input: TTSInput) -> Iterator[TTSOut]:
         cancel_generation = tts_input.cancel_generation
         if cancel_generation is None and self.cancel_scope is not None:
             cancel_generation = self.cancel_scope.generation
@@ -489,30 +495,24 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
             return
 
         def cancel_check() -> bool:
-            cancelled = self.stop_event.is_set() or (
-                cancel_generation is not None
-                and self.cancel_scope is not None
-                and self.cancel_scope.is_stale(cancel_generation)
-            )
-            if cancelled:
-                return True
-            return self.speculative_turns is not None and not self.speculative_turns.is_latest(
-                tts_input.turn_id,
-                tts_input.turn_revision,
-            )
+            return self.stop_event.is_set() or self._is_stale(cancel_generation, tts_input)
 
         first_audio = True
-        started_at_s = perf_counter()
+        completed = False
+        timer = self._latency_timer(tts_input, also_cancelled=cancel_check)
+        trace_context = HttpRequestContext(
+            "tts",
+            session_id=tts_input.runtime_config.trace_session_id if tts_input.runtime_config is not None else None,
+            turn_id=tts_input.turn_id,
+            turn_revision=tts_input.turn_revision,
+            response_key=tts_input.response_key,
+        )
         operation: HttpSpeechOperation | None = None
+        source_chunks: Iterator[bytes] | None = None
+        decoded_chunks: Iterator[np.ndarray] | None = None
 
         def record_first_provider_audio() -> None:
-            if cancel_check():
-                return
-            record_response_tts_ttfa(
-                getattr(self, "turn_latency_store", None),
-                tts_input.response_key,
-                perf_counter() - started_at_s,
-            )
+            timer.first_provider_audio()
 
         try:
             voice = self._resolve_voice(tts_input.runtime_config, tts_input.response)
@@ -554,6 +554,7 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     language=language,
                     use_setup_language=False,
                 )
+            operation.trace = HttpRequestTrace(trace_context)
             with self._operation_lock:
                 self._active_operation = operation
             source_chunks = operation.iter_bytes(cancel_check)
@@ -566,13 +567,9 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 if cancel_check():
                     operation.cancel()
                     return
-                if first_audio:
-                    if not self._commit_first_audio(tts_input):
-                        operation.cancel()
-                        return
-                    self._log_first_audio_latency(tts_input, started_at_s)
-                    first_audio = False
+                first_audio = False
                 yield chunk
+            completed = True
             if first_audio and not cancel_check():
                 raise SpeechRequestError("speech endpoint returned no audio")
         except SpeechRequestCancelled:
@@ -596,16 +593,16 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     )
                 )
         finally:
+            if not completed and operation is not None:
+                operation.cancel()
+            for stream in (decoded_chunks, source_chunks):
+                close = getattr(stream, "close", None)
+                if close is not None:
+                    close()
             if operation is not None:
                 with self._operation_lock:
                     if self._active_operation is operation:
                         self._active_operation = None
-
-    def _commit_first_audio(self, tts_input: TTSInput) -> bool:
-        tracker = self.speculative_turns
-        if tracker is None or tts_input.turn_id is None or tts_input.turn_revision is None:
-            return True
-        return tracker.wait_for_gate(tts_input.turn_id, tts_input.turn_revision, commit=True)
 
     @staticmethod
     def _response_identity(
@@ -675,6 +672,8 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         runtime_config: RuntimeConfig | None,
         response: Any,
     ) -> str | dict[str, str]:
+        if self.voice_override:
+            return self.voice_override
         if response and response.audio and response.audio.output and response.audio.output.voice:
             return self._serialize_voice(response.audio.output.voice)
         if runtime_config is not None:
@@ -782,39 +781,40 @@ class OpenAICompatibleTTSHandler(BaseHandler[TTSIn, TTSOut]):
         on_first_source_audio: Callable[[], None] | None = None,
     ) -> Iterator[np.ndarray]:
         resampler = _StreamingFIRResampler(source_rate, PIPELINE_SAMPLE_RATE)
-        sample_remainder: np.ndarray = np.empty(0, dtype=np.int16)
+        blocks = PCMBlockBuffer(self.blocksize)
         for samples in sample_chunks:
             if on_first_source_audio is not None and samples.size:
                 on_first_source_audio()
                 on_first_source_audio = None
             converted = resampler.push(samples)
-            sample_remainder = np.concatenate((sample_remainder, converted))
-            while sample_remainder.size >= self.blocksize:
-                yield sample_remainder[: self.blocksize].copy()
-                sample_remainder = sample_remainder[self.blocksize :]
+            yield from blocks.push(converted)
 
         converted = resampler.push(np.empty(0, dtype=np.float64), final=True)
-        sample_remainder = np.concatenate((sample_remainder, converted))
-        while sample_remainder.size >= self.blocksize:
-            yield sample_remainder[: self.blocksize].copy()
-            sample_remainder = sample_remainder[self.blocksize :]
-        if sample_remainder.size:
-            yield np.pad(sample_remainder, (0, self.blocksize - sample_remainder.size))
+        yield from blocks.push(converted)
+        yield from blocks.flush()
 
-    def _log_first_audio_latency(self, tts_input: TTSInput, request_started_at_s: float) -> None:
-        logger.info("OpenAI-compatible TTS time to first audio: %.3fs", perf_counter() - request_started_at_s)
-        if tts_input.speech_stopped_at_s is not None:
-            latency_s = max(0.0, perf_counter() - tts_input.speech_stopped_at_s)
-            store = getattr(self, "turn_latency_store", None)
-            recorded = record_response_e2e(store, tts_input.response_key, latency_s)
-            if store is not None and not recorded:
+    def _log_first_audio_latency(
+        self,
+        tts_input: TTSInput,
+        timer: TTSResponseTimer,
+        e2e_s: float | None = None,
+    ) -> None:
+        ttfa_s = timer.provider_ttfa_s if timer.provider_ttfa_s is not None else perf_counter() - timer.started_at_s
+        logger.info("OpenAI-compatible TTS time to first audio: %.3fs", ttfa_s)
+        elapsed_s = timer.speech_stop_elapsed_s()
+        if elapsed_s is None:
+            return
+        latency_s = e2e_s if e2e_s is not None else timer.first_yield(ignore_cancel=True)
+        if latency_s is None:
+            if getattr(self, "turn_latency_store", None) is not None:
                 return
-            logger.info(
-                "Last speech detected to first speech out: %.3fs (turn=%s rev=%s)",
-                latency_s,
-                tts_input.turn_id,
-                tts_input.turn_revision,
-            )
+            latency_s = max(0.0, elapsed_s)
+        logger.info(
+            "Last speech detected to first speech out: %.3fs (turn=%s rev=%s)",
+            latency_s,
+            tts_input.turn_id,
+            tts_input.turn_revision,
+        )
 
     def on_session_end(self) -> None:
         with self._operation_lock:
