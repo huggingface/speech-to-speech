@@ -30,6 +30,7 @@ import { smooth } from "./face-driver.js";
  *   apply: (pose: Pose, talk: Talk, dt: number) => void,
  *   light?: (stage: import("./stage.js").Stage) => void,
  *   talkScale?: number,
+ *   quackAt?: number,
  * }} Body
  */
 
@@ -256,6 +257,8 @@ async function loadDuck(loader, coach, progress) {
     camera: { focusY: -0.1, frameH: 5.1, frameW: 4.3, tiltDeg: 14 },
     table: { y: -1.6, radius: 4 },
     talkScale: 0.5,
+    // When the stand-up quacks: its beak opens widest (seconds from the start).
+    quackAt: clip.jaw.slice(0, Math.round(idle0 * clip.fps)).reduce((m, v, i, a) => (v > a[m] ? i : m), 0) / clip.fps,
     apply: (pose, talk, dt) => {
       t += dt;
       const ct = Math.min(t, idle0);

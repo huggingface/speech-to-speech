@@ -80,7 +80,10 @@ mic ─▶ speech-to-speech backend: VAD + STT ─▶ LLM (the coach) ─▶ TTS
   official SDK's speech wobble (loudness-driven sways on all six head axes),
   and Microduck also opens its beak with the visemes. Microduck only speaks
   duck: its voice plays as the robot's own quacks, one per burst of
-  syllables, and the words show as subtitles. They stand on a
+  syllables, and the words show as subtitles. The Reachys' hello and
+  reactions play the sounds recorded with each emotion, and Microduck quacks
+  its wake-up call as it stands up (on the first click, if the browser holds
+  sound back until then). They stand on a
   tabletop, hold a pose per conversational state (breathing, listening,
   thinking, as in Pollen's
   [reachy-mini-3d-voice](https://huggingface.co/spaces/pollen-robotics/reachy-mini-3d-voice)

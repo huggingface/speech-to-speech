@@ -6,7 +6,8 @@ Apache-2.0) and writes static/avatars/reachy-moves.json: per move, 25 fps frames
 of [x y z qx qy qz qw antR antL yaw] (head pose in the robot's base frame, in
 metres, as the SDK sends it; antennas and body yaw in radians). Each move is
 turned about the vertical so that its body starts facing forward, so the
-robot keeps facing the student.
+robot keeps facing the student. Each move's sound (the .ogg the robot plays
+with it) goes to static/avatars/reachy-sounds/<name>.ogg.
 
     python scripts/bake_reachy_moves.py
 """
@@ -19,6 +20,7 @@ from pathlib import Path
 
 DATASET = "https://huggingface.co/datasets/pollen-robotics/reachy-mini-emotions-library/resolve/main"
 OUT = Path(__file__).resolve().parent.parent / "static" / "avatars" / "reachy-moves.json"
+SOUNDS = OUT.parent / "reachy-sounds"
 FPS = 25
 
 # A name, or (alias, name, start s, end s) for a slice: "sleep" is the
@@ -78,10 +80,20 @@ def bake(spec):
     return {"name": alias, "fps": FPS, "description": data.get("description", ""), "frames": frames}
 
 
+def fetch_sound(spec):
+    """The sound that plays with a move (not for slices like "sleep")."""
+    if isinstance(spec, tuple):
+        return
+    SOUNDS.mkdir(parents=True, exist_ok=True)
+    with urllib.request.urlopen(f"{DATASET}/{spec}.ogg", timeout=60) as r:
+        (SOUNDS / f"{spec}.ogg").write_bytes(r.read())
+
+
 def main():
     moves = []
     for spec in MOVES:
         moves.append(bake(spec))
+        fetch_sound(spec)
         print(f"{moves[-1]['name']}: {len(moves[-1]['frames']) / FPS:.1f} s", file=sys.stderr)
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps({"source": DATASET.rsplit("/resolve", 1)[0], "license": "Apache-2.0", "moves": moves}, separators=(",", ":")))

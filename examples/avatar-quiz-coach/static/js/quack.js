@@ -301,12 +301,61 @@ export function chirp(p, variant) {
   return sig.map((v) => v * gain);
 }
 
+/** @param {Personality} p @param {Rng} rng @param {number} durScale @param {number} f0Scale */
+function greetSyllable(p, rng, durScale, f0Scale) {
+  const dur = ((0.32 + 0.25 * rng.random()) * durScale) / p.speed;
+  const t = tAxis(dur);
+  const f0 = p.pitch * (0.9 + 0.15 * rng.random()) * f0Scale;
+  // glide_bias flips the contour: positive ducks bend up, negative down.
+  const bias = p.glideBias;
+  const bend = 0.1 + 0.15 * p.pitchSpread;
+  const start = f0 * (1 - bias * bend * 0.5);
+  const mid = f0 * (1 + bias * bend);
+  const end = f0 * (1 - bias * bend * 0.3) * (0.92 + 0.08 * rng.random());
+  const freq = lerp(t, [[0, start], [0.18 * dur, mid], [dur, end]]);
+  const env = expdecay(t, attackTime(p, dur, 0.5), dur * 0.7);
+  return voice(p, t, freq, rng, 1.0, 1.0).map((v, i) => v * env[i]);
+}
+
+/**
+ * Microduck's wake-up call: a quack, sometimes a double "wak-wak".
+ * @param {Personality} p @param {number} variant
+ */
+export function greet(p, variant) {
+  const rng = p.variantRng("greet", variant);
+  let sig = greetSyllable(p, rng, 1.0, 1.0);
+  if (rng.random() < 0.4) {
+    const gap = Math.floor(((0.05 + 0.06 * rng.random()) / p.speed) * SR);
+    const f0Scale = 0.95 + 0.06 * rng.random();
+    const b = greetSyllable(p, rng, 0.8, f0Scale);
+    const both = new Float32Array(sig.length + gap + b.length);
+    both.set(sig);
+    both.set(b, sig.length + gap);
+    sig = both;
+  }
+  // Normalise to -3 dBFS.
+  let peak = 1e-9;
+  for (const v of sig) peak = Math.max(peak, Math.abs(v));
+  const gain = 10 ** (-3 / 20) / peak;
+  return sig.map((v) => v * gain);
+}
+
 /** The duck the coach speaks with. Any seed is a real Microduck voice. */
 export const DUCK_SEED = 4;
 const CHIRPS = 12;
 /** @type {Float32Array[] | null} */
 let bank = null;
 const quacks = () => (bank ??= Array.from({ length: CHIRPS }, (_, v) => chirp(new Personality(DUCK_SEED), v)));
+/** @type {Float32Array[] | null} */
+let greets = null;
+
+/** One of Microduck's wake-up calls, 24 kHz mono. */
+export function duckGreet() {
+  greets ??= Array.from({ length: 6 }, (_, v) => greet(new Personality(DUCK_SEED), v));
+  return greets[Math.floor(Math.random() * greets.length)];
+}
+
+export const QUACK_RATE = SR;
 
 // ── Speech in, quacks out ────────────────────────────────────────────────────
 

@@ -22,10 +22,15 @@ import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
 import { BODIES } from "./robot-bodies.js";
 import { FaceDriver, mouthParams, smooth } from "./face-driver.js";
 import { HeadWobbler } from "./head-wobbler.js";
+import { duckGreet, QUACK_RATE } from "./quack.js";
 import { Stage } from "./stage.js";
 
 /** @typedef {{ name: string, fps: number, frames: number[][] }} Move */
 /** @typedef {import("./robot-bodies.js").Pose} Pose */
+
+/** Quiz moments whose emotion also plays its recorded sound (not the frequent listening and thinking). */
+const SOUND_KINDS = new Set(["hello", "correct", "streak", "celebrate", "partial", "incorrect", "skipped", "surprised"]);
+const SOUND_DIR = "static/avatars/reachy-sounds";
 
 /** Emotions per quiz moment; one is picked at random, avoiding the last one. */
 const REACTION_MOVES = /** @type {Record<string, string[]>} */ ({
@@ -114,6 +119,8 @@ export class RobotAvatar extends FaceDriver {
     /** Weight of each state's pose, blended over STATE_BLEND_S. @type {Record<string, number>} */
     this.stateW = { idle: 1, listening: 0, thinking: 0, speaking: 0 };
     this.wobbler = new HeadWobbler(this.inRate);
+    /** Decoded move sounds, by move name. @type {Map<string, Promise<AudioBuffer | null>>} */
+    this.sounds = new Map();
     this.wob = { pitch: 0, yaw: 0, roll: 0, x: 0, y: 0, z: 0 };
     if (coach.mouth === "beak") {
       // The beak trails the sound by its smoothing; it runs that far ahead
@@ -174,6 +181,73 @@ export class RobotAvatar extends FaceDriver {
     const sleep = this.moves.sleep;
     if (sleep) this.moveFrame(sleep, 0, this.pose);
     this.playFor("hello", 1.4);
+    // Microduck quacks as it stands up, when its beak opens.
+    if (body.quackAt !== undefined) {
+      const at = body.quackAt;
+      window.setTimeout(() => this.whenAudible(() => this.playPcm(duckGreet(), 1)), at * 1000);
+    }
+  }
+
+  // ── Sounds ──────────────────────────────────────────────────────────────
+
+  /** The sound recorded with a move, decoded once. @param {string} name */
+  moveSound(name) {
+    let sound = this.sounds.get(name);
+    if (!sound) {
+      const ctx = this.ctx;
+      sound = fetch(`${SOUND_DIR}/${name}.ogg`)
+        .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(`${r.status}`))))
+        .then((buf) => (ctx ? ctx.decodeAudioData(buf) : null))
+        .catch(() => null);
+      this.sounds.set(name, sound);
+    }
+    return sound;
+  }
+
+  /** @param {AudioBuffer | null} buf @param {number} gain */
+  playBuffer(buf, gain) {
+    const ctx = this.ctx;
+    if (!buf || !ctx || ctx.state !== "running") return;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const g = ctx.createGain();
+    g.gain.value = gain;
+    src.connect(g).connect(ctx.destination);
+    src.start();
+  }
+
+  /** @param {Float32Array} pcm 24 kHz mono @param {number} gain */
+  playPcm(pcm, gain) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const buf = ctx.createBuffer(1, pcm.length, QUACK_RATE);
+    buf.copyToChannel(/** @type {Float32Array<ArrayBuffer>} */ (pcm), 0);
+    this.playBuffer(buf, gain);
+  }
+
+  /**
+   * Run `fn` once the page may play sound: now, as soon as the audio starts,
+   * or at the first click or key press (browsers block sound until then).
+   * @param {() => void} fn
+   */
+  whenAudible(fn) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    if (ctx.state === "running") return fn();
+    let done = false;
+    const run = () => {
+      if (done) return;
+      done = true;
+      ctx.removeEventListener("statechange", onState);
+      window.removeEventListener("pointerdown", onGesture, true);
+      window.removeEventListener("keydown", onGesture, true);
+      fn();
+    };
+    const onState = () => ctx.state === "running" && run();
+    const onGesture = () => this.resume().then(run);
+    ctx.addEventListener("statechange", onState);
+    window.addEventListener("pointerdown", onGesture, true);
+    window.addEventListener("keydown", onGesture, true);
   }
 
   // ── Moves ───────────────────────────────────────────────────────────────
@@ -192,7 +266,22 @@ export class RobotAvatar extends FaceDriver {
     const list = (REACTION_MOVES[kind] ?? []).filter((n) => this.moves[n]);
     if (!list.length) return;
     const pool = list.length > 1 ? list.filter((n) => n !== this.lastMove) : list;
-    this.play(pool[Math.floor(Math.random() * pool.length)], fadeIn);
+    const name = pool[Math.floor(Math.random() * pool.length)];
+    this.play(name, fadeIn);
+    // The Reachys' emotions come with their own sounds (Microduck has its quacks).
+    if (!SOUND_KINDS.has(kind) || this.coach.robot === "duck") return;
+    const sound = this.moveSound(name);
+    if (kind !== "hello") {
+      // Under the coach's voice: a little quieter, and only if sound can play now.
+      sound.then((buf) => this.playBuffer(buf, 0.6));
+      return;
+    }
+    const startedAt = performance.now();
+    this.whenAudible(() => {
+      // Blocked until a click: wave hello again, with its sound this time.
+      if (performance.now() - startedAt > 1500) this.play(name, 0.6);
+      sound.then((buf) => this.playBuffer(buf, 1));
+    });
   }
 
   /** @param {Move} m @param {number} t @param {Pose} out */
