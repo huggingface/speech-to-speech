@@ -108,6 +108,18 @@ def test_answer_revealed_only_after_last_try(grader):
     assert game.results[0].clues == ["Clue one?", "Clue two?"]
 
 
+def test_covering_every_required_point_across_tries_counts_as_correct(grader):
+    replies, _ = grader
+    game = g.GameStore().create(make_pack((2, 1)), "ana", False)
+    replies += [answer("partial", "What else?", hits=(0,)), answer("partial", "Almost, what else?", hits=(1,))]
+    assert turn(game, "the first half")["retry"]
+    out = turn(game, "the second half")
+    assert out["verdict"] == "correct" and out["points"] > 0
+    assert out["reveal"]["points_hit"] == [0, 1]
+    assert out["say"].split("!")[0] + "!" in {p.split("!")[0] + "!" for p in g.COVERED_PRAISE}
+    assert "Almost" not in out["say"]
+
+
 def test_stuck_student_gets_a_clue(grader):
     replies, _ = grader
     game = g.GameStore().create(make_pack((1, 1)), "ana", False)

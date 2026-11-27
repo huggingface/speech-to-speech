@@ -100,6 +100,13 @@ STREAK_CALLOUTS = {
     7: ["Seven in a row. Legendary!"],
 }
 HINT_REPEAT = "That was my only hint. Give it your best shot!"
+# Said when the student's tries together cover every required key point but the
+# grader still called the latest one partial.
+COVERED_PRAISE = [
+    "That's it! Put together, that's the whole answer.",
+    "Yes, there it is! Together that covers it.",
+    "That's it, you've got all of it now.",
+]
 GENERIC_CLUE = "Not quite yet. Take another look at what the question is really asking, and give it one more try."
 
 _STOPWORDS = set(
@@ -543,6 +550,13 @@ async def handle_turn(game: Game, transcript: str, intent: str | None = None) ->
         res.attempts += 1
         res.score = decision["score"]
         res.points_hit = sorted(set(res.points_hit) | set(decision["points_hit"]))
+        required = set(q.get("required") or range(len(q["key_points"])))
+        if verdict != "correct" and required <= set(res.points_hit):
+            # Across their tries they have said everything a correct answer needs:
+            # the ticks on screen and the verdict must agree.
+            verdict = "correct"
+            fact = q.get("fun_fact", "")
+            say = random.choice(COVERED_PRAISE) + (f" Fun fact: {fact}" if fact else "")
         if verdict != "correct" and game.attempt < MAX_ATTEMPTS:
             out["verdict"] = verdict
             coach_again(q.get("hint") or "Not quite yet. Think about it from another angle.")
