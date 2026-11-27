@@ -163,29 +163,24 @@ class SpeculativeTurnTracker:
         output_hold_ms: int = 0,
         processing_delay_ms: int = 0,
         *,
-        pending_smart_turn: bool = False,
-        smart_turn_hold_s: float | None = None,
-        smart_turn_token: object | None = None,
-    ) -> None:
-        """Record audio timing and both Smart Turn deadlines for this revision."""
+        pending_smart_turn_s: float | None = None,
+    ) -> object | None:
+        """Record audio timing and Smart Turn deadlines for this revision."""
         with self._condition:
             if self._current is None or self._blocks_reopen_locked(self._current.turn_id, self._current.revision):
-                return
+                return None
             self._phase = TurnPhase.SOFT_ENDED
             self._last_final_audio_ms = audio_ms
             now = time.monotonic()
-            if pending_smart_turn:
-                hold_s = (
-                    max(self._PENDING_REOPEN_HOLD_S, max(0, output_hold_ms) / 1000.0)
-                    if smart_turn_hold_s is None
-                    else max(0.0, smart_turn_hold_s)
-                )
+            token: object | None = None
+            if pending_smart_turn_s is not None:
+                token = object()
                 self._pending_smart_turn = _PendingSmartTurn(
-                    turn_id=self._current.turn_id,
-                    revision=self._current.revision,
-                    finalized_at=now,
-                    deadline=now + hold_s,
-                    token=smart_turn_token,
+                    self._current.turn_id,
+                    self._current.revision,
+                    now,
+                    now + max(0.0, pending_smart_turn_s),
+                    token,
                 )
                 self._processing_deadline = None
             else:
@@ -193,6 +188,7 @@ class SpeculativeTurnTracker:
                 self._processing_deadline = now + max(0, processing_delay_ms) / 1000.0
             self.start_reopen_grace(self._current.turn_id, self._current.revision, max(0, output_hold_ms) / 1000.0)
             self._condition.notify_all()
+            return token
 
     def resolve_smart_turn(
         self,
@@ -204,20 +200,14 @@ class SpeculativeTurnTracker:
         token: object | None = None,
         on_resolve: Callable[[], None] | None = None,
     ) -> bool:
-        """Apply a background Smart Turn result anchored to segment finalization.
-
-        When *token* is provided, publication succeeds only if that exact pending
-        job is still active under the tracker lock (preventing a stale worker from
-        resolving a later session that reused the same ``turn_id`` and revision).
-        """
+        """Apply a background Smart Turn result anchored to segment finalization."""
         if turn_id is None or revision is None:
             return False
         with self._condition:
             pending = self._pending_smart_turn
             if (
                 pending is None
-                or pending.turn_id != turn_id
-                or pending.revision != revision
+                or (pending.turn_id, pending.revision) != (turn_id, revision)
                 or (token is not None and pending.token is not token)
             ):
                 return False
@@ -252,9 +242,7 @@ class SpeculativeTurnTracker:
                 return False
             if token is not None and pending.token is not token:
                 return False
-            if turn_id is None and revision is None:
-                return True
-            return pending.turn_id == turn_id and pending.revision == revision
+            return (turn_id is None and revision is None) or (pending.turn_id, pending.revision) == (turn_id, revision)
 
     def segment_discarded(self) -> None:
         """End detected speech that VAD cannot release as a valid segment."""
@@ -318,11 +306,8 @@ class SpeculativeTurnTracker:
         """
         if turn_id is None or revision is None:
             return _ACCEPT
-        wait_smart_turn = hold_for_grace or hold_for_processing or commit
         with self._condition:
-            return self._gate_locked(
-                turn_id, revision, hold_for_grace, hold_for_processing, wait_smart_turn, hold_until, commit
-            )
+            return self._gate_locked(turn_id, revision, hold_for_grace, hold_for_processing, hold_until, commit)
 
     def wait_for_gate(
         self,
@@ -341,19 +326,19 @@ class SpeculativeTurnTracker:
         """
         if turn_id is None or revision is None:
             return True
-        wait_smart_turn = hold_for_grace or hold_for_processing or commit
         with self._condition:
             while True:
-                decision = self._gate_locked(
-                    turn_id, revision, hold_for_grace, hold_for_processing, wait_smart_turn, hold_until, commit
-                )
+                decision = self._gate_locked(turn_id, revision, hold_for_grace, hold_for_processing, hold_until, commit)
                 if decision.action is not TurnGateAction.HOLD:
                     return decision.action is TurnGateAction.ACCEPT
                 assert decision.deadline is not None
                 waiting_for_smart_hold = (
                     hold_until is None
                     and not self._pending_holds_locked(turn_id, revision)
-                    and not (wait_smart_turn and self._smart_turn_holds_locked(turn_id, revision))
+                    and not (
+                        (hold_for_grace or hold_for_processing or commit)
+                        and self._smart_turn_holds_locked(turn_id, revision)
+                    )
                 )
                 wait_started_at_s = time.perf_counter()
                 self._condition.wait(max(0.0, decision.deadline - time.monotonic()))
@@ -514,11 +499,7 @@ class SpeculativeTurnTracker:
         self._committed.add(self._current)
         self._phase = TurnPhase.ANSWERING
         self._processing_deadline = None
-        if self._pending_smart_turn is not None and (
-            self._pending_smart_turn.turn_id,
-            self._pending_smart_turn.revision,
-        ) == (turn_id, revision):
-            self._pending_smart_turn = None
+        self._pending_smart_turn = None
         if self._grace_matches_locked(turn_id, revision):
             self._reopen_grace = None
         logger.debug("Committed speculative turn %s revision %d", turn_id, revision)
@@ -563,7 +544,6 @@ class SpeculativeTurnTracker:
         revision: int,
         hold_for_grace: bool,
         hold_for_processing: bool,
-        hold_for_smart_turn: bool,
         hold_until: float | None,
         commit: bool,
     ) -> TurnGate:
@@ -575,7 +555,7 @@ class SpeculativeTurnTracker:
             if self._pending_holds_locked(turn_id, revision):
                 assert self._pending_reopen is not None
                 deadlines.append(self._pending_reopen.deadline)
-            if hold_for_smart_turn and self._smart_turn_holds_locked(turn_id, revision):
+            if (hold_for_grace or hold_for_processing or commit) and self._smart_turn_holds_locked(turn_id, revision):
                 assert self._pending_smart_turn is not None
                 deadlines.append(self._pending_smart_turn.deadline)
             if (

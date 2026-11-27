@@ -164,18 +164,10 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
         if wait_for_stability:
             hold_s = self.final_revision_settle_s
             item_delay_s = getattr(item, "processing_delay_s", 0.0)
-            if (
-                item_delay_s > 0.0
-                and not self.speculative_turns.has_pending_smart_turn(turn_id, turn_revision)
-                and self.speculative_turns.processing_deadline(turn_id, turn_revision) is None
-            ):
-                hold_s = max(hold_s, max(0.0, item_delay_s - self._item_age_s(item)))
-            hold_until = monotonic() + hold_s if hold_s > 0 else None
+            if item_delay_s > 0.0 and self.speculative_turns.processing_deadline(turn_id, turn_revision) is None:
+                hold_s = max(hold_s, item_delay_s - self._item_age_s(item))
             return self.speculative_turns.wait_for_gate(
-                turn_id,
-                turn_revision,
-                hold_for_grace=False,
-                hold_until=hold_until,
+                turn_id, turn_revision, hold_for_grace=False, hold_until=monotonic() + hold_s if hold_s > 0 else None
             )
         if wait_for_pending_reopen:
             return self.speculative_turns.wait_for_gate(turn_id, turn_revision, hold_for_grace=False)

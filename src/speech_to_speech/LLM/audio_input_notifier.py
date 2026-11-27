@@ -36,23 +36,16 @@ class AudioInputNotifier(BaseHandler[VADAudio, LLMIn]):
         hold_until = None
         if (
             item.processing_delay_s > 0
-            and not self.speculative_turns.has_pending_smart_turn(item.turn_id, item.turn_revision)
             and self.speculative_turns.processing_deadline(item.turn_id, item.turn_revision) is None
         ):
-            remaining_delay_s = max(0.0, item.processing_delay_s - (perf_counter() - item.created_at_s))
-            if remaining_delay_s > 0:
-                hold_until = monotonic() + remaining_delay_s
+            remaining = item.processing_delay_s - (perf_counter() - item.created_at_s)
+            if remaining > 0:
+                hold_until = monotonic() + remaining
         is_latest = self.speculative_turns.wait_for_gate(
-            item.turn_id,
-            item.turn_revision,
-            hold_for_grace=False,
-            hold_for_processing=True,
-            hold_until=hold_until,
+            item.turn_id, item.turn_revision, hold_for_grace=False, hold_for_processing=True, hold_until=hold_until
         )
-        if not is_latest:
-            store = getattr(self, "turn_latency_store", None)
-            if store is not None:
-                store.discard_pending_turn(item.turn_id, item.turn_revision)
+        if not is_latest and (store := getattr(self, "turn_latency_store", None)) is not None:
+            store.discard_pending_turn(item.turn_id, item.turn_revision)
         return is_latest
 
     def process(self, vad_audio: VADAudio) -> Iterator[LLMIn]:

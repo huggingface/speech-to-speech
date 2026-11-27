@@ -1,6 +1,7 @@
 import logging
 import time
 from concurrent.futures import CancelledError
+from contextlib import contextmanager
 from queue import Queue
 from threading import Event, Thread
 from typing import Literal
@@ -1525,20 +1526,27 @@ class _BlockingSmartTurnAnalyzer:
         return self._results[index]
 
 
+@contextmanager
+def _smart_turn_vad(analyzer, *, store: TurnLatencyStore | None = None, iterator=None):
+    handler = _vad_handler_for_iterator(iterator or _StaticVADIterator(triggered=False, vad_output=None))
+    handler.smart_turn_analyzer = analyzer
+    if store is not None:
+        handler.turn_latency_store = store
+    try:
+        yield handler
+    finally:
+        for ev in getattr(analyzer, "release_events", ()):
+            ev.set()
+        handler.cleanup()
+
+
 def test_vad_smart_turn_runs_in_parallel_without_blocking_vad_process():
     analyzer = _BlockingSmartTurnAnalyzer([SmartTurnResult(complete=False, probability=0.2, inference_ms=40.0)])
-    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
-    handler.smart_turn_analyzer = analyzer
-    try:
+    with _smart_turn_vad(analyzer) as handler:
         outputs = _drive_final_segment(handler)
-        assert len(outputs) == 1
-        assert outputs[0].processing_delay_s == 0.0
-
-        # Smart Turn is executing asynchronously on the worker thread while
-        # VAD has already returned the final segment and keeps ingesting audio.
+        assert len(outputs) == 1 and outputs[0].processing_delay_s == 0.0
         assert analyzer.started_events[0].wait(1.0)
         assert handler.speculative_turns.has_pending_smart_turn("turn_1", 0)
-
         handler.iterator = _StaticVADIterator(triggered=False, vad_output=None)
         assert list(handler.process(_audio_bytes())) == []
 
@@ -1546,12 +1554,7 @@ def test_vad_smart_turn_runs_in_parallel_without_blocking_vad_process():
         _wait_for_smart_turn(handler)
         assert not handler.speculative_turns.has_pending_smart_turn("turn_1", 0)
         deadline = handler.speculative_turns.processing_deadline("turn_1", 0)
-        assert deadline is not None
-        assert 0.3 < deadline - time.monotonic() <= 0.6
-    finally:
-        for ev in analyzer.release_events:
-            ev.set()
-        handler.cleanup()
+        assert deadline is not None and 0.3 < deadline - time.monotonic() <= 0.6
 
 
 def test_vad_smart_turn_stale_revision_result_is_ignored_after_reopen():
@@ -1561,246 +1564,146 @@ def test_vad_smart_turn_stale_revision_result_is_ignored_after_reopen():
             SmartTurnResult(complete=True, probability=0.95, inference_ms=10.0),
         ]
     )
-    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
-    handler.smart_turn_analyzer = analyzer
     store = TurnLatencyStore()
-    handler.turn_latency_store = store
-    try:
-        first_outputs = _drive_final_segment(handler)
-        assert len(first_outputs) == 1
+    with _smart_turn_vad(analyzer, store=store) as handler:
+        assert len(_drive_final_segment(handler)) == 1
         assert analyzer.started_events[0].wait(1.0)
-
-        # User resumes speaking and finalizes rev 1 while rev 0 Smart Turn is still blocked.
         handler._total_samples = int(1.0 * handler.sample_rate)
-        resumed_outputs = _drive_final_segment(handler, active_chunks=12, segment_chunks=12)
-        assert len(resumed_outputs) == 1
-        assert (resumed_outputs[0].turn_id, resumed_outputs[0].turn_revision) == ("turn_1", 1)
+        resumed = _drive_final_segment(handler, active_chunks=12, segment_chunks=12)
+        assert (resumed[0].turn_id, resumed[0].turn_revision) == ("turn_1", 1)
 
-        # Release rev 0 (incomplete) and rev 1 (complete).
         analyzer.release_events[0].set()
         assert analyzer.started_events[1].wait(1.0)
         analyzer.release_events[1].set()
         _wait_for_smart_turn(handler)
 
-        # Rev 1 must have complete timing (<= 0.8s grace, 0ms processing delay),
-        # never overwritten by rev 0's stale incomplete result.
         grace = handler.speculative_turns._reopen_grace
-        assert grace is not None
-        assert (grace.turn_id, grace.revision) == ("turn_1", 1)
+        assert grace is not None and (grace.turn_id, grace.revision) == ("turn_1", 1)
         assert grace.deadline - time.monotonic() <= 0.8
-        rev1_pending = store.pending_for_turn("turn_1", 1)
-        assert rev1_pending is not None
-        assert rev1_pending.smart_turn_status == "complete"
-    finally:
-        for ev in analyzer.release_events:
-            ev.set()
-        handler.cleanup()
+        rev1 = store.pending_for_turn("turn_1", 1)
+        assert rev1 is not None and rev1.smart_turn_status == "complete"
 
 
-def test_vad_smart_turn_session_end_invalidates_inflight_result():
-    analyzer = _BlockingSmartTurnAnalyzer([SmartTurnResult(complete=False, probability=0.1, inference_ms=50.0)])
-    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
-    handler.smart_turn_analyzer = analyzer
-    store = TurnLatencyStore()
-    handler.turn_latency_store = store
-    try:
-        _drive_final_segment(handler)
-        assert analyzer.started_events[0].wait(1.0)
+def test_vad_smart_turn_session_end_invalidates_inflight_and_late_publish(monkeypatch):
+    analyzer_a = _StaticSmartTurnAnalyzer(SmartTurnResult(complete=False, probability=0.1, inference_ms=20.0))
+    analyzer_b = _BlockingSmartTurnAnalyzer([SmartTurnResult(complete=True, probability=0.95, inference_ms=10.0)])
+    paused_at_publish, resume_publish, first_call = Event(), Event(), [True]
+    with _smart_turn_vad(analyzer_a, store=TurnLatencyStore()) as handler:
+        original_resolve = handler.speculative_turns.resolve_smart_turn
 
-        # End session A while rev 0 Smart Turn is blocked, then start session B turn_1 rev=0.
-        handler.iterator.reset_states = lambda: None  # type: ignore[attr-defined]
-        handler.on_session_end()
-        store = TurnLatencyStore()
-        handler.turn_latency_store = store
-        handler.speculative_turns.start_turn()
-        handler.speculative_turns.segment_finalized(500, output_hold_ms=800)
+        def hooked_resolve(*args, **kwargs):
+            if first_call[0]:
+                first_call[0] = False
+                paused_at_publish.set()
+                resume_publish.wait(2.0)
+            return original_resolve(*args, **kwargs)
 
-        # Releasing session A's Smart Turn must NOT mutate session B's turn_1 rev=0.
-        analyzer.release_events[0].set()
-        _wait_for_smart_turn(handler)
+        monkeypatch.setattr(handler.speculative_turns, "resolve_smart_turn", hooked_resolve)
+        try:
+            _drive_final_segment(handler)
+            assert paused_at_publish.wait(1.0)
 
-        assert store.pending_for_turn("turn_1", 0) is None
-        grace = handler.speculative_turns._reopen_grace
-        assert grace is not None
-        assert grace.deadline - time.monotonic() <= 0.8
-    finally:
-        for ev in analyzer.release_events:
-            ev.set()
-        handler.cleanup()
+            handler.iterator.reset_states = lambda: None  # type: ignore[attr-defined]
+            handler.on_session_end()
+            store_b = TurnLatencyStore()
+            handler.turn_latency_store = store_b
+            handler.smart_turn_analyzer = analyzer_b
+            _drive_final_segment(handler)
+            assert handler.speculative_turns.has_pending_smart_turn("turn_1", 0)
+
+            resume_publish.set()
+            assert analyzer_b.started_events[0].wait(1.0)
+            assert handler.speculative_turns.has_pending_smart_turn("turn_1", 0)
+            pending_b = store_b.pending_for_turn("turn_1", 0)
+            assert pending_b is None or pending_b.smart_turn_status is None
+
+            analyzer_b.release_events[0].set()
+            _wait_for_smart_turn(handler)
+            assert not handler.speculative_turns.has_pending_smart_turn("turn_1", 0)
+            pending_b = store_b.pending_for_turn("turn_1", 0)
+            assert pending_b is not None and pending_b.smart_turn_status == "complete"
+        finally:
+            resume_publish.set()
+            for ev in analyzer_b.release_events:
+                ev.set()
 
 
 def test_resolve_smart_turn_anchors_deadlines_to_finalized_at(clock):
     tracker = SpeculativeTurnTracker()
     tracker.speech_started(0)
-    tracker.segment_finalized(1000, pending_smart_turn=True, smart_turn_hold_s=2.0)
-
-    # Simulate 150ms Smart Turn inference time.
+    tracker.segment_finalized(1000, pending_smart_turn_s=2.0)
     clock[0] += 0.15
     assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=2000, processing_delay_ms=600)
-
     assert not tracker.has_pending_smart_turn("turn_1", 0)
     assert tracker.processing_deadline("turn_1", 0) == pytest.approx(100.6)
-    grace = tracker._reopen_grace
-    assert grace is not None
-    assert grace.deadline == pytest.approx(102.0)
+    assert tracker._reopen_grace is not None and tracker._reopen_grace.deadline == pytest.approx(102.0)
 
 
-def test_wait_for_gate_pending_smart_turn_does_not_charge_hold_observer():
+@pytest.mark.parametrize(("delay_ms", "expect_observed"), [(0, False), (120, True)])
+def test_wait_for_gate_hold_for_processing_excludes_smart_turn_wait_and_charges_delay(delay_ms, expect_observed):
     tracker = SpeculativeTurnTracker()
     observed: list[tuple[str, int, float, float]] = []
     tracker.wait_observer = lambda tid, rev, start, end: observed.append((tid, rev, start, end))
     tracker.start_turn()
-    tracker.segment_finalized(1000, pending_smart_turn=True, smart_turn_hold_s=2.0)
+    tracker.segment_finalized(1000, pending_smart_turn_s=2.0)
 
-    done = Event()
     results: list[bool] = []
-
-    def waiter() -> None:
-        results.append(tracker.wait_for_gate("turn_1", 0, hold_for_grace=False, hold_for_processing=True))
-        done.set()
-
-    thread = Thread(target=waiter)
+    thread = Thread(
+        target=lambda: results.append(
+            tracker.wait_for_gate("turn_1", 0, hold_for_grace=False, hold_for_processing=True)
+        )
+    )
     thread.start()
     time.sleep(0.03)
-    assert not done.is_set()
-    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=800, processing_delay_ms=0)
-    assert done.wait(1.0)
-    thread.join(timeout=1.0)
-
-    assert results == [True]
-    # Waiting for Smart Turn classification itself is not counted as grace hold_s.
-    assert observed == []
-
-
-def test_wait_for_gate_hold_for_processing_charges_only_incomplete_delay():
-    tracker = SpeculativeTurnTracker()
-    observed: list[tuple[str, int, float, float]] = []
-    tracker.wait_observer = lambda tid, rev, start, end: observed.append((tid, rev, start, end))
-    tracker.start_turn()
-    tracker.segment_finalized(1000, pending_smart_turn=True, smart_turn_hold_s=2.0)
-
-    done = Event()
-    results: list[bool] = []
-
-    def waiter() -> None:
-        results.append(tracker.wait_for_gate("turn_1", 0, hold_for_grace=False, hold_for_processing=True))
-        done.set()
-
-    thread = Thread(target=waiter)
-    thread.start()
-    time.sleep(0.04)
-    assert not done.is_set()
+    assert thread.is_alive()
     resolved_at = time.perf_counter()
-    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=500, processing_delay_ms=120)
-    assert done.wait(1.0)
+    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=800, processing_delay_ms=delay_ms)
     thread.join(timeout=1.0)
-
-    assert results == [True]
-    assert len(observed) >= 1
-    assert observed[0][2] >= resolved_at - 0.005
-    total_observed = sum(end - start for _tid, _rev, start, end in observed)
-    assert 0.04 <= total_observed <= 0.15
-
-
-def test_vad_smart_turn_stale_session_paused_after_gen_check_cannot_resolve_next_session(monkeypatch):
-    analyzer_a = _StaticSmartTurnAnalyzer(SmartTurnResult(complete=False, probability=0.1, inference_ms=20.0))
-    analyzer_b = _BlockingSmartTurnAnalyzer([SmartTurnResult(complete=True, probability=0.95, inference_ms=10.0)])
-    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
-    handler.smart_turn_analyzer = analyzer_a
-    handler.turn_latency_store = TurnLatencyStore()
-
-    original_resolve = handler.speculative_turns.resolve_smart_turn
-    paused_at_publish = Event()
-    resume_publish = Event()
-    first_call = [True]
-
-    def hooked_resolve(*args, **kwargs):
-        if first_call[0]:
-            first_call[0] = False
-            paused_at_publish.set()
-            resume_publish.wait(2.0)
-        return original_resolve(*args, **kwargs)
-
-    monkeypatch.setattr(handler.speculative_turns, "resolve_smart_turn", hooked_resolve)
-    try:
-        _drive_final_segment(handler)
-        # Session A has finished _classify_smart_turn and passed its generation checks,
-        # pausing right before publishing its result into the tracker / latency store.
-        assert paused_at_publish.wait(1.0)
-
-        # End session A and start session B with its own turn_1 rev=0.
-        handler.iterator.reset_states = lambda: None  # type: ignore[attr-defined]
-        handler.on_session_end()
-        store_b = TurnLatencyStore()
-        handler.turn_latency_store = store_b
-        handler.smart_turn_analyzer = analyzer_b
-        _drive_final_segment(handler)
-        assert handler.speculative_turns.has_pending_smart_turn("turn_1", 0)
-
-        # Release session A's worker; once session B's analyzer begins on the single
-        # worker thread, session A's publish attempt has completely finished.
-        resume_publish.set()
-        assert analyzer_b.started_events[0].wait(1.0)
-
-        # Session B's turn_1 rev=0 must STILL be pending and untouched by session A.
-        assert handler.speculative_turns.has_pending_smart_turn("turn_1", 0)
-        pending_b = store_b.pending_for_turn("turn_1", 0)
-        assert pending_b is None or pending_b.smart_turn_status is None
-
-        # Letting session B finish resolves turn_1 rev=0 with session B's decision.
-        analyzer_b.release_events[0].set()
-        _wait_for_smart_turn(handler)
-        assert not handler.speculative_turns.has_pending_smart_turn("turn_1", 0)
-        pending_b = store_b.pending_for_turn("turn_1", 0)
-        assert pending_b is not None
-        assert pending_b.smart_turn_status == "complete"
-    finally:
-        resume_publish.set()
-        for ev in analyzer_b.release_events:
-            ev.set()
-        handler.cleanup()
+    assert not thread.is_alive() and results == [True]
+    if expect_observed:
+        assert observed and observed[0][2] >= resolved_at - 0.005
+        assert 0.04 <= sum(end - start for _, _, start, end in observed) <= 0.15
+    else:
+        assert observed == []
 
 
 def test_vad_smart_turn_unexpected_worker_exception_logs_and_releases_pending(caplog, monkeypatch):
-    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
-    handler.smart_turn_analyzer = _StaticSmartTurnAnalyzer(
-        SmartTurnResult(complete=False, probability=0.1, inference_ms=10.0)
-    )
+    analyzer = _StaticSmartTurnAnalyzer(SmartTurnResult(complete=False, probability=0.1, inference_ms=10.0))
     store = TurnLatencyStore()
-    handler.turn_latency_store = store
-
-    def boom(*_args, **_kwargs):
-        raise RuntimeError("unexpected worker failure")
-
-    monkeypatch.setattr(handler, "_classify_smart_turn", boom)
-    try:
+    with _smart_turn_vad(analyzer, store=store) as handler:
+        monkeypatch.setattr(
+            handler, "_classify_smart_turn", lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
         with caplog.at_level(logging.ERROR, logger="speech_to_speech.VAD.vad_handler"):
             _drive_final_segment(handler)
             _wait_for_smart_turn(handler)
-
         assert not handler.speculative_turns.has_pending_smart_turn("turn_1", 0)
         deadline = handler.speculative_turns.processing_deadline("turn_1", 0)
         assert deadline is not None and deadline <= time.monotonic()
-        grace = handler.speculative_turns._reopen_grace
-        assert grace is not None
-        assert grace.deadline - time.monotonic() <= 0.8
+        assert handler.speculative_turns._reopen_grace is not None
+        assert handler.speculative_turns._reopen_grace.deadline - time.monotonic() <= 0.8
         pending = store.pending_for_turn("turn_1", 0)
-        assert pending is not None
-        assert pending.smart_turn_status == "failed"
+        assert pending is not None and pending.smart_turn_status == "failed"
         assert any("Smart Turn worker failed" in record.getMessage() for record in caplog.records)
-    finally:
-        handler.cleanup()
 
 
-def test_vad_cleanup_on_stop_event_unblocks_pending_smart_turn_waiter():
+@pytest.mark.parametrize("stopping", [True, False])
+def test_vad_cleanup_handles_stop_event_and_pipeline_end_drain(stopping):
+    from speech_to_speech.pipeline.messages import PIPELINE_END
+
     analyzer = _BlockingSmartTurnAnalyzer([SmartTurnResult(complete=True, probability=0.95, inference_ms=10.0)])
-    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
-    handler.stop_event = Event()
-    handler.smart_turn_analyzer = analyzer
-    try:
-        _drive_final_segment(handler)
+    iterator = _StaticVADIterator(
+        triggered=False, vad_output=[torch.zeros(512) for _ in range(31)], last_utterance_active_speech_samples=12 * 512
+    )
+    store = TurnLatencyStore()
+    with _smart_turn_vad(analyzer, store=store, iterator=iterator) as handler:
+        handler.stop_event, handler.queue_in, handler.queue_out = Event(), Queue(), Queue()
+        handler.pipeline_index, handler._times = None, []
+        handler.queue_in.put(_audio_bytes())
+        handler.queue_in.put(PIPELINE_END)
+        vad_thread = Thread(target=handler.run)
+        vad_thread.start()
         assert analyzer.started_events[0].wait(1.0)
-
         result: list[bool] = []
         waiter = Thread(
             target=lambda: result.append(
@@ -1810,71 +1713,17 @@ def test_vad_cleanup_on_stop_event_unblocks_pending_smart_turn_waiter():
         waiter.start()
         time.sleep(0.02)
         assert waiter.is_alive()
-
-        started_cleanup = time.monotonic()
-        handler.stop_event.set()
-        handler.cleanup()
-        waiter.join(timeout=1.0)
-
-        assert not waiter.is_alive()
-        assert time.monotonic() - started_cleanup < 0.5
-        assert result == [False]
-    finally:
-        for ev in analyzer.release_events:
-            ev.set()
-        handler.cleanup()
-
-
-def test_vad_cleanup_on_pipeline_end_drain_preserves_smart_turn_decision():
-    from speech_to_speech.pipeline.messages import PIPELINE_END
-
-    analyzer = _BlockingSmartTurnAnalyzer([SmartTurnResult(complete=True, probability=0.95, inference_ms=10.0)])
-    handler = _vad_handler_for_iterator(
-        _StaticVADIterator(
-            triggered=False,
-            vad_output=[torch.zeros(512) for _ in range(31)],
-            last_utterance_active_speech_samples=12 * 512,
-        )
-    )
-    handler.stop_event = Event()
-    handler.queue_in = Queue()
-    handler.queue_out = Queue()
-    handler.pipeline_index = None
-    handler._times = []
-    handler.smart_turn_analyzer = analyzer
-    store = TurnLatencyStore()
-    handler.turn_latency_store = store
-
-    handler.queue_in.put(_audio_bytes())
-    handler.queue_in.put(PIPELINE_END)
-    vad_thread = Thread(target=handler.run)
-    vad_thread.start()
-    try:
-        assert analyzer.started_events[0].wait(1.0)
-        vad_thread.join(timeout=1.0)
-        assert not vad_thread.is_alive()
-
-        # Releasing Smart Turn after PIPELINE_END drain must still resolve the
-        # pending gate and record smart_turn_status instead of stalling for 2s.
-        result: list[bool] = []
-        waiter = Thread(
-            target=lambda: result.append(
-                handler.speculative_turns.wait_for_gate("turn_1", 0, hold_for_grace=False, hold_for_processing=True)
-            )
-        )
         t0 = time.monotonic()
-        waiter.start()
-        analyzer.release_events[0].set()
-        waiter.join(timeout=1.0)
-
-        assert not waiter.is_alive()
-        assert time.monotonic() - t0 < 0.5
-        assert result == [True]
-        pending = store.pending_for_turn("turn_1", 0)
-        assert pending is not None
-        assert pending.smart_turn_status == "complete"
-    finally:
-        for ev in analyzer.release_events:
-            ev.set()
+        if stopping:
+            handler.stop_event.set()
+            handler.cleanup()
+        else:
+            vad_thread.join(timeout=1.0)
+            analyzer.release_events[0].set()
         vad_thread.join(timeout=1.0)
-        handler.cleanup()
+        waiter.join(timeout=1.0)
+        assert not vad_thread.is_alive() and not waiter.is_alive() and time.monotonic() - t0 < 0.5
+        assert result == [not stopping]
+        if not stopping:
+            pending = store.pending_for_turn("turn_1", 0)
+            assert pending is not None and pending.smart_turn_status == "complete"

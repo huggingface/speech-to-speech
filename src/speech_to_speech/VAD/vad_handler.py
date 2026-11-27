@@ -5,6 +5,7 @@ import time
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from queue import Queue
 from threading import Event
 from typing import TYPE_CHECKING, Any, Literal
@@ -648,60 +649,37 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         analyzer: Any,
         token: object,
     ) -> None:
+        if not self.speculative_turns.has_pending_smart_turn(token=token):
+            return
         try:
-            if not self.speculative_turns.has_pending_smart_turn(token=token):
-                return
             status, analysis_s, reopen_grace_ms, processing_delay_ms = self._classify_smart_turn(
                 audio, analyzer=analyzer, sample_rate=sample_rate
             )
-            store = getattr(self, "turn_latency_store", None)
-
-            def _record_latency() -> None:
-                if store is not None:
-                    store.record_smart_turn(
-                        turn_id,
-                        turn_revision,
-                        status=status,
-                        analysis_s=analysis_s,
-                        grace_s=reopen_grace_ms / 1000.0 if status != "disabled" else None,
-                        processing_delay_s=processing_delay_ms / 1000.0 if status != "disabled" else None,
-                    )
-
-            self.speculative_turns.resolve_smart_turn(
-                turn_id,
-                turn_revision,
-                output_hold_ms=reopen_grace_ms,
-                processing_delay_ms=processing_delay_ms,
-                token=token,
-                on_resolve=_record_latency,
-            )
         except Exception:
-            logger.exception(
-                "Smart Turn worker failed for turn=%s rev=%s; falling back to default speculative reopen grace",
+            logger.exception("Smart Turn worker failed for turn=%s rev=%s; using default grace", turn_id, turn_revision)
+            status, analysis_s, reopen_grace_ms, processing_delay_ms = "failed", None, self.speculative_reopen_ms, 0
+        store = getattr(self, "turn_latency_store", None)
+        on_resolve = (
+            partial(
+                store.record_smart_turn,
                 turn_id,
                 turn_revision,
+                status=status,
+                analysis_s=analysis_s,
+                grace_s=reopen_grace_ms / 1000.0 if status != "disabled" else None,
+                processing_delay_s=processing_delay_ms / 1000.0 if status != "disabled" else None,
             )
-            store = getattr(self, "turn_latency_store", None)
-
-            def _record_failure() -> None:
-                if store is not None:
-                    store.record_smart_turn(
-                        turn_id,
-                        turn_revision,
-                        status="failed",
-                        analysis_s=None,
-                        grace_s=self.speculative_reopen_ms / 1000.0,
-                        processing_delay_s=0.0,
-                    )
-
-            self.speculative_turns.resolve_smart_turn(
-                turn_id,
-                turn_revision,
-                output_hold_ms=self.speculative_reopen_ms,
-                processing_delay_ms=0,
-                token=token,
-                on_resolve=_record_failure,
-            )
+            if store is not None
+            else None
+        )
+        self.speculative_turns.resolve_smart_turn(
+            turn_id,
+            turn_revision,
+            output_hold_ms=reopen_grace_ms,
+            processing_delay_ms=processing_delay_ms,
+            token=token,
+            on_resolve=on_resolve,
+        )
 
     def process(self, audio_chunk: VADIn) -> Iterator[VADOut]:
         runtime_config = None
@@ -1042,16 +1020,14 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 self._speculative_raw_audio_prefix = analysis_audio
                 # When Smart Turn is enabled, run it in parallel with STT and
                 # hold turn commits / final STT emission until it resolves.
-                smart_turn_token = object() if analyzer is not None else None
-                self.speculative_turns.segment_finalized(
+                smart_turn_token = self.speculative_turns.segment_finalized(
                     end_ms,
                     output_hold_ms=self.speculative_reopen_ms,
-                    processing_delay_ms=0,
-                    pending_smart_turn=analyzer is not None,
-                    smart_turn_hold_s=max(2.0, self.smart_turn_max_wait_ms / 1000.0) if analyzer is not None else None,
-                    smart_turn_token=smart_turn_token,
+                    pending_smart_turn_s=max(2.0, self.smart_turn_max_wait_ms / 1000.0)
+                    if analyzer is not None
+                    else None,
                 )
-                if analyzer is not None:
+                if analyzer is not None and smart_turn_token is not None:
                     self._submit_smart_turn(turn_id, turn_revision, analysis_audio, analyzer, smart_turn_token)
                 # Queue the provider boundary before yielding downstream. The
                 # next microphone chunk can then never overtake this commit.
