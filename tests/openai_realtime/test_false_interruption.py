@@ -71,11 +71,15 @@ _INPUT_EVENTS = {
         ("Okay.", 0),
         ("Yeah, I see.", 0),
         ("Ahem.", 0),
-        ("A ham.", 0),
-        ("A hand.", 0),
         ("[coughs]", 0),
         ("(laughing) Hmm.", 0),
-        ("Thank you.", 0),
+        # Answers and words are not backchannels, even short ones.
+        ("Yes.", 1),
+        ("Sure.", 1),
+        ("Huh?", 1),
+        ("Thank you.", 2),
+        # STT mishearings of a throat clearing are words: add them to `fillers` for that STT.
+        ("A ham.", 2),
         ("No.", 1),
         ("Uh, what?", 1),
         ("Okay, stop.", 1),
@@ -88,11 +92,12 @@ def test_fillers_and_backchannels_do_not_count(transcript, words):
     assert FalseInterruptionConfig().word_count(transcript) == words
 
 
-def test_ignore_words_can_be_replaced():
-    config = FalseInterruptionConfig(ignore_words=("vale",))
-    assert config.word_count("Vale.") == 0
-    assert config.word_count("Uh") == 1
-    assert FalseInterruptionConfig(ignore_words=()).word_count("Yeah.") == 1
+def test_fillers_and_backchannels_can_be_set_for_another_language():
+    french = FalseInterruptionConfig(fillers=("euh", "bah"), backchannels=("ouais", "d'accord"))
+    assert french.word_count("Euh, ouais, d'accord.") == 0
+    assert french.word_count("Uh, yeah.") == 2
+    assert FalseInterruptionConfig(backchannels=()).word_count("Mm-hmm, yeah.") == 1
+    assert FalseInterruptionConfig(fillers=()).word_count("Uh, yeah.") == 1
 
 
 def test_session_field_values():

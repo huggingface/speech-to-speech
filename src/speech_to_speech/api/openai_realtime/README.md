@@ -623,11 +623,19 @@ them alone is handled as before. Then:
   left to play answers it rather than backchannels over it, so it becomes an
   ordinary user turn.
 
-The built-in list of ignored words is English: hesitations ("uh", "um",
-"hmm", "mm-hmm"), backchannels ("yeah", "okay", "right", "I see", "got it")
-and "thank you", which STT models often write for noise. Text in brackets or
-parentheses, such as `[coughs]`, never counts. `ignore_words` replaces the list,
-for example for another language.
+Two lists decide what is not a word:
+
+- **`fillers`**: non-lexical sounds such as "uh", "um", "hmm", "mm-hmm", "uh-huh"
+  and "ahem". The defaults are the same in every language.
+- **`backchannels`**: what a listener says to show they are following, such as
+  "yeah", "okay", "right", "I see" and "got it". The built-in list is English.
+  Set it for the session's language: "ouais" or "sí" count as words otherwise.
+  `[]` makes every backchannel interrupt. Words that usually answer a question
+  ("yes", "sure") are not on it, so an early answer stops the reply.
+
+Text in brackets or parentheses, such as `[coughs]`, never counts. An STT that
+writes a throat clearing as words ("A ham.") makes it an interruption, as on
+`main`. Add its spellings to `fillers` if that happens often.
 
 `playback` chooses what happens to the reply's audio while the decision is
 pending:

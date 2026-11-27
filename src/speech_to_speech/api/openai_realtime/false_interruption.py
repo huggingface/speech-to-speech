@@ -74,10 +74,10 @@ def resume_rewind_samples(played: np.ndarray, sample_rate: int) -> int:
     return 0
 
 
-# Words and phrases that never count toward an interruption on their own.
-# Hyphens and punctuation are normalized away, so "mm-hmm" matches "mm hmm".
-DEFAULT_IGNORE_WORDS: tuple[str, ...] = (
-    # Hesitations and noises an STT writes for coughs and throat clearing.
+# Sounds an STT writes for hesitations, throat clearing, laughter, and "I'm
+# listening" noises. They carry no words in any language. Hyphens and
+# punctuation are normalized away, so "mm-hmm" matches "mm hmm".
+DEFAULT_FILLERS: tuple[str, ...] = (
     "uh",
     "uhh",
     "um",
@@ -99,43 +99,30 @@ DEFAULT_IGNORE_WORDS: tuple[str, ...] = (
     "mm hmm",
     "mm hm",
     "uh huh",
-    "huh",
-    "aha",
-    "ha",
-    # Throat clearing, as STT models spell it.
     "ahem",
-    "a hem",
-    "a ham",
-    "a hand",
-    "uh hum",
-    "hem",
-    # Backchannels: the listener is following, not taking the turn.
+    "ha",
+    "aha",
+)
+
+# English words a listener says to show they are following, not to take the
+# turn. Words that usually answer a question ("yes", "sure") are left out: an
+# early answer should stop the reply.
+DEFAULT_BACKCHANNELS: tuple[str, ...] = (
     "yeah",
     "yea",
     "yep",
     "yup",
-    "yes",
     "ya",
     "okay",
     "ok",
     "right",
     "alright",
     "all right",
-    "sure",
     "i see",
     "got it",
     "gotcha",
-    "cool",
-    "nice",
-    "wow",
-    "great",
-    "exactly",
-    "true",
-    "indeed",
     "makes sense",
     "go on",
-    "thanks",
-    "thank you",
 )
 
 # Each of these characters is one word: their scripts do not separate words with spaces.
@@ -161,8 +148,8 @@ def interruption_words(text: str) -> list[str]:
     return [word.strip("'") for word in "".join(chars).split() if word.strip("'")]
 
 
-def _phrases(ignore_words: tuple[str, ...] | list[str]) -> list[tuple[str, ...]]:
-    phrases = {tuple(interruption_words(entry)) for entry in ignore_words}
+def _phrases(ignored: tuple[str, ...] | list[str]) -> list[tuple[str, ...]]:
+    phrases = {tuple(interruption_words(entry)) for entry in ignored}
     phrases.discard(())
     return sorted(phrases, key=len, reverse=True)
 
@@ -196,16 +183,24 @@ class FalseInterruptionConfig(BaseModel):
     """
     timeout_ms: int = Field(default=2000, ge=0, le=30000)
     """Give up and resume if no transcript arrives this long after speech stops."""
-    ignore_words: tuple[str, ...] | None = None
-    """Words and phrases that never count. ``None`` uses the built-in English list."""
+    fillers: tuple[str, ...] | None = None
+    """Non-lexical sounds that never count ("uh", "mm-hmm", "ahem"). ``None`` uses ``DEFAULT_FILLERS``."""
+    backchannels: tuple[str, ...] | None = None
+    """Listener words that never count on their own ("yeah", "okay", "I see").
+
+    ``None`` uses the English ``DEFAULT_BACKCHANNELS``; ``[]`` counts them as
+    words. Set it for the session's language, since "ouais" or "sí" are words otherwise.
+    """
 
     _phrases: list[tuple[str, ...]] = PrivateAttr(default_factory=list)
 
     def model_post_init(self, __context: Any) -> None:
-        self._phrases = _phrases(DEFAULT_IGNORE_WORDS if self.ignore_words is None else self.ignore_words)
+        fillers = DEFAULT_FILLERS if self.fillers is None else self.fillers
+        backchannels = DEFAULT_BACKCHANNELS if self.backchannels is None else self.backchannels
+        self._phrases = _phrases((*fillers, *backchannels))
 
     def word_count(self, transcript: str) -> int:
-        """Count the words of *transcript* that are not ignored fillers or backchannels."""
+        """Count the words of *transcript* that are not fillers or backchannels."""
         words = interruption_words(transcript)
         phrases = self._phrases
         count = 0
