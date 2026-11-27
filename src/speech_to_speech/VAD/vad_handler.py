@@ -93,13 +93,18 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         idle_min_confident_speech_ms: int = 0,
         response_playing: Event | None = None,
         has_pending_playback: Callable[[], bool] | None = None,
+        barge_in_min_confident_speech_ms: int = 0,
     ) -> None:
         if not 0 < confident_thresh <= 1:
             raise ValueError("confident_thresh must be in (0, 1]")
         if barge_in_ms < 0:
             raise ValueError("barge_in_ms must not be negative")
+        if barge_in_min_confident_speech_ms < 0:
+            raise ValueError("barge_in_min_confident_speech_ms must not be negative")
         if min(min_confident_speech_ms, idle_min_speech_ms, idle_min_confident_speech_ms) < 0 or idle_after_s < 0:
             raise ValueError("Confident-speech and idle turn-opening settings must not be negative")
+        if barge_in_min_confident_speech_ms > 0 and min_confident_speech_ms <= 0:
+            raise ValueError("barge_in_min_confident_speech_ms requires min_confident_speech_ms > 0")
         if (idle_after_s or idle_min_speech_ms or idle_min_confident_speech_ms) and min_confident_speech_ms <= 0:
             raise ValueError("Idle turn-opening settings require min_confident_speech_ms > 0")
         if vad != "silero" and min_confident_speech_ms > 0:
@@ -117,6 +122,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self.min_silence_ms = min_silence_ms
         self.min_speech_ms = min_speech_ms
         self.barge_in_ms = barge_in_ms
+        self.barge_in_min_confident_speech_ms = barge_in_min_confident_speech_ms
         self.min_speech_continuation_ms = self._resolve_min_speech_continuation_ms(
             self.min_speech_ms,
             min_speech_continuation_ms,
@@ -339,8 +345,11 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         idle_s = self._idle_s(start_ms)
         min_speech_ms: float = self.min_speech_ms
         min_confident_ms: float = self.min_confident_speech_ms
-        if self._is_response_playing() and getattr(self, "barge_in_ms", 0) > 0:
-            min_speech_ms = self.barge_in_ms
+        barge_in_ms = getattr(self, "barge_in_ms", 0)
+        barge_in_confident_ms = getattr(self, "barge_in_min_confident_speech_ms", 0)
+        if self._is_response_playing() and (barge_in_ms > 0 or barge_in_confident_ms > 0):
+            min_speech_ms = barge_in_ms or min_speech_ms
+            min_confident_ms = barge_in_confident_ms or min_confident_ms
         elif self.idle_after_s > 0 and idle_s > self.idle_after_s:
             min_speech_ms = self.idle_min_speech_ms or min_speech_ms
             min_confident_ms = self.idle_min_confident_speech_ms or min_confident_ms
