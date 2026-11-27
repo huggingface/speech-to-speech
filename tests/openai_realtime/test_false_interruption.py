@@ -279,6 +279,18 @@ def test_dismissed_turn_restores_a_reply_that_finished_meanwhile():
     assert tracker.speech_started(5000) == ("turn_3", 0, False)
 
 
+def test_speech_held_over_a_reply_is_transcribed_without_the_smart_turn_delay():
+    """The paused reply waits on this transcript; once the turn is real, the delay applies as usual."""
+    tracker = SpeculativeTurnTracker()
+    _answering_turn(tracker)
+    turn, revision = tracker.start_turn()
+    assert tracker.mark_provisional(turn)
+    tracker.segment_finalized(1000, processing_delay_ms=600)
+    assert tracker.processing_deadline(turn, revision) is None
+    tracker.confirm_provisional(turn)
+    assert tracker.processing_deadline(turn, revision) is not None
+
+
 def test_confirmed_turn_supersedes_the_previous_one():
     tracker = SpeculativeTurnTracker()
     first = _answering_turn(tracker)

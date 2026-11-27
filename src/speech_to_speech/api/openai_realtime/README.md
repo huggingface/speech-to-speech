@@ -603,6 +603,15 @@ them alone is handled as before. Then:
   playback cut in history, and the rest of the user item. A partial transcript
   counts once two consecutive hypotheses both have enough words; a final
   transcript counts at once.
+- **So does long speech.** `min_speech_ms` of active speech (1.2 s by default;
+  0 turns it off) commits the interruption before its words are known. Words
+  can come late: VAD splits "Wait, wait, can you..." into short segments, and
+  an STT that shares a GPU with the TTS can be slow while the reply is still
+  being synthesized. Committing stops that synthesis, and keeps real speech
+  from being dropped when its transcript misses `timeout_ms`. Coughs and
+  backchannels are well under a second of speech. Since the reply is already
+  paused, this changes when the client sees the user's turn, not when the
+  assistant goes quiet.
 - **No words resume the reply.** An empty or filler-only transcript, a failed
   transcription, or no transcript within `timeout_ms` after the speech stops
   means the speech was not an interruption. The client never sees that turn,
@@ -613,15 +622,6 @@ them alone is handled as before. Then:
   arrives when the reply is fully generated and has at most a second of audio
   left to play answers it rather than backchannels over it, so it becomes an
   ordinary user turn.
-- **So does long speech.** `min_speech_ms` of active speech (1.2 s by default;
-  0 turns it off) commits the interruption before its words are known. Words
-  can come late: VAD splits "Wait, wait, can you..." into short segments, and
-  an STT that shares a GPU with the TTS can be slow while the reply is still
-  being synthesized. Committing stops that synthesis, and keeps real speech
-  from being dropped when its transcript misses `timeout_ms`. Coughs and
-  backchannels are well under a second of speech. Since the reply is already
-  paused, this changes when the client sees the user's turn, not when the
-  assistant goes quiet.
 
 The built-in list of ignored words is English: hesitations ("uh", "um",
 "hmm", "mm-hmm"), backchannels ("yeah", "okay", "right", "I see", "got it")
@@ -644,9 +644,11 @@ since the server cannot pause audio it has already sent. To opt in, add
 sends `speech_to_speech.interruption.pending` (`audio_start_ms`, `playback`)
 when it starts holding, and `speech_to_speech.interruption.resolved`
 (`interrupted`, `transcript`) when it decides. When `interrupted` is true, the
-usual cancellation events follow: keep the player paused until they clear it.
-The demo client in `demo/` does this, and resumes from the last gap between
-words the same way the server's WebRTC track does.
+usual cancellation events follow: a client that clears its player on
+`input_audio_buffer.speech_started` drops the paused audio then, and one that
+lets the reply finish in some cases should resume it. The demo client in
+`demo/` pauses its player and resumes from the last gap between words, the same
+way the server's WebRTC track does.
 
 Speech that continues the user's own unanswered turn (VAD reopens it) still
 cancels the stale reply at once. Speech while the assistant is silent is an
