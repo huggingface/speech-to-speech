@@ -329,6 +329,9 @@ body[data-phase="results"] .brand-name, body[data-phase="results"] .brand-tag { 
 .keypoints li::before { content: "○"; color: var(--faint); }
 .keypoints li.hit { color: var(--text); }
 .keypoints li.hit::before { content: "✓"; color: var(--good); font-weight: 800; }
+.keypoints li.kp-head { margin-top: 6px; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); }
+.keypoints li.kp-head::before { content: none; }
+.keypoints li.extra::before { content: "+"; color: var(--faint); }
 
 .mic-row { display: flex; align-items: center; gap: 14px; margin: 18px 0 12px; }
 .mic {

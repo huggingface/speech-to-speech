@@ -1377,12 +1377,24 @@ function showVerdict(out) {
     $("#reveal-answer").textContent = reveal.answer;
     const list = $("#reveal-points");
     list.innerHTML = "";
-    reveal.key_points.forEach((/** @type {string} */ p, /** @type {number} */ i) => {
+    // The points the answer needs, then the optional ones: an unticked optional
+    // point is extra detail, not something the student missed.
+    const required = reveal.required || reveal.key_points.map((/** @type {string} */ _p, /** @type {number} */ i) => i);
+    const item = (/** @type {number} */ i, /** @type {string} */ cls) => {
       const li = document.createElement("li");
-      li.textContent = p;
-      if (reveal.points_hit.includes(i)) li.className = "hit";
+      li.textContent = reveal.key_points[i];
+      li.className = reveal.points_hit.includes(i) ? "hit" : cls;
       list.append(li);
-    });
+    };
+    required.forEach((/** @type {number} */ i) => item(i, ""));
+    const extra = reveal.key_points.map((/** @type {string} */ _p, /** @type {number} */ i) => i).filter((/** @type {number} */ i) => !required.includes(i));
+    if (extra.length) {
+      const head = document.createElement("li");
+      head.className = "kp-head";
+      head.textContent = "Also worth knowing";
+      list.append(head);
+      extra.forEach((i) => item(i, "extra"));
+    }
   }
 }
 
@@ -1493,7 +1505,8 @@ function renderReview(review) {
   for (const r of review) {
     const li = document.createElement("li");
     li.className = r.verdict;
-    const missed = r.key_points.filter((/** @type {string} */ _p, /** @type {number} */ i) => !r.points_hit.includes(i));
+    const required = r.required || r.key_points.map((/** @type {string} */ _p, /** @type {number} */ i) => i);
+    const missed = r.key_points.filter((/** @type {string} */ _p, /** @type {number} */ i) => required.includes(i) && !r.points_hit.includes(i));
     li.innerHTML = `<span class="rp">${r.points ? `+${r.points}` : ""}</span><div class="rq">${escapeHtml(r.question)}</div>
       <div class="ra">${escapeHtml(r.answer)}</div>
       ${r.your_answer ? `<div class="ry">You: “${escapeHtml(r.your_answer)}”</div>` : ""}

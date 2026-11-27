@@ -120,6 +120,19 @@ def test_covering_every_required_point_across_tries_counts_as_correct(grader):
     assert "Almost" not in out["say"]
 
 
+def test_correct_answer_ticks_its_required_points(grader):
+    replies, _ = grader
+    pack = make_pack((2, 1))
+    pack["questions"][0]["key_points"] = ["a", "b", "c"]
+    pack["questions"][0]["required"] = [1]
+    game = g.GameStore().create(pack, "ana", False)
+    replies += [answer("correct", "Yes!", hits=())]
+    reveal = turn(game, "right")["reveal"]
+    assert reveal["required"] == [1] and reveal["points_hit"] == [1]
+    review = g.finish_now(game, "bye")["summary"]["review"][0]
+    assert review["required"] == [1] and review["points_hit"] == [1]
+
+
 def test_stuck_student_gets_a_clue(grader):
     replies, _ = grader
     game = g.GameStore().create(make_pack((1, 1)), "ana", False)

@@ -329,6 +329,11 @@ class GameStore:
 # ── Turn handling ───────────────────────────────────────────────────────────
 
 
+def required_points(q: dict[str, Any]) -> list[int]:
+    """Indices of the key points a correct answer must contain (all of them when unmarked)."""
+    return list(q.get("required") or range(len(q["key_points"])))
+
+
 def _grader_messages(game: Game, transcript: str) -> list[dict[str, str]]:
     q = game.question()
     res = game.result()
@@ -337,7 +342,7 @@ def _grader_messages(game: Game, transcript: str) -> list[dict[str, str]]:
         "question": q["question"],
         "reference_answer": q["answer"],
         "key_points": q["key_points"],
-        "required_point_indices": q.get("required") or list(range(len(q["key_points"]))),
+        "required_point_indices": required_points(q),
         "prepared_hint": q.get("hint", ""),
         "fun_fact": q.get("fun_fact", ""),
         "attempt": game.attempt,
@@ -426,6 +431,7 @@ def _reveal(game: Game, res: QuestionResult) -> dict[str, Any]:
         "qid": q["id"],
         "answer": q["answer"],
         "key_points": q["key_points"],
+        "required": required_points(q),
         "points_hit": res.points_hit,
         "verdict": res.verdict,
         "points": res.points,
@@ -550,7 +556,7 @@ async def handle_turn(game: Game, transcript: str, intent: str | None = None) ->
         res.attempts += 1
         res.score = decision["score"]
         res.points_hit = sorted(set(res.points_hit) | set(decision["points_hit"]))
-        required = set(q.get("required") or range(len(q["key_points"])))
+        required = set(required_points(q))
         if verdict != "correct" and required <= set(res.points_hit):
             # Across their tries they have said everything a correct answer needs:
             # the ticks on screen and the verdict must agree.
@@ -562,6 +568,9 @@ async def handle_turn(game: Game, transcript: str, intent: str | None = None) ->
             coach_again(q.get("hint") or "Not quite yet. Think about it from another angle.")
         else:
             points, multiplier = _award(game, res, verdict or "incorrect")
+            if res.verdict == "correct":
+                # A correct answer covers every required point, whatever the grader ticked.
+                res.points_hit = sorted(set(res.points_hit) | required)
             out.update({"verdict": res.verdict, "points": points, "multiplier": multiplier})
             resolved = True
             if res.verdict == "correct" and game.streak in STREAK_CALLOUTS:
@@ -699,6 +708,7 @@ def _finish(game: Game) -> dict[str, Any]:
                 "question": game.pack["questions"][r.qid]["question"],
                 "answer": game.pack["questions"][r.qid]["answer"],
                 "key_points": game.pack["questions"][r.qid]["key_points"],
+                "required": required_points(game.pack["questions"][r.qid]),
                 "points_hit": r.points_hit,
                 "verdict": r.verdict,
                 "points": r.points,
