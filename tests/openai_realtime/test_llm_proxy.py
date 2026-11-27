@@ -93,7 +93,8 @@ class FakeUpstream:
                 pass
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        # shutdown() waits for the serving loop to poll.
+        self._thread = threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         self._thread.start()
 
     @property
@@ -154,11 +155,11 @@ def _make_app(config: LLMProxyConfig | None):
     return create_app(pool=[_make_unit()], stop_event=ThreadingEvent(), llm_proxy_config=config)
 
 
-def _proxy_config(upstream: FakeUpstream, **overrides: Any) -> LLMProxyConfig:
+def _proxy_config(upstream: FakeUpstream | None = None, **overrides: Any) -> LLMProxyConfig:
     defaults: dict[str, Any] = dict(
         enabled=True,
         llm_backend="chat-completions",
-        upstream_base_url=upstream.base_url,
+        upstream_base_url=upstream.base_url if upstream else "http://127.0.0.1:1/v1",
         upstream_api_key="sk-server-secret",
         model_name="server-model",
     )
@@ -246,8 +247,8 @@ class TestUnavailableContract:
         with TestClient(app) as client:
             return client.post(path, json=CHAT_BODY)
 
-    def test_flag_off_is_501(self, upstream):
-        app = _make_app(_proxy_config(upstream, enabled=False))
+    def test_flag_off_is_501(self):
+        app = _make_app(_proxy_config(enabled=False))
         r = self._post(app, "/v1/chat/completions")
         assert r.status_code == 501
         assert "disabled" in r.json()["error"]["message"]
@@ -259,16 +260,16 @@ class TestUnavailableContract:
         assert r.status_code == 501
 
     @pytest.mark.parametrize("backend", ["transformers", "mlx-lm"])
-    def test_local_backend_is_501_naming_remote_backends(self, upstream, backend):
-        app = _make_app(_proxy_config(upstream, llm_backend=backend))
+    def test_local_backend_is_501_naming_remote_backends(self, backend):
+        app = _make_app(_proxy_config(llm_backend=backend))
         r = self._post(app, "/v1/chat/completions")
         assert r.status_code == 501
         message = r.json()["error"]["message"]
         assert "chat-completions" in message
         assert "responses-api" in message
 
-    def test_responses_path_is_501_under_chat_completions_backend(self, upstream):
-        app = _make_app(_proxy_config(upstream))
+    def test_responses_path_is_501_under_chat_completions_backend(self):
+        app = _make_app(_proxy_config())
         r = self._post(app, "/v1/responses")
         assert r.status_code == 501
         assert "/v1/chat/completions" in r.json()["error"]["message"]
@@ -376,7 +377,7 @@ RESPONSES_SSE_FRAMES = [
 
 
 class TestResponsesPassthrough:
-    def _config(self, upstream, **overrides):
+    def _config(self, upstream=None, **overrides):
         return _proxy_config(upstream, llm_backend="responses-api", **overrides)
 
     def test_non_streaming_passes_through_verbatim(self, upstream):
@@ -408,18 +409,18 @@ class TestResponsesPassthrough:
         (request,) = upstream.requests
         assert request["body"]["store"] is False
 
-    def test_chat_completions_path_is_501_under_responses_backend(self, upstream):
-        app = _make_app(self._config(upstream))
+    def test_chat_completions_path_is_501_under_responses_backend(self):
+        app = _make_app(self._config())
         with TestClient(app) as client:
             r = client.post("/v1/chat/completions", json=CHAT_BODY)
         assert r.status_code == 501
         assert "/v1/responses" in r.json()["error"]["message"]
 
     @pytest.mark.parametrize("backend", ["transformers", "mlx-lm"])
-    def test_flag_off_and_local_backend_are_501_on_responses_path(self, upstream, backend):
+    def test_flag_off_and_local_backend_are_501_on_responses_path(self, backend):
         for config in (
-            self._config(upstream, enabled=False),
-            _proxy_config(upstream, llm_backend=backend),
+            self._config(enabled=False),
+            _proxy_config(llm_backend=backend),
         ):
             app = _make_app(config)
             with TestClient(app) as client:
