@@ -44,8 +44,6 @@ class SpeechStartedEvent(PipelineEvent):
     turn_revision: int | None = None
     reopened: bool = False
     interrupt_response: bool = Field(default=True, exclude=True)
-    # Active speech VAD had heard in this segment when it confirmed the start.
-    active_speech_ms: float = Field(default=0.0, exclude=True)
 
 
 class SpeechStoppedEvent(PipelineEvent):
@@ -54,8 +52,6 @@ class SpeechStoppedEvent(PipelineEvent):
     audio_end_ms: int = 0
     turn_id: str | None = None
     turn_revision: int | None = None
-    # Active speech in the segment that just ended, without padding or silence.
-    active_speech_ms: float = Field(default=0.0, exclude=True)
 
 
 # ── Transcription events (TranscriptionNotifier) ─────────────────────

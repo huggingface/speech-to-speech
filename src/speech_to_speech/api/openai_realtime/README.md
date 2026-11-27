@@ -564,7 +564,7 @@ sequenceDiagram
 By default any speech VAD detects during a reply cancels it, even a cough, room
 noise, or a listener's "uh-huh". If the transcript of that speech is then
 empty, no new response is made and the assistant goes silent. A session can
-make the assistant pause instead, and carry on if the speech had no words:
+make the assistant pause instead, and resume if the speech had no real words:
 
 ```json
 {
@@ -577,7 +577,7 @@ make the assistant pause instead, and carry on if the speech had no words:
         "turn_detection": {
           "type": "server_vad",
           "interrupt_response": true,
-          "false_interruption": {"playback": "pause", "min_words": 1, "min_speech_ms": 1200, "timeout_ms": 2000}
+          "false_interruption": {"min_words": 1, "timeout_ms": 2000}
         }
       }
     }
@@ -586,86 +586,51 @@ make the assistant pause instead, and carry on if the speech had no words:
 ```
 
 `"false_interruption": true` uses those defaults; `null` or `false` turns it
-off. The server flag `--false_interruption {off,pause,continue,duck}` (with
-`--false_interruption_min_words` and `--false_interruption_min_speech_ms`) sets
-the default for sessions that leave the field unset. It is off by default.
+off. The server flag `--false_interruption` enables it by default for sessions
+that leave the field unset (off by default).
 
 When speech starts while a spoken reply is active, queued, or still playing,
-the server holds that user turn instead of cancelling the reply, and playback
-pauses at the moment it would have been cut. The reply keeps generating.
-Out-of-band and text-only responses are not speech to protect: speech during
-them alone is handled as before. Then:
+the server holds that user turn instead of cancelling the reply, pauses
+playback, and lets the reply keep generating. Out-of-band and text-only
+responses are not protected. Then:
 
 - **Real words commit the interruption.** Once the transcript has `min_words`
-  words that are not fillers or backchannels, the barge-in happens exactly as
-  it would have at speech start: `response.done` (`cancelled`, `turn_detected`),
-  `input_audio_buffer.speech_started` with the original `audio_start_ms`, the
-  playback cut in history, and the rest of the user item. A partial transcript
-  counts once two consecutive hypotheses both have enough words; a final
-  transcript counts at once.
-- **So does long speech.** `min_speech_ms` of active speech (1.2 s by default;
-  0 turns it off) commits the interruption before its words are known. Words
-  can come late: VAD splits "Wait, wait, can you..." into short segments, and
-  an STT that shares a GPU with the TTS can be slow while the reply is still
-  being synthesized. Committing stops that synthesis, and keeps real speech
-  from being dropped when its transcript misses `timeout_ms`. Coughs and
-  backchannels are well under a second of speech. Since the reply is already
-  paused, this changes when the client sees the user's turn, not when the
-  assistant goes quiet.
+  words that are not fillers or backchannels (two consecutive partial
+  hypotheses, or a final transcript), barge-in runs through the ordinary path:
+  `response.done` (`cancelled`, `turn_detected`),
+  `input_audio_buffer.speech_started` with the original `audio_start_ms`,
+  history cut to what was played, and the user item.
 - **No words resume the reply.** An empty or filler-only transcript, a failed
-  transcription, or no transcript within `timeout_ms` after the speech stops
-  means the speech was not an interruption. The client never sees that turn,
-  it does not enter the conversation, and the reply resumes. It replays from
-  the last gap between words in the 600 ms before the pause, so a word cut in
-  half is said again whole.
-- **Unless the reply is ending.** A short transcript such as "Yes." that
-  arrives when the reply is fully generated and has at most a second of audio
-  left to play answers it rather than backchannels over it, so it becomes an
-  ordinary user turn.
+  transcription, or no transcript within `timeout_ms` after speech stops drops
+  the turn without emitting it or adding it to history, and resumes playback
+  from the last gap between words in the 600 ms before the pause.
+- **Unless the reply is ending.** A non-empty transcript arriving once the
+  reply has finished generating with at most 1 s of audio left becomes an
+  ordinary user turn so a short answer ("Yeah.") is not discarded.
 
-Two lists decide what is not a word:
+Two lists decide what does not count as a word:
 
-- **`fillers`**: non-lexical sounds such as "uh", "um", "hmm", "mm-hmm", "uh-huh"
-  and "ahem". The defaults are the same in every language. Letters repeated
-  for length ("Hmmmm", "Uhhh", "Mhmm") and written laughter ("haha") match too.
-- **`backchannels`**: what a listener says to show they are following, such as
-  "yeah", "okay", "right", "I see" and "got it". The built-in list is English.
-  Set it for the session's language: "ouais" or "sí" count as words otherwise.
-  `[]` makes every backchannel interrupt. Words that usually answer a question
-  ("yes", "sure") are not on it, so an early answer stops the reply.
+- **`fillers`**: non-lexical sounds across languages ("uh", "um", "hmm",
+  "mm-hmm", "uh-huh", "ahem", repeated letters such as "Hmmmm", written
+  laughter such as "haha", and bracketed/parenthesized annotations such as
+  `[coughs]`).
+- **`backchannels`**: English listener words ("yeah", "okay", "right", "I see",
+  "got it"). Set it per session for another language, or `[]` so every
+  backchannel interrupts. Direct answers ("yes", "sure") always count as words.
 
-Text in brackets or parentheses, such as `[coughs]`, never counts. An STT that
-writes a throat clearing as words ("A ham.") makes it an interruption, as on
-`main`. Add its spellings to `fillers` if that happens often.
+On **WebRTC**, the server pauses and resumes its paced audio track directly. On
+**WebSocket**, clients own their player: add `"speech_to_speech.interruption"`
+to `session.extensions` to receive `speech_to_speech.interruption.pending`
+(`audio_start_ms`) and `speech_to_speech.interruption.resolved` (`interrupted`,
+`transcript`) and pause/resume locally (while the server freezes its playback
+estimate for history truncation). WebSocket clients that do not opt in keep
+playing until an interruption is committed. The demo client in `demo/` opts in
+and replays from the last word gap.
 
-`playback` chooses what happens to the reply's audio while the decision is
-pending:
-
-| `playback` | WebRTC (server paces playback) | WebSocket (client owns its player) |
-|---|---|---|
-| `pause` (default) | The server pauses its track, then resumes from the last gap between words. | The client is told with `speech_to_speech.interruption.pending` and pauses its player, then resumes on `.resolved` with `interrupted: false`. The playback estimate used for history stops meanwhile. |
-| `continue` | Keeps playing. | Keeps playing. |
-| `duck` | The server plays it at a quarter of the volume. | The client is told and may duck. |
-
-WebSocket clients that do not opt in to the events always get `continue`,
-since the server cannot pause audio it has already sent. To opt in, add
-`"speech_to_speech.interruption"` to `session.extensions`. The server then
-sends `speech_to_speech.interruption.pending` (`audio_start_ms`, `playback`)
-when it starts holding, and `speech_to_speech.interruption.resolved`
-(`interrupted`, `transcript`) when it decides. When `interrupted` is true, the
-usual cancellation events follow: a client that clears its player on
-`input_audio_buffer.speech_started` drops the paused audio then, and one that
-lets the reply finish in some cases should resume it. The demo client in
-`demo/` pauses its player and resumes from the last gap between words, the same
-way the server's WebRTC track does.
-
-Speech that continues the user's own unanswered turn (VAD reopens it) still
-cancels the stale reply at once. Speech while the assistant is silent is an
-ordinary turn. A tool follow-up `response.create` sent while the decision is
-pending goes ahead and is cancelled like any reply if the speech turns out to
-be an interruption. Pipelines that send audio straight to the model, with no
-STT, have no words to judge, so they commit the interruption when the speech
-ends.
+Speech that reopens the user's own unanswered turn still cancels the stale
+reply immediately. A tool follow-up `response.create` during a held turn goes
+ahead and is cancelled like any reply if the speech commits. Direct-audio
+pipelines without STT commit the interruption when the audio input completes.
 
 ### Turning off barge-in from a client
 

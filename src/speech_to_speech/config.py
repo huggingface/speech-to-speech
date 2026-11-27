@@ -40,8 +40,6 @@ _MODULE_PIPELINE = {
     "enable_live_transcription",
     "live_transcription_update_interval",
     "false_interruption",
-    "false_interruption_min_words",
-    "false_interruption_min_speech_ms",
     "enable_llm_proxy",
     "llm_proxy_connect_timeout_s",
     "enable_visemes",

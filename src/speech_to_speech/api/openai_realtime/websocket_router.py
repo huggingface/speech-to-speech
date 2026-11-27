@@ -23,7 +23,6 @@ from openai.types.realtime import (
 )
 
 from speech_to_speech.api.openai_realtime.false_interruption import (
-    FalseInterruptionConfig,
     PendingInterruption,
     SpeechToSpeechInterruptionPendingEvent,
     SpeechToSpeechInterruptionResolvedEvent,
@@ -36,7 +35,6 @@ from speech_to_speech.api.openai_realtime.service import (
     build_error_event,
 )
 from speech_to_speech.api.openai_realtime.transports import (
-    PlaybackState,
     SessionTransport,
     WebSocketTransport,
     send_ws_event,
@@ -489,7 +487,14 @@ async def _dispatch_client_event(
         ):
             session.pending_output_item = None
         service.truncate_unplayed_audio(session_id, transport.discard_pending_audio())
-        await _release_interruption(unit, transport, session_id, "output audio cleared")
+        st = service._state(session_id)
+        if _reply_audible(st) or st.response_pending:
+            # output_audio_buffer.clear drops buffered audio without cancelling
+            # an active reply; keep the pause if a hold is still undecided.
+            if st.pending_interruption is not None and _should_pause(transport, st):
+                transport.set_paused(True)
+        else:
+            await _release_interruption(unit, transport, session_id, "output audio cleared")
 
     elif isinstance(event, SessionUpdateEvent):
         err = service.handle_session_update(session_id, event)
@@ -497,8 +502,13 @@ async def _dispatch_client_event(
             await send_correlated([err])
         else:
             await send_correlated([service.build_session_updated(session_id)])
-            if service._state(session_id).runtime_config.false_interruption is None:
+            cfg = service._state(session_id).runtime_config
+            if cfg.false_interruption is None:
                 await _release_interruption(unit, transport, session_id, "false_interruption turned off")
+            elif not cfg.interrupt_response_enabled:
+                await _release_interruption(
+                    unit, transport, session_id, "interrupt_response turned off", interrupted=False
+                )
 
     elif isinstance(event, ConversationItemCreateEvent):
         events = service.handle_conversation_item_create(session_id, event)
@@ -630,21 +640,17 @@ async def _deliver_text_event(
 # ---------------------------------------------------------------------------
 
 
-def _interruption_playback(transport: SessionTransport, st: Any, config: FalseInterruptionConfig) -> PlaybackState:
-    """Playback while a possible interruption is undecided.
+def _should_pause(transport: SessionTransport, st: Any) -> bool:
+    """Whether playback pauses while a possible interruption is undecided.
 
-    A WebSocket client owns its player, so it pauses only when it was told
-    to, through the opt-in interruption events. Ducking needs no bookkeeping.
+    WebRTC pauses server-side; WebSocket clients pause when opted in to the
+    interruption events and otherwise keep playing until committed.
     """
-    if config.playback == "continue":
-        return "play"
-    if transport.kind == "websocket" and not st.runtime_config.interruption_events_enabled:
-        return "play"
-    return "pause" if config.playback == "pause" else "duck"
+    return transport.kind != "websocket" or st.runtime_config.interruption_events_enabled
 
 
 # A short transcript that arrives this close to the end of the reply's audio
-# answers it ("Yes.") rather than backchanneling over it. It also absorbs the
+# answers it ("Yeah.") rather than backchanneling over it. It also absorbs the
 # WebSocket playback estimate's error, which ignores client latency.
 _REPLY_ENDING_MS = 1000.0
 
@@ -677,18 +683,14 @@ def _holds_interruption(unit: PipelineUnit, transport: SessionTransport, st: Any
     return turns is not None and turns.mark_provisional(event.turn_id)
 
 
-async def _send_interruption_event(transport: SessionTransport, st: Any, event: Any) -> None:
-    if st.runtime_config.interruption_events_enabled:
-        await transport.send_events([event])
-
-
 async def _confirm_interruption(
     unit: PipelineUnit,
     session: SessionState,
     transport: SessionTransport,
     session_id: str,
     *,
-    reason: str = "words or long speech",
+    reason: str = "words",
+    interrupted: bool = True,
 ) -> None:
     """Real words arrived: apply the barge-in now, as if it had happened at speech start."""
     service = unit.service
@@ -710,15 +712,16 @@ async def _confirm_interruption(
         reason,
     )
     try:
-        await _send_interruption_event(
-            transport,
-            st,
-            SpeechToSpeechInterruptionResolvedEvent(
-                event_id=service._next_event_id(),
-                interrupted=True,
-                transcript=pending.transcript,
-            ),
-        )
+        if pending.announced:
+            await transport.send_events(
+                [
+                    SpeechToSpeechInterruptionResolvedEvent(
+                        event_id=service._next_event_id(),
+                        interrupted=interrupted,
+                        transcript=pending.transcript,
+                    )
+                ]
+            )
         index = 0
         while index < len(pending.events):
             await _deliver_text_event(unit, session, transport, session_id, pending.events[index])
@@ -728,7 +731,8 @@ async def _confirm_interruption(
         # it would swallow the rest of this turn and never hold speech again.
         st.pending_interruption = None
         # The replayed speech start discarded the paused audio; play what follows.
-        transport.set_playback("play")
+        transport.set_paused(False)
+        pending.released.set()
 
 
 async def _release_interruption(
@@ -736,6 +740,8 @@ async def _release_interruption(
     transport: SessionTransport,
     session_id: str,
     reason: str,
+    *,
+    interrupted: bool = True,
 ) -> None:
     """The reply a held turn might interrupt is gone: the speech is an ordinary turn.
 
@@ -749,7 +755,10 @@ async def _release_interruption(
     session = unit.session
     if pending is None or session is None or session.session_id != session_id:
         return
-    await _confirm_interruption(unit, session, transport, session_id, reason=reason)
+    if pending.releasing:
+        await pending.released.wait()
+        return
+    await _confirm_interruption(unit, session, transport, session_id, reason=reason, interrupted=interrupted)
 
 
 async def _dismiss_interruption(
@@ -764,12 +773,20 @@ async def _dismiss_interruption(
     pending = st.pending_interruption
     if pending is None or pending.releasing:
         return
-    st.pending_interruption = None
     if service.speculative_turns is not None:
-        service.speculative_turns.discard_provisional(pending.turn_id)
+        if reason == "superseded":
+            service.speculative_turns.discard_provisional(pending.turn_id)
+        else:
+            service.speculative_turns.discard_provisional(pending.turn_id, pending.revision)
+            if service.speculative_turns.is_provisional(pending.turn_id):
+                # VAD already reopened this turn to a newer revision whose
+                # SpeechStartedEvent is still queued; keep holding for it.
+                pending.stopped_at = None
+                return
+    st.pending_interruption = None
     for revision in pending.revisions:
         service.turn_latency_store.discard_pending_turn(pending.turn_id, revision)
-    transport.set_playback("play")
+    transport.set_paused(False)
     unit.should_listen.set()
     logger.info(
         "Pipeline %d: speech during response was not an interruption (%s, transcript=%s); reply continues",
@@ -777,15 +794,16 @@ async def _dismiss_interruption(
         reason,
         transcript_for_log(pending.transcript),
     )
-    await _send_interruption_event(
-        transport,
-        st,
-        SpeechToSpeechInterruptionResolvedEvent(
-            event_id=service._next_event_id(),
-            interrupted=False,
-            transcript=pending.transcript,
-        ),
-    )
+    if pending.announced:
+        await transport.send_events(
+            [
+                SpeechToSpeechInterruptionResolvedEvent(
+                    event_id=service._next_event_id(),
+                    interrupted=False,
+                    transcript=pending.transcript,
+                )
+            ]
+        )
 
 
 async def _gate_interruption(
@@ -809,10 +827,11 @@ async def _gate_interruption(
         return False
     pending = st.pending_interruption
     if pending is not None and pending.releasing:
-        if not pending.owns(event):
-            return False
-        pending.events.append(event)
-        return True
+        if pending.owns(event):
+            pending.events.append(event)
+            return True
+        await pending.released.wait()
+        pending = st.pending_interruption
     if pending is not None:
         if pending.owns(event):
             verdict = pending.observe(event)
@@ -822,7 +841,7 @@ async def _gate_interruption(
                 and event.transcript.strip()
                 and not _assistant_still_speaking(transport, st)
             ):
-                # "Yes." to the question the reply just finished asking is an
+                # "Yeah." to the question the reply just finished asking is an
                 # answer, not a backchannel: only speech over a reply that
                 # still has a while to go is ignored.
                 verdict = Verdict.CONFIRM
@@ -836,28 +855,34 @@ async def _gate_interruption(
             return False
         # A newer turn started before the held one produced words.
         await _dismiss_interruption(unit, transport, session_id, "superseded")
-    if not isinstance(event, SpeechStartedEvent) or not _holds_interruption(unit, transport, st, event):
+    if not isinstance(event, SpeechStartedEvent):
+        return False
+    if not _holds_interruption(unit, transport, st, event):
+        if unit.service.speculative_turns is not None:
+            unit.service.speculative_turns.confirm_provisional(event.turn_id)
         return False
     config = st.runtime_config.false_interruption
     assert config is not None
-    playback = _interruption_playback(transport, st, config)
-    st.pending_interruption = PendingInterruption.begin(event, config)
-    transport.set_playback(playback)
+    announced = st.runtime_config.interruption_events_enabled
+    st.pending_interruption = PendingInterruption.begin(event, config, announced=announced)
+    pauses = _should_pause(transport, st)
+    if pauses:
+        transport.set_paused(True)
     logger.info(
-        "Pipeline %d: speech during response held until it has words (turn=%s, playback=%s)",
+        "Pipeline %d: speech during response held until it has words (turn=%s, paused=%s)",
         unit.index,
         event.turn_id,
-        playback,
+        pauses,
     )
-    await _send_interruption_event(
-        transport,
-        st,
-        SpeechToSpeechInterruptionPendingEvent(
-            event_id=unit.service._next_event_id(),
-            audio_start_ms=event.audio_start_ms,
-            playback="continue" if playback == "play" else playback,
-        ),
-    )
+    if announced:
+        await transport.send_events(
+            [
+                SpeechToSpeechInterruptionPendingEvent(
+                    event_id=unit.service._next_event_id(),
+                    audio_start_ms=event.audio_start_ms,
+                )
+            ]
+        )
     return True
 
 
@@ -867,15 +892,12 @@ async def _resolve_due_interruption(
     transport: SessionTransport,
     session_id: str,
 ) -> None:
-    """Decide what time alone settles: speech long enough, or no transcript in time."""
+    """Dismiss a held turn if no transcript arrives within ``timeout_ms``."""
     try:
         pending = unit.service._state(session_id).pending_interruption
     except KeyError:
         return
-    verdict = pending.due() if pending is not None else None
-    if verdict is Verdict.CONFIRM:
-        await _confirm_interruption(unit, session, transport, session_id)
-    elif verdict is Verdict.DISMISS:
+    if pending is not None and pending.due() is Verdict.DISMISS:
         await _dismiss_interruption(unit, transport, session_id, "no transcript before timeout")
 
 

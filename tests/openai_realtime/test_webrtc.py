@@ -93,6 +93,7 @@ class _FakeTransport(SessionTransport):
         self.sent: list[dict] = []
         self.discards = 0
         self.unplayed_ms = 0.0
+        self.paused: list[bool] = []
 
     async def send_events(self, events):
         self.sent.extend(e.model_dump() for e in events)
@@ -108,7 +109,14 @@ class _FakeTransport(SessionTransport):
 
     def discard_pending_audio(self):
         self.discards += 1
+        unplayed, self.unplayed_ms = self.unplayed_ms, 0.0
+        return unplayed
+
+    def unplayed_audio_ms(self):
         return self.unplayed_ms
+
+    def set_paused(self, paused: bool):
+        self.paused.append(paused)
 
     async def close(self):
         pass
@@ -402,26 +410,16 @@ class TestPipelineAudioTrack:
         assert all(np.all(frame == 2000) for frame in frames)
         track.stop()
 
-    async def test_clear_ends_a_pause_or_duck(self):
-        """A reply cancelled while held must not leave the next one silent or quiet (#879 review)."""
+    async def test_clear_ends_a_pause(self):
+        """A reply cancelled while held must not leave the next one silent (#879 review)."""
         track = PipelineAudioTrack()
         track.write(np.full(WEBRTC_FRAME_SAMPLES * 2, 1000, dtype=np.int16).tobytes())
         await asyncio.wait_for(track.recv(), timeout=RECV_TIMEOUT_S)
         track.pause()
-        track.set_gain(0.25)
         track.clear()
         track.write(np.full(WEBRTC_FRAME_SAMPLES * 2, 2000, dtype=np.int16).tobytes())
         frame = await asyncio.wait_for(track.recv(), timeout=RECV_TIMEOUT_S)
         assert np.all(frame.to_ndarray() == 2000)
-        track.stop()
-
-    async def test_duck_lowers_and_resume_restores_volume(self):
-        track = PipelineAudioTrack()
-        track.write((np.ones(WEBRTC_FRAME_SAMPLES * 2, dtype=np.int16) * 1000).tobytes())
-        track.set_gain(0.25)
-        assert np.all((await track.recv()).to_ndarray() == 250)
-        track.resume()
-        assert np.all((await track.recv()).to_ndarray() == 1000)
         track.stop()
 
     async def test_stop_wakes_pending_recv_and_raises(self):
@@ -699,7 +697,6 @@ class TestWebRTCDispatch:
         assert len(transport.sent) == 1
         assert transport.sent[0]["type"] == "error"
         assert transport.sent[0]["error"]["type"] == "invalid_event_for_transport"
-        assert transport.sent[0]["error"]["type"] == "invalid_event_for_transport"
         assert unit.input_queue.qsize() == 0
 
     async def test_output_audio_buffer_clear_flushes_audio(self):
@@ -814,6 +811,56 @@ class TestWebRTCDispatch:
 
         assert len(transport.sent) == 1
         assert transport.sent[0]["type"] == "error"
+
+    async def test_output_audio_buffer_clear_keeps_active_response_hold_and_releases_when_idle(self):
+        from speech_to_speech.api.openai_realtime.service import RealtimeService
+        from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+
+        tracker = SpeculativeTurnTracker()
+        unit = make_pipeline_unit(service=RealtimeService(speculative_turns=tracker))
+        conn_id = unit.service.register()
+        transport = _FakeTransport()
+        transport.unplayed_ms = 500.0
+        unit.session = SessionState(session_id=conn_id, transport=transport)
+        await router_module._dispatch_client_event(
+            unit,
+            conn_id,
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "realtime",
+                    "audio": {"input": {"turn_detection": {"type": "server_vad", "false_interruption": True}}},
+                },
+            },
+            transport,
+            transport_kind="webrtc",
+        )
+        t1 = tracker.start_turn()
+        tracker.segment_finalized(1000)
+        assert tracker.gate(*t1, commit=True).action.value == "accept"
+        unit.service.begin_audio_output(conn_id, "resp_1", PIPELINE_SAMPLE_RATE)
+        t2 = tracker.start_turn(provisional=True)
+        assert await router_module._gate_interruption(
+            unit, unit.session, transport, conn_id, SpeechStartedEvent(turn_id=t2[0], turn_revision=0)
+        )
+        transport.sent.clear()
+
+        # Active response: clear flushes audio only and keeps the response + paused hold intact.
+        await router_module._dispatch_client_event(
+            unit, conn_id, {"type": "output_audio_buffer.clear"}, transport, transport_kind="webrtc"
+        )
+        assert unit.service._state(conn_id).in_response is True
+        assert unit.service._state(conn_id).pending_interruption is not None
+        assert transport.sent == [] and transport.paused[-1] is True
+
+        # After response.done with trailing buffered audio: clear releases the hold without cancelling.
+        unit.service.finish_response(conn_id, response_key="resp_1")
+        transport.unplayed_ms = 400.0
+        await router_module._dispatch_client_event(
+            unit, conn_id, {"type": "output_audio_buffer.clear"}, transport, transport_kind="webrtc"
+        )
+        assert unit.service._state(conn_id).pending_interruption is None
+        assert [event["type"] for event in transport.sent] == ["input_audio_buffer.speech_started"]
 
     async def test_response_cancel_closes_message_lifecycle(self):
         unit = _make_unit()

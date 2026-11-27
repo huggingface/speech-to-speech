@@ -326,8 +326,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         confident_ms = min(confident_ms, active_ms)
         return (active_ms - confident_ms) / min_speech_ms + confident_ms / min_confident_ms, idle_s
 
-    def _ensure_turn_for_speech_start(self, audio_start_ms: int) -> tuple[str, int, bool]:
-        turn_id, revision, reopened = self.speculative_turns.speech_started(audio_start_ms)
+    def _ensure_turn_for_speech_start(self, audio_start_ms: int, *, provisional: bool = False) -> tuple[str, int, bool]:
+        turn_id, revision, reopened = self.speculative_turns.speech_started(audio_start_ms, provisional=provisional)
         if not reopened and revision == 0 and not self._speech_started_emitted:
             self._speculative_audio_prefix = None
             self._last_window_snapshot_samples = 0
@@ -694,7 +694,14 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                         idle_s,
                     )
             if accepted:
-                turn_id, turn_revision, reopened = self._ensure_turn_for_speech_start(effective_start_ms)
+                provisional = bool(
+                    runtime_config is not None
+                    and runtime_config.false_interruption is not None
+                    and runtime_config.interrupt_response_enabled
+                )
+                turn_id, turn_revision, reopened = self._ensure_turn_for_speech_start(
+                    effective_start_ms, provisional=provisional
+                )
                 self._speech_started_emitted = True
                 self._log_speech_starts += 1
                 logger.info(
@@ -712,7 +719,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                             turn_id=turn_id,
                             turn_revision=turn_revision,
                             reopened=reopened,
-                            active_speech_ms=effective_active_speech_duration_ms,
                         )
                     )
                 self._notify_streaming_turn(turn_id, turn_revision)
@@ -884,7 +890,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                             audio_end_ms=self._audio_ms,
                             turn_id=turn_id,
                             turn_revision=turn_revision,
-                            active_speech_ms=raw_active_ms,
                         )
                     )
                 if self._speech_started_emitted:
@@ -909,7 +914,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                                 turn_revision=turn_revision,
                                 reopened=reopened,
                                 interrupt_response=False,
-                                active_speech_ms=active_speech_duration_ms,
                             )
                         )
                     self._notify_streaming_turn(turn_id, turn_revision)
@@ -955,7 +959,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                             audio_end_ms=end_ms,
                             turn_id=turn_id,
                             turn_revision=turn_revision,
-                            active_speech_ms=raw_active_ms,
                         )
                     )
                 self._speculative_audio_prefix = output_array

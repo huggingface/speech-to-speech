@@ -12,7 +12,6 @@
  *     { kind: "clear", clearId? }                       wipe queue (barge-in)
  *     { kind: "pause" }                                 hold the queue (speech that may be a cough)
  *     { kind: "resume" }                                play on, replaying from the last gap between words
- *     { kind: "gain", value }                           playback volume (ducking); resume and clear reset it
  *
  *   worklet -> main:
  *     { kind: "cleared", clearId, played }             per-item rendered PCM counts
@@ -63,6 +62,7 @@ function resumeRewindSamples(played, rate) {
     if (run >= minRun) return w + run === count - 1 ? 0 : (count - (w + run)) * window;
     run = 0;
   }
+  if (run >= minRun && run < count) return (count - (run - 1)) * window;
   return 0;
 }
 
@@ -81,7 +81,6 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
     this._fadeIn = 0;
     this._fadeOut = 0;
     this._lastSample = 0;
-    this._gain = 1;
     this._paused = false;
     this._pauseFade = 0;
     this._history = new Float32Array(Math.ceil(sampleRate * REWIND_MAX_MS / 1000));
@@ -126,7 +125,6 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
           this._pauseFade = 0;
           this._replay = null;
           this._historyLength = 0;
-          this._gain = 1;
           break;
         case "pause":
           if (!this._paused) {
@@ -135,14 +133,22 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
           }
           break;
         case "resume":
-          this._gain = 1;
           if (this._paused) {
             this._paused = false;
             this._pauseFade = 0;
             const played = this._played();
             const rewind = resumeRewindSamples(played, sampleRate);
             if (rewind > 0) {
-              this._replay = played.slice(played.length - rewind);
+              const rewound = played.slice(played.length - rewind);
+              if (this._replay && this._replayIdx < this._replay.length) {
+                const remaining = this._replay.subarray(this._replayIdx);
+                const combined = new Float32Array(rewound.length + remaining.length);
+                combined.set(rewound);
+                combined.set(remaining, rewound.length);
+                this._replay = combined;
+              } else {
+                this._replay = rewound;
+              }
               this._replayIdx = 0;
               this._historyLength -= rewind;
               this._historyEnd = (this._historyEnd - rewind + this._history.length) % this._history.length;
@@ -153,9 +159,6 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
               this._fadeOut = 0;
             }
           }
-          break;
-        case "gain":
-          if (typeof data.value === "number" && data.value >= 0) this._gain = data.value;
           break;
       }
     };
@@ -280,7 +283,6 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
         this._totalPlayed += 1;
       }
 
-      sample *= this._gain;
       out[i] = sample;
       if (stereo) stereo[i] = sample;
     }

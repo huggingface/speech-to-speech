@@ -64,8 +64,6 @@ const MIC_CHUNK_MS = 40;
 const HEARD_TEXT_EVENT_PREFIX = "heard_text_";
 const ASSISTANT_ITEM_HISTORY = 64;
 const ASSISTANT_REPLIES_CHECKED = 2;
-// Volume of a reply ducked under speech that may not interrupt it (same as the server's WebRTC duck).
-const DUCK_GAIN = 0.25;
 const CAPTURE_CONFIG_TIMEOUT_MS = 2_000;
 const SPEAKING_OPEN_DB = -50;
 const SPEAKING_HANG_MS = 250;
@@ -737,8 +735,7 @@ export class S2sRealtimeClient extends EventTarget {
         // Speech over the reply that may be only a cough or an "uh-huh" (server
         // flag --false_interruption). WebRTC playback is paused by the server.
         if (this.options.transport === "websocket") {
-          if (event.playback === "pause") this._playbackNode?.port.postMessage({ kind: "pause" });
-          else if (event.playback === "duck") this._playbackNode?.port.postMessage({ kind: "gain", value: DUCK_GAIN });
+          this._playbackNode?.port.postMessage({ kind: "pause" });
         }
         break;
       case "speech_to_speech.interruption.resolved":

@@ -2,19 +2,19 @@
 
 With ``turn_detection.false_interruption`` set, user speech that starts while a
 reply is active, queued, or still playing does not cancel that reply right
-away. Playback pauses at once (by default) and the router holds the new turn's
-pipeline events, while the reply keeps generating. The interruption is
-committed once the user's transcript has ``min_words`` words that are not
-fillers or backchannels ("uh", "mm-hmm", "yeah"): the held events then run
-through the ordinary barge-in path, so the client sees exactly what an
-immediate interruption would have produced. If the turn ends empty,
-filler-only, or untranscribable, its events are dropped. The client never
-hears about that turn, nothing enters the conversation, and the reply resumes
-from the last gap between words before the pause.
+away. Playback pauses at once and the router holds the new turn's pipeline
+events while the reply keeps generating. The interruption is committed once the
+user's transcript has ``min_words`` words that are not fillers or backchannels
+("uh", "mm-hmm", "yeah"): the held events then run through the ordinary
+barge-in path, so the client sees what an immediate interruption would have
+produced. If the turn ends empty, filler-only, or untranscribable, its events
+are dropped, nothing enters the conversation, and the reply resumes from the
+last gap between words before the pause.
 """
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 import time
@@ -32,9 +32,6 @@ if TYPE_CHECKING:
 
 INTERRUPTION_EVENTS_EXTENSION = "speech_to_speech.interruption"
 
-PlaybackMode = Literal["continue", "pause", "duck"]
-PLAYBACK_MODES: tuple[PlaybackMode, ...] = ("continue", "pause", "duck")
-
 # Resuming a paused reply replays from the last gap between words within this
 # much of the audio played before the pause, rather than from the middle of a word.
 RESUME_REWIND_MAX_MS = 600
@@ -49,8 +46,7 @@ def resume_rewind_samples(played: np.ndarray, sample_rate: int) -> int:
     Replay starts just before the next word at the latest quiet stretch of at
     least 50 ms (quieter than a tenth of the loudest 10 ms) in the last
     ``RESUME_REWIND_MAX_MS``. Returns 0 when playback stopped in such a gap,
-    or when there is none: replaying from the middle of another word would be
-    no better than resuming where playback stopped.
+    or when there is none.
     """
     window = max(1, sample_rate * _GAP_WINDOW_MS // 1000)
     count = min(len(played), sample_rate * RESUME_REWIND_MAX_MS // 1000) // window
@@ -71,14 +67,14 @@ def resume_rewind_samples(played: np.ndarray, sample_rate: int) -> int:
             # Keep one window of the gap ahead of the next word.
             return (count - (index + run)) * window
         run = 0
+    if run >= min_run and run < count:
+        return (count - (run - 1)) * window
     return 0
 
 
-# Sounds an STT writes for hesitations, throat clearing, laughter, and "I'm
-# listening" noises. They carry no words in any language. Hyphens and
-# punctuation are normalized away, so "mm-hmm" matches "mm hmm". Letters
-# repeated for length are too, so "Hmmmm", "Uhhh" and "Mhmm" match "hmm",
-# "uh" and "mhm"; written laughter ("haha", "hehehe") matches "ha".
+# Non-lexical sounds across languages (hesitations, throat clears, laughter).
+# Punctuation and repeated letters are normalized away ("Hmmmm" -> "hm",
+# "mm-hmm" -> "mm hm", "haha"/"hehehe" -> "ha").
 DEFAULT_FILLERS: tuple[str, ...] = (
     "uh",
     "um",
@@ -102,9 +98,8 @@ DEFAULT_FILLERS: tuple[str, ...] = (
     "aha",
 )
 
-# English words a listener says to show they are following, not to take the
-# turn. Words that usually answer a question ("yes", "sure") are left out: an
-# early answer should stop the reply.
+# English listener backchannels. Direct answers ("yes", "sure") are omitted so
+# early answers interrupt; set per session for other languages or [] to disable.
 DEFAULT_BACKCHANNELS: tuple[str, ...] = (
     "yeah",
     "yea",
@@ -123,10 +118,10 @@ DEFAULT_BACKCHANNELS: tuple[str, ...] = (
     "go on",
 )
 
-# Each of these characters is one word: their scripts do not separate words with spaces.
 _CHARACTER_WORDS = re.compile(r"[฀-๿぀-ヿ㐀-䶿一-鿿가-힯豈-﫿]")
-# Sound annotations some STT models emit for non-speech, e.g. "[coughs]" or "(laughing)".
 _ANNOTATION = re.compile(r"\[[^\]]*\]|\([^)]*\)|\*[^*]*\*")
+_LAUGHTER = re.compile(r"a?(?:h[ae]){2,}h?")
+_REPEATED_LETTER = re.compile(r"(.)\1+")
 
 
 def interruption_words(text: str) -> list[str]:
@@ -134,10 +129,9 @@ def interruption_words(text: str) -> list[str]:
     text = _ANNOTATION.sub(" ", text).casefold()
     chars = []
     for char in text:
-        category = unicodedata.category(char)
-        if char == "'" or char == "’":
+        if char in ("'", "’"):
             chars.append("'")
-        elif category.startswith(("P", "S")) or char.isspace():
+        elif unicodedata.category(char).startswith(("P", "S")) or char.isspace():
             chars.append(" ")
         elif _CHARACTER_WORDS.match(char):
             chars.append(f" {char} ")
@@ -146,19 +140,12 @@ def interruption_words(text: str) -> list[str]:
     return [word.strip("'") for word in "".join(chars).split() if word.strip("'")]
 
 
-# Laughter written as two or more syllables, after repeated letters are collapsed.
-_LAUGHTER = re.compile(r"a?(?:h[ae]){2,}h?")
-_REPEATED_LETTER = re.compile(r"(.)\1+")
-
-
-def _matching_form(word: str) -> str:
-    """The form a word is compared in against the ignore lists: "hmmmm" and "hmm" are both "hm"."""
-    word = _REPEATED_LETTER.sub(r"\1", word)
-    return "ha" if _LAUGHTER.fullmatch(word) else word
-
-
 def _matching_words(text: str) -> tuple[str, ...]:
-    return tuple(_matching_form(word) for word in interruption_words(text))
+    words = []
+    for word in interruption_words(text):
+        collapsed = _REPEATED_LETTER.sub(r"\1", word)
+        words.append("ha" if _LAUGHTER.fullmatch(collapsed) else collapsed)
+    return tuple(words)
 
 
 def _phrases(ignored: tuple[str, ...] | list[str]) -> list[tuple[str, ...]]:
@@ -173,27 +160,7 @@ class FalseInterruptionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     min_words: int = Field(default=1, ge=1, le=50)
-    """Words that are not fillers or backchannels needed to commit an interruption."""
-    min_speech_ms: int = Field(default=1200, ge=0, le=30000)
-    """Active speech that commits an interruption even before its words are known; 0 turns it off.
-
-    Words can come late: VAD splits "Wait, wait, can you..." into short
-    segments, and an STT that shares the GPU with the TTS can be slow while
-    the reply is still being synthesized. Committing stops that synthesis,
-    and it keeps real speech from being dropped as a false interruption when
-    its transcript misses ``timeout_ms``. A cough or a backchannel is well
-    under a second.
-    """
-    playback: PlaybackMode = "pause"
-    """What happens to the assistant's audio while the decision is pending.
-
-    ``pause`` stops playback at once and, on a false interruption, resumes
-    from the last gap between words. ``continue`` keeps playing. ``duck``
-    keeps playing at low volume. The server applies ``pause`` and ``duck`` on
-    WebRTC, where it paces playback. WebSocket clients own their player: they
-    learn the mode from the opt-in ``speech_to_speech.interruption.*`` events
-    and apply it themselves; without those events their playback continues.
-    """
+    """Words other than fillers or backchannels needed to commit an interruption."""
     timeout_ms: int = Field(default=2000, gt=0, le=30000)
     """Give up and resume if no transcript arrives this long after speech stops.
 
@@ -203,11 +170,7 @@ class FalseInterruptionConfig(BaseModel):
     fillers: tuple[str, ...] | None = None
     """Non-lexical sounds that never count ("uh", "mm-hmm", "ahem"). ``None`` uses ``DEFAULT_FILLERS``."""
     backchannels: tuple[str, ...] | None = None
-    """Listener words that never count on their own ("yeah", "okay", "I see").
-
-    ``None`` uses the English ``DEFAULT_BACKCHANNELS``; ``[]`` counts them as
-    words. Set it for the session's language, since "ouais" or "sí" are words otherwise.
-    """
+    """Listener words that never count on their own ("yeah", "okay", "I see"). ``None`` uses ``DEFAULT_BACKCHANNELS``."""
 
     _phrases: list[tuple[str, ...]] = PrivateAttr(default_factory=list)
 
@@ -224,7 +187,7 @@ class FalseInterruptionConfig(BaseModel):
         index = 0
         while index < len(words):
             for phrase in phrases:
-                if tuple(words[index : index + len(phrase)]) == phrase:
+                if words[index : index + len(phrase)] == phrase:
                     index += len(phrase)
                     break
             else:
@@ -237,11 +200,7 @@ _UNSET = object()
 
 
 def turn_detection_setting(turn_detection: Any) -> Any:
-    """Return the raw ``false_interruption`` value a client set, or ``_UNSET``.
-
-    ``turn_detection`` arrives as the SDK's ``ServerVad`` model, which keeps
-    unknown fields as extras, or as a plain dict.
-    """
+    """Return the raw ``false_interruption`` value a client set, or ``_UNSET``."""
     if turn_detection is None:
         return _UNSET
     if isinstance(turn_detection, dict):
@@ -255,10 +214,7 @@ def is_unset(value: Any) -> bool:
 
 
 def parse_false_interruption(value: Any) -> FalseInterruptionConfig | None:
-    """Read the session field: ``None``/``false`` is off, ``true`` uses the defaults.
-
-    Raises ``ValueError`` with a client-facing message for an invalid value.
-    """
+    """Read the session field: ``None``/``false`` is off, ``true`` uses the defaults."""
     if value is None or value is False:
         return None
     if value is True:
@@ -280,13 +236,9 @@ class Verdict(str, Enum):
     """What the router does with one event of the pending turn."""
 
     HOLD = "hold"
-    """Keep the event for replay if the interruption is committed."""
     DROP = "drop"
-    """Consume the event: it belongs to a revision the turn has moved past."""
     CONFIRM = "confirm"
-    """Commit the interruption: replay every held event, this one included."""
     DISMISS = "dismiss"
-    """A false interruption: drop the held events and let the reply continue."""
 
 
 @dataclass
@@ -297,71 +249,50 @@ class PendingInterruption:
     revision: int | None
     config: FalseInterruptionConfig
     audio_start_ms: int = 0
+    announced: bool = False
     events: list[PipelineEvent] = field(default_factory=list)
     revisions: set[int | None] = field(default_factory=set)
     started_at: float = field(default_factory=time.monotonic)
     stopped_at: float | None = None
     previous_words: int = 0
     transcript: str = ""
-    # Active speech of finished segments, and of the one in progress.
-    closed_speech_ms: float = 0.0
-    speaking_since: float | None = None
-    speaking_active_ms: float = 0.0
-    # Committed, with its held events being replayed.
     releasing: bool = False
+    released: asyncio.Event = field(default_factory=asyncio.Event)
 
     @classmethod
-    def begin(cls, event: SpeechStartedEvent, config: FalseInterruptionConfig) -> PendingInterruption:
+    def begin(
+        cls,
+        event: SpeechStartedEvent,
+        config: FalseInterruptionConfig,
+        *,
+        announced: bool = False,
+    ) -> PendingInterruption:
         assert event.turn_id is not None
         pending = cls(
             turn_id=event.turn_id,
             revision=event.turn_revision,
             config=config,
             audio_start_ms=event.audio_start_ms,
+            announced=announced,
         )
         pending.events.append(event)
         pending.revisions.add(event.turn_revision)
-        pending._speech_started(event, pending.started_at)
         return pending
-
-    def _speech_started(self, event: SpeechStartedEvent, now: float) -> None:
-        self.speaking_since = now
-        self.speaking_active_ms = event.active_speech_ms
-
-    def speech_ms(self, now: float | None = None) -> float:
-        """Active speech heard so far in this turn."""
-        if self.speaking_since is None:
-            return self.closed_speech_ms
-        now = time.monotonic() if now is None else now
-        return self.closed_speech_ms + self.speaking_active_ms + (now - self.speaking_since) * 1000
 
     def owns(self, event: PipelineEvent) -> bool:
         return getattr(event, "turn_id", None) == self.turn_id
 
-    def _long_enough(self, now: float | None = None) -> bool:
-        return bool(self.config.min_speech_ms) and self.speech_ms(now) >= self.config.min_speech_ms
-
     def deadline(self) -> float | None:
-        """When :meth:`due` next changes without a new event, if ever."""
-        if self.releasing:
+        if self.releasing or self.stopped_at is None:
             return None
-        if self.speaking_since is not None and self.config.min_speech_ms:
-            remaining_ms = self.config.min_speech_ms - self.speech_ms(self.speaking_since)
-            return self.speaking_since + max(0.0, remaining_ms) / 1000.0
-        if self.stopped_at is not None:
-            return self.stopped_at + self.config.timeout_ms / 1000.0
-        return None
+        return self.stopped_at + self.config.timeout_ms / 1000.0
 
     def due(self, now: float | None = None) -> Verdict | None:
-        """A decision that time alone has made: long speech, or no transcript after the timeout."""
-        if self.releasing:
+        deadline = self.deadline()
+        if deadline is None:
             return None
         now = time.monotonic() if now is None else now
-        if self.speaking_since is not None:
-            return Verdict.CONFIRM if self._long_enough(now) else None
-        if self.stopped_at is not None and now >= self.stopped_at + self.config.timeout_ms / 1000.0:
-            return Verdict.DISMISS
-        return None
+        return Verdict.DISMISS if now >= deadline else None
 
     def observe(self, event: PipelineEvent) -> Verdict:
         """Decide one event of this turn. The caller checks :meth:`owns` first."""
@@ -382,8 +313,7 @@ class PendingInterruption:
             self.stopped_at = None
             self.previous_words = 0
             self.events.append(event)
-            self._speech_started(event, time.monotonic())
-            return Verdict.CONFIRM if self._long_enough() else Verdict.HOLD
+            return Verdict.HOLD
         if revision != self.revision:
             if (
                 isinstance(event, TranscriptionCompletedEvent)
@@ -401,18 +331,15 @@ class PendingInterruption:
             self.previous_words = words
             return Verdict.CONFIRM if confirmed else Verdict.HOLD
         if isinstance(event, SpeechStoppedEvent):
-            now = time.monotonic()
-            if self.speaking_since is not None:
-                heard = self.speaking_active_ms + (now - self.speaking_since) * 1000
-                self.closed_speech_ms += event.active_speech_ms or heard
-                self.speaking_since = None
-            self.stopped_at = now
-            return Verdict.CONFIRM if self._long_enough(now) else Verdict.HOLD
+            self.stopped_at = time.monotonic()
+            return Verdict.HOLD
         if isinstance(event, TranscriptionCompletedEvent):
             self.transcript = event.transcript
-            if self.config.word_count(event.transcript) >= self.config.min_words:
-                return Verdict.CONFIRM
-            return Verdict.DISMISS
+            return (
+                Verdict.CONFIRM
+                if self.config.word_count(event.transcript) >= self.config.min_words
+                else Verdict.DISMISS
+            )
         if isinstance(event, TranscriptionFailedEvent):
             return Verdict.DISMISS
         if isinstance(event, AudioInputCompletedEvent):
@@ -427,7 +354,6 @@ class SpeechToSpeechInterruptionPendingEvent(BaseModel):
     type: Literal["speech_to_speech.interruption.pending"] = "speech_to_speech.interruption.pending"
     event_id: str
     audio_start_ms: int
-    playback: PlaybackMode
 
 
 class SpeechToSpeechInterruptionResolvedEvent(BaseModel):

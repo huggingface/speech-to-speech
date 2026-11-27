@@ -167,10 +167,15 @@ class RuntimeConfig(BaseModel):
         """Settings for holding barge-in until real words arrive, or ``None`` when off.
 
         Reads ``turn_detection.false_interruption``. A session that never set
-        it gets the server default; ``null`` or ``false`` turns it off.
+        it gets the server default; ``null``, ``false``, or explicit
+        ``turn_detection: null`` turns it off.
         """
         assert self.session.audio is not None and self.session.audio.input is not None
-        value = turn_detection_setting(self.session.audio.input.turn_detection)
+        input_audio = self.session.audio.input
+        td = input_audio.turn_detection
+        if td is None and "turn_detection" in input_audio.model_fields_set:
+            return None
+        value = turn_detection_setting(td)
         if is_unset(value):
             return self._default_false_interruption
         try:

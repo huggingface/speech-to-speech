@@ -136,31 +136,14 @@ class ModuleArguments(Wav2Vec2STVHandlerArguments):
         default=0.5,
         metadata={"help": "Update interval for live transcription in seconds (default: 0.5s = 500ms)"},
     )
-    false_interruption: str = field(
-        default="off",
+    false_interruption: bool = field(
+        default=False,
         metadata={
-            "choices": ("off", "continue", "pause", "duck"),
             "help": "Realtime server default for turn_detection.false_interruption, for sessions that do not set "
-            "it. Anything but 'off' stops a cough, room noise or a backchannel ('uh-huh', 'yeah') from cancelling "
-            "the assistant's reply: speech during a reply interrupts only once its transcript has real words. "
-            "The value is what happens to the reply's audio meanwhile: 'pause' stops it at once and resumes it "
-            "after a false interruption, 'continue' keeps playing, 'duck' plays it quieter. The server applies "
-            "'pause' and 'duck' on WebRTC; WebSocket clients apply them when they opt in to "
-            "speech_to_speech.interruption events, and otherwise keep playing. Default is off.",
-        },
-    )
-    false_interruption_min_words: int = field(
-        default=1,
-        metadata={
-            "help": "With --false_interruption, words other than fillers and backchannels needed before speech "
-            "during a reply interrupts it. Default is 1."
-        },
-    )
-    false_interruption_min_speech_ms: int = field(
-        default=1200,
-        metadata={
-            "help": "With --false_interruption, active speech during a reply that interrupts it even before its "
-            "words are transcribed; 0 waits for words. Default is 1200."
+            "it. Stops a cough, room noise or a backchannel ('uh-huh', 'yeah') from cancelling the assistant's "
+            "reply: playback pauses on speech start and resumes if the transcript has no real words. Applies "
+            "directly on WebRTC; WebSocket clients pause when they opt in to speech_to_speech.interruption "
+            "events, and otherwise keep playing until committed."
         },
     )
     enable_llm_proxy: bool = field(

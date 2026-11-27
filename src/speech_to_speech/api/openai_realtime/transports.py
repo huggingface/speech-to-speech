@@ -17,7 +17,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from fastapi import WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
@@ -28,8 +28,6 @@ if TYPE_CHECKING:
     from speech_to_speech.api.openai_realtime.service import RealtimeService, ServerEvent
 
 logger = logging.getLogger(__name__)
-
-PlaybackState = Literal["play", "pause", "duck"]
 
 
 class SessionTransport(ABC):
@@ -68,8 +66,8 @@ class SessionTransport(ABC):
     def has_unplayed_audio(self) -> bool:
         return self.unplayed_audio_ms() > 0
 
-    def set_playback(self, state: PlaybackState) -> None:
-        """Pause, duck, or resume assistant playback while barge-in is undecided.
+    def set_paused(self, paused: bool) -> None:
+        """Pause or resume assistant playback while barge-in is undecided.
 
         Paused audio is kept and resumes from the same point; it still counts
         as unplayed for :meth:`discard_pending_audio`. Transports that do not
@@ -119,7 +117,7 @@ class WebSocketTransport(SessionTransport):
         # finishing after a discard not to add its discarded audio back.
         self._sending_seconds = 0.0
         self._discards = 0
-        # Set while the client is expected to hold playback (see set_playback):
+        # Set while the client is expected to hold playback (see set_paused):
         # the playback estimate stops advancing from this moment.
         self._paused_at: float | None = None
 
@@ -155,10 +153,10 @@ class WebSocketTransport(SessionTransport):
     def unplayed_audio_ms(self) -> float:
         return (max(0.0, self._playback_end - self._now()) + self._sending_seconds) * 1000
 
-    def set_playback(self, state: PlaybackState) -> None:
+    def set_paused(self, paused: bool) -> None:
         # The client's player does the pausing, after the opt-in
-        # speech_to_speech.interruption.pending event; only "pause" stops it.
-        if state == "pause":
+        # speech_to_speech.interruption.pending event.
+        if paused:
             if self._paused_at is None:
                 self._paused_at = self._clock()
             return

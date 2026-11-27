@@ -147,7 +147,7 @@ class SpeculativeTurnTracker:
         with self._condition:
             return self._pending_reopen is not None
 
-    def speech_started(self, audio_ms: int) -> tuple[str, int, bool]:
+    def speech_started(self, audio_ms: int, *, provisional: bool = False) -> tuple[str, int, bool]:
         """Choose a new turn or reopen the unanswered current turn atomically."""
         with self._condition:
             if self._current is not None and self._phase == TurnPhase.LISTENING:
@@ -161,7 +161,7 @@ class SpeculativeTurnTracker:
                 pending.turn_id, pending.base_revision, pending.candidate_revision
             ):
                 return pending.turn_id, pending.candidate_revision, True
-            turn_id, revision = self.start_turn()
+            turn_id, revision = self.start_turn(provisional=provisional)
             return turn_id, revision, False
 
     def segment_finalized(self, audio_ms: int, output_hold_ms: int = 0, processing_delay_ms: int = 0) -> None:
@@ -191,7 +191,7 @@ class SpeculativeTurnTracker:
                 return None
             return self._processing_deadline
 
-    def start_turn(self) -> tuple[str, int]:
+    def start_turn(self, *, provisional: bool = False) -> tuple[str, int]:
         """Advance the conversation cursor and return the new turn metadata."""
         with self._condition:
             if self._provisional is None or self._current is None or self._current.turn_id != self._provisional:
@@ -204,13 +204,13 @@ class SpeculativeTurnTracker:
                     last_final_audio_ms=self._last_final_audio_ms,
                     processing_deadline=self._processing_deadline,
                 )
-            self._provisional = None
             self._sequence += 1
             self._current = _TurnReference(
                 sequence=self._sequence,
                 turn_id=f"turn_{self._sequence}",
                 revision=0,
             )
+            self._provisional = self._current.turn_id if provisional else None
             self._closed_current = None
             self._phase = TurnPhase.LISTENING
             self._last_final_audio_ms = None
@@ -271,14 +271,22 @@ class SpeculativeTurnTracker:
             logger.debug("Speculative turn %s confirmed", turn_id)
             self._condition.notify_all()
 
-    def discard_provisional(self, turn_id: str | None) -> bool:
+    def discard_provisional(self, turn_id: str | None, revision: int | None = None) -> bool:
         """Forget the provisional turn and restore the turn before it as current.
 
-        Returns ``False`` (and changes nothing else) when the turn is no longer
-        the provisional current turn, for example because a newer turn started.
+        Returns ``False`` without modifying state when *turn_id* is no longer
+        provisional or has already reopened to a newer revision.
         """
         with self._condition:
             if turn_id is None or self._provisional != turn_id:
+                return False
+            if (
+                self._current is not None
+                and self._current.turn_id == turn_id
+                and revision is not None
+                and self._current.revision != revision
+            ):
+                # VAD already reopened this provisional turn; keep it live.
                 return False
             self._provisional = None
             predecessor = self._predecessor
