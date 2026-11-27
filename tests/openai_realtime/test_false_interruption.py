@@ -212,6 +212,7 @@ def test_words_of_a_replaced_revision_still_commit():
     pending.observe(SpeechStartedEvent(turn_id="turn_2", turn_revision=1, reopened=True))
     late = TranscriptionCompletedEvent(transcript="Wait.", turn_id="turn_2", turn_revision=0)
     assert pending.observe(late) is Verdict.CONFIRM
+    assert pending.transcript == "Wait."
 
 
 # ── Session configuration ────────────────────────────────────────────
@@ -293,6 +294,28 @@ def test_dismissed_turn_restores_a_reply_that_finished_meanwhile():
     assert tracker.phase is TurnPhase.CLOSED
     # The next speech starts a new turn instead of reopening the cough.
     assert tracker.speech_started(5000) == ("turn_3", 0, False)
+
+
+def test_turn_answered_during_a_provisional_turn_is_committed_and_closed():
+    """The reply to turn 1 starts while a cough is held as turn 2 (#879 review)."""
+    tracker = SpeculativeTurnTracker()
+    first = tracker.start_turn()
+    tracker.segment_finalized(1000)
+    second, _ = tracker.start_turn()
+    assert tracker.mark_provisional(second)
+
+    assert tracker.gate(*first, commit=True).action.value == "accept"
+    assert tracker.is_committed(*first)
+    tracker.close(*first)
+    assert tracker.is_committed(*first)
+
+    assert tracker.discard_provisional(second)
+    assert tracker.current_turn() == first
+    assert tracker.phase is TurnPhase.CLOSED
+    assert tracker.is_committed(*first)
+    # An answered turn cannot reopen: new speech is a new turn.
+    assert not tracker.can_reopen(3000)
+    assert tracker.speech_started(3000)[2] is False
 
 
 def test_confirmed_turn_supersedes_the_previous_one():
@@ -738,6 +761,34 @@ def test_default_pauses_a_client_that_can_pause(call):
     assert call.receive_until("speech_to_speech.interruption.resolved")[-1]["interrupted"] is False
 
 
+def test_cough_before_the_first_output_keeps_the_input_lifecycle_first(call):
+    """The reply to turn 1 is pending, not yet speaking, when a cough is held (#879 review)."""
+    call.configure()
+    turn = call.speech()
+    call.stop(turn, 1.0)
+    call.final(turn, "What does attention do?")
+    key = call.service.text_prompt_queue.get(timeout=2).response_key
+    cough = call.speech()
+    _wait_for(lambda: _pending(call) is not None)
+
+    call.reply(turn, key, "It weighs the parts of the input.")
+    call.receive_until("response.output_audio.delta")
+    types = [event["type"] for event in call.received]
+    for lifecycle in (
+        "input_audio_buffer.speech_stopped",
+        "input_audio_buffer.committed",
+        "conversation.item.input_audio_transcription.completed",
+    ):
+        assert types.index(lifecycle) < types.index("response.created"), lifecycle
+
+    call.finish(key)
+    call.stop(cough)
+    call.final(cough, "")
+    _wait_for(lambda: _pending(call) is None)
+    assert call.tracker.current_turn() == turn
+    assert call.tracker.phase is TurnPhase.CLOSED
+
+
 def test_interruption_after_a_pause_cuts_history_where_the_pause_began(call):
     """Audio sent while the client held playback was never heard: history ends at the pause."""
     call.configure({"playback": "pause"}, extensions=["speech_to_speech.interruption"])
@@ -756,6 +807,42 @@ def test_interruption_after_a_pause_cuts_history_where_the_pause_began(call):
     played_s = list(cuts.values())[-1] / RATE
     # Neither the 0.5 s paused nor the 1 s sent meanwhile counts as heard.
     assert 0.35 <= played_s < 0.75
+
+
+def test_response_cancel_during_a_hold_releases_the_speech_as_a_turn(call):
+    """The client cancels the reply and starts another (#879 review): the old hold must not cut it."""
+    # Only words can end this hold, as in the review's reproduction.
+    call.configure({"playback": "pause", "min_speech_ms": 0}, extensions=["speech_to_speech.interruption"])
+    _coach_is_reading(call)
+    held = call.speech()
+    call.receive_until("speech_to_speech.interruption.pending")
+
+    call.ws.send_json({"type": "response.cancel"})
+    _wait_for(lambda: _pending(call) is None, timeout=1.0)
+    events = call.receive_until("input_audio_buffer.speech_started")
+    resolved = next(event for event in events if event["type"] == "speech_to_speech.interruption.resolved")
+    assert resolved["interrupted"] is True
+
+    call.ws.send_json({"type": "response.create"})
+    key = call.service.text_prompt_queue.get(timeout=2).response_key
+    call.reply(None, key, "Here is another way to put it.")
+    created = call.receive_until("response.created")[-1]["response"]["id"]
+    call.stop(held)
+    call.final(held, "Wait.")
+    done = call.finish(key)
+    assert (done["response"]["id"], done["response"]["status"]) == (created, "completed")
+
+
+def test_turning_the_option_off_during_a_hold_releases_the_speech(call):
+    call.configure({"playback": "pause", "min_speech_ms": 0}, extensions=["speech_to_speech.interruption"])
+    _coach_is_reading(call)
+    call.speech()
+    call.receive_until("speech_to_speech.interruption.pending")
+
+    call.configure(False, extensions=["speech_to_speech.interruption"])
+    _wait_for(lambda: _pending(call) is None, timeout=1.0)
+    events = call.receive_until("input_audio_buffer.speech_started")
+    assert any(e["type"] == "response.done" and e["response"]["status"] == "cancelled" for e in events)
 
 
 def test_tool_follow_up_during_a_cough_is_answered(call):
@@ -835,6 +922,19 @@ def test_websocket_discard_while_paused_counts_the_paused_audio_as_unplayed():
     assert transport.discard_pending_audio() == pytest.approx(2000.0)
     transport.set_playback("play")
     assert not transport.has_unplayed_audio()
+
+
+def test_websocket_discard_ends_the_pause():
+    """The client dropped its audio: what is sent next plays, even without a resume."""
+    clock = _Clock()
+    transport = WebSocketTransport(websocket=None, clock=clock)
+    transport._playback_end = clock.now + 2.0
+    transport.set_playback("pause")
+    clock.now += 1.0
+    transport.discard_pending_audio()
+    transport._playback_end = clock.now + 1.0  # the next reply's audio
+    clock.now += 0.6
+    assert transport.unplayed_audio_ms() == pytest.approx(400.0)
 
 
 def test_send_loop_wakes_for_the_transcript_deadline(call):

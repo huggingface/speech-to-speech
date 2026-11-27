@@ -290,6 +290,8 @@ class PendingInterruption:
     closed_speech_ms: float = 0.0
     speaking_since: float | None = None
     speaking_active_ms: float = 0.0
+    # Committed, with its held events being replayed.
+    releasing: bool = False
 
     @classmethod
     def begin(cls, event: SpeechStartedEvent, config: FalseInterruptionConfig) -> PendingInterruption:
@@ -324,6 +326,8 @@ class PendingInterruption:
 
     def deadline(self) -> float | None:
         """When :meth:`due` next changes without a new event, if ever."""
+        if self.releasing:
+            return None
         if self.speaking_since is not None and self.config.min_speech_ms:
             remaining_ms = self.config.min_speech_ms - self.speech_ms(self.speaking_since)
             return self.speaking_since + max(0.0, remaining_ms) / 1000.0
@@ -333,6 +337,8 @@ class PendingInterruption:
 
     def due(self, now: float | None = None) -> Verdict | None:
         """A decision that time alone has made: long speech, or no transcript after the timeout."""
+        if self.releasing:
+            return None
         now = time.monotonic() if now is None else now
         if self.speaking_since is not None:
             return Verdict.CONFIRM if self._long_enough(now) else None
@@ -367,6 +373,7 @@ class PendingInterruption:
                 and self.config.word_count(event.transcript) >= self.config.min_words
             ):
                 # "Wait." before the user went on: the words were said, whatever follows.
+                self.transcript = event.transcript
                 return Verdict.CONFIRM
             return Verdict.DROP
         self.events.append(event)

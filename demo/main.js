@@ -17,10 +17,10 @@
  * @typedef {S2sRealtimeClient} RealtimeClient
  */
 
-import { S2sRealtimeClient, normalizePlaybackBufferMs } from "./s2s-realtime-client.js?v=reasoning-language-20261110";
+import { S2sRealtimeClient, normalizePlaybackBufferMs } from "./s2s-realtime-client.js?v=false-interruption-20261127";
 import { ReasoningControl } from "./ui/reasoning.js";
 import { $, truncateError, errorMessage, DEBUG } from "./ui/dom.js";
-import { ChatView } from "./ui/chat.js?v=reasoning-language-20261110";
+import { ChatView } from "./ui/chat.js?v=false-interruption-20261127";
 import { Account } from "./ui/account.js";
 
 const DEFAULT_VOICE = "Aiden";

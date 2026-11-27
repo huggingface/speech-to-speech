@@ -402,6 +402,19 @@ class TestPipelineAudioTrack:
         assert all(np.all(frame == 2000) for frame in frames)
         track.stop()
 
+    async def test_clear_ends_a_pause_or_duck(self):
+        """A reply cancelled while held must not leave the next one silent or quiet (#879 review)."""
+        track = PipelineAudioTrack()
+        track.write(np.full(WEBRTC_FRAME_SAMPLES * 2, 1000, dtype=np.int16).tobytes())
+        await asyncio.wait_for(track.recv(), timeout=RECV_TIMEOUT_S)
+        track.pause()
+        track.set_gain(0.25)
+        track.clear()
+        track.write(np.full(WEBRTC_FRAME_SAMPLES * 2, 2000, dtype=np.int16).tobytes())
+        frame = await asyncio.wait_for(track.recv(), timeout=RECV_TIMEOUT_S)
+        assert np.all(frame.to_ndarray() == 2000)
+        track.stop()
+
     async def test_duck_lowers_and_resume_restores_volume(self):
         track = PipelineAudioTrack()
         track.write((np.ones(WEBRTC_FRAME_SAMPLES * 2, dtype=np.int16) * 1000).tobytes())

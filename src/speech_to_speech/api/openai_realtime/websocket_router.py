@@ -489,6 +489,7 @@ async def _dispatch_client_event(
         ):
             session.pending_output_item = None
         service.truncate_unplayed_audio(session_id, transport.discard_pending_audio())
+        await _release_interruption(unit, transport, session_id, "output audio cleared")
 
     elif isinstance(event, SessionUpdateEvent):
         err = service.handle_session_update(session_id, event)
@@ -496,6 +497,8 @@ async def _dispatch_client_event(
             await send_correlated([err])
         else:
             await send_correlated([service.build_session_updated(session_id)])
+            if service._state(session_id).runtime_config.false_interruption is None:
+                await _release_interruption(unit, transport, session_id, "false_interruption turned off")
 
     elif isinstance(event, ConversationItemCreateEvent):
         events = service.handle_conversation_item_create(session_id, event)
@@ -542,6 +545,9 @@ async def _dispatch_client_event(
         if events:
             await send_correlated(events)
         unit.response_playing.clear()
+        # Before the next client event (often a response.create): a hold left
+        # in place would cancel that reply once its words arrive.
+        await _release_interruption(unit, transport, session_id, "the reply was cancelled")
 
 
 async def _deliver_text_event(
@@ -681,21 +687,27 @@ async def _confirm_interruption(
     session: SessionState,
     transport: SessionTransport,
     session_id: str,
+    *,
+    reason: str = "words or long speech",
 ) -> None:
     """Real words arrived: apply the barge-in now, as if it had happened at speech start."""
     service = unit.service
     st = service._state(session_id)
     pending = st.pending_interruption
-    if pending is None:
+    if pending is None or pending.releasing:
         return
-    st.pending_interruption = None
+    # The hold stays in place until its events have been replayed: a later
+    # event of the same turn that the send loop reads meanwhile queues behind
+    # them (see _gate_interruption) instead of going out first.
+    pending.releasing = True
     if service.speculative_turns is not None:
         service.speculative_turns.confirm_provisional(pending.turn_id)
     logger.info(
-        "Pipeline %d: speech during response is an interruption after %.0f ms (turn=%s)",
+        "Pipeline %d: speech during response is an interruption after %.0f ms (turn=%s, %s)",
         unit.index,
         (time.monotonic() - pending.started_at) * 1000,
         pending.turn_id,
+        reason,
     )
     await _send_interruption_event(
         transport,
@@ -706,10 +718,34 @@ async def _confirm_interruption(
             transcript=pending.transcript,
         ),
     )
-    for event in pending.events:
-        await _deliver_text_event(unit, session, transport, session_id, event)
+    index = 0
+    while index < len(pending.events):
+        await _deliver_text_event(unit, session, transport, session_id, pending.events[index])
+        index += 1
+    st.pending_interruption = None
     # The replayed speech start discarded the paused audio; play what follows.
     transport.set_playback("play")
+
+
+async def _release_interruption(
+    unit: PipelineUnit,
+    transport: SessionTransport,
+    session_id: str,
+    reason: str,
+) -> None:
+    """The reply a held turn might interrupt is gone: the speech is an ordinary turn.
+
+    Its words are not dropped (it may be "Wait, stop" said as the client
+    cancelled), and the hold cannot cancel a reply that starts after this.
+    """
+    try:
+        pending = unit.service._state(session_id).pending_interruption
+    except KeyError:
+        return
+    session = unit.session
+    if pending is None or session is None or session.session_id != session_id:
+        return
+    await _confirm_interruption(unit, session, transport, session_id, reason=reason)
 
 
 async def _dismiss_interruption(
@@ -722,7 +758,7 @@ async def _dismiss_interruption(
     service = unit.service
     st = service._state(session_id)
     pending = st.pending_interruption
-    if pending is None:
+    if pending is None or pending.releasing:
         return
     st.pending_interruption = None
     if service.speculative_turns is not None:
@@ -768,6 +804,11 @@ async def _gate_interruption(
     except KeyError:
         return False
     pending = st.pending_interruption
+    if pending is not None and pending.releasing:
+        if not pending.owns(event):
+            return False
+        pending.events.append(event)
+        return True
     if pending is not None:
         if pending.owns(event):
             verdict = pending.observe(event)

@@ -165,6 +165,9 @@ class PipelineAudioTrack(MediaStreamTrack):
     def clear(self) -> None:
         del self._buffer[:]
         del self._played[:]
+        # Nothing is left to hold or to play quieter; the next reply plays normally.
+        self._paused = False
+        self._gain = 1.0
         self._drain_remaining = 0
         self._generation += 1
         self._data_available.clear()

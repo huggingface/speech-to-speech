@@ -427,6 +427,10 @@ class SpeculativeTurnTracker:
             return False
         with self._condition:
             answered = self._committed | ({self._closed_current} if self._closed_current is not None else set())
+            if self._provisional is not None and self._predecessor is not None:
+                # Closed while a provisional turn was current: still answered.
+                if self._predecessor.closed_current is not None:
+                    answered.add(self._predecessor.closed_current)
             return any(
                 reference.turn_id == turn_id and (revision is None or reference.revision == revision)
                 for reference in answered
@@ -516,7 +520,19 @@ class SpeculativeTurnTracker:
         if self._current is None:
             return False
         if not self._is_current_locked(turn_id, revision):
-            return False
+            if not self._is_provisional_predecessor_locked(turn_id, revision):
+                return False
+            # A reply to the turn before a provisional one starts: commit that
+            # turn, so its input lifecycle goes out before the reply and a
+            # dismissed provisional turn restores it as answered.
+            predecessor = self._predecessor
+            assert predecessor is not None and predecessor.current is not None
+            self._committed.add(predecessor.current)
+            predecessor.phase = TurnPhase.ANSWERING
+            predecessor.processing_deadline = None
+            logger.debug("Committed speculative turn %s revision %d before a provisional turn", turn_id, revision)
+            self._condition.notify_all()
+            return True
         self._committed.add(self._current)
         self._phase = TurnPhase.ANSWERING
         self._processing_deadline = None

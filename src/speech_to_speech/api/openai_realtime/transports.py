@@ -174,7 +174,9 @@ class WebSocketTransport(SessionTransport):
         # what they heard.
         now = self._now()
         unplayed = max(0.0, self._playback_end - now) + self._sending_seconds
-        self._playback_end = now
+        # The client dropped its audio, paused or not: what is sent next plays.
+        self._playback_end = self._clock()
+        self._paused_at = None
         self._sending_seconds = 0.0
         self._discards += 1
         return unplayed * 1000
