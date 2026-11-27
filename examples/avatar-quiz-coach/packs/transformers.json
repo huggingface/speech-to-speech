@@ -7,9 +7,8 @@
    "question": "What is the attention mechanism in machine learning, in simple terms?",
    "answer": "Attention determines the importance of each component in a sequence relative to the others, assigning weights so the model can focus on the most relevant parts, like important words in a sentence.",
    "key_points": [
-    "Assigns importance weights to components of a sequence",
-    "Lets the model focus on relevant parts",
-    "Weights are relative to other components"
+    "Weighs how important each part of the input is, so the model can focus on the relevant parts",
+    "The weights are relative to the other parts"
    ],
    "hint": "Think about what the word attention means when you listen to someone in a noisy room.",
    "fun_fact": "The attention mechanism was partly inspired by the cocktail party effect, a phenomenon studied in audition research back in 1953.",
@@ -17,7 +16,7 @@
    "source": 2,
    "id": 0,
    "required": [
-    1
+    0
    ]
   },
   {
@@ -26,7 +25,7 @@
    "key_points": [
     "2017",
     "Attention Is All You Need",
-    "Google researchers"
+    "Written by Google researchers"
    ],
    "hint": "The paper's title plays on a famous Beatles song.",
    "fun_fact": "The paper has been cited more than 150,000 times, making it one of the top ten most-cited papers of the 21st century.",
@@ -42,9 +41,8 @@
    "question": "Why do transformers need positional encodings or positional embeddings?",
    "answer": "Because self-attention by itself is permutation-invariant, meaning it treats the input as an unordered set. Positional information must be injected so that token order can affect the output.",
    "key_points": [
-    "Self-attention alone is permutation-invariant",
-    "Positional encodings inject order information",
-    "Without them, token order would not affect the output"
+    "Attention alone ignores word order, so position information has to be added",
+    "Without it, shuffling the words would not change the output"
    ],
    "hint": "What would the model know about word order if attention treated all tokens equally?",
    "fun_fact": "The original paper used sine and cosine wave functions for positional encoding, partly because they might allow the model to handle sequences longer than those seen during training.",
@@ -59,9 +57,9 @@
    "question": "Why did recurrent neural networks struggle to process long sentences, and how did LSTM help?",
    "answer": "Recurrent networks suffered from the vanishing gradient problem, so information from early tokens faded by the end of a long sequence. LSTM introduced gating mechanisms that mitigated this problem and enabled efficient learning on longer sequences.",
    "key_points": [
-    "Vanishing gradient problem loses early token information",
-    "LSTM introduced gating mechanisms",
-    "LSTM mitigated but did not eliminate the issue"
+    "Information from early words fades over long sequences, the vanishing gradient problem",
+    "LSTM added gates that control what to keep",
+    "LSTM reduced but did not remove the problem"
    ],
    "hint": "Think about what happens to a signal that passes through many steps in a row.",
    "fun_fact": "Even with LSTM, reversing the input sentence improved early translation systems, showing how poorly information from the start of a sentence was preserved.",
@@ -77,9 +75,9 @@
    "question": "What is the main computational advantage transformers have over recurrent networks during training?",
    "answer": "Transformers process all tokens in parallel rather than one at a time, so their computations can be parallelized across sequence positions and accelerated on GPUs, enabling faster training and larger models.",
    "key_points": [
-    "Parallel processing of all tokens",
-    "Recurrent networks must process tokens sequentially",
-    "Parallelizability enables GPU acceleration and bigger models"
+    "Processes all tokens in parallel",
+    "Recurrent networks must go one token at a time",
+    "This makes GPU acceleration and bigger models possible"
    ],
    "hint": "Consider whether a recurrent network can compute anything about the last word before reading the first word.",
    "fun_fact": "The parallelizability of transformers is a key reason they became the main architecture of most modern large language models.",
@@ -94,9 +92,9 @@
    "question": "In self-attention, what are the query, key, and value vectors, and where do they come from?",
    "answer": "Query, key, and value vectors are generated from the same input sequence, which is what distinguishes self-attention from cross-attention. Each token's query is compared against all keys to produce weights that combine the values.",
    "key_points": [
-    "Queries, keys, and values all come from the same source sequence",
-    "Queries are compared against keys to produce weights",
-    "Weights are used to combine the values"
+    "Queries, keys and values all come from the same input sequence",
+    "Each query is compared with the keys to get weights",
+    "The weights combine the values"
    ],
    "hint": "The word self in self-attention tells you something important about where the vectors come from.",
    "fun_fact": "Self-attention was once called intra-attention or intra-sentence attention when it was first proposed for LSTMs.",
@@ -113,10 +111,9 @@
    "question": "What does multi-head attention add beyond a single attention mechanism?",
    "answer": "Multi-head attention runs several attention heads in parallel, each learning different linear projections of the queries, keys, and values. This lets the model capture different types of relationships between words simultaneously.",
    "key_points": [
-    "Multiple parallel attention heads",
-    "Each head learns different projections of queries, keys, and values",
-    "Captures different relationships at once",
-    "Outputs are concatenated and linearly transformed"
+    "Several attention heads run in parallel, each with its own projections",
+    "Lets the model capture different kinds of relationships at once",
+    "Head outputs are concatenated and projected"
    ],
    "hint": "Imagine several people reading the same sentence but each looking for something different.",
    "fun_fact": "The heads' outputs are concatenated and passed through a final learned linear transformation to produce the layer's output.",
@@ -124,7 +121,7 @@
    "source": 3,
    "id": 6,
    "required": [
-    2
+    1
    ]
   },
   {
@@ -133,7 +130,7 @@
    "key_points": [
     "Costs grow quadratically with sequence length",
     "Affects both computation and memory",
-    "This is the main weakness of standard self-attention"
+    "The main weakness of standard self-attention"
    ],
    "hint": "Think about how many pairwise comparisons are needed if every token attends to every other token.",
    "fun_fact": "This quadratic cost is why researchers have explored local attention with sliding windows, which was found to reduce translation time in early attention models.",

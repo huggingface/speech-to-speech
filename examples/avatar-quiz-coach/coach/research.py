@@ -35,7 +35,7 @@ MAX_TOTAL_CHARS = 26000
 # A repository or paper read first-hand gets a larger reading budget.
 MAX_PRIMARY_CHARS = 80000
 # Bumped when research changes, so cached packs from older research are redone.
-RESEARCH_VERSION = 3
+RESEARCH_VERSION = 4
 SPARE_QUESTIONS = 3
 
 DIFFICULTIES = {
@@ -173,11 +173,14 @@ async def _fetch_page(http: httpx.AsyncClient, source: dict[str, str]) -> dict[s
 # ── Question writing ─────────────────────────────────────────────────────────
 
 REQUIRED_RULE = (
-    "Mark as required the fewest key points a correct spoken answer must contain: for a question about one idea, "
-    "the one key point that is its core; when the question asks for several things (two components, a year and a "
-    "title, what happened and why), one key point per thing asked. Details, examples, names, numbers, nuances and "
-    "consequences the question does not ask about are never required. Every question has at least one required "
-    "key point."
+    "Mark as required only what the question's own wording asks for, with the fewest key points that cover it: one "
+    'key point per thing asked. "What is X?", "Where does X come from?" and "Why...?" each ask one thing; "What is '
+    'X, and why...?" asks two; "What two..." asks two. A point that explains, justifies or adds detail to another '
+    "point is never required, however true or important. Details, examples, names, numbers and consequences the "
+    "question does not ask about are never required. When several answers are equally valid (any one reason, cause "
+    'or example), write them as one key point joined by "or" and require that point, never one particular '
+    'alternative. Write key points as plain facts, without words like "reason" or "example". Every question has at '
+    "least one required key point."
 )
 
 WRITER_SYSTEM = (

@@ -7,9 +7,8 @@
    "question": "What are the two major components of a diffusion model?",
    "answer": "A diffusion model has a forward diffusion process that gradually adds noise to data, and a reverse sampling process that learns to undo the noise step by step.",
    "key_points": [
-    "forward diffusion process adds noise",
-    "reverse sampling process removes noise",
-    "the model learns to reverse the forward process"
+    "A forward process gradually adds noise to the data",
+    "A reverse process learns to remove the noise step by step"
    ],
    "hint": "Think of one process that destroys and one that restores.",
    "fun_fact": "The name 'diffusion' comes from thermodynamics, where particles spread out over time, just like noise spreading through an image.",
@@ -25,9 +24,9 @@
    "question": "After training, how does a diffusion model create a brand new image?",
    "answer": "It starts with an image made of pure random noise and applies the trained network iteratively to denoise it, gradually revealing a new image.",
    "key_points": [
-    "start from random noise",
-    "apply the denoising network repeatedly",
-    "the result is a new image sampled from the learned distribution"
+    "Starts from pure random noise",
+    "Applies the denoising network repeatedly",
+    "The result is a new image from the learned distribution"
    ],
    "hint": "The starting point contains no picture at all.",
    "fun_fact": "Because the starting noise is random, the same prompt can produce a different image every single time.",
@@ -43,9 +42,8 @@
    "question": "Why is the forward noising process designed so that the final result approaches a Gaussian distribution?",
    "answer": "Because the Gaussian is a simple, well-understood distribution that is easy to sample from, so at generation time we can start from pure Gaussian noise and reverse the process to get realistic data.",
    "key_points": [
-    "Gaussian noise is easy to sample",
-    "all traces of the original image are gone at the end",
-    "this gives a known starting point for generation"
+    "Generation can then start from pure Gaussian noise, which is simple and easy to sample",
+    "By the end, all traces of the original image are gone"
    ],
    "hint": "Think about what makes a convenient starting point for sampling.",
    "fun_fact": "This mirrors physics: the Gaussian is the equilibrium distribution, like how gas particles spread until they fill a room evenly.",
@@ -53,16 +51,15 @@
    "source": 1,
    "id": 2,
    "required": [
-    2
+    0
    ]
   },
   {
    "question": "What kinds of neural networks are typically used as the denoising backbone of a diffusion model?",
    "answer": "The backbone can be any network, but U-Nets and transformers are the typical choices for the denoising component.",
    "key_points": [
-    "U-Nets are the classic choice",
-    "transformers are increasingly used",
-    "the backbone is the denoising network"
+    "U-Nets, the classic choice",
+    "Transformers, increasingly used"
    ],
    "hint": "One architecture has a shape named after a letter.",
    "fun_fact": "Stable Diffusion 3 switched from a U-Net to a rectified flow transformer, mixing text and image encodings inside each block.",
@@ -78,9 +75,8 @@
    "question": "How do text-to-image diffusion models use the text prompt to guide image generation?",
    "answer": "A text encoder converts the prompt into an embedding, and that embedding is fed to the denoising network through a cross-attention mechanism, so each denoising step is conditioned on the text.",
    "key_points": [
-    "text encoder turns the prompt into an embedding",
-    "cross-attention exposes the embedding to the denoising U-Net",
-    "the denoising steps are conditioned on the text"
+    "A text encoder turns the prompt into an embedding",
+    "The denoising network is conditioned on that embedding at every step, through cross-attention"
    ],
    "hint": "The text doesn't paint the image directly; it steers the denoising.",
    "fun_fact": "Stable Diffusion used a frozen CLIP text encoder, a model originally built for matching images with captions.",
@@ -89,16 +85,15 @@
    "id": 4,
    "required": [
     0,
-    2
+    1
    ]
   },
   {
    "question": "What is a latent diffusion model, and why perform diffusion in latent space instead of pixel space?",
    "answer": "A latent diffusion model runs the noising and denoising process in a compressed latent space created by an autoencoder, rather than directly on pixels. This is much more computationally efficient for both training and generation.",
    "key_points": [
-    "an autoencoder compresses images to a latent space",
-    "diffusion happens in the compressed representation",
-    "main advantage is computational efficiency"
+    "Diffusion runs in a compressed latent space from an autoencoder, not on pixels",
+    "The main advantage is computational efficiency"
    ],
    "hint": "Think about working on a compressed file instead of the full image.",
    "fun_fact": "Latent diffusion is why Stable Diffusion can run on consumer GPUs with as little as 2.4 gigabytes of memory.",
@@ -106,17 +101,17 @@
    "source": 2,
    "id": 5,
    "required": [
-    1,
-    2
+    0,
+    1
    ]
   },
   {
    "question": "In Stable Diffusion, what are the three main components of the architecture and what does each do?",
    "answer": "The variational autoencoder compresses images into latent space and decodes latents back to pixels, the U-Net performs the denoising in latent space, and the text encoder converts the prompt into an embedding for conditioning.",
    "key_points": [
-    "VAE compresses and decodes between pixel and latent space",
-    "U-Net does the denoising",
-    "text encoder converts the prompt to an embedding"
+    "The VAE compresses images into latent space and decodes them back to pixels",
+    "The U-Net does the denoising",
+    "The text encoder turns the prompt into an embedding"
    ],
    "hint": "One compresses, one denoises, one understands language.",
    "fun_fact": "The U-Net in Stable Diffusion has about 860 million parameters, which was considered lightweight by 2022 standards.",
@@ -133,9 +128,8 @@
    "question": "Why is randomness essential in the reverse diffusion process, rather than just doing pure denoising steps?",
    "answer": "If the process were purely deterministic, every starting noise point would collapse to the same output, destroying diversity. Randomness keeps the generated distribution spread out, so different noise samples yield different, varied images.",
    "key_points": [
-    "pure determinism collapses diversity",
-    "randomness keeps the output distribution spread out",
-    "different random seeds produce different images"
+    "Without randomness the outputs would collapse and lose their diversity",
+    "Different random noise then gives different images"
    ],
    "hint": "Consider what would happen if every generation followed the exact same path.",
    "fun_fact": "This mirrors thermodynamics: if particles only underwent gradient descent, they would all fall to the origin and the distribution would collapse.",

@@ -7,9 +7,9 @@
    "question": "What defines an intelligent agent, in the most general sense?",
    "answer": "An intelligent agent is an entity that perceives its environment, takes actions autonomously to achieve goals, and may improve its performance by acquiring knowledge.",
    "key_points": [
-    "Perceives environment",
-    "Takes autonomous actions toward goals",
-    "Can improve through knowledge"
+    "Perceives its environment",
+    "Acts autonomously to achieve goals",
+    "Can improve by acquiring knowledge"
    ],
    "hint": "Think about the basic loop of sensing and acting.",
    "fun_fact": "A simple thermostat counts as an intelligent agent by this definition, just like a human does.",
@@ -25,9 +25,8 @@
    "question": "How does the definition of an AI agent differ from a basic intelligent agent like a thermostat?",
    "answer": "AI agents, also called agentic AI, proactively pursue goals, make decisions, and take actions over extended periods, whereas a simple agent like a thermostat responds to immediate conditions.",
    "key_points": [
-    "Proactively pursues goals",
-    "Makes decisions over extended periods",
-    "Contrast with simple reactive systems"
+    "Pursues goals proactively, making decisions over long periods",
+    "A thermostat only reacts to immediate conditions"
    ],
    "hint": "The key difference involves time and initiative.",
    "fun_fact": "Even a firm, a state, or a biome can be modeled as an intelligent agent.",
@@ -42,9 +41,8 @@
    "question": "How can a software harness extend what a large language model can do?",
    "answer": "A software harness can provide an LLM with memory and access to tools such as web search, letting it act beyond simply generating text from static training data.",
    "key_points": [
-    "Provides memory",
-    "Gives access to tools like web search",
-    "Extends beyond raw text generation"
+    "Gives the model tools like web search, or memory",
+    "Lets it act beyond generating text from its training data"
    ],
    "hint": "Think about what surrounds the model rather than the model itself.",
    "fun_fact": "The chatbot ChatGPT is an LLM inside such a harness, which is why it can remember context and search the web.",
@@ -52,16 +50,15 @@
    "source": 2,
    "id": 2,
    "required": [
-    1
+    0
    ]
   },
   {
    "question": "What is an objective function in the context of intelligent agents?",
    "answer": "An objective function specifies the goals an agent is designed to achieve and serves as a measure of success. An agent is considered more intelligent if its actions consistently yield outcomes better aligned with this function.",
    "key_points": [
-    "Encapsulates the agent's goals",
-    "Measures success",
-    "Captures trade-offs between conflicting goals"
+    "Specifies the agent's goals, the measure of its success",
+    "Can capture trade-offs between conflicting goals"
    ],
    "hint": "It is the yardstick the agent tries to maximize.",
    "fun_fact": "AlphaZero's chess objective was extremely simple: plus one for a win and minus one for a loss.",
@@ -76,8 +73,7 @@
    "question": "Why does retrieval-augmented generation reduce the need to retrain a language model?",
    "answer": "With RAG, when new information becomes available, you only update the model's external knowledge base rather than retraining the model, saving computational and financial costs.",
    "key_points": [
-    "Only the external knowledge base is updated",
-    "No model retraining needed",
+    "New information goes into the external knowledge base, so the model needs no retraining",
     "Saves compute and money"
    ],
    "hint": "The new information lives outside the model.",
@@ -93,10 +89,9 @@
    "question": "Describe the main stages of how RAG works.",
    "answer": "Documents are converted into embeddings and stored in a vector database. When a query arrives, a retriever selects the most relevant documents, their content is added to the prompt, and the LLM generates an answer from both the query and the retrieved text.",
    "key_points": [
-    "Documents become embeddings in a vector database",
-    "Retriever picks relevant documents",
-    "Retrieved text augments the prompt",
-    "LLM generates from query plus retrieved content"
+    "Documents are turned into embeddings in a vector database",
+    "A retriever picks the documents relevant to the query",
+    "The retrieved text is added to the prompt and the model answers from both"
    ],
    "hint": "Start with what happens to the documents before any question is asked.",
    "fun_fact": "RAG can work on structured data too, including knowledge graphs, not just plain text.",
@@ -105,17 +100,15 @@
    "id": 5,
    "required": [
     1,
-    2,
-    3
+    2
    ]
   },
   {
    "question": "Can RAG completely eliminate hallucinations? Explain why or why not.",
    "answer": "No. RAG reduces factual errors, but an LLM can still generate misinformation from factually correct sources if it misinterprets context, such as treating a rhetorical chapter title as a literal statement of fact.",
    "key_points": [
-    "Reduces but does not eliminate hallucinations",
-    "Model can misinterpret retrieved context",
-    "Correct sources can still yield false statements"
+    "No: it reduces hallucinations but does not eliminate them",
+    "The model can still misread the retrieved context, or the sources themselves can be wrong"
    ],
    "hint": "Think about whether retrieving true facts guarantees understanding them.",
    "fun_fact": "One LLM declared that Barack Obama was America's first Muslim president, based on a rhetorical book chapter title.",
@@ -131,9 +124,8 @@
    "question": "How does rationality apply to an agent's decisions, given that agents are not omniscient?",
    "answer": "A rational agent selects the action expected to maximize its performance measure based on its percept sequence, prior knowledge, and available actions. Rationality is about the expected outcome given available information, not about being always successful or all-knowing.",
    "key_points": [
-    "Maximizes expected performance measure",
-    "Acts on percepts, prior knowledge, and available actions",
-    "Does not require omniscience or guaranteed success"
+    "Picks the action with the best expected outcome",
+    "Judged on what it knows from its percepts and prior knowledge, not on being all-knowing or always right"
    ],
    "hint": "Rationality is judged before the outcome is known, not after.",
    "fun_fact": "This agent-based framing is how Russell and Norvig define the entire field of artificial intelligence.",
@@ -142,7 +134,7 @@
    "id": 7,
    "required": [
     0,
-    2
+    1
    ]
   }
  ],

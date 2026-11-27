@@ -7,8 +7,8 @@
    "question": "What two things can users share on the Hugging Face online platform?",
    "answer": "Users can share machine learning models and datasets. The platform became the go-to place for the AI community to publish and discover both.",
    "key_points": [
-    "machine learning models",
-    "datasets"
+    "Machine learning models",
+    "Datasets"
    ],
    "hint": "Think about the two main ingredients needed to build and train an AI system.",
    "fun_fact": "The company is named after the hugging face emoji, and it started out in 2016 as a chatbot app for teenagers.",
@@ -24,10 +24,10 @@
    "question": "According to the Open Source Initiative, what four things can people do with an open-source AI system?",
    "answer": "They can freely use it, study it, modify it, and share it. This includes the training datasets, the code, and the model parameters.",
    "key_points": [
-    "use it",
-    "study it",
-    "modify it",
-    "share it"
+    "Use it",
+    "Study it",
+    "Modify it",
+    "Share it"
    ],
    "hint": "These are the same core freedoms that define open-source software in general.",
    "fun_fact": "The Open Source Initiative spent two years consulting experts before publishing its definition of open-source AI in 2024.",
@@ -45,9 +45,8 @@
    "question": "What is Hugging Face's Transformers library used for?",
    "answer": "It is an open-source library for downloading, training, and running pretrained machine learning models. It is Hugging Face's most notable software contribution to the field.",
    "key_points": [
-    "open-source library",
-    "downloading pretrained models",
-    "training and running models"
+    "Downloading pretrained models and running or fine-tuning them",
+    "An open-source library"
    ],
    "hint": "It handles the full workflow of working with models that others have already built.",
    "fun_fact": "Many popular tools like Ollama and LM Studio can pull models directly from the Hugging Face Hub, so the library's ecosystem reaches far beyond Hugging Face itself.",
@@ -55,17 +54,15 @@
    "source": 1,
    "id": 2,
    "required": [
-    1,
-    2
+    0
    ]
   },
   {
    "question": "What is the key difference between a truly open-source model and one that is merely open-weight?",
    "answer": "An open-weight model releases only the model parameters, while a truly open-source model also releases its training data and code. Critics call open-weight models that claim to be open-source 'openwashing'.",
    "key_points": [
-    "open-weight releases only parameters",
-    "open-source includes data and code",
-    "critics call this openwashing"
+    "Open-weight releases only the trained weights, while open source also releases the training data and code",
+    "Critics call open-weight models labelled open source openwashing"
    ],
    "hint": "Consider what parts of the model someone would need to actually recreate or fully understand it.",
    "fun_fact": "Artificial Analysis gives Nvidia's Nemotron family an openness score of eighty-three percent, while many Chinese frontier open-weight models score under fifty percent.",
@@ -73,17 +70,15 @@
    "source": 2,
    "id": 3,
    "required": [
-    0,
-    1
+    0
    ]
   },
   {
    "question": "Why has Meta's description of Llama as open-source been disputed?",
    "answer": "Llama's license prohibits some uses, and Meta never disclosed the origin of the data used to train the models. The Open Source Initiative and others argue this fails the standard definition of open-source.",
    "key_points": [
-    "license restricts certain uses",
-    "training data origin not disclosed",
-    "Open Source Initiative disputes the claim"
+    "Its license restricts some uses, or Meta never disclosed its training data",
+    "The Open Source Initiative disputes the claim"
    ],
    "hint": "Think about both the license terms and what Meta kept hidden about the training process.",
    "fun_fact": "The very first Llama model was restricted to researchers, and its weights leaked online through a torrent just weeks after release.",
@@ -98,9 +93,8 @@
    "question": "What is the design goal of Hugging Face's SmolLM family of language models?",
    "answer": "SmolLM models are small language models designed to be relatively capable while running with limited computing resources. The SmolLM2 versions are specifically intended for on-device applications.",
    "key_points": [
-    "small language models",
-    "run with limited computing resources",
-    "on-device applications"
+    "Small models that stay capable while running on limited computing resources",
+    "Meant for on-device use"
    ],
    "hint": "The name is a big clue about the model size.",
    "fun_fact": "SmolLM3, released in 2025, supports reasoning and six languages despite having only three billion parameters.",
@@ -108,17 +102,15 @@
    "source": 1,
    "id": 5,
    "required": [
-    1
+    0
    ]
   },
   {
    "question": "Why have Chinese companies like DeepSeek embraced open-weight AI models?",
    "answer": "China uses open weights to reduce reliance on western software and gatekeeping, and to give its industries faster access to higher-powered AI. These models are typically released under permissive licenses like Apache or MIT.",
    "key_points": [
-    "reduce reliance on western software",
-    "avoid gatekeeping",
-    "give industries faster access",
-    "permissive licenses like MIT"
+    "To reduce reliance on Western software and gatekeeping, or to give its industries faster access to powerful AI",
+    "Released under permissive licenses like MIT or Apache"
    ],
    "hint": "Think about the strategic advantage of not depending on closed foreign technology.",
    "fun_fact": "DeepSeek's R1 reasoning model, released in January 2025 under the MIT license, made the world widely aware of China's open AI strategy.",
@@ -133,10 +125,10 @@
    "question": "What was the most controversial aspect of the Open Source Initiative's definition of open-source AI, and how did they resolve it?",
    "answer": "Data access was the sticking point, because some models are trained on sensitive data that cannot be released. The final definition requires full release of the code, but for data it only requires enough details for others to understand and re-create the model.",
    "key_points": [
-    "data access was controversial",
-    "sensitive training data cannot always be released",
-    "full code release required",
-    "only data details required, not the data itself"
+    "Access to the training data was the controversy",
+    "Some training data is sensitive and cannot be released",
+    "The code must be fully released",
+    "For data, only enough detail to understand and re-create the model is required"
    ],
    "hint": "The compromise treats code and data differently.",
    "fun_fact": "The resulting definition, called OSAID version 1.0, was published in 2024 after two years of expert consultation.",
