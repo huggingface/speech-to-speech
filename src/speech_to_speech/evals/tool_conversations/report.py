@@ -36,6 +36,7 @@ METRICS = (
     ("extra_call", "Call when none was needed", "extra_call", "free_turns"),
     ("late_result_spoken", "Late result spoken", "late_result_spoken", "late_results"),
     ("late_result_recalled", "Long-running tool called again", "repeated_long_running", "late_results"),
+    ("timer_success", "Five-minute timer succeeded", "timer_success", "timer_trials"),
     ("crashed", "Conversations that crashed", "crashed", "conversations"),
 )
 
@@ -87,6 +88,9 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, int]:
     c["server_errors"] = 0
     for row in results:
         c["conversations"] += 1
+        if "outcome" in row:
+            c["timer_trials"] += 1
+            c["timer_success"] += row["outcome"]["passed"]
         if "crash" in row:
             c["crashed"] += 1
             continue
@@ -124,7 +128,27 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, int]:
     return c
 
 
+def _score_timer_trial(row: dict[str, Any]) -> dict[str, Any]:
+    if "crash" in row:
+        return {"passed": False, "reason": "conversation_error"}
+    turn = row["turns"][0]
+    if turn.get("failure"):
+        return {"passed": False, "reason": turn["failure"]}
+    first = turn["rounds"][0]
+    if first["status"] != "completed":
+        return {"passed": False, "reason": "response_not_completed"}
+    if turn["expected_tool"] not in first["calls"]:
+        return {"passed": False, "reason": "expected_tool_missing"}
+    counts = dict.fromkeys(("argument_calls", "scored_argument_calls", "valid_arguments", "correct_arguments"), 0)
+    _count_arguments({**turn, "rounds": [first]}, counts)
+    if counts["correct_arguments"] == 0:
+        return {"passed": False, "reason": "incorrect_arguments"}
+    return {"passed": True}
+
+
 def build_report(meta: dict[str, Any], results: list[dict[str, Any]]) -> dict[str, Any]:
+    if meta.get("scenario_set") == "five-minute-timer":
+        results = [{**row, "outcome": _score_timer_trial(row)} for row in results]
     return {"schema": REPORT_SCHEMA, **meta, "summary": summarize(results), "results": results}
 
 
@@ -144,7 +168,11 @@ def render_report(report: dict[str, Any]) -> str:
         "| Metric | Result |",
         "|---|---|",
     ]
-    lines += [f"| {label} | {_rate(s, num, den)} |" for _key, label, num, den in METRICS]
+    lines += [
+        f"| {label} | {_rate(s, num, den)} |"
+        for _key, label, num, den in METRICS
+        if den != "timer_trials" or s.get(den)
+    ]
     return "\n".join(lines)
 
 
@@ -168,6 +196,8 @@ def render_comparison(reports: list[dict[str, Any]]) -> str:
     lines = [header, "|" + "---|" * (len(reports) + 1)]
     base = reports[0]["summary"]
     for _key, label, num, den in METRICS:
+        if den == "timer_trials" and not any(report["summary"].get(den) for report in reports):
+            continue
         cells = []
         for i, report in enumerate(reports):
             s = report["summary"]

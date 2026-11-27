@@ -20,10 +20,11 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 
 from speech_to_speech.evals.tool_conversations.report import build_report, render_comparison, render_report
-from speech_to_speech.evals.tool_conversations.runner import RunnerConfig, run_set
+from speech_to_speech.evals.tool_conversations.runner import AUDIO_RATE, RunnerConfig, run_set
 from speech_to_speech.evals.tool_conversations.scenarios import SCENARIO_SETS
 
 DEFAULT_URL = "ws://127.0.0.1:8765/v1/realtime"
@@ -37,13 +38,30 @@ def _run(args: argparse.Namespace) -> int:
             print(f"{args.token_env} is not set", file=sys.stderr)
             return 2
         headers["Authorization"] = f"Bearer {token}"
-    config = RunnerConfig(url=args.url, headers=headers, concurrency=args.concurrency)
+    pcm = None
+    if args.audio_file is not None:
+        from speech_to_speech.evals.big_bench_audio.dataset import load_pcm16_mono
+
+        if args.set != "five-minute-timer":
+            print("--audio-file requires --set five-minute-timer", file=sys.stderr)
+            return 2
+        try:
+            pcm = load_pcm16_mono(args.audio_file, rate=AUDIO_RATE)
+            if not any(pcm):
+                raise ValueError("recording is empty or silent")
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"Invalid timer recording: {exc}", file=sys.stderr)
+            return 2
+
+    config = RunnerConfig(url=args.url, headers=headers, concurrency=args.concurrency, timer_pcm=pcm)
     started = datetime.now(timezone.utc).isoformat()
     results = asyncio.run(run_set(config, SCENARIO_SETS[args.set], args.reps, seed=args.seed))
     meta = {
         "label": args.label,
         "url": args.url,
         "scenario_set": args.set,
+        "input_mode": "audio" if pcm is not None else "text",
+        **({"input_pcm_sha256": sha256(pcm).hexdigest(), "input_sample_rate": AUDIO_RATE} if pcm is not None else {}),
         "reps": args.reps,
         "started_at": started,
         "notes": args.notes,
@@ -123,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--out", required=True, help="report JSON path")
     run.add_argument("--label", default="", help="name shown in tables, e.g. 'main + Google template'")
     run.add_argument("--set", choices=sorted(SCENARIO_SETS), default="conversations")
+    run.add_argument("--audio-file", type=Path, help="Recording of the five-minute-timer prompt.")
     run.add_argument("--reps", type=int, default=8, help="repetitions of each conversation")
     run.add_argument("--concurrency", type=int, default=3, help="keep below the server's num_pipelines")
     run.add_argument("--seed", type=int, default=0)

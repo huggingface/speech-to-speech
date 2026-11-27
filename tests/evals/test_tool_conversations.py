@@ -1,11 +1,16 @@
 """Tool-conversation eval: metrics, comparison and the runner against a scripted server."""
 
 import asyncio
+import base64
 import json
 import stat
+import sys
+import wave
+from types import SimpleNamespace
 
 import pytest
 
+from speech_to_speech.evals.tool_conversations import runner
 from speech_to_speech.evals.tool_conversations.__main__ import main
 from speech_to_speech.evals.tool_conversations.report import fisher_exact, render_comparison, render_report, summarize
 from speech_to_speech.evals.tool_conversations.runner import RunnerConfig, run_set
@@ -193,3 +198,111 @@ def test_server_config_is_private_and_points_speech_at_the_stand_in(tmp_path, mo
     assert config["openai_tts_base_url"] == config["openai_stt_base_url"] == "http://127.0.0.1:9999/v1"
     assert config["responses_api_api_key"] == "secret-value"
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    "spoken, minutes, reason, sequence",
+    [
+        (False, 5, None, "single"),
+        (False, 3, "incorrect_arguments", "single"),
+        (False, None, "response_timeout", "single"),
+        (True, 5, None, "single"),
+        (True, 3, "incorrect_arguments", "single"),
+        (True, None, "response_timeout", "single"),
+        (True, 5, None, "reopen"),
+        (True, 5, "split_turn", "split"),
+    ],
+)
+def test_five_minute_timer_cli_scores_each_attempt(monkeypatch, tmp_path, spoken, minutes, reason, sequence):
+    class Socket:
+        def __init__(self):
+            self.events = []
+            self.incoming = asyncio.Queue()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def send(self, raw):
+            event = json.loads(raw)
+            self.events.append(event)
+            kind = event["type"]
+            if kind == "input_audio_buffer.append" and any(base64.b64decode(event["audio"])):
+                return
+            if kind not in {"input_audio_buffer.append", "response.create"} or minutes is None:
+                return
+            output = []
+            if not any(e.get("item", {}).get("type") == "function_call_output" for e in self.events):
+                output.append(
+                    {
+                        "type": "function_call",
+                        "name": "set_timer",
+                        "call_id": "timer-call",
+                        "arguments": json.dumps({"minutes": minutes, "label": "tea"}),
+                    }
+                )
+            if spoken and output:
+                self.incoming.put_nowait({"type": "input_audio_buffer.speech_started", "item_id": "first"})
+                if sequence == "reopen":
+                    self.incoming.put_nowait({"type": "input_audio_buffer.speech_started", "item_id": "reopened"})
+                self.incoming.put_nowait({"type": "response.created", "response": {"id": "initial"}})
+            self.incoming.put_nowait({"type": "response.done", "response": {"status": "completed", "output": output}})
+            if spoken and output and sequence == "split":
+                self.incoming.put_nowait({"type": "input_audio_buffer.speech_started", "item_id": "second"})
+                self.incoming.put_nowait({"type": "response.created", "response": {"id": "second-auto"}})
+                self.incoming.put_nowait({"type": "response.done", "response": {"status": "completed", "output": []}})
+
+        async def recv(self):
+            return json.dumps(await self.incoming.get())
+
+    socket = Socket()
+    monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(connect=lambda *a, **kw: socket))
+    monkeypatch.setattr(runner, "AUDIO_TRAILING_MS", 20)
+    monkeypatch.setattr(runner, "RESPONSE_TIMEOUT_S", 0.25)
+    report_path = tmp_path / "report.json"
+    argv = ["run", "--set", "five-minute-timer", "--reps", "1", "--out", str(report_path)]
+    if spoken:
+        recording = tmp_path / "timer.wav"
+        with wave.open(str(recording), "wb") as wav:
+            wav.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+            wav.writeframes(b"\x00\x40" * 480)
+        argv += ["--audio-file", str(recording)]
+
+    assert main(argv) == 0
+    report = json.loads(report_path.read_text())
+    assert report["input_mode"] == ("audio" if spoken else "text")
+    assert bool(report.get("input_pcm_sha256")) == spoken
+    assert report["summary"]["timer_trials"] == 1
+    assert report["summary"]["timer_success"] == int(reason is None)
+    row = report["results"][0]
+    assert row["outcome"]["passed"] is (reason is None)
+    assert row["outcome"].get("reason") == reason
+
+    [turn] = row["turns"]
+    assert turn["ask"] == "Can you start a five minute timer for the tea?"
+    assert turn["expected_arguments"] == {"minutes": 5}
+    events = socket.events
+    assert events[0]["type"] == "session.update"
+    input_config = events[0]["session"]["audio"]["input"]
+    if spoken:
+        assert input_config["turn_detection"]["create_response"] is True
+        assert [e["type"] for e in events[1:3]] == ["input_audio_buffer.append"] * 2
+        assert base64.b64decode(events[1]["audio"]) == b"\xff\x3f" * 480
+        assert base64.b64decode(events[2]["audio"]) == bytes(960)
+    else:
+        assert input_config["turn_detection"] is None
+        assert events[1]["item"]["content"] == [{"type": "input_text", "text": turn["ask"]}]
+        assert events[2]["type"] == "response.create"
+    if minutes is None:
+        assert len(events) == 3
+        assert turn["rounds"] == []
+    else:
+        assert turn["rounds"][0]["calls"] == ["set_timer"]
+        assert json.loads(turn["rounds"][0]["arguments"][0]) == {"minutes": minutes, "label": "tea"}
+        assert events[3]["item"]["call_id"] == "timer-call"
+        assert events[4] == {"type": "response.create"}
+        if sequence == "split":
+            assert turn["failure"] == "split_turn"
+            assert len(turn["rounds"]) == 1

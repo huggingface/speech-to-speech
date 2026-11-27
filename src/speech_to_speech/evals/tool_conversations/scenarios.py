@@ -112,6 +112,9 @@ CONVERSATIONS: tuple[Conversation, ...] = (
     ),
 )
 
+FIVE_MINUTE_TIMER = (Turn("Can you start a five minute timer for the tea?", "set_timer", {"minutes": 5}),)
+
+
 # Opening requests only: the first call of a conversation, with no history to learn from.
 FIRST_TURNS: tuple[Conversation, ...] = tuple(
     (turn,)
@@ -126,7 +129,7 @@ FIRST_TURNS: tuple[Conversation, ...] = tuple(
         Turn("What time is it in Tokyo?", "get_time", {"city": "Tokyo"}),
         Turn("What's the time in New York right now?", "get_time", {"city": "New York"}),
         Turn("Set a 10 minute timer for the eggs.", "set_timer", {"minutes": 10}),
-        Turn("Can you start a five minute timer for the tea?", "set_timer", {"minutes": 5}),
+        FIVE_MINUTE_TIMER[0],
         Turn("Take a look, what am I holding?", "take_picture"),
         Turn("Can you see what's on my desk?", "take_picture"),
         Turn("What color is my shirt?", "take_picture"),
@@ -146,4 +149,5 @@ FIRST_TURNS: tuple[Conversation, ...] = tuple(
 SCENARIO_SETS: dict[str, tuple[Conversation, ...]] = {
     "conversations": CONVERSATIONS,
     "first-turns": FIRST_TURNS,
+    "five-minute-timer": (FIVE_MINUTE_TIMER,),
 }
