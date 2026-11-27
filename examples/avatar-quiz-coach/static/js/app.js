@@ -63,6 +63,8 @@ const S = {
   /** @type {RealtimeVoice | null} */ fillersFor: null,
   /** Grader tool calls not yet answered. */
   toolsPending: 0,
+  /** The server lost the quiz (it restarted): going back to the lobby. */
+  expiring: false,
   /** Seconds of audio received per response id, and ids whose audio is complete. */
   lineAudio: new Map(),
   lineDone: new Set(),
@@ -322,6 +324,32 @@ function setPhase(phase) {
   $("#hud").hidden = phase !== "quiz" && phase !== "results";
   $("#panel").scrollTop = 0;
 }
+
+const RESET_LINE = "Sorry, I lost our place because the app just restarted. Pick the topic again and we'll start fresh.";
+
+/**
+ * The server no longer knows this quiz: it restarted (an update, a crash) and
+ * quizzes live in its memory. Let the coach finish saying so, then go back to
+ * the lobby with a note, instead of failing on every answer.
+ */
+async function quizExpired() {
+  if (S.expiring || !S.game) return;
+  S.expiring = true;
+  const run = S.runId;
+  try {
+    const started = performance.now();
+    await sleep(1200);
+    while (performance.now() - started < 12000 && (S.coachTalking || S.voice?.replying || S.avatar?.playing)) await sleep(200);
+    if (S.runId !== run) return;
+    backToLobby();
+    toast("The app restarted, so your quiz was reset. Pick a topic to start again.", "info");
+  } finally {
+    S.expiring = false;
+  }
+}
+
+/** @param {unknown} err */
+const isExpired = (err) => /** @type {any} */ (err)?.status === 404;
 
 function backToLobby() {
   S.runId++;
@@ -1111,6 +1139,7 @@ function submitTurn(text, intent) {
   }
   S.turnChain = S.turnChain.then(() => doTurn(text, intent)).catch((err) => {
     console.error(err);
+    if (isExpired(err)) return quizExpired();
     toast(err.message || "Something went wrong.");
     setMicIdle();
   });
@@ -1157,6 +1186,7 @@ async function retractCheck() {
     }
   } catch (err) {
     console.warn("[voice] retract failed", err);
+    if (isExpired(err)) quizExpired();
   }
 }
 const TOOL_INTENTS = { check_answer: null, give_hint: "hint", skip_question: "skip", end_quiz: "stop" };
@@ -1207,6 +1237,11 @@ function runTool(call) {
       try {
         out = await postJson(`api/game/${game.game_id}/turn`, { transcript, intent });
       } catch (err) {
+        if (isExpired(err)) {
+          voice.sendToolOutput(call.callId, JSON.stringify({ error: "The quiz was reset because the app restarted.", next: `Say exactly: "${RESET_LINE}" Then stop.` }));
+          quizExpired();
+          return;
+        }
         voice.sendToolOutput(call.callId, JSON.stringify({ error: "The grader is unavailable.", next: "Ask them to say their answer again." }));
         throw err;
       } finally {
@@ -1532,7 +1567,7 @@ function countUp(el, target) {
 async function postJson(url, body) {
   const resp = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw new Error(data.detail || `Request failed (${resp.status})`);
+  if (!resp.ok) throw Object.assign(new Error(data.detail || `Request failed (${resp.status})`), { status: resp.status });
   return data;
 }
 
