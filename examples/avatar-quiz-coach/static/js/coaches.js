@@ -7,6 +7,9 @@
  * - Ada: a photoreal Gaussian-splat head ("Nyx", from LAM output, MIT, via
  *   @myned-ai/avatar-chat-widget) drawn by @myned-ai/gsplat-flame-avatar-renderer
  *   and driven with ARKit blendshapes; head and shoulders only.
+ * - Reachy: Pollen Robotics' Reachy Mini (Apache-2.0 model and rig), talking
+ *   with its head and antennas and reacting with emotions recorded on the
+ *   real robot.
  *
  * `lipGain` / `jawGain` say how strongly a rig's mouth shapes read.
  */
@@ -37,11 +40,21 @@ export const COACHES = {
     asset: "static/avatars/nyx.zip",
     camera: { y: 1.72, z: 0.64, pitchDeg: -6 },
   },
+  reachy: {
+    name: "Reachy",
+    voice: "en-arthur_m",
+    renderer: "reachy",
+    lipGain: 1,
+    jawGain: 1,
+    asset: "static/avatars/reachy_mini.glb",
+    moves: "static/avatars/reachy-moves.json",
+    camera: { focusY: 0.45, frameH: 4.9, frameW: 3.6 },
+  },
 };
 
 /** @param {string} key */
 export function coachFor(key) {
-  return /** @type {typeof COACHES.max | typeof COACHES.ada} */ (
+  return /** @type {typeof COACHES.max | typeof COACHES.ada | typeof COACHES.reachy} */ (
     COACHES[/** @type {keyof typeof COACHES} */ (key)] || COACHES.max
   );
 }

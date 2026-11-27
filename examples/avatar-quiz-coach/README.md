@@ -14,7 +14,7 @@ short_description: An avatar coach that researches any topic and quizzes you alo
 # Viva: a voice quiz coach with a talking avatar
 
 Pick a topic, or type your own (“RLHF vs DPO”, “the French Revolution, focus
-on the Terror”). Your coach (Max or Ada) reads up on it, then quizzes you out
+on the Terror”). Your coach (Max, Ada or Reachy) reads up on it, then quizzes you out
 loud. You answer in your own words. A wrong answer or “I don't know” gets a
 clue, not the answer: up to three tries, each clue more specific, and the
 answer is explained only after the last try or when you say “skip”. Streaks,
@@ -67,12 +67,16 @@ mic ─▶ speech-to-speech backend: VAD + STT ─▶ LLM (the coach) ─▶ TTS
   out the reopen grace), so it is often done when the coach calls for it. A check rejects clues that
   contain answer phrases the student hasn't said yet. Points, streaks and badges
   are computed with plain rules in `coach/game.py`.
-- **Face**: a [TalkingHead](https://github.com/met4citizen/TalkingHead) avatar (Max)
-  or a photoreal Gaussian-splat head (Ada).
+- **Face**: a [TalkingHead](https://github.com/met4citizen/TalkingHead) avatar (Max),
+  a photoreal Gaussian-splat head (Ada) or Pollen Robotics'
+  [Reachy Mini](https://github.com/pollen-robotics/reachy_mini) (Reachy).
   When the backend runs with `--enable_visemes`, its phoneme-based visemes drive
   the mouth, merged into held, blended shapes and scheduled against the audio
   player; otherwise [HeadAudio](https://github.com/met4citizen/HeadAudio)
-  derives visemes from the audio in the browser.
+  derives visemes from the audio in the browser. Reachy Mini has no mouth, so
+  the same timing moves its head, as the real robot does when it talks: it
+  rises on vowels and settles on closures, and the antennas flick on
+  syllables. Its reactions are emotions recorded on the real robot.
 
 ## Run locally
 
@@ -83,6 +87,8 @@ From this folder, with a speech-to-speech server on port 8765
 npm ci
 curl -L -o static/avatars/avatarsdk.glb https://raw.githubusercontent.com/met4citizen/TalkingHead/1563de184c19b310de4b636664d5835e2c74dbba/avatars/avatarsdk.glb
 curl -L -o static/avatars/nyx.zip https://cdn.jsdelivr.net/npm/@myned-ai/avatar-chat-widget@1.15.0/public/asset/nyx.zip
+curl -L -o static/avatars/reachy_mini.glb https://raw.githubusercontent.com/andimarafioti/agentic-days-keynote/a663a678fc03b69a6b920d089f4a9bdfef10d3db/assets/reachy_mini_viz.glb
+python scripts/bake_reachy_moves.py
 pip install -r requirements.txt
 HF_TOKEN=hf_... SPEECH_TO_SPEECH_URL=ws://localhost:8765/v1/realtime uvicorn server:app --port 7860
 ```
@@ -101,7 +107,10 @@ HF_TOKEN=hf_... uvicorn server:app --port 7860
 Open http://localhost:7860. Add `?fakemic=1` to test without a microphone
 (`vivaFakeMic.play(url)` in the console speaks an audio file into it).
 `python -m pytest tests` runs the scoring tests; `python scripts/bake_packs.py`
-regenerates the featured topics.
+regenerates the featured topics. http://localhost:7860/static/lab.html?coach=reachy
+drives a coach without a voice session: it speaks the clips in `static/_test`
+(any 24 kHz mono WAVs) through the same calls as the backend and fires the
+reactions.
 
 ## Configuration
 
@@ -114,7 +123,7 @@ regenerates the featured topics.
 | `SESSION_PROXY_URL` | Or piggyback another deployment's session API, e.g. `https://smolagents-hf-realtime-voice.hf.space/api` |
 | `GRADER_BASE_URL`, `GRADER_MODEL` | Grade on the speech backend's own model through any OpenAI-compatible endpoint (e.g. the deployment's Gemma 4 31B); `GRADER_REASONING_EFFORT` (default `none`) and `GRADER_API_KEY` (default `HF_TOKEN`) go with it. The hosted chain below stays as fallback. |
 | `GRADER_MODELS`, `WRITER_MODELS` | Comma-separated Inference Providers fallback chains (defaults: Qwen3.8-27B on Cerebras with reasoning off for grading, GLM-5.3 for writing; `model@effort` sets a model's reasoning effort) |
-| `COACH_VOICE` | Overrides the TTS voice (by default Max uses `en-arthur_m` and Ada `en-maya_f`, voices of the hosted stack; a Qwen3-TTS CustomVoice backend needs e.g. `Aiden` / `Serena`) |
+| `COACH_VOICE` | Overrides the TTS voice (by default Max and Reachy use `en-arthur_m` and Ada `en-maya_f`, voices of the hosted stack; a Qwen3-TTS CustomVoice backend needs e.g. `Aiden` / `Serena`) |
 | `SERPER_API_KEY` | Adds Google results to research |
 | `LOG_TURNS` | `1` logs each graded turn (the student's words and the grader's decision) for debugging |
 | `GITHUB_TOKEN` | Optional, for reading GitHub repositories past the anonymous API limit (60 requests an hour per IP) |
@@ -126,5 +135,15 @@ non-commercial use). Ada is "Nyx", a photoreal Gaussian-splat head made with
 [LAM](https://github.com/aigc3d/LAM) and shipped (MIT) with
 [avatar-chat-widget](https://github.com/myned-ai/avatar-chat-widget); it is drawn by
 [gsplat-flame-avatar-renderer](https://github.com/myned-ai/gsplat-flame-avatar-renderer)
-and driven with ARKit blendshapes, head and shoulders only. The Docker build
-downloads both from pinned, checksummed URLs.
+and driven with ARKit blendshapes, head and shoulders only. Reachy is
+[Reachy Mini](https://github.com/pollen-robotics/reachy_mini), Pollen Robotics'
+open-source desk robot: the model is from
+[reachy_mini_blender](https://github.com/pollen-robotics/reachy_mini_blender)
+(Apache-2.0, by Clément Plays; the 1.3 MB Draco export from Fabien Danieau's
+[Reachy Mini talk](https://github.com/FabienDanieau/reachy_mini_intro)), posed by
+the rig from Pollen's
+[reachy-mini-yo-its-your-boy](https://huggingface.co/spaces/pollen-robotics/reachy-mini-yo-its-your-boy)
+Space (Apache-2.0, `static/js/reachy-rig.js`), and its reactions come from the
+[emotions library](https://huggingface.co/datasets/pollen-robotics/reachy-mini-emotions-library)
+(Apache-2.0). The Docker build downloads the models from pinned, checksummed
+URLs and bakes the emotions.
