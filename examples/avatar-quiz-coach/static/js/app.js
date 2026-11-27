@@ -140,9 +140,20 @@ function setupUi() {
     });
   });
   $("#btn-signin").hidden = !S.cfg.oauth || !!S.cfg.user;
+  if (S.cfg.loginUrl) /** @type {HTMLAnchorElement} */ ($("#btn-signin")).href = S.cfg.loginUrl;
   const nameInput = /** @type {HTMLInputElement} */ ($("#player-name"));
   if (S.cfg.user) {
     $("#name-field").innerHTML = `<span>Playing as</span><span class="verified">@${escapeHtml(S.cfg.user)} ✓</span>`;
+    const account = $("#account");
+    const pic = S.cfg.avatar
+      ? `<img class="account-avatar" src="${escapeHtml(S.cfg.avatar)}" alt="">`
+      : `<span class="account-avatar">${escapeHtml(S.cfg.user[0].toUpperCase())}</span>`;
+    account.innerHTML = `${pic}<span class="account-name">${escapeHtml(S.cfg.user)}</span>${
+      S.cfg.logoutUrl ? `<a class="account-out" href="${escapeHtml(S.cfg.logoutUrl)}">Sign out</a>` : ""
+    }`;
+    account.hidden = false;
+  } else if (S.cfg.loginRequired) {
+    $("#name-field").innerHTML = `<a class="signin-cta" href="${escapeHtml(S.cfg.loginUrl || "oauth/huggingface/login")}">🤗 Sign in with Hugging Face to play</a>`;
   } else {
     nameInput.value = store.get("name");
     nameInput.addEventListener("change", () => store.set("name", nameInput.value.trim()));
@@ -298,7 +309,7 @@ async function refreshBoardDialog() {
 }
 
 function playerName() {
-  return S.cfg.user || /** @type {HTMLInputElement} */ ($("#player-name")).value.trim() || store.get("name");
+  return S.cfg.user || /** @type {HTMLInputElement | null} */ ($("#player-name"))?.value.trim() || store.get("name");
 }
 
 // ── Phases ───────────────────────────────────────────────────────────────
@@ -330,6 +341,11 @@ function backToLobby() {
  * @param {{ topic?: string, difficulty?: string, packId?: string, title?: string, emoji?: string, questionIds?: number[] }} opts
  */
 async function startRun(opts) {
+  if (S.cfg.loginRequired && !S.cfg.user) {
+    toast(`Sign in with Hugging Face (top right) to play with ${S.coach.name}.`, "info");
+    $("#btn-signin").classList.add("pulse");
+    return;
+  }
   const run = ++S.runId;
   S.avatar?.resume(); // inside the click: unlocks audio on iOS/Safari
   S.game = null;

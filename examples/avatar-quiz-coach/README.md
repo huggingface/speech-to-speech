@@ -135,8 +135,15 @@ reactions.
 | `SERPER_API_KEY` | Adds Google results to research |
 | `LOG_TURNS` | `1` logs each graded turn (the student's words and the grader's decision) for debugging |
 | `GITHUB_TOKEN` | Optional, for reading GitHub repositories past the anonymous API limit (60 requests an hour per IP) |
-| `LEADERBOARD_REPO` | Dataset repo that mirrors the leaderboard so it survives restarts |
+| `DATA_DIR` | Where the leaderboard and researched topics are kept (default `/data` when it exists, else `./data`) |
 | `RESEARCH_PER_HOUR` | New topics per visitor per hour (default 8) |
+
+On a Space (`hf_oauth: true` above), visitors sign in with Hugging Face. Their
+own token opens the voice session on the load balancer, which bills and
+rate-limits each user, so talking and researching a new topic need a sign-in.
+Mount a private storage bucket at `/data` (a Space volume) so the leaderboard
+and researched topics survive restarts, and set `LOAD_BALANCER_URL` and
+`HF_TOKEN` as secrets.
 
 Max is TalkingHead's [Avatar SDK](https://avatarsdk.com) sample (free for
 non-commercial use). Ada is "Nyx", a photoreal Gaussian-splat head made with

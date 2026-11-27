@@ -1,64 +1,28 @@
-"""Leaderboard stored as JSON lines, optionally mirrored to a Hub dataset.
+"""Leaderboard stored as JSON lines in ``<DATA_DIR>/leaderboard/leaderboard.jsonl``.
 
-Locally (and on a Space with persistent storage) entries live in
-``<DATA_DIR>/leaderboard.jsonl``. When ``LEADERBOARD_REPO`` names a dataset and
-``HF_TOKEN`` can write to it, the file is restored from the dataset at startup
-and pushed back by a ``CommitScheduler`` every few minutes, so scores survive
-Space restarts without paid storage.
+On the Space, ``DATA_DIR`` is ``/data``: a private Hugging Face storage bucket
+mounted read-write into the container, so scores survive restarts and rebuilds.
 """
 
 from __future__ import annotations
 
 import json
-import logging
 import os
 import threading
 import time
 from typing import Any
-
-logger = logging.getLogger(__name__)
 
 FILENAME = "leaderboard.jsonl"
 WEEK_S = 7 * 24 * 3600
 
 
 class Leaderboard:
-    def __init__(self, data_dir: str, repo_id: str = "", token: str = "") -> None:
+    def __init__(self, data_dir: str) -> None:
         self._dir = os.path.join(data_dir, "leaderboard")
         os.makedirs(self._dir, exist_ok=True)
         self._path = os.path.join(self._dir, FILENAME)
         self._lock = threading.Lock()
-        self._scheduler = None
-        if repo_id and token:
-            self._restore(repo_id, token)
-            try:
-                from huggingface_hub import CommitScheduler
-
-                self._scheduler = CommitScheduler(
-                    repo_id=repo_id,
-                    repo_type="dataset",
-                    folder_path=self._dir,
-                    path_in_repo="data",
-                    every=5,
-                    token=token,
-                    private=True,
-                )
-            except Exception as exc:  # Hub sync is best effort
-                logger.warning("leaderboard sync disabled: %s", exc)
         self._entries = self._load()
-
-    def _restore(self, repo_id: str, token: str) -> None:
-        if os.path.exists(self._path):
-            return
-        try:
-            from huggingface_hub import hf_hub_download
-
-            src = hf_hub_download(repo_id, f"data/{FILENAME}", repo_type="dataset", token=token)
-            with open(src, encoding="utf-8") as fh, open(self._path, "w", encoding="utf-8") as out:
-                out.write(fh.read())
-            logger.info("restored leaderboard from %s", repo_id)
-        except Exception as exc:
-            logger.info("no leaderboard to restore from %s (%s)", repo_id, exc)
 
     def _load(self) -> list[dict[str, Any]]:
         entries = []
@@ -73,8 +37,7 @@ class Leaderboard:
 
     def add(self, entry: dict[str, Any]) -> dict[str, Any]:
         entry = {**entry, "ts": entry.get("ts", time.time())}
-        lock = self._scheduler.lock if self._scheduler is not None else self._lock
-        with lock:
+        with self._lock:
             with open(self._path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
         self._entries.append(entry)

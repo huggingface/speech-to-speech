@@ -22,6 +22,7 @@ import os
 import re
 import time
 from collections import defaultdict, deque
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +54,11 @@ LB_HF_TOKEN = os.environ.get("LB_HF_TOKEN", "").strip()
 # token: stands in for the signed-in visitor's OAuth token. Never set it on a
 # public deployment, or every visitor is billed to this account.
 LB_USER_TOKEN = os.environ.get("LB_USER_TOKEN", "").strip()
+# Hugging Face sets SPACE_ID ("owner/name") in every Space.
+SPACE_ID = os.environ.get("SPACE_ID", "").strip()
+_LB_USER_TOKEN_ON_SPACE = bool(LB_USER_TOKEN and SPACE_ID)
+if _LB_USER_TOKEN_ON_SPACE:
+    LB_USER_TOKEN = ""
 RESEARCH_PER_HOUR = int(os.environ.get("RESEARCH_PER_HOUR", "8"))
 # Empty: each coach uses its own voice (Max: Aiden, Ada: Serena; see static/js/avatar.js).
 VOICE = os.environ.get("COACH_VOICE", "").strip()
@@ -60,8 +66,14 @@ VOICE = os.environ.get("COACH_VOICE", "").strip()
 LOG_TURNS = os.environ.get("LOG_TURNS", "") == "1"
 
 app = FastAPI(title="Viva quiz coach")
+if _LB_USER_TOKEN_ON_SPACE:
+    logger.warning("LB_USER_TOKEN is ignored on a Space: every visitor would be billed to that account.")
 
 # ── Optional Hugging Face sign-in (Spaces with `hf_oauth: true`) ─────────────
+#
+# On a Space, the visitor's OAuth token opens their voice session on the load
+# balancer (it bills and rate-limits per user), so talking and researching new
+# topics need a sign-in. Locally there is no OAuth and nothing is gated.
 
 OAUTH = False
 if os.environ.get("OAUTH_CLIENT_ID"):
@@ -73,6 +85,11 @@ if os.environ.get("OAUTH_CLIENT_ID"):
     except Exception as exc:  # pragma: no cover - depends on the Space runtime
         logger.warning("HF OAuth unavailable: %s", exc)
 
+# Relative, so they also work when the Space is served under a path prefix.
+LOGIN_URL = "oauth/huggingface/login"
+LOGOUT_URL = "oauth/huggingface/logout"
+_EXPIRY_SKEW = timedelta(seconds=30)
+
 
 def _oauth(request: Request) -> Any:
     if not OAUTH:
@@ -83,16 +100,48 @@ def _oauth(request: Request) -> Any:
         return None
 
 
-def _username(request: Request) -> str | None:
+def _expired(info: Any) -> bool:
+    expires = getattr(info, "access_token_expires_at", None)
+    if expires is None:  # older huggingface_hub: let the upstream check it
+        return False
+    if not isinstance(expires, datetime):
+        return True
+    if expires.tzinfo is None:
+        expires = expires.astimezone(timezone.utc)
+    return expires <= datetime.now(timezone.utc) + _EXPIRY_SKEW
+
+
+def _signed_in(request: Request) -> Any:
+    """The visitor's OAuth info while their token is still valid, else None."""
     info = _oauth(request)
-    user = getattr(info, "user_info", None)
+    if info is None or not getattr(info, "user_info", None) or not getattr(info, "access_token", None):
+        return None
+    return None if _expired(info) else info
+
+
+def _username(request: Request) -> str | None:
+    user = getattr(_signed_in(request), "user_info", None)
     name = getattr(user, "preferred_username", None) if user else None
     return str(name) if name else None
 
 
+def _avatar(request: Request) -> str | None:
+    user = getattr(_signed_in(request), "user_info", None)
+    picture = getattr(user, "picture", None) if user else None
+    return str(picture) if picture else None
+
+
 def _access_token(request: Request) -> str | None:
-    token = getattr(_oauth(request), "access_token", None)
+    token = getattr(_signed_in(request), "access_token", None)
     return str(token) if token else None
+
+
+def _login_required(request: Request) -> bool:
+    return OAUTH and _access_token(request) is None
+
+
+def _login_response(reason: str = "login_required") -> JSONResponse:
+    return JSONResponse({"reason": reason, "loginUrl": LOGIN_URL}, status_code=401)
 
 
 # ── State ───────────────────────────────────────────────────────────────────
@@ -103,9 +152,7 @@ GENERATED_DIR = DATA_DIR / "packs"
 GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 PACKS.update(research.load_packs(str(GENERATED_DIR)))
 GAMES = game_mod.GameStore()
-BOARD = Leaderboard(
-    str(DATA_DIR), os.environ.get("LEADERBOARD_REPO", "").strip(), os.environ.get("HF_TOKEN", "").strip()
-)
+BOARD = Leaderboard(str(DATA_DIR))
 _research_log: dict[str, deque[float]] = defaultdict(deque)
 
 
@@ -164,6 +211,10 @@ def config(request: Request) -> dict[str, Any]:
         "voice": VOICE,
         "oauth": OAUTH,
         "user": _username(request),
+        "avatar": _avatar(request),
+        "loginRequired": OAUTH,
+        "loginUrl": LOGIN_URL if OAUTH else None,
+        "logoutUrl": LOGOUT_URL if OAUTH else None,
         "llmReady": bool(llm.api_token()),
     }
 
@@ -201,6 +252,8 @@ def _relay(resp: httpx.Response) -> JSONResponse:
         body = resp.json()
     except ValueError:
         body = {"error": resp.text[:200]}
+    if resp.status_code == 401 and OAUTH and isinstance(body, dict):
+        body = {"reason": body.get("reason", "login_required"), "loginUrl": LOGIN_URL}
     out = JSONResponse(body, status_code=resp.status_code)
     if SESSION_PROXY_URL:
         for raw in resp.headers.get_list("set-cookie"):
@@ -212,6 +265,8 @@ def _relay(resp: httpx.Response) -> JSONResponse:
 @app.post("/api/session")
 async def session(request: Request) -> JSONResponse:
     base, headers = _upstream()
+    if _login_required(request):
+        return _login_response()
     try:
         async with httpx.AsyncClient(timeout=20.0) as http:
             resp = await http.post(f"{base}/session", headers=_upstream_headers(request, headers), content="{}")
@@ -224,6 +279,8 @@ async def session(request: Request) -> JSONResponse:
 @app.get("/api/queue/{queue_id}")
 async def queue_status(queue_id: str, request: Request) -> JSONResponse:
     base, headers = _upstream()
+    if _login_required(request):
+        return _login_response()
     async with httpx.AsyncClient(timeout=20.0) as http:
         resp = await http.get(f"{base}/queue/{queue_id}", headers=_upstream_headers(request, headers))
     return _relay(resp)
@@ -281,6 +338,11 @@ async def research_topic(req: ResearchRequest, request: Request) -> StreamingRes
         if cached:
             yield _sse({"type": "status", "stage": "write", "message": "I've studied this one before"})
             yield _sse({"type": "pack", "pack": _client_pack(cached)})
+            return
+        if _login_required(request):
+            yield _sse(
+                {"type": "error", "message": "Sign in with Hugging Face to research a new topic.", "login": True}
+            )
             return
         if not llm.api_token():
             yield _sse(

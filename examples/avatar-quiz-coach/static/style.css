@@ -97,6 +97,21 @@ button, input, select { font: inherit; color: inherit; }
 .brand-tag { color: var(--muted); font-size: 13px; }
 .top-actions { display: flex; gap: 8px; align-items: center; }
 .signin { text-decoration: none; background: rgba(255, 210, 30, 0.14); border-color: rgba(255, 210, 30, 0.35); backdrop-filter: blur(10px); }
+.signin.pulse { animation: signin-pulse 1.2s ease-in-out 3; }
+@keyframes signin-pulse { 50% { box-shadow: 0 0 0 6px rgba(255, 210, 30, 0.35); background: rgba(255, 210, 30, 0.3); } }
+.account {
+  display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px 0 5px; border-radius: 12px;
+  border: 1px solid var(--line); background: rgba(255, 255, 255, 0.06); backdrop-filter: blur(10px); font-size: 13px;
+}
+.account[hidden] { display: none; }
+.account-avatar {
+  width: 28px; height: 28px; border-radius: 50%; object-fit: cover; display: grid; place-items: center;
+  background: rgba(255, 210, 30, 0.25); font-weight: 700;
+}
+.account-name { font-weight: 600; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-out { color: var(--muted); text-decoration: none; margin-left: 2px; }
+.account-out:hover { color: var(--text); }
+.signin-cta { color: var(--text); text-decoration: none; font-size: 14px; font-weight: 600; padding: 8px 12px; border-radius: 11px; background: rgba(255, 210, 30, 0.14); border: 1px solid rgba(255, 210, 30, 0.35); }
 .icon-btn {
   width: 40px; height: 40px; border-radius: 12px;
   border: 1px solid var(--line); background: rgba(255, 255, 255, 0.06);
@@ -439,3 +454,4 @@ code { font-size: 12.5px; background: rgba(255, 255, 255, 0.08); padding: 1px 5p
   .cards { grid-template-columns: 1fr 1fr; }
   .name-field input { width: 130px; }
 }
+@media (max-width: 860px) { .account-name { display: none; } }
