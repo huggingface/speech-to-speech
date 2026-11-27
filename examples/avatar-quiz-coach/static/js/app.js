@@ -12,7 +12,7 @@ import { COACHES } from "./coaches.js";
 import { RealtimeVoice } from "./realtime.js";
 import { confetti } from "./confetti.js";
 
-/** @typedef {import("./avatar.js").Avatar | import("./splat-avatar.js").SplatAvatar | import("./reachy-avatar.js").ReachyAvatar} Avatar */
+/** @typedef {import("./avatar.js").Avatar | import("./splat-avatar.js").SplatAvatar | import("./robot-avatar.js").RobotAvatar} Avatar */
 
 const $ = (/** @type {string} */ sel) => /** @type {HTMLElement} */ (document.querySelector(sel));
 const LEVELS = { 1: ["Easy", "easy"], 2: ["Medium", ""], 3: ["Hard", "hard"] };
@@ -107,8 +107,8 @@ async function boot() {
   // Each coach has its own renderer; load only the one on screen.
   S.avatarReady = (S.coach.renderer === "splat"
     ? import("./splat-avatar.js").then((m) => new m.SplatAvatar($("#avatar"), /** @type {any} */ (S.coach)))
-    : S.coach.renderer === "reachy"
-      ? import("./reachy-avatar.js").then((m) => new m.ReachyAvatar($("#avatar"), /** @type {any} */ (S.coach)))
+    : S.coach.renderer === "robot"
+      ? import("./robot-avatar.js").then((m) => new m.RobotAvatar($("#avatar"), /** @type {any} */ (S.coach)))
       : import("./avatar.js").then((m) => new m.Avatar($("#avatar"), /** @type {any} */ (S.coach)))
   )
     .then((avatar) => {

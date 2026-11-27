@@ -1,28 +1,29 @@
 // @ts-check
 /**
- * Reachy Mini as the coach: Pollen Robotics' open-source desk robot, drawn
- * from its Blender model with the Space rig (reachy-rig.js), which poses the
- * head on its Stewart platform, the antennas and the body like the SDK does.
+ * Pollen Robotics' robots as coaches: Reachy Mini, Reachy 2 and Microduck.
+ * Each robot's model and joints live in robot-bodies.js; this file gives them
+ * a voice, speech motion and reactions, all expressed as one head pose in
+ * Reachy Mini's SDK frame (head position and orientation, two antennas and
+ * the body's yaw) that each body maps onto its own joints.
  *
- * Reachy Mini has no mouth, so it talks the way the real robot does in its
- * conversation app: the head moves with the speech. The syllables come from
- * the same lip-sync timing as the other coaches (server visemes or
- * HeadAudio, see face-driver.js): open vowels lift the head a few
- * millimetres, lip closures and pauses let it settle, and the antennas
- * flick on stressed syllables. Reactions replay emotions recorded on the
- * real robot (Pollen's emotions library, baked by
- * scripts/bake_reachy_moves.py).
+ * Mouths come from the same lip-sync timing as the other coaches (server
+ * visemes or HeadAudio, see face-driver.js). Reachy Mini and Reachy 2 have
+ * none, so they talk the way the real robots do, with their heads: open
+ * vowels lift the head, lip closures and pauses let it settle, and the
+ * antennas flick on syllables. Microduck opens its beak. Reactions replay
+ * emotions recorded on the real Reachy Mini (Pollen's emotions library, baked
+ * by scripts/bake_reachy_moves.py), on whichever robot is on screen.
  */
 
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
-import { Reachy } from "./reachy-rig.js";
+import { BODIES } from "./robot-bodies.js";
 import { FaceDriver, mouthParams, smooth, wobble } from "./face-driver.js";
 import { Stage } from "./stage.js";
 
 /** @typedef {{ name: string, fps: number, frames: number[][] }} Move */
-/** @typedef {{ p: THREE.Vector3, q: THREE.Quaternion, ant: number[], yaw: number }} Pose */
+/** @typedef {import("./robot-bodies.js").Pose} Pose */
 
 /** Emotions per quiz moment; one is picked at random, avoiding the last one. */
 const REACTION_MOVES = /** @type {Record<string, string[]>} */ ({
@@ -63,14 +64,14 @@ function copyPose(dst, src) {
   return dst;
 }
 
-export class ReachyAvatar extends FaceDriver {
+export class RobotAvatar extends FaceDriver {
   /** @param {HTMLElement} container @param {any} coach */
   constructor(container, coach) {
     super(container, coach);
     /** @type {Stage | null} */
     this.stage = null;
-    /** @type {any} */
-    this.robot = null;
+    /** @type {import("./robot-bodies.js").Body | null} */
+    this.body = null;
     /** @type {Record<string, Move>} */
     this.moves = {};
     /** @type {{ move: Move, t: number, from: Pose, rate: number, fadeIn: number } | null} */
@@ -79,12 +80,13 @@ export class ReachyAvatar extends FaceDriver {
     this.pose = newPose();
     this.base = newPose();
     this.movePose = newPose();
-    /** Speech motion state: a springy "jaw" that the head rides on. */
-    this.talk = { lift: 0, v: 0, ant: 0, antV: 0, lastOpen: 0 };
-    // The head's spring trails the syllables by ~90 ms (measured), so the
-    // motion runs that much ahead: server cues are scheduled earlier, and
-    // with HeadAudio the voice waits that much longer.
-    this.leadMs = 90;
+    /** Speech motion: a springy "jaw" the head rides on, and the mouth opening. */
+    this.talk = { lift: 0, v: 0, ant: 0, antV: 0, lastOpen: 0, open: 0 };
+    // Head motion on a spring trails the syllables by ~90 ms (measured), so
+    // it runs that much ahead: server cues are scheduled earlier, and with
+    // HeadAudio the voice waits that much longer. A robot with a real mouth
+    // (Microduck's beak) sets its own lead.
+    this.leadMs = coach.leadMs ?? 90;
     this.headaudioDelay += this.leadMs / 1000;
   }
 
@@ -100,86 +102,27 @@ export class ReachyAvatar extends FaceDriver {
     await this.initAudio();
     const draco = new DRACOLoader().setDecoderPath("vendor/three/examples/jsm/libs/draco/gltf/");
     const loader = new GLTFLoader().setDRACOLoader(draco);
-    const [gltf, moves] = await Promise.all([
-      loader.loadAsync(this.coach.asset, (e) => onProgress?.({ lengthComputable: true, loaded: e.loaded * 0.95, total: e.total || 1 })),
+    const load = BODIES[this.coach.robot];
+    if (!load) throw new Error(`unknown robot ${this.coach.robot}`);
+    const [body, moves] = await Promise.all([
+      load(loader, this.coach, (/** @type {number} */ f) => onProgress?.({ lengthComputable: true, loaded: f * 95, total: 100 })),
       fetch(this.coach.moves)
         .then((r) => (r.ok ? r.json() : { moves: [] }))
         .catch(() => ({ moves: [] })),
     ]);
     for (const m of moves.moves) this.moves[m.name] = m;
     draco.dispose();
-
-    const robot = new Reachy(gltf.scene);
-    this.robot = robot;
-    robot.setPose(this.pose);
-    robot.group.updateWorldMatrix(true, true);
-    this.hideInternals(robot);
-    this.simplifyMaterials(robot);
-    // Scale to ~3 units tall, base on the floor of the frame, facing the camera.
-    const box = new THREE.Box3().setFromObject(robot.group);
-    const s = 3 / (box.max.y - box.min.y);
-    robot.group.scale.setScalar(s);
-    robot.group.position.y = -box.min.y * s - 2.15;
-    const cam = this.coach.camera ?? {};
-    this.stage = new Stage(this.container, { focusY: cam.focusY ?? 0.1, frameH: cam.frameH ?? 2.9, frameW: cam.frameW ?? 2.5, fov: 24 });
-    this.stage.scene.add(robot.group);
-    // A white shell: softer key, more wrap from the sky, so it isn't blown out.
-    this.stage.renderer.toneMappingExposure = 0.82;
-    this.stage.lights.key.intensity = 1.7;
-    this.stage.lights.hemi.intensity = 0.9;
-    this.stage.scene.environmentIntensity = 0.45;
+    this.body = body;
+    const cam = body.camera;
+    this.stage = new Stage(this.container, { focusY: cam.focusY, frameH: cam.frameH, frameW: cam.frameW, fov: 24 });
+    this.stage.scene.add(body.group);
+    body.light?.(this.stage);
     this.stage.updaters.push((dt) => this.update(dt));
     onProgress?.({ lengthComputable: true, loaded: 100, total: 100 });
     // Wake up: from the resting pose (head down, antennas folded) into a hello.
     const sleep = this.moves.sleep;
     if (sleep) this.moveFrame(sleep, 0, this.pose);
     this.playFor("hello", 1.4);
-  }
-
-  /**
-   * The model is the full CAD assembly. The motors inside the body and the
-   * electronics inside the closed head can never be seen (only the lenses,
-   * what sits right behind them and the camera between them show through
-   * the face), and they are most of its 460 draws and 260k triangles.
-   * @param {any} robot
-   */
-  hideInternals(robot) {
-    const box = new THREE.Box3();
-    const lenses = robot.meshes.filter((/** @type {any} */ m) => m.material?.name === "Glass_Eyes");
-    const centers = lenses.map((/** @type {any} */ l) => box.setFromObject(l).getCenter(new THREE.Vector3()));
-    const gap = centers.length === 2 ? centers[0].distanceTo(centers[1]) : 0;
-    // The camera bridge between the eyes shows too.
-    if (gap) centers.push(centers[0].clone().lerp(centers[1], 0.5));
-    /** @type {any[]} */
-    this.hidden = [];
-    const c = new THREE.Vector3();
-    for (const p of robot.parts) {
-      const m = p.node;
-      if (!m.isMesh || lenses.includes(m)) continue;
-      let hide = p.id === "motors";
-      if (p.id === "headCore" && gap) {
-        box.setFromObject(m).getCenter(c);
-        hide = Math.min(...centers.map((/** @type {THREE.Vector3} */ e) => e.distanceTo(c))) > 0.3 * gap;
-      }
-      if (hide) {
-        m.visible = false;
-        this.hidden.push(m);
-      }
-    }
-  }
-
-  /**
-   * Transmission (the glass eyes) costs an extra render pass a frame: plain
-   * glossy black glass looks the same at this size.
-   * @param {any} robot
-   */
-  simplifyMaterials(robot) {
-    const glass = new THREE.MeshPhysicalMaterial({ color: 0x050508, roughness: 0.05, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.02, envMapIntensity: 1.6 });
-    for (const m of robot.meshes) {
-      const mats = Array.isArray(m.material) ? m.material : [m.material];
-      const out = mats.map((/** @type {any} */ mat) => (mat.transmission > 0 || mat.name === "Glass_Eyes" ? glass : mat));
-      m.material = Array.isArray(m.material) ? out : out[0];
-    }
   }
 
   // ── Moves ───────────────────────────────────────────────────────────────
@@ -236,8 +179,8 @@ export class ReachyAvatar extends FaceDriver {
     this.base.ant = [-0.18 + idleAnt, 0.18 + idleAnt * 0.8];
     this.base.yaw = H.yaw * 0.6 + 0.04 * wobble(t * 0.5, 5);
 
-    // Recorded move on top, faded in over 0.35 s from wherever the robot
-    // was, and out over its last 0.5 s.
+    // Recorded move on top, faded in from wherever the robot was, and out
+    // over its last 0.5 s.
     const pm = this.playingMove;
     if (pm) {
       pm.t += sdt * pm.rate;
@@ -257,6 +200,7 @@ export class ReachyAvatar extends FaceDriver {
     // pauses; the antennas flick on syllable onsets.
     const m = mouthParams(w);
     const T = this.talk;
+    T.open = m.open;
     const drive = Math.min(1, m.open * 2.6);
     T.v += ((drive - T.lift) * 900 - T.v * 36) * sdt;
     T.lift += T.v * sdt;
@@ -265,13 +209,14 @@ export class ReachyAvatar extends FaceDriver {
     T.antV += (-T.ant * 140 - T.antV * 8 + onset * 160) * sdt;
     T.ant += T.antV * sdt;
     const talkW = Math.min(1, this.energySlow * 1.2);
-    this.pose.p.z += T.lift * 0.009;
-    this.pose.p.x += T.lift * 0.003;
-    _e.set(Math.sin(t * 1.7) * 0.05 * talkW, -T.lift * 0.2 + 0.03 * talkW, Math.sin(t * 0.9) * 0.09 * talkW, "ZYX");
+    const k = this.body?.talkScale ?? 1;
+    this.pose.p.z += T.lift * 0.009 * k;
+    this.pose.p.x += T.lift * 0.003 * k;
+    _e.set(Math.sin(t * 1.7) * 0.05 * talkW, (-T.lift * 0.2 + 0.03 * talkW) * k, Math.sin(t * 0.9) * 0.09 * talkW, "ZYX");
     this.pose.q.multiply(_q.setFromEuler(_e));
     this.pose.ant = [this.pose.ant[0] - T.ant * 0.5, this.pose.ant[1] + T.ant * 0.5];
 
-    this.robot.setPose(this.pose);
+    this.body?.apply(this.pose, T, sdt);
   }
 
   // ── Body language ───────────────────────────────────────────────────────

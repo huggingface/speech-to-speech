@@ -7,9 +7,10 @@
  * - Ada: a photoreal Gaussian-splat head ("Nyx", from LAM output, MIT, via
  *   @myned-ai/avatar-chat-widget) drawn by @myned-ai/gsplat-flame-avatar-renderer
  *   and driven with ARKit blendshapes; head and shoulders only.
- * - Reachy: Pollen Robotics' Reachy Mini (Apache-2.0 model and rig), talking
- *   with its head and antennas and reacting with emotions recorded on the
- *   real robot.
+ * - Reachy Mini, Reachy 2 and Microduck: Pollen Robotics' robots (Apache-2.0
+ *   models), drawn by robot-avatar.js. Reachy Mini and Reachy 2 talk with
+ *   their heads and antennas, Microduck with its beak; all react with
+ *   emotions recorded on the real Reachy Mini.
  *
  * `lipGain` / `jawGain` say how strongly a rig's mouth shapes read.
  */
@@ -41,14 +42,37 @@ export const COACHES = {
     camera: { y: 1.72, z: 0.64, pitchDeg: -6 },
   },
   reachy: {
-    name: "Reachy",
+    name: "Reachy Mini",
     voice: "en-arthur_m",
-    renderer: "reachy",
+    renderer: "robot",
+    robot: "mini",
     lipGain: 1,
     jawGain: 1,
     asset: "static/avatars/reachy_mini.glb",
     moves: "static/avatars/reachy-moves.json",
-    camera: { focusY: 0.45, frameH: 4.9, frameW: 3.6 },
+  },
+  reachy2: {
+    name: "Reachy 2",
+    voice: "en-arthur_m",
+    renderer: "robot",
+    robot: "reachy2",
+    lipGain: 1,
+    jawGain: 1,
+    asset: "static/avatars/reachy2.glb",
+    moves: "static/avatars/reachy-moves.json",
+  },
+  duck: {
+    name: "Microduck",
+    voice: "en-maya_f",
+    renderer: "robot",
+    robot: "duck",
+    lipGain: 1,
+    jawGain: 1,
+    // Its beak follows the mouth shapes without the head's spring, so it
+    // needs less lead (measured).
+    leadMs: 60,
+    asset: "static/avatars/robots/duck",
+    moves: "static/avatars/reachy-moves.json",
   },
 };
 

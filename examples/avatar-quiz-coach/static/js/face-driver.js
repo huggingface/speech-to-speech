@@ -3,7 +3,7 @@
  * The part of a coach that doesn't depend on how it is drawn: it plays the
  * voice, times the mouth to it and decides the face and head pose for each
  * frame. A renderer extends it and draws `frame()` however it likes
- * (reachy-avatar.js turns the mouth into head motion).
+ * (robot-avatar.js turns the mouth into head motion or a beak).
  *
  * Same audio and lip-sync path as the splat coach (splat-avatar.js): the
  * voice plays through TalkingHead's streaming worklet on our own

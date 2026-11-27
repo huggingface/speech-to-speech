@@ -3,5 +3,6 @@ data/
 static/avatars/*.glb
 static/avatars/*.zip
 static/avatars/*.json
+static/avatars/robots/
 __pycache__/
 static/_test/
