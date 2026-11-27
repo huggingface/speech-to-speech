@@ -145,6 +145,22 @@ class AudioHandler(RealtimeBaseHandler):
             pending.transcription = terminal
         pending.input_closed = True
 
+    def force_resolve_input_turn(self, conn_id: str, turn_id: str | None) -> list[ServerEvent]:
+        """Immediately publish and close held input terminals for *turn_id*."""
+        st = self._state(conn_id)
+        events: list[ServerEvent] = []
+        for item_id, pending in list(st.pending_input_terminals.items()):
+            if turn_id is not None and pending.turn_id != turn_id:
+                continue
+            pending.input_closed = True
+            if self._service.speculative_turns is not None and pending.turn_id is not None:
+                self._service.speculative_turns.gate(
+                    pending.turn_id, pending.turn_revision, hold_for_grace=False, commit=True
+                )
+                self._service.speculative_turns.close(pending.turn_id, pending.turn_revision)
+            events.extend(self._publish_input_terminal(conn_id, item_id, pending))
+        return events
+
     def resolve_input_terminals(
         self,
         conn_id: str,
@@ -378,8 +394,20 @@ class AudioHandler(RealtimeBaseHandler):
         # its user item becomes permanent before the new turn opens.
         events: list[ServerEvent] = self.resolve_input_terminals(conn_id, started_turn_id=event.turn_id)
         interrupt_enabled = event.interrupt_response and st.runtime_config.interrupt_response_enabled
+        preserve_key = st.preserve_turn_on_cancel_key
+        st.preserve_turn_on_cancel_key = None
+        keep_turn_open = preserve_key is not None and (
+            st.current_response_key == preserve_key or (preserve_key == "" and st.current_response_key is None)
+        )
         if st.in_response and interrupt_enabled:
-            events.extend(response.finish_response(conn_id, status="cancelled", reason="turn_detected"))
+            events.extend(
+                response.finish_response(
+                    conn_id,
+                    status="cancelled",
+                    reason="turn_detected",
+                    keep_turn_open=keep_turn_open,
+                )
+            )
         if interrupt_enabled:
             response.discard_tool_followup_prefetch(conn_id)
             st.generation_done_tool_calls.clear()

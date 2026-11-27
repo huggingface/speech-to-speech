@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from unicodedata import category
 
 from openai.types.realtime import (
@@ -216,6 +216,7 @@ class ConversationHandler(RealtimeBaseHandler):
         # edit a new item that reuses its id.
         st.assistant_audio_segments.pop(event.item_id, None)
         st.assistant_audio_cuts.pop(event.item_id, None)
+        st.resumed_audio_origins.pop(event.item_id, None)
         self._service.audio._release_input_item_state_by_id(conn_id, event.item_id)
         retained_ids = chat.item_ids() | chat.unheard_assistant_item_ids() | st.input_items.keys()
         st.acknowledged_item_ids = [item_id for item_id in st.acknowledged_item_ids if item_id in retained_ids]
@@ -301,6 +302,24 @@ class ConversationHandler(RealtimeBaseHandler):
             # An empty transcript never enters the chat, but the client was
             # told about the item and its empty completed transcription.
             return self._user_audio_item(item_id, "")
+        if item_id in st.resumed_audio_origins:
+            from speech_to_speech.api.openai_realtime.handlers.response import _heard_transcript
+
+            segments = st.assistant_audio_segments.get(item_id, [])
+            delivered = sum(segment[1] for segment in segments)
+            cut = st.assistant_audio_cuts.get(item_id, delivered)
+            transcript = _heard_transcript(segments, cut)
+            status: Literal["completed", "incomplete"] = (
+                "incomplete" if item_id in st.assistant_audio_cuts else "completed"
+            )
+            return RealtimeConversationItemAssistantMessage(
+                id=item_id,
+                object="realtime.item",
+                type="message",
+                role="assistant",
+                status=status,
+                content=[AssistantContent(type="output_audio", transcript=transcript)],
+            )
         if item_id in st.runtime_config.chat.unheard_assistant_item_ids():
             # A reply nobody heard is kept out of model history, but like a
             # truncation to 0 ms it still exists, with nothing heard.

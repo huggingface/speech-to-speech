@@ -136,6 +136,21 @@ class ModuleArguments(Wav2Vec2STVHandlerArguments):
         default=0.5,
         metadata={"help": "Update interval for live transcription in seconds (default: 0.5s = 500ms)"},
     )
+    min_interruption_words: int = field(
+        default=0,
+        metadata={
+            "help": "Minimum transcribed words required for speech during assistant playback to confirm an interruption. "
+            "Set to 1 to resume playback automatically when STT returns an empty transcript or fails (for example after a cough), "
+            "or higher to also ignore short backchannels in any language. 0 (default) disables false-interruption replay."
+        },
+    )
+    false_interruption_timeout_ms: int = field(
+        default=2000,
+        metadata={
+            "help": "Maximum wait (ms) for STT to settle a potential false interruption before confirming the cancellation. "
+            "Only used when --min_interruption_words > 0. Default is 2000 ms."
+        },
+    )
     enable_llm_proxy: bool = field(
         default=False,
         metadata={

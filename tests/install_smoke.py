@@ -127,6 +127,8 @@ def _validate_package_defaults() -> None:
     assert module_args.log_level == "info"
     assert module_args.enable_live_transcription is True
     assert module_args.live_transcription_update_interval == 0.5
+    assert module_args.min_interruption_words == 0
+    assert module_args.false_interruption_timeout_ms == 2000
     assert responses_api_args.model_name == "gpt-5.6-terra"
     assert responses_api_args.responses_api_stream is True
     assert responses_api_args.responses_api_reasoning_effort == "none"
@@ -147,6 +149,7 @@ def _validate_package_defaults() -> None:
     assert vad_args.min_silence_ms == 64
     assert vad_args.min_speech_ms == 384
     assert vad_args.barge_in_ms == 0
+    assert vad_args.barge_in_min_confident_speech_ms == 0
     assert vad_args.min_speech_continuation_ms == 192
     assert vad_args.realtime_processing_pause == 0.5
     assert vad_args.smart_turn is True

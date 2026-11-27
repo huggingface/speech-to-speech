@@ -176,7 +176,13 @@ class ResponseHandler(RealtimeBaseHandler):
         if line:
             logger.info("%s response_key=%s", line, response_key)
 
-    def _end_response(self, conn_id: str, status: _ResponseStatus = "completed") -> None:
+    def _end_response(
+        self,
+        conn_id: str,
+        status: _ResponseStatus = "completed",
+        *,
+        keep_turn_open: bool = False,
+    ) -> None:
         st = self._state(conn_id)
         completed_response_key = st.current_response_key
         if status == "cancelled":
@@ -197,7 +203,7 @@ class ResponseHandler(RealtimeBaseHandler):
             self._service.total_usage.audio_duration_s,
         )
         st.response_usage.reset()
-        if self._service.speculative_turns is not None:
+        if not keep_turn_open and self._service.speculative_turns is not None:
             self._service.speculative_turns.close(
                 st.current_response_turn_id,
                 st.current_response_turn_revision,
@@ -231,7 +237,15 @@ class ResponseHandler(RealtimeBaseHandler):
         st.current_item_id = None
         st.content_index = 0
         st.in_response = False
-        self._service.close_response_key(conn_id, completed_response_key)
+        st.active_resumed_audio = None
+        if keep_turn_open:
+            # Roll back provisional generation so only the heard prefix remains
+            # in chat, without tombstoning the response key so live LLM/TTS
+            # chunks can still be buffered while STT settles.
+            self._service.history.close(conn_id, completed_response_key)
+            st.clear_pending_response(completed_response_key)
+        else:
+            self._service.close_response_key(conn_id, completed_response_key)
         st.current_response_params = None
         st.pending_assistant_item_id = None
         st.pending_assistant_output_index = None
@@ -1025,6 +1039,7 @@ class ResponseHandler(RealtimeBaseHandler):
                 oldest = next(iter(segments_by_item))
                 del segments_by_item[oldest]
                 st.assistant_audio_cuts.pop(oldest, None)
+                st.resumed_audio_origins.pop(oldest, None)
         return segments
 
     def _record_audio_text(self, conn_id: str, item_id: str, text: str) -> None:
@@ -1140,6 +1155,13 @@ class ResponseHandler(RealtimeBaseHandler):
         # Cuts are measured from the original segments, so a client position
         # replaces an earlier server estimate instead of compounding it.
         st.assistant_audio_cuts[item_id] = played_samples
+        origin = st.resumed_audio_origins.get(item_id)
+        if origin is not None:
+            root_item_id, resume_sample, audio_buf = origin
+            combined_text = _heard_transcript(audio_buf.as_audio_segments(), resume_sample + played_samples)
+            self._update_resumed_root_history(st, root_item_id, combined_text, "incomplete")
+            _log_heard(root_item_id, audio_buf.as_audio_segments(), combined_text, source)
+            return
         text = _heard_transcript(segments, played_samples)
         st.runtime_config.chat.truncate_assistant_message(item_id, text)
         _log_heard(item_id, segments, text, source)
@@ -1215,6 +1237,87 @@ class ResponseHandler(RealtimeBaseHandler):
         )
         return events
 
+    @staticmethod
+    def _update_resumed_root_history(
+        st: ConnState,
+        root_item_id: str,
+        text: str,
+        status: Literal["completed", "incomplete"],
+    ) -> None:
+        if not root_item_id:
+            return
+        if not st.runtime_config.chat.truncate_assistant_message(root_item_id, text, status=status) and text:
+            st.runtime_config.chat.add_heard_assistant_message(root_item_id, text)
+            if status == "completed":
+                st.runtime_config.chat.truncate_assistant_message(root_item_id, text, status="completed")
+
+    def _emit_audio_transcript_delta(self, conn_id: str, resp_id: str, text: str) -> list[ServerEvent]:
+        st = self._state(conn_id)
+        output_idx, item_id = self._output_part_context(conn_id, "text")
+        if st.pending_text_outputs and st.pending_text_outputs[-1]["output_index"] == output_idx:
+            pending = st.pending_text_outputs[-1]
+        else:
+            st.pending_text_outputs.append({"item_id": item_id, "output_index": output_idx, "parts": []})
+            pending = st.pending_text_outputs[-1]
+        events = self._begin_message_output(conn_id, pending, wants_audio=True)
+        parts = pending["parts"]
+        assert isinstance(parts, list)
+        st.pending_assistant_item_id = item_id
+        st.pending_assistant_output_index = output_idx
+        delta = (" " if parts else "") + text
+        parts.append(text)
+        self._record_audio_text(conn_id, item_id, text)
+        events.append(
+            ResponseAudioTranscriptDeltaEvent(
+                type="response.output_audio_transcript.delta",
+                event_id=self._next_event_id(),
+                content_index=0,
+                delta=delta,
+                item_id=item_id,
+                output_index=output_idx,
+                response_id=resp_id,
+            )
+        )
+        self._service.conversation.record_acknowledged_item(conn_id, item_id)
+        return events
+
+    def begin_resumed_audio_response(
+        self,
+        conn_id: str,
+        audio_buf: Any,
+        resume_sample: int,
+    ) -> tuple[str, list[ServerEvent]]:
+        """Open a standard Realtime audio response to replay unplayed audio."""
+        st = self._state(conn_id)
+        st.current_response_id = _generate_id("resp")
+        st.current_response_key = None if audio_buf.generation_done else audio_buf.response_key
+        st.current_response_turn_id = audio_buf.turn_id
+        st.current_response_turn_revision = audio_buf.turn_revision
+        st.next_assistant_output_sequence = audio_buf.next_output_sequence
+        st.in_response = True
+        new_item_id = self._start_item(conn_id)
+        st.active_resumed_audio = (audio_buf.root_item_id, resume_sample, audio_buf)
+        st.resumed_audio_origins[new_item_id] = (audio_buf.root_item_id, resume_sample, audio_buf)
+        while len(st.resumed_audio_origins) > _AUDIO_ITEM_HISTORY:
+            st.resumed_audio_origins.pop(next(iter(st.resumed_audio_origins)))
+        audio_buf.current_item_id = new_item_id
+        audio_buf.wire_start_sample = resume_sample
+        return new_item_id, [
+            ResponseCreatedEvent(
+                type="response.created",
+                event_id=self._next_event_id(),
+                response=self._build_response(conn_id, "in_progress"),
+            )
+        ]
+
+    def emit_resumed_audio_text(self, conn_id: str, text: str) -> list[ServerEvent]:
+        """Emit transcript delta events for a replayed audio segment."""
+        text = text.strip()
+        if not text:
+            return []
+        resp_id, _ = self._ensure_response(conn_id, self._state(conn_id).current_response_key)
+        return self._emit_audio_transcript_delta(conn_id, resp_id, text)
+
     def finish_response(
         self,
         conn_id: str,
@@ -1222,6 +1325,7 @@ class ResponseHandler(RealtimeBaseHandler):
         reason: _StatusReason | None = None,
         *,
         response_key: str | None = None,
+        keep_turn_open: bool = False,
     ) -> list[ServerEvent]:
         """Close the current response (audio/text done + response done).
 
@@ -1239,6 +1343,7 @@ class ResponseHandler(RealtimeBaseHandler):
         if st.in_response:
             # Audio for this item was still streaming; finishing it clears the id.
             open_item_id = st.pending_assistant_item_id
+            resumed = st.active_resumed_audio
             if status == "completed" and st.response_failed:
                 status = "failed"
             elif status == "completed" and st.response_incomplete:
@@ -1291,16 +1396,31 @@ class ResponseHandler(RealtimeBaseHandler):
                 while len(st.answered_tool_call_ids) > TOOL_FOLLOWUP_ACK_LIMIT:
                     st.answered_tool_call_ids.pop(next(iter(st.answered_tool_call_ids)))
             if status == "completed":
-                st.runtime_config.chat.bind_assistant_item_ids(
-                    st.current_response_key,
-                    terminal_response.output or [],
+                if resumed is not None:
+                    root_item_id, _resume_sample, audio_buf = resumed
+                    self._update_resumed_root_history(st, root_item_id, audio_buf.full_text(), "completed")
+                else:
+                    st.runtime_config.chat.bind_assistant_item_ids(
+                        st.current_response_key,
+                        terminal_response.output or [],
+                    )
+                    self._service.history.finalize(conn_id, st.current_response_key)
+            heard = self._heard_output(conn_id, open_item_id) if status == "cancelled" and resumed is None else []
+            resumed_delivered = 0
+            if status == "cancelled" and resumed is not None:
+                resumed_delivered = sum(
+                    sum(segment[1] for segment in st.assistant_audio_segments.get(str(pending["item_id"]), []))
+                    for pending in st.pending_text_outputs
                 )
-                self._service.history.finalize(conn_id, st.current_response_key)
-            heard = self._heard_output(conn_id, open_item_id) if status == "cancelled" else []
             anchor = self._service.history.anchor(conn_id, st.current_response_key)
             # Ending the response closes its key, which rolls back unfinalized
             # history before deferred client items are applied below.
-            self._end_response(conn_id, status)
+            self._end_response(conn_id, status, keep_turn_open=keep_turn_open)
+            if status == "cancelled" and resumed is not None:
+                root_item_id, resume_sample, audio_buf = resumed
+                combined_text = _heard_transcript(audio_buf.as_audio_segments(), resume_sample + resumed_delivered)
+                self._update_resumed_root_history(st, root_item_id, combined_text, "incomplete")
+                _log_heard(root_item_id, audio_buf.as_audio_segments(), combined_text, "audio sent before cancel")
             # Speech already delivered stays in history, cut to its audio; a
             # client truncate or WebRTC playback position can cut it further.
             for item_id, text in heard:
@@ -1415,33 +1535,18 @@ class ResponseHandler(RealtimeBaseHandler):
                 text = part.text.strip() if wants_audio else part.text
                 if not text:
                     continue
-                output_idx, item_id = self._output_part_context(conn_id, "text")
-                if st.pending_text_outputs and st.pending_text_outputs[-1]["output_index"] == output_idx:
-                    pending = st.pending_text_outputs[-1]
-                else:
-                    st.pending_text_outputs.append({"item_id": item_id, "output_index": output_idx, "parts": []})
-                    pending = st.pending_text_outputs[-1]
-                events.extend(self._begin_message_output(conn_id, pending, wants_audio))
-                parts = pending["parts"]
-                assert isinstance(parts, list)
                 if wants_audio:
-                    st.pending_assistant_item_id = item_id
-                    st.pending_assistant_output_index = output_idx
-                    delta = (" " if parts else "") + text
-                    parts.append(text)
-                    self._record_audio_text(conn_id, item_id, text)
-                    events.append(
-                        ResponseAudioTranscriptDeltaEvent(
-                            type="response.output_audio_transcript.delta",
-                            event_id=self._next_event_id(),
-                            content_index=0,
-                            delta=delta,
-                            item_id=item_id,
-                            output_index=output_idx,
-                            response_id=resp_id,
-                        )
-                    )
+                    events.extend(self._emit_audio_transcript_delta(conn_id, resp_id, text))
                 else:
+                    output_idx, item_id = self._output_part_context(conn_id, "text")
+                    if st.pending_text_outputs and st.pending_text_outputs[-1]["output_index"] == output_idx:
+                        pending = st.pending_text_outputs[-1]
+                    else:
+                        st.pending_text_outputs.append({"item_id": item_id, "output_index": output_idx, "parts": []})
+                        pending = st.pending_text_outputs[-1]
+                    events.extend(self._begin_message_output(conn_id, pending, wants_audio=False))
+                    parts = pending["parts"]
+                    assert isinstance(parts, list)
                     parts.append(text)
                     events.append(
                         ResponseTextDeltaEvent(
@@ -1454,7 +1559,7 @@ class ResponseHandler(RealtimeBaseHandler):
                             delta=text,
                         )
                     )
-                self._service.conversation.record_acknowledged_item(conn_id, item_id)
+                    self._service.conversation.record_acknowledged_item(conn_id, item_id)
             elif isinstance(part, AssistantToolCallPart):
                 # An early tool call defers closing the message only while TTS
                 # still owes it audio. Text-only output has nothing to wait for,

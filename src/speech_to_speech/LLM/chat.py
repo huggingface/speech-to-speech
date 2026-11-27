@@ -808,14 +808,20 @@ class Chat:
         """Remove and return the calls recorded for *item_ids*; caller holds ``_lock``."""
         return set().union(*(self._replies_past.pop(item_id, set()) for item_id in item_ids if item_id is not None))
 
-    def truncate_assistant_message(self, item_id: str, text: str) -> bool:
+    def truncate_assistant_message(
+        self,
+        item_id: str,
+        text: str,
+        *,
+        status: Literal["completed", "incomplete"] = "incomplete",
+    ) -> bool:
         """Keep only *text*, the heard prefix, of one delivered assistant message.
 
-        The message becomes ``incomplete``. Empty *text* removes it, so an
-        unheard reply is not replayed as delivered; non-empty *text* for a
-        message removed that way puts it back where it was. Provider-native
-        messages are replaced by plain text; their reasoning companions are
-        dropped as :meth:`delete_item` does.
+        The message takes *status* (``incomplete`` by default). Empty *text*
+        removes it, so an unheard reply is not replayed as delivered; non-empty
+        *text* for a message removed that way puts it back where it was.
+        Provider-native messages are replaced by plain text; their reasoning
+        companions are dropped as :meth:`delete_item` does.
         """
         with self._lock:
             reply = self._unheard_assistant_items.get(item_id)
@@ -832,6 +838,7 @@ class Chat:
                 if reply.preceding and not anchors:
                     return False  # Its turn was evicted or compacted.
                 heard = self._heard_message_locked(item_id, text)
+                heard.status = status
                 self.buffer.insert(max(anchors, default=0), heard)
                 self._set_replied_past_locked(heard, reply.replied_past)
                 self._gen_counter += 1
@@ -867,7 +874,7 @@ class Chat:
             message = self.buffer[index]
             if len(target_ids) == 1 and type(message) is RealtimeConversationItemAssistantMessage:
                 message.content = [AssistantContent(type="output_text", text=text)]
-                message.status = "incomplete"
+                message.status = status
                 self._gen_counter += 1
                 self._compact_in_flight = False
                 return True
@@ -876,6 +883,7 @@ class Chat:
             self._delete_item_locked(item_id)
             retained_ids = {item.id for item in self.buffer}
             heard = self._heard_message_locked(item_id, text)
+            heard.status = status
             self.buffer.insert(sum(preceding_id in retained_ids for preceding_id in preceding_ids), heard)
             self._set_replied_past_locked(heard, replied_past)
             return True
