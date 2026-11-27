@@ -183,78 +183,12 @@ class ConversationHandler(RealtimeBaseHandler):
     def _delete_replay_family_item(self, conn_id: str, item_id: str) -> bool:
         """Delete *item_id* when it belongs to a replay family and rebuild Chat from survivors."""
         st = self._state(conn_id)
-        chat = st.runtime_config.chat
-        resumed_origin = st.resumed_audio_origins.get(item_id)
-        child_replays = [
-            (rid, origin) for rid, origin in st.resumed_audio_origins.items() if origin[1].root_item_id == item_id
-        ]
-        if resumed_origin is None and not child_replays:
+        origin = st.resumed_audio_origins.get(item_id) or next(
+            (entry for entry in st.resumed_audio_origins.values() if entry[1].root_item_id == item_id), None
+        )
+        if origin is None:
             return False
-
-        from speech_to_speech.api.openai_realtime.handlers.response import _heard_transcript
-
-        audio_buf = resumed_origin[1] if resumed_origin is not None else child_replays[0][1][1]
-        root_id = audio_buf.root_item_id
-        root_deleted = item_id == root_id
-        st.resumed_audio_origins.pop(item_id, None)
-
-        survivors: list[tuple[str, int, int, Literal["completed", "incomplete"], str]] = []
-        if not root_deleted and (root_id in chat.item_ids() or root_id in chat.unheard_assistant_item_ids()):
-            root_segs = st.assistant_audio_segments.get(root_id, [])
-            root_cut = st.assistant_audio_cuts.get(root_id, st.resumed_root_wire_cuts.get(root_id, 0))
-            survivors.append((root_id, 0, root_cut, "incomplete", _heard_transcript(root_segs, root_cut)))
-        for rid, (r_start, r_buf) in list(st.resumed_audio_origins.items()):
-            if r_buf.root_item_id != root_id:
-                continue
-            r_segs = st.assistant_audio_segments.get(rid, [])
-            r_delivered = sum(seg[1] for seg in r_segs)
-            r_cut = st.assistant_audio_cuts.get(rid, r_delivered)
-            r_status: Literal["completed", "incomplete"] = (
-                "incomplete" if rid in st.assistant_audio_cuts else "completed"
-            )
-            survivors.append((rid, r_start, r_start + r_cut, r_status, _heard_transcript(r_segs, r_cut)))
-
-        if not survivors:
-            chat.delete_item(root_id)
-            st.resumed_root_wire_cuts.pop(root_id, None)
-            return True
-
-        new_root = survivors[0][0]
-        final_status = survivors[-1][3]
-        if len(survivors) == 1:
-            merged_text = survivors[0][4]
-        else:
-            ranges: list[list[int]] = []
-            for _, start_s, end_s, _, _ in sorted(survivors, key=lambda entry: entry[1]):
-                if end_s <= start_s:
-                    continue
-                if ranges and start_s <= ranges[-1][1]:
-                    ranges[-1][1] = max(ranges[-1][1], end_s)
-                else:
-                    ranges.append([start_s, end_s])
-            merged_text = " ".join(chunk for s, e in ranges if (chunk := audio_buf.text_for_range(s, e)))
-
-        if new_root != root_id:
-            audio_buf.root_item_id = new_root
-            for _, r_buf in st.resumed_audio_origins.values():
-                if r_buf.root_item_id == root_id:
-                    r_buf.root_item_id = new_root
-            st.resumed_root_wire_cuts.pop(root_id, None)
-            if merged_text:
-                st.resumed_audio_origins.pop(new_root, None)
-                st.audio_output_item_ids[new_root] = None
-                if len(survivors) > 1:
-                    new_segs = st.assistant_audio_segments.get(new_root, [])
-                    st.resumed_root_wire_cuts[new_root] = st.assistant_audio_cuts.get(
-                        new_root, sum(seg[1] for seg in new_segs)
-                    )
-            if not chat.replace_assistant_message(root_id, new_root, merged_text, status=final_status) and merged_text:
-                chat.add_heard_assistant_message(new_root, merged_text, status=final_status)
-        else:
-            if len(survivors) == 1:
-                st.resumed_root_wire_cuts.pop(root_id, None)
-            if not chat.truncate_assistant_message(root_id, merged_text, status=final_status) and merged_text:
-                chat.add_heard_assistant_message(root_id, merged_text, status=final_status)
+        self._service.response.rebuild_replay_family_history(conn_id, origin[1], deleted_item_id=item_id)
         return True
 
     def _apply_delete(self, conn_id: str, event: ConversationItemDeleteEvent) -> list[ServerEvent]:

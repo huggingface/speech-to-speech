@@ -462,9 +462,13 @@ def _record_replay(
     pcm: bytes = b"",
 ) -> None:
     """Retain assistant transcript segments and PCM16 audio for false-interruption replay."""
-    if unit.service.session_min_interruption_words(session_id) <= 0 or (event is None and not pcm):
+    if event is None and not pcm:
         return
     st = unit.service._state(session_id)
+    if st.replay_enabled_for_response is None:
+        st.replay_enabled_for_response = unit.service.session_min_interruption_words(session_id) > 0
+    if not st.replay_enabled_for_response or unit.service.session_min_interruption_words(session_id) <= 0:
+        return
     if is_out_of_band(st.current_response_params) or not response_wants_audio(st.current_response_params):
         return
     item_id = st.pending_assistant_item_id or (
@@ -889,6 +893,7 @@ async def _dispatch_client_event(
             await send_correlated([err])
         else:
             if service.session_min_interruption_words(session_id) <= 0:
+                service._state(session_id).replay_enabled_for_response = False
                 _confirm_false_interruption(unit, session_id, "session.update disabled recovery", clear_audio=True)
             await send_correlated([service.build_session_updated(session_id)])
 

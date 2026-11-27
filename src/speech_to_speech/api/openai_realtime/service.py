@@ -316,6 +316,8 @@ class ConnState(BaseModel):
     false_interruption_turn_id: str | None = None
     # Dismissed false-interruption turn IDs retained until their late terminal transcription arrives.
     dismissed_interruption_turns: dict[str, None] = Field(default_factory=dict)
+    # Whether replay recording was active when the current response began (mid-reply opt-in takes effect next turn).
+    replay_enabled_for_response: bool | None = None
     # When True, the next cancelled finish_response keeps the turn and response key open for replay buffering.
     preserve_turn_on_cancel: bool = False
     # Keyed by output index so response.done can preserve interleaving with

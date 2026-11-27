@@ -97,6 +97,7 @@ class AssistantAudioBuffer:
     response_key: str | None
     root_item_id: str
     current_item_id: str
+    root_start_sample: int = 0
     wire_start_sample: int = 0
     turn_id: str | None = None
     turn_revision: int | None = None
@@ -210,7 +211,11 @@ class AssistantAudioBuffer:
         if end_sample <= start_sample:
             return ""
         if start_sample <= 0:
-            return _heard_transcript(self.as_audio_segments(), end_sample)
+            return (
+                self.full_text()
+                if end_sample >= self.total_samples
+                else _heard_transcript(self.as_audio_segments(), end_sample)
+            )
         segs: list[list[Any]] = []
         for seg in self.segments:
             seg_len = seg.end_sample - seg.start_sample

@@ -991,6 +991,120 @@ def test_double_recovery_retrieval_and_deletion_history_reconciliation() -> None
         assert _drain_until(ws, "conversation.item.deleted")[-1]["item_id"] == item_2
         assert [m for m in chat.buffer if m.role == "assistant"] == []
 
+    # 3. After deleting item_1 in a 2-recovery chain, truncating item_3 must NOT restore deleted "First".
+    with _ws_session(min_words=1) as (unit, ws, sid):
+        chat = unit.service._state(sid).runtime_config.chat
+        chat.add_item(make_user_message("Three parts."))
+        _queue_completed_reply(
+            unit,
+            sid,
+            "rk_del_trunc",
+            [
+                ("First sentence.", _tone(RATE * 2)),
+                ("Second sentence.", _tone(RATE * 2)),
+                ("Third sentence.", _tone(RATE * 2)),
+            ],
+        )
+        item_1 = next(
+            ev["item"]["id"] for ev in _drain_until(ws, "response.done") if ev["type"] == "response.output_item.added"
+        )
+
+        # First recovery at 2s (item_2), second recovery at 4s (item_3).
+        unit.text_output_queue.put(SpeechStartedEvent(turn_id="turn_dt1", turn_revision=0))
+        _drain_until(ws, "input_audio_buffer.speech_started")
+        ws.send_json(
+            {"type": "conversation.item.truncate", "item_id": item_1, "content_index": 0, "audio_end_ms": 2000}
+        )
+        _wait_for(lambda: unit.session.pending_false_interruption.client_played_samples is not None)
+        unit.text_output_queue.put(SpeechStoppedEvent(turn_id="turn_dt1", turn_revision=0, duration_s=0.2))
+        unit.text_output_queue.put(TranscriptionCompletedEvent(transcript="", turn_id="turn_dt1", turn_revision=0))
+        item_2 = next(
+            ev["item"]["id"] for ev in _drain_until(ws, "response.done") if ev["type"] == "response.output_item.added"
+        )
+
+        unit.text_output_queue.put(SpeechStartedEvent(turn_id="turn_dt2", turn_revision=0))
+        _drain_until(ws, "input_audio_buffer.speech_started")
+        wire_start_ms = unit.session.pending_false_interruption.audio_buffer.wire_start_sample * 1000 // RATE
+        ws.send_json(
+            {
+                "type": "conversation.item.truncate",
+                "item_id": item_2,
+                "content_index": 0,
+                "audio_end_ms": 4000 - wire_start_ms,
+            }
+        )
+        _wait_for(lambda: unit.session.pending_false_interruption.client_played_samples is not None)
+        unit.text_output_queue.put(SpeechStoppedEvent(turn_id="turn_dt2", turn_revision=0, duration_s=0.2))
+        unit.text_output_queue.put(TranscriptionCompletedEvent(transcript="", turn_id="turn_dt2", turn_revision=0))
+        item_3 = next(
+            ev["item"]["id"] for ev in _drain_until(ws, "response.done") if ev["type"] == "response.output_item.added"
+        )
+
+        # Delete item_1 -> "First" disappears from Chat.
+        ws.send_json({"type": "conversation.item.delete", "item_id": item_1})
+        assert _drain_until(ws, "conversation.item.deleted")[-1]["item_id"] == item_1
+        assistant_msgs = [m for m in chat.buffer if m.role == "assistant"]
+        assert len(assistant_msgs) == 1
+        assert "First" not in assistant_msgs[0].content[0].text
+        assert "Second sentence." in assistant_msgs[0].content[0].text
+
+        # Truncating surviving item_3 must NOT restore deleted "First".
+        ws.send_json(
+            {"type": "conversation.item.truncate", "item_id": item_3, "content_index": 0, "audio_end_ms": 1000}
+        )
+        ws.send_json({"type": "conversation.item.retrieve", "item_id": item_3})
+        got_3 = _drain_until(ws, "conversation.item.retrieved")[-1]["item"]
+        assert got_3["status"] == "incomplete"
+        assistant_msgs = [m for m in chat.buffer if m.role == "assistant"]
+        assert len(assistant_msgs) == 1 and assistant_msgs[0].status == "incomplete"
+        assert "First" not in assistant_msgs[0].content[0].text
+        assert "Second sentence." in assistant_msgs[0].content[0].text
+
+
+def test_mid_reply_opt_in_takes_effect_on_next_response() -> None:
+    with _ws_session(min_words=0) as (unit, ws, sid):
+        chat = unit.service._state(sid).runtime_config.chat
+        chat.add_item(make_user_message("Speak."))
+        gen = unit.cancel_scope.generation
+        unit.output_queue.put(
+            AssistantOutputEvent(text="First two seconds.", response_key="rk_mid", cancel_generation=gen)
+        )
+        unit.output_queue.put(AudioOutput(audio=_tone(RATE * 2), response_key="rk_mid", cancel_generation=gen))
+        _drain_until(ws, "response.output_audio.delta")
+        assert unit.session.last_assistant_audio is None
+
+        # Enable recovery mid-reply; current partial reply must not record a misaligned half-buffer.
+        ws.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "realtime",
+                    "audio": {"input": {"turn_detection": {"type": "server_vad", "min_interruption_words": 1}}},
+                },
+            }
+        )
+        _drain_until(ws, "session.updated")
+
+        unit.output_queue.put(
+            AssistantOutputEvent(text="Last two seconds.", response_key="rk_mid", cancel_generation=gen)
+        )
+        unit.output_queue.put(AudioOutput(audio=_tone(RATE * 2), response_key="rk_mid", cancel_generation=gen))
+        unit.output_queue.put(AssistantResponseDoneEvent(response_key="rk_mid", cancel_generation=gen))
+        unit.output_queue.put(AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key="rk_mid", cancel_generation=gen))
+        _drain_until(ws, "response.done")
+        assert unit.session.last_assistant_audio is None
+
+        # The next response starts with recovery active from sample 0 and replays cleanly.
+        _queue_completed_reply(unit, sid, "rk_next", [("Next full reply.", _tone(RATE * 2))])
+        _drain_until(ws, "response.done")
+        assert unit.session.last_assistant_audio is not None
+        unit.text_output_queue.put(SpeechStartedEvent(turn_id="turn_next", turn_revision=0))
+        _drain_until(ws, "input_audio_buffer.speech_started")
+        unit.text_output_queue.put(SpeechStoppedEvent(turn_id="turn_next", turn_revision=0, duration_s=0.2))
+        unit.text_output_queue.put(TranscriptionCompletedEvent(transcript="", turn_id="turn_next", turn_revision=0))
+        replayed = _drain_until(ws, "response.done")
+        assert any(ev["type"] == "response.output_audio.delta" for ev in replayed)
+
 
 def test_per_session_false_interruption_config_via_session_update() -> None:
     # 1. Server default disabled (0); Session A opts in via session.update while Session B on same service stays off.
