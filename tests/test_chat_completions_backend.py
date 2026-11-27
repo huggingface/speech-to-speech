@@ -9,9 +9,12 @@ Run with pytest, or standalone:  python tests/test_chat_completions_backend.py
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import queue
 import threading
+import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
@@ -104,7 +107,14 @@ class _FakeClient:
         return self
 
 
-def _make_handler(stream=True, *, base_url="http://fake/v1", reasoning_effort=None):
+def _make_handler(
+    stream=True,
+    *,
+    base_url="http://fake/v1",
+    reasoning_effort=None,
+    audio_input=False,
+    audio_content_type="input_audio",
+):
     """Build a handler whose warmup hits the fake client (no network)."""
     orig_openai = base_mod.OpenAI
     orig_async_client = ChatCompletionsApiModelHandler._make_async_client
@@ -124,6 +134,8 @@ def _make_handler(stream=True, *, base_url="http://fake/v1", reasoning_effort=No
                 disable_thinking=True,
                 reasoning_effort=reasoning_effort,
                 compact_history=False,
+                audio_input=audio_input,
+                audio_content_type=audio_content_type,
             ),
         )
     finally:
@@ -137,6 +149,32 @@ def test_warmup_uses_request_scoped_sdk_retries():
     handler = _make_handler()
 
     assert handler.client.last_options == {"max_retries": base_mod.WARMUP_MAX_RETRIES}
+
+
+@pytest.mark.parametrize(
+    "audio_input,audio_content_type", [(False, "input_audio"), (True, "input_audio"), (True, "audio_url")]
+)
+def test_warmup_uses_selected_input_format(audio_input, audio_content_type):
+    handler = _make_handler(audio_input=audio_input, audio_content_type=audio_content_type)
+
+    kwargs = handler.client.chat.completions.last_kwargs
+    user = kwargs["messages"][-1]
+    if not audio_input:
+        assert user["content"] == "Hello"
+        return
+
+    (part,) = user["content"]
+    assert part["type"] == audio_content_type
+    if audio_content_type == "input_audio":
+        assert part["input_audio"]["format"] == "wav"
+        data = part["input_audio"]["data"]
+    else:
+        prefix, data = part["audio_url"]["url"].split(",", 1)
+        assert prefix == "data:audio/wav;base64"
+
+    with wave.open(io.BytesIO(base64.b64decode(data))) as wav:
+        assert (wav.getframerate(), wav.getnchannels(), wav.getsampwidth(), wav.getnframes()) == (16000, 1, 2, 1600)
+        assert wav.readframes(1600) == bytes(3200)
 
 
 def _chunk(content=None, tool_calls=None, usage=None):
