@@ -127,6 +127,7 @@ def test_session_end_restarts_the_idle_clock(monkeypatch) -> None:
     "settings",
     [
         {"confident_thresh": 0},
+        {"barge_in_ms": -1},
         {"min_confident_speech_ms": -1},
         {"idle_after_s": 60},  # idle settings need the scored rule
         {"min_confident_speech_ms": 128, "vad": "firered", "vad_firered_model_dir": "unused"},
@@ -199,3 +200,43 @@ def test_zero_minimum_accepts_detected_speech_unless_idle_override_applies(
     assert _opened_turns(handler, 1) == 0
     assert handler._speech_started_emitted == opens
     assert _opened_turns(handler, len(SILENCE)) == int(opens)
+
+
+def test_barge_in_ms_raises_ordinary_speech_bar_under_confident_scoring(monkeypatch) -> None:
+    response_playing = Event()
+    response_playing.set()
+    probs = [ORDINARY] * 13 + SILENCE + [ORDINARY] * 25 + SILENCE + [ORDINARY] * 6 + SILENCE
+    handler = _handler(
+        monkeypatch,
+        probs,
+        min_speech_ms=192,
+        barge_in_ms=800,
+        min_confident_speech_ms=128,
+        response_playing=response_playing,
+    )
+
+    # While playing, 416 ms of ordinary speech is under barge_in_ms=800; 800 ms opens.
+    assert _opened_turns(handler, 17) == 0
+    assert _opened_turns(handler, 29) == 1
+
+    # Once the response finishes and playback stops, a new turn uses min_speech_ms=192 again.
+    handler.speculative_turns.gate("turn_1", 0, hold_for_grace=False, commit=True)
+    handler.speculative_turns.close("turn_1", 0)
+    response_playing.clear()
+    outputs = [output for _ in range(10) for output in handler.process(CHUNK) if isinstance(output, VADAudio)]
+    assert [(item.turn_id, item.turn_revision) for item in outputs] == [("turn_2", 0)]
+
+
+def test_default_barge_in_ms_keeps_min_speech_ms_while_playing(monkeypatch) -> None:
+    response_playing = Event()
+    response_playing.set()
+    probs = [ORDINARY] * 13 + SILENCE + [ORDINARY] * 25 + SILENCE
+    handler = _handler(
+        monkeypatch,
+        probs,
+        **SCORED,
+        response_playing=response_playing,
+    )
+
+    assert _opened_turns(handler, 17) == 0  # 416 ms stays below min_speech_ms=800 when barge_in_ms=0
+    assert _opened_turns(handler, 29) == 1

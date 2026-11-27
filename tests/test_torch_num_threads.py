@@ -74,7 +74,6 @@ def _build_handlers(monkeypatch, module_kwargs):
         speculative_turns=SpeculativeTurnTracker(),
         cancel_scope=CancelScope(),
         pipeline_index=0,
-        response_playing=Event(),
     )
     return stt_threads
 

@@ -397,7 +397,7 @@ def _build_handlers(
     speculative_turns: SpeculativeTurnTracker,
     cancel_scope: CancelScope,
     pipeline_index: int,
-    response_playing: Event,
+    response_playing: Event | None = None,
     resource_ledger: list[Any] | None = None,
 ) -> list[Any]:
     """Build a handler chain: VAD → STT/AudioInput → LM → TTS."""

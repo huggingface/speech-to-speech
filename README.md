@@ -851,9 +851,9 @@ YAML configuration, set it under `runtime` as `torch_num_threads`. See the
 See [VADHandlerArguments](./src/speech_to_speech/arguments_classes/vad_arguments.py). Notable options:
 
 - `--thresh`: threshold value to trigger voice activity detection.
-- `--min_speech_ms`: active speech that opens a new turn while the assistant is silent, 192 ms by default so a short word reaches the transcription.
-- `--barge_in_ms`: active speech that opens a turn while the assistant speaks and interrupts it, 384 ms by default.
-- `--min_speech_continuation_ms`: sustain-bar hysteresis threshold for speech that continues a reopenable soft-ended, uncommitted turn within the reopen window. It defaults to 192 ms.
+- `--min_speech_ms`: minimum duration of detected voice activity to be considered speech (default 384 ms).
+- `--barge_in_ms`: optional override for `--min_speech_ms` while the assistant is speaking to interrupt it; `0` (default) keeps `--min_speech_ms`.
+- `--min_speech_continuation_ms`: sustain-bar hysteresis threshold for speech that continues a reopenable soft-ended, uncommitted turn within the reopen window. The default and recommended pairing is `--min_speech_ms 384 --min_speech_continuation_ms 192`.
 - `--min_silence_ms`: minimum length of silence intervals for segmenting speech. Default is 64 ms.
 - `--short_segment_merge_ms`: optional merge window for stitching adjacent VAD segments that are each shorter than `--min_speech_ms`.
 - `--speculative_reopen_ms`: delay response commitment for 800 ms after a soft-ended turn so immediately resumed speech can reopen it.
