@@ -7,7 +7,13 @@ import stat
 import pytest
 
 from speech_to_speech.evals.tool_conversations.__main__ import main
-from speech_to_speech.evals.tool_conversations.report import fisher_exact, render_comparison, render_report, summarize
+from speech_to_speech.evals.tool_conversations.report import (
+    build_report,
+    fisher_exact,
+    render_comparison,
+    render_report,
+    summarize,
+)
 from speech_to_speech.evals.tool_conversations.runner import RunnerConfig, run_set
 from speech_to_speech.evals.tool_conversations.scenarios import CONVERSATIONS, RESULTS, Turn
 
@@ -44,7 +50,7 @@ def test_summary_counts_each_outcome():
     assert (s["first_tool_turns"], s["first_turn_misses"]) == (1, 1)
     assert (s["spoke_first"], s["expression_turns"], s["spoke_first_expression"]) == (1, 1, 1)
     assert (s["free_turns"], s["extra_call"], s["call_markup_spoken"]) == (1, 1, 1)
-    assert (s["late_results"], s["late_result_spoken"], s["repeated_long_running"]) == (1, 1, 0)
+    assert (s["late_results"], s["late_result_spoken"], s["late_results_with_recall"]) == (1, 1, 0)
     assert (s["conversations"], s["crashed"]) == (2, 1)
 
 
@@ -193,3 +199,51 @@ def test_server_config_is_private_and_points_speech_at_the_stand_in(tmp_path, mo
     assert config["openai_tts_base_url"] == config["openai_stt_base_url"] == "http://127.0.0.1:9999/v1"
     assert config["responses_api_api_key"] == "secret-value"
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    "late_calls, expected", [(None, "-"), ([], "0/1 (0.0%)"), (["research_report"] * 2, "1/1 (100.0%)")]
+)
+def test_late_recall_rate_counts_each_late_result_once(late_calls, expected):
+    turns = [_user(0, None, ("", ["research_report"] * 2))]
+    if late_calls is not None:
+        turns.append({"kind": "late_result", "text": "", "calls": late_calls})
+    report = build_report({"label": "test"}, [{"turns": turns}])
+    assert f"| Late results that trigger another long-running tool call | {expected} |" in render_report(report)
+
+
+@pytest.mark.parametrize(
+    "legacy_count, late_calls, expected",
+    [
+        (2, [], "0/1 (0.0%)"),
+        (1, [], "0/1 (0.0%)"),
+        (1, ["research_report", "research_report"], "1/1 (100.0%)"),
+        (2, None, "-"),
+    ],
+)
+def test_compare_cli_reconstructs_legacy_late_recall_only_from_raw_turns(
+    tmp_path, capsys, legacy_count, late_calls, expected
+):
+    legacy = tmp_path / "legacy.json"
+    current = tmp_path / "current.json"
+    valid = {"kind": "late_result", "text": "", "calls": ["research_report"]}
+    current.write_text(json.dumps(build_report({"label": "current"}, [{"turns": [valid]}])))
+    summary = summarize([{"turns": [valid]}])
+    del summary["late_results_with_recall"]
+    summary["repeated_long_running"] = legacy_count
+    report = {"label": "legacy", "summary": summary}
+    if late_calls is not None:
+        user_calls = [] if late_calls else ["research_report"] * legacy_count
+        report["results"] = [
+            {"turns": [_user(0, None, ("", user_calls)), {"kind": "late_result", "text": "", "calls": late_calls}]}
+        ]
+    legacy.write_text(json.dumps(report))
+
+    for paths, expected_cells in (
+        ([legacy, current], f"{expected} | 1/1 (100.0%)" + (" p=1" if late_calls is not None else "")),
+        ([current, legacy], f"1/1 (100.0%) | {expected}" + (" p=1" if late_calls is not None else "")),
+    ):
+        assert main(["compare", *map(str, paths)]) == 0
+        output = capsys.readouterr().out
+        assert f"| Late results that trigger another long-running tool call | {expected_cells} |" in output
+        assert "| Late result spoken | 0/1 (0.0%) | 0/1 (0.0%) p=1 |" in output
