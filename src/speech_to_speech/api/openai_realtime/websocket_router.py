@@ -181,7 +181,14 @@ def _output_is_held(unit: PipelineUnit, session_id: str, item: Any) -> bool:
     """Whether *item* must stay queued until its response or turn allows it.
 
     Holding never waits here, so speech and connection events keep flowing.
+    Cancelled or obsolete response events are never held so they can be
+    discarded immediately instead of head-of-line blocking later responses.
     """
+    if isinstance(item, (*_RESPONSE_PIPELINE_EVENTS, AssistantToolCallReadyEvent)):
+        if _generation_is_discardable(unit, getattr(item, "cancel_generation", None)):
+            return False
+        if _response_key_is_obsolete(unit, session_id, getattr(item, "response_key", None)):
+            return False
     response_key = _output_response_key(item)
     if response_key is not None and unit.service.response.is_response_output_blocked(session_id, response_key):
         return True
@@ -532,6 +539,7 @@ async def _dispatch_client_event(
         if events:
             await send_correlated(events)
         unit.response_playing.clear()
+        unit.output_signal.notify_threadsafe()
 
 
 def _send_loop_wait_timeout(unit: PipelineUnit) -> float:

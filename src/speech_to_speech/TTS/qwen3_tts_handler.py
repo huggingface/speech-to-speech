@@ -26,7 +26,7 @@ from openai.types.realtime.realtime_response_create_params import RealtimeRespon
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.api.openai_realtime.utils import StreamingPcm16Resampler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.console import console
+from speech_to_speech.pipeline.console import console as console
 from speech_to_speech.pipeline.control import SESSION_END, is_control_message
 from speech_to_speech.pipeline.events import AssistantOutputEvent
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
@@ -697,10 +697,12 @@ class Qwen3TTSHandler(BaseTTSHandler):
         gen: Any,
         label: str,
         timer: TTSResponseTimer | None = None,
+        *,
+        started_at: float | None = None,
     ) -> Iterator[bytes | np.ndarray]:
         """Common streaming loop: log TTFA and RTF, yield int16 chunks."""
         cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
-        start = perf_counter()
+        start = perf_counter() if started_at is None else started_at
         if timer is not None:
             # Measure from here, after any MLX lock wait, so ``tts_ttfa`` matches the logged TTFA.
             timer.mark_start(start)
@@ -833,13 +835,22 @@ class Qwen3TTSHandler(BaseTTSHandler):
         combined_text = " ".join(parts).strip()
         return combined_text, language_code
 
+    def _assistant_text_for_print(self, tts_input: TTSInput) -> str:
+        spoken = getattr(self, "_spoken_text", None)
+        return spoken if isinstance(spoken, str) else tts_input.text
+
+    def _on_first_audio_committed(self, tts_input: TTSInput, timer: TTSResponseTimer | None) -> None:
+        super()._on_first_audio_committed(tts_input, timer)
+        if timer is not None:
+            self._log_first_audio_latency(tts_input, timer)
+
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         if isinstance(tts_input, EndOfResponse):
             if self._gate_end_of_response(tts_input):
                 yield AUDIO_RESPONSE_DONE
             return
 
-        if not self._admit_input(tts_input, commit=False, hold_for_grace=False):
+        if not self._admit_input(tts_input):
             return
 
         runtime_config = tts_input.runtime_config
@@ -848,6 +859,7 @@ class Qwen3TTSHandler(BaseTTSHandler):
         coalesced_text, language_code = self._coalesce_pending_tts_input(tts_input)
 
         text = coalesced_text or "Hello."
+        self._spoken_text: str | None = text
 
         model_type = self._model_type()
         self._apply_session_voice_override(model_type, runtime_config, response)
@@ -872,17 +884,11 @@ class Qwen3TTSHandler(BaseTTSHandler):
                         "Qwen3-TTS Base model requires a voice-clone reference. "
                         "Provide qwen3_tts_ref_audio or qwen3_tts_ref_spk, or use a CustomVoice/VoiceDesign model."
                     )
-                first_audio = True
-                for audio_chunk in audio_iter:
-                    if first_audio:
-                        if not self._commit_first_audio(tts_input, generation=cancel_gen):
-                            return
-                        console.print(f"[green]ASSISTANT: {text}")
-                        self._log_first_audio_latency(tts_input, timer)
-                        first_audio = False
-                    yield audio_chunk
+                yield from audio_iter
         except Exception as exc:
             log_exception(logger, "Error during Qwen3-TTS generation", exc)
+        finally:
+            self._spoken_text = None
 
     def _log_first_audio_latency(self, tts_input: TTSInput, timer: TTSResponseTimer) -> None:
         elapsed_s = timer.speech_stop_elapsed_s()
@@ -920,17 +926,55 @@ class Qwen3TTSHandler(BaseTTSHandler):
         max_tokens: int,
         **generation_kwargs: Any,
     ) -> Iterator[bytes | np.ndarray]:
+        # Acquire the global MLX lock per model step (and materialize mx.array
+        # to NumPy before releasing) so blocking on speculative reopen grace or
+        # downstream queues never holds the MLX lock across idle waits.
         with MLXLockContext(handler_name="Qwen3TTS", timeout=10.0) as acquired:
             if not acquired:
                 raise TimeoutError("Timed out waiting for MLX lock")
-            yield from self._stream(
+            started_at = perf_counter()
+            if timer is not None:
+                timer.mark_start(started_at)
+            raw_iter = iter(
                 generation_fn(
                     **self._mlx_stream_kwargs(max_tokens=max_tokens),
                     **generation_kwargs,
-                ),
-                label=label,
-                timer=timer,
+                )
             )
+            try:
+                first_item = next(raw_iter)
+            except StopIteration:
+                return
+            except BaseException:
+                close = getattr(raw_iter, "close", None)
+                if close is not None:
+                    close()
+                raise
+            first_prepared = self._prepare_audio_chunk(first_item)
+
+        def locked_steps() -> Iterator[Any]:
+            try:
+                if first_prepared[0] is not None and first_prepared[1] is not None:
+                    yield (first_prepared[0], first_prepared[1], {})
+                while True:
+                    with MLXLockContext(handler_name="Qwen3TTS", timeout=10.0) as acquired:
+                        if not acquired:
+                            raise TimeoutError("Timed out waiting for MLX lock")
+                        try:
+                            item = next(raw_iter)
+                        except StopIteration:
+                            return
+                        prepared = self._prepare_audio_chunk(item)
+                    if prepared[0] is not None and prepared[1] is not None:
+                        yield (prepared[0], prepared[1], {})
+            finally:
+                close = getattr(raw_iter, "close", None)
+                if close is not None:
+                    with MLXLockContext(handler_name="Qwen3TTS", timeout=10.0) as acquired:
+                        if acquired:
+                            close()
+
+        yield from self._stream(locked_steps(), label=label, timer=timer, started_at=started_at)
 
     def _process_voice_clone(
         self,

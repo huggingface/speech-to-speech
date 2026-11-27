@@ -907,3 +907,109 @@ def test_confirmed_reopen_drops_held_output():
     thread.join(timeout=1.0)
 
     assert outputs == []
+
+
+def test_reopen_grace_end_of_response_aborts_on_cancel_without_mutating_language():
+    tracker = SpeculativeTurnTracker()
+    tracker.start_turn()
+    tracker.start_reopen_grace("turn_1", 0, grace_s=0.5)
+    scope = CancelScope()
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.stop_event = Event()
+    processor.setup(speculative_turns=tracker, cancel_scope=scope)
+    config = _session_with_language("auto")
+
+    chunk_outputs = list(
+        processor.process(
+            LLMResponseChunk(
+                text="I can help you find the train station in London.",
+                runtime_config=config,
+                response_key="resp_1",
+                turn_id="turn_1",
+                turn_revision=0,
+                cancel_generation=scope.generation,
+            )
+        )
+    )
+    assert [type(item) for item in chunk_outputs] == [AssistantOutputEvent, TTSInput]
+
+    done = Event()
+    outputs = []
+
+    def run_end():
+        outputs.extend(
+            processor.process(
+                EndOfResponse(
+                    response_key="resp_1",
+                    turn_id="turn_1",
+                    turn_revision=0,
+                    cancel_generation=scope.generation,
+                )
+            )
+        )
+        done.set()
+
+    thread = Thread(target=run_end)
+    thread.start()
+    try:
+        assert not done.wait(0.03)
+        scope.cancel()
+        assert done.wait(0.2)
+    finally:
+        thread.join(timeout=1.0)
+
+    assert config.last_assistant_language is None
+    assert len(outputs) == 1
+    assert isinstance(outputs[0], EndOfResponse)
+    assert outputs[0].cleanup_only is True
+    assert outputs[0].response_key == "resp_1"
+
+
+def test_reopen_grace_end_of_response_aborts_on_stop_event_without_emitting():
+    tracker = SpeculativeTurnTracker()
+    tracker.start_turn()
+    tracker.start_reopen_grace("turn_1", 0, grace_s=0.5)
+    stop_event = Event()
+    processor = LMOutputProcessor.__new__(LMOutputProcessor)
+    processor.stop_event = stop_event
+    processor.setup(speculative_turns=tracker)
+    config = _session_with_language("auto")
+
+    list(
+        processor.process(
+            LLMResponseChunk(
+                text="I can help you find the train station in London.",
+                runtime_config=config,
+                response_key="resp_stop",
+                turn_id="turn_1",
+                turn_revision=0,
+            )
+        )
+    )
+
+    done = Event()
+    outputs = []
+
+    def run_end():
+        outputs.extend(
+            processor.process(
+                EndOfResponse(
+                    response_key="resp_stop",
+                    turn_id="turn_1",
+                    turn_revision=0,
+                )
+            )
+        )
+        done.set()
+
+    thread = Thread(target=run_end)
+    thread.start()
+    try:
+        assert not done.wait(0.03)
+        stop_event.set()
+        assert done.wait(0.2)
+    finally:
+        thread.join(timeout=1.0)
+
+    assert config.last_assistant_language is None
+    assert outputs == []

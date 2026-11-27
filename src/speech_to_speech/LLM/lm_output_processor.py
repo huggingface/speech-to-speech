@@ -11,11 +11,13 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from queue import Queue
+from typing import Any
 from uuid import uuid4
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline import language_detection
+from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
@@ -56,10 +58,12 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
         speculative_turns: SpeculativeTurnTracker | None = None,
         text_output_queue: Queue[PipelineEvent] | None = None,
         detect_llm_output_language: bool = False,
+        cancel_scope: CancelScope | None = None,
     ) -> None:
         self.speculative_turns = speculative_turns
         self.text_output_queue = text_output_queue
         self.detect_llm_output_language = detect_llm_output_language
+        self.cancel_scope = cancel_scope
         self._language_detector = language_detection.warm_language_detector() if detect_llm_output_language else None
         self._response_key: str | None = None
         self._tool_call_ids: list[str] = []
@@ -129,6 +133,13 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
             )
         )
 
+    def _is_cancelled(self, cancel_generation: int | None) -> bool:
+        stop_event = getattr(self, "stop_event", None)
+        if stop_event is not None and stop_event.is_set():
+            return True
+        cancel_scope = getattr(self, "cancel_scope", None)
+        return cancel_generation is not None and cancel_scope is not None and cancel_scope.is_stale(cancel_generation)
+
     def _turn_output_allowed(
         self,
         turn_id: str | None,
@@ -136,14 +147,25 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
         *,
         hold_for_grace: bool = True,
         observe_wait: bool = True,
+        cancel_generation: int | None = None,
     ) -> bool:
+        if self._is_cancelled(cancel_generation):
+            return False
         if self.speculative_turns is None:
             return True
-        if hold_for_grace and observe_wait:
+        stop_event = getattr(self, "stop_event", None)
+        cancel_scope = getattr(self, "cancel_scope", None)
+        has_abort = stop_event is not None or (cancel_generation is not None and cancel_scope is not None)
+        if hold_for_grace and observe_wait and not has_abort:
             return self.speculative_turns.wait_for_gate(turn_id, turn_revision)
-        return self.speculative_turns.wait_for_gate(
-            turn_id, turn_revision, hold_for_grace=hold_for_grace, observe_wait=observe_wait
-        )
+        kwargs: dict[str, Any] = {}
+        if not hold_for_grace:
+            kwargs["hold_for_grace"] = False
+        if not observe_wait:
+            kwargs["observe_wait"] = False
+        if has_abort:
+            kwargs["should_abort"] = lambda: self._is_cancelled(cancel_generation)
+        return self.speculative_turns.wait_for_gate(turn_id, turn_revision, **kwargs)
 
     def process(self, lm_output: LLMOut) -> Iterator[TTSIn | PipelineEvent]:
         """
@@ -171,14 +193,19 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 lm_output.turn_id,
                 lm_output.turn_revision,
                 observe_wait=not self._forwarded_audio_tts,
+                cancel_generation=lm_output.cancel_generation,
             ):
                 logger.debug(
                     "Dropping stale end-of-response for turn=%s rev=%s",
                     lm_output.turn_id,
                     lm_output.turn_revision,
                 )
+                stop_event = getattr(self, "stop_event", None)
+                stopped = stop_event is not None and stop_event.is_set()
                 self._notify_generation_done(lm_output, response_key, succeeded=False)
                 self._reset_response()
+                if stopped:
+                    return
                 if response_key is not None:
                     # Bypass downstream speculative gates with a lifecycle-only
                     # terminal. The router uses its key to cancel an opened stale
@@ -188,6 +215,8 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                         response_key=response_key,
                         cleanup_only=True,
                     )
+                elif lm_output.cancel_generation is not None and self._is_cancelled(lm_output.cancel_generation):
+                    yield EndOfResponse(cancel_generation=lm_output.cancel_generation)
                 return
             succeeded = lm_output.error is None and lm_output.status == "completed"
             self._notify_generation_done(lm_output, response_key, succeeded=succeeded)
@@ -237,6 +266,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
             lm_output.turn_id,
             lm_output.turn_revision,
             hold_for_grace=not has_spoken_audio,
+            cancel_generation=lm_output.cancel_generation,
         ):
             logger.debug("Dropping stale LLM chunk for turn=%s rev=%s", lm_output.turn_id, lm_output.turn_revision)
             return
@@ -251,7 +281,11 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                 continue
             if isinstance(part, AssistantToolCallPart) and has_spoken_audio:
                 # Tool calls must never leave the processor before the reopen grace settles.
-                if not self._turn_output_allowed(lm_output.turn_id, lm_output.turn_revision):
+                if not self._turn_output_allowed(
+                    lm_output.turn_id,
+                    lm_output.turn_revision,
+                    cancel_generation=lm_output.cancel_generation,
+                ):
                     logger.debug(
                         "Dropping stale tool call chunk for turn=%s rev=%s", lm_output.turn_id, lm_output.turn_revision
                     )

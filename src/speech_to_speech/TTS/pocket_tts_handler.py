@@ -10,7 +10,6 @@ from typing import Any, Callable, Iterator, cast
 import numpy as np
 
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
@@ -298,7 +297,7 @@ class PocketTTSHandler(BaseTTSHandler):
 
         if self._response_identity(tts_input) in self._failed_responses:
             return
-        if not self._admit_input(tts_input, commit=False, hold_for_grace=False):
+        if not self._admit_input(tts_input):
             return
 
         gen = tts_input.cancel_generation
@@ -353,12 +352,9 @@ class PocketTTSHandler(BaseTTSHandler):
             if timer.first_provider_audio(first_audio_at_s):
                 logger.debug("Time to first audio: %.3fs", first_audio_at_s - timer.started_at_s)
 
-        emit = self._first_audio_emitter(
-            tts_input,
-            timer,
-            gen,
-            on_first=lambda: console.print(f"[green]ASSISTANT: {text}"),
-        )
+        def emit(block: np.ndarray) -> Iterator[TTSOut]:
+            timer.first_yield()
+            yield block
 
         for audio_chunk in self._generate_audio(text, gen, record_first_provider_audio):
             if self._is_stale(gen):

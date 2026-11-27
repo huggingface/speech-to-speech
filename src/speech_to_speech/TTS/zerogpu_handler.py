@@ -2,20 +2,19 @@
 
 import logging
 from threading import Event
-from time import perf_counter
 
-from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.events import ResponseFailedEvent
-from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.transcript_logging import log_exception
-from speech_to_speech.pipeline.turn_latency import record_response_e2e, record_response_tts_ttfa
+from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
 from speech_to_speech.zerogpu import runtime
 
 logger = logging.getLogger(__name__)
 
 
-class ZeroGPUTTSHandler(BaseHandler[TTSIn, TTSOut]):
+class ZeroGPUTTSHandler(BaseTTSHandler):
+    _print_assistant_text = False
+
     def setup(
         self,
         should_listen,
@@ -53,14 +52,12 @@ class ZeroGPUTTSHandler(BaseHandler[TTSIn, TTSOut]):
         return generation, item.response_key, item.turn_id, item.turn_revision
 
     def _cancelled(self, item, generation):
-        return (
-            self.stop_event.is_set()
-            or (self.cancel_scope is not None and self.cancel_scope.is_stale(generation))
-            or (
-                self.speculative_turns is not None
-                and not self.speculative_turns.is_latest(item.turn_id, item.turn_revision)
-            )
-        )
+        stop_event = getattr(self, "stop_event", None)
+        return (stop_event is not None and stop_event.is_set()) or self._is_stale(generation, item)
+
+    def _is_commit_cancelled(self, tts_input):
+        session_stopped = getattr(self, "_session_stopped", None)
+        return session_stopped is not None and session_stopped.is_set()
 
     def _request_voice(self, item):
         requested = None
@@ -84,19 +81,15 @@ class ZeroGPUTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
     def process(self, item):
         identity = self._identity(item)
-        tracker = self.speculative_turns
         if isinstance(item, EndOfResponse):
             self._failed_responses.discard(identity)
-            if tracker and not tracker.wait_for_gate(item.turn_id, item.turn_revision):
-                if item.response_key is None:
-                    return
-                item.cleanup_only = True
-            yield AUDIO_RESPONSE_DONE
+            if self._gate_end_of_response(item):
+                yield AUDIO_RESPONSE_DONE
+            return
+        if not self._admit_input(item):
             return
         generation = identity[0]
         if identity in self._failed_responses or not item.text.strip() or self._cancelled(item, generation):
-            return
-        if tracker and not tracker.wait_for_gate(item.turn_id, item.turn_revision, hold_for_grace=False):
             return
         session_stopped = self._session_stopped
 
@@ -104,7 +97,7 @@ class ZeroGPUTTSHandler(BaseHandler[TTSIn, TTSOut]):
             return session_stopped.is_set() or self._cancelled(item, generation)
 
         chunks = None
-        started = perf_counter()
+        timer = self._latency_timer(item, generation, also_cancelled=cancelled)
         first = True
         try:
             chunks = runtime.synthesize_chunks(
@@ -116,16 +109,8 @@ class ZeroGPUTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 if len(chunk) == 0:
                     continue
                 if first:
-                    if tracker and not tracker.wait_for_gate(
-                        item.turn_id, item.turn_revision, commit=True, should_abort=cancelled
-                    ):
-                        return
-                    if cancelled():
-                        return
-                    store = getattr(self, "turn_latency_store", None)
-                    record_response_tts_ttfa(store, item.response_key, perf_counter() - started)
-                    if item.speech_stopped_at_s is not None:
-                        record_response_e2e(store, item.response_key, max(0, perf_counter() - item.speech_stopped_at_s))
+                    timer.first_provider_audio()
+                    timer.first_yield()
                     first = False
                 yield chunk
             if first and not cancelled():

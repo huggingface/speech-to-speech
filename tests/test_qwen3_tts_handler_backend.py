@@ -1409,3 +1409,167 @@ def test_stream_preserves_short_tail_and_discards_pending_audio_on_cancel(
         assert list(stream) == []
     else:
         np.testing.assert_array_equal(np.concatenate([first, *stream]), expected)
+
+
+def test_mlx_qwen3_releases_global_mlx_lock_during_reopen_grace(monkeypatch):
+    from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
+    from speech_to_speech.utils.mlx_lock import acquire_mlx_lock, release_mlx_lock
+
+    tracker = SpeculativeTurnTracker()
+    tracker.start_turn()
+    tracker.start_reopen_grace("turn_1", 0, grace_s=0.4)
+    store = TurnLatencyStore()
+    response_tracker = store.get_or_create_response("resp_mlx_grace", turn_id="turn_1", turn_revision=0)
+
+    second_chunk_pulled = Event()
+    commit_entered = Event()
+
+    def _fake_generate(**_kwargs):
+        yield (_audible_stream_chunk(), 16000, {})
+        second_chunk_pulled.set()
+        yield (_audible_stream_chunk(), 16000, {})
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.should_listen = Event()
+    handler.cancel_scope = None
+    handler.speculative_turns = tracker
+    handler.turn_latency_store = store
+    handler.ref_audio = "TTS/ref_audio.wav"
+    handler.ref_text = "Reference text."
+    handler.speaker = None
+    handler.instruct = None
+    handler.language = "English"
+    handler.xvec_only = False
+    handler.parity_mode = False
+    handler.non_streaming_mode = None
+    handler.streaming_chunk_size = 4
+    handler.max_new_tokens = 1536
+    handler.blocksize = 512
+    handler.backend = "mlx"
+    handler.gen_kwargs = {}
+    handler.queue_in = Queue()
+    handler.model = SimpleNamespace(
+        config=SimpleNamespace(tts_model_type="base"),
+        generate=_fake_generate,
+    )
+    handler._prepare_mlx_ref_audio = lambda ref_audio: ref_audio
+    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *_a, **_kw: None)
+
+    original_commit = Qwen3TTSHandler._commit_first_audio
+
+    def _signalling_commit(self, tts_input, **kwargs):
+        commit_entered.set()
+        return original_commit(self, tts_input, **kwargs)
+
+    monkeypatch.setattr(Qwen3TTSHandler, "_commit_first_audio", _signalling_commit)
+
+    done = Event()
+    outputs = []
+
+    def run_process():
+        outputs.extend(
+            handler.process(
+                TTSInput(
+                    text="Hello.",
+                    turn_id="turn_1",
+                    turn_revision=0,
+                    response_key="resp_mlx_grace",
+                )
+            )
+        )
+        done.set()
+
+    thread = Thread(target=run_process)
+    thread.start()
+    try:
+        assert commit_entered.wait(1.0)
+        # While Qwen3-TTS is parked waiting for the reopen grace to expire,
+        # another MLX handler (e.g. STT/LLM) must be able to acquire the lock.
+        acquired = acquire_mlx_lock(timeout=0.05, handler_name="TestConcurrentMLX")
+        assert acquired is True
+        release_mlx_lock(handler_name="TestConcurrentMLX")
+
+        reopen(tracker, "turn_1", 0)
+        assert done.wait(1.0)
+    finally:
+        thread.join(timeout=1.0)
+
+    assert outputs == []
+    assert not second_chunk_pulled.is_set()
+    assert not tracker.is_committed("turn_1", 0)
+    assert response_tracker.tts_ttfa_s is None
+    assert response_tracker.e2e_s is None
+
+
+def test_speculative_tts_cancel_during_grace_leaves_ttfa_unset(monkeypatch):
+    from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
+
+    tracker = SpeculativeTurnTracker()
+    turn_id, rev, _ = tracker.speech_started(0)
+    tracker.segment_finalized(1000, output_hold_ms=300)
+    scope = CancelScope()
+    store = TurnLatencyStore()
+    response_tracker = store.get_or_create_response("resp_qwen_cancel", turn_id=turn_id, turn_revision=rev)
+
+    commit_entered = Event()
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.should_listen = Event()
+    handler.cancel_scope = scope
+    handler.speculative_turns = tracker
+    handler.turn_latency_store = store
+    handler.ref_audio = "TTS/ref_audio.wav"
+    handler.ref_text = "Reference text."
+    handler.speaker = None
+    handler.instruct = None
+    handler.language = "English"
+    handler.xvec_only = False
+    handler.parity_mode = False
+    handler.non_streaming_mode = None
+    handler.streaming_chunk_size = 8
+    handler.max_new_tokens = 360
+    handler.blocksize = 512
+    handler.backend = "faster_qwen3_tts"
+    handler.queue_in = Queue()
+    handler.model = SimpleNamespace(
+        model=SimpleNamespace(model=SimpleNamespace(tts_model_type="base")),
+        generate_voice_clone_streaming=lambda **_kwargs: iter([(_audible_stream_chunk(), 16000, {})]),
+    )
+    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda *_a, **_kw: None)
+
+    original_commit = Qwen3TTSHandler._commit_first_audio
+
+    def _signalling_commit(self, tts_input, **kwargs):
+        commit_entered.set()
+        return original_commit(self, tts_input, **kwargs)
+
+    monkeypatch.setattr(Qwen3TTSHandler, "_commit_first_audio", _signalling_commit)
+
+    done = Event()
+    outputs = []
+
+    def run_process():
+        outputs.extend(
+            handler.process(
+                TTSInput(
+                    text="Hello.",
+                    turn_id=turn_id,
+                    turn_revision=rev,
+                    response_key="resp_qwen_cancel",
+                    cancel_generation=scope.generation,
+                )
+            )
+        )
+        done.set()
+
+    thread = Thread(target=run_process)
+    thread.start()
+    try:
+        assert commit_entered.wait(1.0)
+        scope.cancel()
+        assert done.wait(0.3)
+    finally:
+        thread.join(timeout=1.0)
+
+    assert outputs == []
+    assert response_tracker.tts_ttfa_s is None
+    assert response_tracker.e2e_s is None

@@ -11,7 +11,7 @@ import numpy as np
 from scipy.signal import resample_poly
 
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.console import console
+from speech_to_speech.pipeline.console import console as console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -118,7 +118,7 @@ class KittenTTSHandler(BaseTTSHandler):
                 yield AUDIO_RESPONSE_DONE
             return
 
-        if not self._admit_input(tts_input, commit=False, hold_for_grace=False):
+        if not self._admit_input(tts_input):
             return
 
         text = tts_input.text
@@ -130,12 +130,10 @@ class KittenTTSHandler(BaseTTSHandler):
 
         # Synthesis start: after speculative gate / voice resolve, before provider work.
         timer = self._latency_timer(tts_input, cancel_gen)
-        emit = self._first_audio_emitter(
-            tts_input,
-            timer,
-            cancel_gen,
-            on_first=lambda: console.print(f"[green]ASSISTANT: {text}"),
-        )
+
+        def emit(block: np.ndarray) -> Iterator[TTSOut]:
+            timer.first_yield()
+            yield block
 
         # One input can hold several sentences, each a blocking model call. Deliver
         # each chunk before synthesizing the next so the first one is not held back

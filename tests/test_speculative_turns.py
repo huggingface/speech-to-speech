@@ -1474,3 +1474,26 @@ def test_firered_preserves_candidate_audio_through_handler(speech_pad_ms, silent
     streamed = np.frombuffer(b"".join(sink.audio), dtype=np.int16)
     np.testing.assert_array_equal(streamed, pcm[expected_start : expected_start + len(audio)])
     np.testing.assert_array_equal(audio, pcm[expected_start : expected_start + len(audio)].astype(np.float32) / 32768)
+
+
+def test_wait_for_gate_consolidates_wait_observer_across_abort_polls():
+    tracker = SpeculativeTurnTracker()
+    store = TurnLatencyStore()
+    observed: list[tuple[str, int, float, float]] = []
+
+    def observe(turn_id: str, revision: int, start_s: float, end_s: float) -> None:
+        observed.append((turn_id, revision, start_s, end_s))
+        store.record_smart_wait(turn_id, revision, start_s, end_s)
+
+    tracker.wait_observer = observe
+    turn_id, rev = tracker.start_turn()
+    latency = store.get_or_create_response("resp_wait", turn_id=turn_id, turn_revision=rev)
+    latency.smart_turn_status = "incomplete"
+    tracker.start_reopen_grace(turn_id, rev, grace_s=0.09)
+
+    assert tracker.wait_for_gate(turn_id, rev, commit=True, should_abort=lambda: False) is True
+
+    # Multiple 20ms _ABORT_POLL_S ticks during a continuous grace wait must emit one span.
+    assert len(observed) == 1
+    assert len(latency._smart_wait_intervals) == 1
+    assert latency.smart_turn_wait_s >= 0.07

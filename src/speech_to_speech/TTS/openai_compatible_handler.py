@@ -361,6 +361,8 @@ class _StreamingByteReader(io.RawIOBase):
 class OpenAICompatibleTTSHandler(BaseTTSHandler):
     """Client handler for POST /v1/audio/speech with cancellable audio streaming."""
 
+    _print_assistant_text = False
+
     def setup(
         self,
         should_listen: Event,
@@ -452,6 +454,23 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
             perf_counter() - started_at_s,
         )
 
+    def _is_commit_cancelled(self, tts_input: TTSInput | None) -> bool:
+        lock = getattr(self, "_operation_lock", None)
+        if lock is None:
+            return False
+        with lock:
+            operation = self._active_operation
+        if operation is None:
+            return False
+        cancelled_event = getattr(operation, "_cancelled", None)
+        if cancelled_event is not None:
+            return bool(cancelled_event.is_set())
+        return bool(getattr(operation, "cancelled", False))
+
+    def _on_first_audio_committed(self, tts_input: TTSInput, timer: TTSResponseTimer | None) -> None:
+        if timer is not None:
+            self._log_first_audio_latency(tts_input, timer)
+
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
         if isinstance(tts_input, EndOfResponse):
             if self._gate_end_of_response(tts_input):
@@ -460,7 +479,7 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
                 yield AUDIO_RESPONSE_DONE
             return
 
-        if not self._admit_input(tts_input, commit=False, hold_for_grace=False):
+        if not self._admit_input(tts_input):
             return
 
         cancel_generation = tts_input.cancel_generation
@@ -481,15 +500,10 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
             return
 
         def cancel_check() -> bool:
-            cancelled = self.stop_event.is_set() or self._is_stale(cancel_generation)
-            if cancelled:
-                return True
-            return self.speculative_turns is not None and not self.speculative_turns.is_latest(
-                tts_input.turn_id,
-                tts_input.turn_revision,
-            )
+            return self.stop_event.is_set() or self._is_stale(cancel_generation, tts_input)
 
         first_audio = True
+        completed = False
         timer = self._latency_timer(tts_input, also_cancelled=cancel_check)
         trace_context = HttpRequestContext(
             "tts",
@@ -499,6 +513,8 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
             response_key=tts_input.response_key,
         )
         operation: HttpSpeechOperation | None = None
+        source_chunks: Iterator[bytes] | None = None
+        decoded_chunks: Iterator[np.ndarray] | None = None
 
         def record_first_provider_audio() -> None:
             timer.first_provider_audio()
@@ -556,13 +572,9 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
                 if cancel_check():
                     operation.cancel()
                     return
-                if first_audio:
-                    if not self._commit_first_audio(tts_input, generation=cancel_generation, cancelled=cancel_check):
-                        operation.cancel()
-                        return
-                    self._log_first_audio_latency(tts_input, timer)
-                    first_audio = False
+                first_audio = False
                 yield chunk
+            completed = True
             if first_audio and not cancel_check():
                 raise SpeechRequestError("speech endpoint returned no audio")
         except SpeechRequestCancelled:
@@ -586,6 +598,12 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
                     )
                 )
         finally:
+            if not completed and operation is not None:
+                operation.cancel()
+            for stream in (decoded_chunks, source_chunks):
+                close = getattr(stream, "close", None)
+                if close is not None:
+                    close()
             if operation is not None:
                 with self._operation_lock:
                     if self._active_operation is operation:
@@ -781,7 +799,8 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
         yield from blocks.flush()
 
     def _log_first_audio_latency(self, tts_input: TTSInput, timer: TTSResponseTimer) -> None:
-        logger.info("OpenAI-compatible TTS time to first audio: %.3fs", perf_counter() - timer.started_at_s)
+        ttfa_s = timer.provider_ttfa_s if timer.provider_ttfa_s is not None else perf_counter() - timer.started_at_s
+        logger.info("OpenAI-compatible TTS time to first audio: %.3fs", ttfa_s)
         elapsed_s = timer.speech_stop_elapsed_s()
         if elapsed_s is None:
             return

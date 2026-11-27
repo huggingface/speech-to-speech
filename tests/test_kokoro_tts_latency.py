@@ -157,3 +157,92 @@ def test_kokoro_mlx_records_ttfa_before_silence_trim(monkeypatch):
     assert outputs
     assert tracker.tts_ttfa_s == pytest.approx(0.08)
     assert tracker.e2e_s == pytest.approx(1.08)
+
+
+def test_kokoro_mlx_releases_global_mlx_lock_during_reopen_grace(monkeypatch):
+    from threading import Thread
+
+    from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+    from speech_to_speech.utils.mlx_lock import acquire_mlx_lock, release_mlx_lock
+    from tests.turns import reopen
+
+    monkeypatch.setattr(kokoro_handler, "platform", "darwin")
+    monkeypatch.setattr(KokoroTTSHandler, "warmup", lambda self: None)
+    monkeypatch.setattr(kokoro_handler.console, "print", lambda *_args, **_kwargs: None)
+
+    second_chunk_pulled = Event()
+    commit_entered = Event()
+
+    class FakePipeline:
+        def load_voice(self, voice: str) -> None:
+            return None
+
+        def __call__(self, *, text: str, voice: str, speed: float):
+            yield SimpleNamespace(audio=np.full((1, 2400), 0.2, dtype=np.float32))
+            second_chunk_pulled.set()
+            yield SimpleNamespace(audio=np.full((1, 2400), 0.2, dtype=np.float32))
+
+    speculative_turns = SpeculativeTurnTracker()
+    speculative_turns.start_turn()
+    speculative_turns.start_reopen_grace("turn_1", 0, grace_s=0.4)
+    store = TurnLatencyStore()
+    latency = store.get_or_create_response("mlx-grace", turn_id="turn_1", turn_revision=0)
+
+    handler = KokoroTTSHandler.__new__(KokoroTTSHandler)
+    handler.should_listen = Event()
+    handler.cancel_scope = None
+    handler.speculative_turns = speculative_turns
+    handler.turn_latency_store = store
+    handler.device = "mps"
+    handler.backend = "mlx"
+    handler.voice = "bm_fable"
+    handler.lang_code = "b"
+    handler._initial_voice = "bm_fable"
+    handler._initial_lang_code = "b"
+    handler.speed = 1.0
+    handler.blocksize = 512
+    handler.model = SimpleNamespace(_get_pipeline=lambda lang: FakePipeline())
+    handler._pipeline = FakePipeline()
+
+    original_commit = KokoroTTSHandler._commit_first_audio
+
+    def _signalling_commit(self, tts_input, **kwargs):
+        commit_entered.set()
+        return original_commit(self, tts_input, **kwargs)
+
+    monkeypatch.setattr(KokoroTTSHandler, "_commit_first_audio", _signalling_commit)
+
+    done = Event()
+    outputs: list[np.ndarray] = []
+
+    def run_process() -> None:
+        outputs.extend(
+            handler.process(
+                TTSInput(
+                    text="Hello",
+                    response_key="mlx-grace",
+                    turn_id="turn_1",
+                    turn_revision=0,
+                )
+            )
+        )
+        done.set()
+
+    thread = Thread(target=run_process)
+    thread.start()
+    try:
+        assert commit_entered.wait(1.0)
+        acquired = acquire_mlx_lock(timeout=0.05, handler_name="TestConcurrentMLX")
+        assert acquired is True
+        release_mlx_lock(handler_name="TestConcurrentMLX")
+
+        reopen(speculative_turns, "turn_1", 0)
+        assert done.wait(1.0)
+    finally:
+        thread.join(timeout=1.0)
+
+    assert outputs == []
+    assert not second_chunk_pulled.is_set()
+    assert not speculative_turns.is_committed("turn_1", 0)
+    assert latency.tts_ttfa_s is None
+    assert latency.e2e_s is None

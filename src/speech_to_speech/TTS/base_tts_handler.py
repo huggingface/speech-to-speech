@@ -5,20 +5,15 @@ import logging
 from collections.abc import Callable, Iterator
 from typing import Any
 
-import numpy as np
-
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.turn_latency import TTSResponseTimer, TurnLatencyStore
 
 logger = logging.getLogger(__name__)
-
-
-class _TurnCommitDropped(BaseException):
-    """Internal control-flow abort when a speculative turn drops before first audio commit."""
 
 
 class BaseTTSHandler(BaseHandler[TTSIn, TTSOut]):
@@ -28,7 +23,9 @@ class BaseTTSHandler(BaseHandler[TTSIn, TTSOut]):
     cancel_scope: CancelScope | None = None
     turn_latency_store: TurnLatencyStore | None = None
     speculative_turns: SpeculativeTurnTracker | None = None
+    _print_assistant_text: bool = True
     _active_tts_input: TTSInput | None = None
+    _active_timer: TTSResponseTimer | None = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -38,13 +35,42 @@ class BaseTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         @functools.wraps(raw_process)
         def _scoped_process(self: BaseTTSHandler, tts_input: TTSIn) -> Iterator[TTSOut]:
-            self._active_tts_input = tts_input if isinstance(tts_input, TTSInput) else None
-            try:
+            if isinstance(tts_input, TTSInput) and self._active_tts_input is tts_input:
                 yield from raw_process(self, tts_input)
-            except _TurnCommitDropped:
                 return
+
+            previous_input = self._active_tts_input
+            previous_timer = self._active_timer
+            self._active_tts_input = tts_input if isinstance(tts_input, TTSInput) else None
+            self._active_timer = None
+            process_generation: int | None = None
+            if isinstance(tts_input, TTSInput):
+                process_generation = tts_input.cancel_generation
+                if process_generation is None and self.cancel_scope is not None:
+                    process_generation = self.cancel_scope.generation
+
+            gen = raw_process(self, tts_input)
+            try:
+                first_audio = isinstance(tts_input, TTSInput)
+                for output in gen:
+                    if first_audio:
+                        assert isinstance(tts_input, TTSInput)
+                        if not self._commit_first_audio(tts_input, generation=process_generation):
+                            return
+                        first_audio = False
+                        timer = self._active_timer
+                        if timer is not None:
+                            timer.publish_provider_audio()
+                        self._on_first_audio_committed(tts_input, timer)
+                        if timer is not None:
+                            timer.first_yield(ignore_cancel=True)
+                    yield output
             finally:
-                self._active_tts_input = None
+                close = getattr(gen, "close", None)
+                if close is not None:
+                    close()
+                self._active_tts_input = previous_input
+                self._active_timer = previous_timer
 
         _scoped_process._tts_scoped = True  # type: ignore[attr-defined]
         setattr(cls, "process", _scoped_process)
@@ -62,11 +88,18 @@ class BaseTTSHandler(BaseHandler[TTSIn, TTSOut]):
             end.cleanup_only = True
         return True
 
-    def _admit_input(self, tts_input: TTSInput, *, commit: bool = True, hold_for_grace: bool = True) -> bool:
+    def _admit_input(
+        self,
+        tts_input: TTSInput,
+        *,
+        commit: bool = False,
+        hold_for_grace: bool = False,
+    ) -> bool:
         """Wait for the speculative turn gate and say whether to synthesize ``tts_input``.
 
-        ``commit=True`` marks the turn as having produced audio. Speculative handlers
-        pass ``commit=False, hold_for_grace=False`` and commit on first audio instead.
+        Defaults to speculative admission (``commit=False, hold_for_grace=False``) so
+        synthesis can overlap the reopen grace while ``BaseTTSHandler`` commits on the
+        first yielded audio block.
         """
         tracker = self.speculative_turns
         if tracker is None:
@@ -80,6 +113,19 @@ class BaseTTSHandler(BaseHandler[TTSIn, TTSOut]):
             logger.debug("Dropping stale TTS input for turn=%s rev=%s", tts_input.turn_id, tts_input.turn_revision)
             return False
         return True
+
+    def _is_commit_cancelled(self, tts_input: TTSInput | None) -> bool:
+        """Handler-specific cancellation check consulted while waiting to commit first audio."""
+        return False
+
+    def _assistant_text_for_print(self, tts_input: TTSInput) -> str:
+        """Return the text printed to the terminal once first audio commits."""
+        return tts_input.text
+
+    def _on_first_audio_committed(self, tts_input: TTSInput, timer: TTSResponseTimer | None) -> None:
+        """Run user-visible first-audio side effects after speculative commit succeeds."""
+        if self._print_assistant_text:
+            console.print(f"[green]ASSISTANT: {self._assistant_text_for_print(tts_input)}")
 
     def _commit_first_audio(
         self,
@@ -105,6 +151,7 @@ class BaseTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     and tts_input.cancel_generation is not None
                     and self._is_stale(tts_input.cancel_generation, tts_input)
                 )
+                or self._is_commit_cancelled(tts_input)
                 or (cancelled is not None and cancelled())
             )
 
@@ -131,31 +178,6 @@ class BaseTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 return False
         return not _aborted()
 
-    def _first_audio_emitter(
-        self,
-        tts_input: TTSInput | None,
-        timer: TTSResponseTimer,
-        generation: int | None = None,
-        *,
-        cancelled: Callable[[], bool] | None = None,
-        on_first: Callable[[], None] | None = None,
-    ) -> Callable[[np.ndarray], Iterator[np.ndarray]]:
-        """Return an ``emit(block)`` helper that commits on first audio or aborts cleanly."""
-        committed = False
-
-        def emit(block: np.ndarray) -> Iterator[np.ndarray]:
-            nonlocal committed
-            if not committed:
-                if not self._commit_first_audio(tts_input, generation=generation, cancelled=cancelled):
-                    raise _TurnCommitDropped
-                committed = True
-                if on_first is not None:
-                    on_first()
-            timer.first_yield()
-            yield block
-
-        return emit
-
     def _is_stale(self, generation: int | None, tts_input: TTSInput | None = None) -> bool:
         """True once an interruption or speculative turn reopen supersedes this work."""
         if generation is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(generation):
@@ -167,6 +189,13 @@ class BaseTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 return True
         return False
 
+    def _turn_uncommitted(self, tts_input: TTSInput | None) -> bool:
+        tracker = self.speculative_turns
+        if tracker is None or tts_input is None or tts_input.turn_id is None or tts_input.turn_revision is None:
+            return False
+        is_committed = getattr(tracker, "is_committed", None)
+        return not (callable(is_committed) and is_committed(tts_input.turn_id, tts_input.turn_revision))
+
     def _latency_timer(
         self,
         tts_input: TTSInput | None,
@@ -177,15 +206,22 @@ class BaseTTSHandler(BaseHandler[TTSIn, TTSOut]):
         """Start timing one synthesis; call right before provider work begins.
 
         Output counts as cancelled once ``generation`` is stale, the speculative
-        turn is superseded, or when ``also_cancelled`` returns True.
+        turn is superseded, or when ``also_cancelled`` returns True. For an
+        uncommitted speculative turn, ``tts_ttfa`` and ``e2e`` stay deferred
+        until ``_commit_first_audio`` succeeds so dropped speculative audio never
+        tags a cancelled turn as ``tts=cut``.
         """
 
         def cancelled() -> bool:
             return self._is_stale(generation, tts_input) or (also_cancelled is not None and also_cancelled())
 
-        return TTSResponseTimer(
+        timer = TTSResponseTimer(
             self.turn_latency_store,
             tts_input.response_key if tts_input is not None else None,
             tts_input.speech_stopped_at_s if tts_input is not None else None,
             cancelled,
+            defer_until_commit=self._turn_uncommitted(tts_input),
         )
+        if tts_input is not None and self._active_tts_input is tts_input:
+            self._active_timer = timer
+        return timer

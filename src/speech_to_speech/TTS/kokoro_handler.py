@@ -18,7 +18,7 @@ from typing import Any, Iterator, Optional
 import numpy as np
 
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.console import console
+from speech_to_speech.pipeline.console import console as console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -239,7 +239,7 @@ class KokoroTTSHandler(BaseTTSHandler):
                 yield AUDIO_RESPONSE_DONE
             return
 
-        if not self._admit_input(tts_input, commit=False, hold_for_grace=False):
+        if not self._admit_input(tts_input):
             return
 
         runtime_config = tts_input.runtime_config
@@ -338,6 +338,9 @@ class KokoroTTSHandler(BaseTTSHandler):
         from scipy.signal import resample_poly
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
+        # Hold the global MLX lock only during MLX model/pipeline calls and
+        # array materialization so speculative reopen-grace waits never block
+        # other MLX handlers.
         with MLXLockContext(handler_name="KokoroTTS", timeout=10.0):
             new_lang_code, new_voice = (
                 self._lang_and_voice_for(language_code, pinned_voice)
@@ -361,62 +364,91 @@ class KokoroTTSHandler(BaseTTSHandler):
                     logger.warning(f"Failed to switch language/voice: {e}. Keeping current language: {self.lang_code}")
 
             timer = self._latency_timer(tts_input, gen)
-            emit = self._first_audio_emitter(
-                tts_input,
-                timer,
-                gen,
-                on_first=lambda: console.print(f"[green]ASSISTANT: {llm_sentence}"),
-            )
-
             # Generate audio using the preloaded pipeline directly
             # This avoids the voice reload that happens in model.generate()
-            for result in self._pipeline(
-                text=llm_sentence,
-                voice=self.voice,
-                speed=self.speed,
-            ):
-                if self._is_stale(gen):
-                    logger.info("TTS generation cancelled (interruption)")
-                    return
-                if result.audio is None:
-                    continue
-                # result.audio is an mx.array with shape (1, samples), convert to numpy and squeeze
-                audio = np.array(result.audio, dtype=np.float32).squeeze(0)
-                if audio.size:
-                    # Provider samples, before silence trim / resample / block assembly.
-                    timer.first_provider_audio()
+            results_iter = iter(
+                self._pipeline(
+                    text=llm_sentence,
+                    voice=self.voice,
+                    speed=self.speed,
+                )
+            )
+            try:
+                first_result = next(results_iter)
+            except StopIteration:
+                return
+            except BaseException:
+                close = getattr(results_iter, "close", None)
+                if close is not None:
+                    close()
+                raise
+            # result.audio is an mx.array with shape (1, samples), convert to numpy and squeeze
+            first_audio = (
+                None if first_result.audio is None else np.array(first_result.audio, dtype=np.float32).squeeze(0)
+            )
 
-                # Trim silence from start and end of audio
-                # Kokoro generates ~250ms of silence at the start and variable silence at the end
-                threshold = 0.01
-                abs_audio = np.abs(audio)
-                # Find first and last samples above threshold
-                above_threshold = abs_audio > threshold
-                if np.any(above_threshold):
-                    start_idx = int(np.argmax(above_threshold))
-                    end_idx = len(audio) - int(np.argmax(above_threshold[::-1]))
-                    # Add small padding (5ms = 120 samples at 24kHz) to avoid cutting speech
-                    padding = 120
-                    start_idx = max(0, start_idx - padding)
-                    end_idx = min(len(audio), end_idx + padding)
-                    audio = audio[start_idx:end_idx]
-
-                # Kokoro outputs at 24kHz, resample to 16kHz for the pipeline
-                # Using scipy's polyphase resampling (fast and high quality)
-                # 16000/24000 = 2/3, so up=2, down=3
-                audio = resample_poly(audio, up=2, down=3)
-
-                # Convert to int16 format
-                audio = np.clip(audio * 32768, -32768, 32767).astype(np.int16)
-
-                # Preserve short tails without inserting silence between provider segments.
-                for i in range(0, len(audio), self.blocksize):
+        def iter_audio_segments() -> Iterator[np.ndarray]:
+            try:
+                if first_audio is not None:
+                    yield first_audio
+                while True:
                     if self._is_stale(gen):
                         logger.info("TTS generation cancelled (interruption)")
                         return
-                    chunk = audio[i : i + self.blocksize]
-                    logger.debug(f"TTS yielding audio chunk: {len(chunk)} samples")
-                    yield from emit(chunk)
+                    with MLXLockContext(handler_name="KokoroTTS", timeout=10.0):
+                        try:
+                            result = next(results_iter)
+                        except StopIteration:
+                            return
+                        segment = None if result.audio is None else np.array(result.audio, dtype=np.float32).squeeze(0)
+                    if segment is not None:
+                        yield segment
+            finally:
+                close = getattr(results_iter, "close", None)
+                if close is not None:
+                    with MLXLockContext(handler_name="KokoroTTS", timeout=10.0):
+                        close()
+
+        for audio in iter_audio_segments():
+            if self._is_stale(gen):
+                logger.info("TTS generation cancelled (interruption)")
+                return
+            if audio.size:
+                # Provider samples, before silence trim / resample / block assembly.
+                timer.first_provider_audio()
+
+            # Trim silence from start and end of audio
+            # Kokoro generates ~250ms of silence at the start and variable silence at the end
+            threshold = 0.01
+            abs_audio = np.abs(audio)
+            # Find first and last samples above threshold
+            above_threshold = abs_audio > threshold
+            if np.any(above_threshold):
+                start_idx = int(np.argmax(above_threshold))
+                end_idx = len(audio) - int(np.argmax(above_threshold[::-1]))
+                # Add small padding (5ms = 120 samples at 24kHz) to avoid cutting speech
+                padding = 120
+                start_idx = max(0, start_idx - padding)
+                end_idx = min(len(audio), end_idx + padding)
+                audio = audio[start_idx:end_idx]
+
+            # Kokoro outputs at 24kHz, resample to 16kHz for the pipeline
+            # Using scipy's polyphase resampling (fast and high quality)
+            # 16000/24000 = 2/3, so up=2, down=3
+            audio = resample_poly(audio, up=2, down=3)
+
+            # Convert to int16 format
+            audio = np.clip(audio * 32768, -32768, 32767).astype(np.int16)
+
+            # Preserve short tails without inserting silence between provider segments.
+            for i in range(0, len(audio), self.blocksize):
+                if self._is_stale(gen):
+                    logger.info("TTS generation cancelled (interruption)")
+                    return
+                chunk = audio[i : i + self.blocksize]
+                timer.first_yield()
+                logger.debug(f"TTS yielding audio chunk: {len(chunk)} samples")
+                yield chunk
 
     def _process_kokoro(
         self,
@@ -447,12 +479,6 @@ class KokoroTTSHandler(BaseTTSHandler):
         if new_voice == pinned_voice:
             new_voice = self._load_requested_voice(self.pipeline, new_voice)
         self.voice = new_voice
-        emit = self._first_audio_emitter(
-            tts_input,
-            timer,
-            gen,
-            on_first=lambda: console.print(f"[green]ASSISTANT: {llm_sentence}"),
-        )
 
         # Generate audio using Kokoro
         # The pipeline yields tuples of (graphemes, phonemes, audio)
@@ -485,7 +511,9 @@ class KokoroTTSHandler(BaseTTSHandler):
                 if self._is_stale(gen):
                     logger.info("TTS generation cancelled (interruption)")
                     return
-                yield from emit(audio[i : i + self.blocksize])
+                chunk = audio[i : i + self.blocksize]
+                timer.first_yield()
+                yield chunk
 
     def on_session_end(self) -> None:
         self.voice = self._initial_voice

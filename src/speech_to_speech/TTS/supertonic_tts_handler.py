@@ -9,7 +9,7 @@ import numpy as np
 import scipy.signal
 
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.console import console
+from speech_to_speech.pipeline.console import console as console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -138,7 +138,7 @@ class SupertonicTTSHandler(BaseTTSHandler):
                 yield AUDIO_RESPONSE_DONE
             return
 
-        if not self._admit_input(tts_input, commit=False, hold_for_grace=False):
+        if not self._admit_input(tts_input):
             return
 
         cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
@@ -189,9 +189,6 @@ class SupertonicTTSHandler(BaseTTSHandler):
 
         # Convert to int16 format expected by the audio pipeline
         audio_int16 = np.clip(audio_16k_float * 32768, -32768, 32767).astype(np.int16)
-        if not self._commit_first_audio(tts_input, generation=cancel_gen):
-            return
-        console.print(f"[green]ASSISTANT: {text}")
 
         def emit(block: np.ndarray) -> Iterator[TTSOut]:
             timer.first_yield()
