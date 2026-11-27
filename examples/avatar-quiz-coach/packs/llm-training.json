@@ -42,8 +42,7 @@
    "answer": "Frozen layers are kept unchanged during training, so only the remaining layers update. It saves computation and preserves lower-level features learned during pretraining.",
    "key_points": [
     "Frozen layers don't change during backpropagation",
-    "Saves compute",
-    "Earlier layers capture lower-level features"
+    "A reason to do it, such as saving compute or keeping the lower-level features learned in pretraining"
    ],
    "hint": "It's about which parts of the network you allow to update.",
    "fun_fact": "With LoRA, a model with billions of parameters can be fine-tuned using only several million extra parameters.",
@@ -51,7 +50,8 @@
    "source": 3,
    "id": 2,
    "required": [
-    0
+    0,
+    1
    ]
   },
   {

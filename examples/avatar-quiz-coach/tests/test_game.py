@@ -116,7 +116,7 @@ def test_covering_every_required_point_across_tries_counts_as_correct(grader):
     out = turn(game, "the second half")
     assert out["verdict"] == "correct" and out["points"] > 0
     assert out["reveal"]["points_hit"] == [0, 1]
-    assert out["say"].split("!")[0] + "!" in {p.split("!")[0] + "!" for p in g.COVERED_PRAISE}
+    assert any(out["say"].startswith(p) for p in g.COVERED_PRAISE)
     assert "Almost" not in out["say"]
 
 
