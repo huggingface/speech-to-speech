@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 import torch
 
+from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
 from speech_to_speech.pipeline.messages import VADAudio
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.VAD.vad_handler import VADHandler
@@ -128,6 +129,8 @@ def test_session_end_restarts_the_idle_clock(monkeypatch) -> None:
     [
         {"confident_thresh": 0},
         {"barge_in_ms": -1},
+        {"barge_in_min_confident_speech_ms": -1},
+        {"barge_in_min_confident_speech_ms": 256},  # requires min_confident_speech_ms > 0
         {"min_confident_speech_ms": -1},
         {"idle_after_s": 60},  # idle settings need the scored rule
         {"min_confident_speech_ms": 128, "vad": "firered", "vad_firered_model_dir": "unused"},
@@ -259,3 +262,62 @@ def test_confident_speech_still_uses_min_confident_speech_ms_during_barge_in(mon
     assert _opened_turns(handler, 12) == 0
     # 128 ms of confident speech still opens because barge_in_ms replaces only the ordinary-speech term.
     assert _opened_turns(handler, 8) == 1
+
+
+def test_barge_in_min_confident_speech_ms_raises_confident_bar_during_playback(monkeypatch) -> None:
+    response_playing = Event()
+    response_playing.set()
+    # 4 confident chunks (128 ms), then 8 confident chunks (256 ms), then after playback 4 confident chunks (128 ms).
+    probs = [CONFIDENT] * 4 + SILENCE + [CONFIDENT] * 8 + SILENCE + [CONFIDENT] * 4 + SILENCE
+    handler = _handler(
+        monkeypatch,
+        probs,
+        min_speech_ms=800,
+        min_confident_speech_ms=128,
+        barge_in_min_confident_speech_ms=256,
+        response_playing=response_playing,
+    )
+
+    # While playing, 128 ms of confident speech is under barge_in_min_confident_speech_ms=256; 256 ms opens.
+    assert _opened_turns(handler, 8) == 0
+    assert _opened_turns(handler, 12) == 1
+
+    # Once playback stops, confident speech drops back to min_confident_speech_ms=128.
+    handler.speculative_turns.gate("turn_1", 0, hold_for_grace=False, commit=True)
+    handler.speculative_turns.close("turn_1", 0)
+    response_playing.clear()
+    outputs = [output for _ in range(8) for output in handler.process(CHUNK) if isinstance(output, VADAudio)]
+    assert [(item.turn_id, item.turn_revision) for item in outputs] == [("turn_2", 0)]
+
+
+def test_barge_in_min_confident_speech_ms_applies_during_buffered_playback_and_ignores_idle(monkeypatch) -> None:
+    buffered = True
+    # 40 silent chunks (1.28 s > idle_after_s=1.0), then 8 confident chunks (256 ms < idle_min_confident=384).
+    probs = [0.0] * 40 + [CONFIDENT] * 8 + SILENCE
+    handler = _handler(
+        monkeypatch,
+        probs,
+        **IDLE,
+        barge_in_min_confident_speech_ms=256,
+        has_pending_playback=lambda: buffered,
+    )
+
+    # Buffered playback uses barge-in requirements (256 ms), not idle requirements (384 ms).
+    assert _opened_turns(handler, len(probs)) == 1
+
+
+def test_positional_continuation_threshold_keeps_its_meaning(monkeypatch) -> None:
+    args = VADHandlerArguments("silero", None, False, 0.6, 16000, 64, 384, 0, 160)
+    assert args.min_speech_continuation_ms == 160
+    assert args.barge_in_min_confident_speech_ms == 0
+
+    monkeypatch.setattr(torch.hub, "load", lambda *args, **kwargs: (_FakeVADModel([]), None))
+    handler = VADHandler(
+        Event(),
+        Queue(),
+        Queue(),
+        setup_args=(Event(), SpeculativeTurnTracker(), 0.6, 16000, 64, 384, 0, 160),
+        setup_kwargs={"smart_turn": False},
+    )
+    assert handler.min_speech_continuation_ms == 160
+    assert handler.barge_in_min_confident_speech_ms == 0
