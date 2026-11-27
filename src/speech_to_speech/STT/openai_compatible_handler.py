@@ -68,6 +68,8 @@ class HttpTranscriptionOperation:
     timeout_s: float
     extra_fields: dict[str, Any] | None = None
     trace: HttpRequestTrace | None = field(default=None, repr=False)
+    speech_contexts: str | None = None
+    prompt: str | None = None
     _cancelled: Event = field(default_factory=Event, init=False, repr=False)
     _transport_lock: Any = field(default_factory=Lock, init=False, repr=False)
     _cancel_reason: str = field(default="superseded", init=False, repr=False)
@@ -187,6 +189,10 @@ class HttpTranscriptionOperation:
                 data["languages[]"] = self.language
             else:
                 data["language"] = self.language
+        if self.speech_contexts:
+            data["speech_contexts"] = self.speech_contexts
+        if self.prompt:
+            data["prompt"] = self.prompt
 
         return {"data": data, "files": {"file": ("audio.wav", self.wav_bytes, "audio/wav")}}
 
@@ -247,6 +253,38 @@ class HttpTranscriptionOperation:
         )
 
 
+def _reject_json_constant(constant: str) -> Any:
+    raise ValueError(f"unsupported JSON constant {constant}")
+
+
+def _validate_speech_contexts(speech_contexts: str) -> None:
+    message = 'STT speech_contexts must be a JSON array like [{"phrases": ["word"], "boost": 3.0}]'
+    try:
+        contexts = json.loads(speech_contexts, parse_constant=_reject_json_constant)
+    except ValueError as exc:
+        raise ValueError(f"{message}: invalid JSON") from exc
+    if not isinstance(contexts, list) or not contexts:
+        raise ValueError(message)
+    for context in contexts:
+        if not isinstance(context, dict):
+            raise ValueError(message)
+        phrases = context.get("phrases")
+        if (
+            not isinstance(phrases, list)
+            or not phrases
+            or not all(isinstance(phrase, str) and phrase.strip() for phrase in phrases)
+        ):
+            raise ValueError(f"{message}: each entry needs a nonempty 'phrases' list of strings")
+        if "boost" in context:
+            boost = context["boost"]
+            try:
+                valid_boost = not isinstance(boost, bool) and isinstance(boost, (int, float)) and math.isfinite(boost)
+            except OverflowError:
+                valid_boost = False
+            if not valid_boost:
+                raise ValueError(f"{message}: 'boost' must be a number")
+
+
 @dataclass(eq=False)
 class _TranscriptionRequest:
     source: VADAudio
@@ -291,6 +329,8 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         max_output_tokens: int = 384,
         instruction: str = "",
         drop_filler_only: bool = False,
+        speech_contexts: str | None = None,
+        prompt: str | None = None,
     ) -> None:
         if profile not in {"transcription", "nemotron"}:
             raise ValueError("OpenAI-compatible STT profile must be 'transcription' or 'nemotron'")
@@ -298,6 +338,10 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             raise ValueError("STT instruction and recognition context require the nemotron profile")
         if profile == "transcription" and drop_filler_only:
             raise ValueError("STT drop_filler_only requires the nemotron profile")
+        if profile == "nemotron" and (speech_contexts or prompt):
+            raise ValueError("STT speech_contexts and prompt require the transcription profile")
+        if speech_contexts:
+            _validate_speech_contexts(speech_contexts)
         if context_terms is not None and not isinstance(context_terms, (list, tuple)):
             raise ValueError("STT context_terms must be a list of nonempty strings")
         if profile == "nemotron" and (response_format != "json" or not model or gen_kwargs):
@@ -325,6 +369,8 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
         self.max_output_tokens = max_output_tokens
         self.instruction = instruction.strip()
         self.drop_filler_only = drop_filler_only
+        self.speech_contexts = speech_contexts or None
+        self.prompt = prompt or None
         if profile == "nemotron":
             from speech_to_speech.STT.nemotron_transcribe import build_prompt
 
@@ -751,6 +797,8 @@ class OpenAICompatibleSTTHandler(BaseSTTHandler):
             response_format=self.response_format,
             timeout_s=self.timeout,
             extra_fields=extra_fields,
+            speech_contexts=self.speech_contexts,
+            prompt=self.prompt,
         )
 
     @staticmethod
