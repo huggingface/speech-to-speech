@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from queue import Queue
 from threading import Event
@@ -92,6 +92,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         idle_min_speech_ms: int = 0,
         idle_min_confident_speech_ms: int = 0,
         response_playing: Event | None = None,
+        has_pending_playback: Callable[[], bool] | None = None,
     ) -> None:
         if not 0 < confident_thresh <= 1:
             raise ValueError("confident_thresh must be in (0, 1]")
@@ -111,6 +112,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._last_accept_audio_ms = 0
         self.should_listen = should_listen
         self.response_playing = response_playing if response_playing is not None else Event()
+        self.has_pending_playback = has_pending_playback
         self.sample_rate = sample_rate
         self.min_silence_ms = min_silence_ms
         self.min_speech_ms = min_speech_ms
@@ -289,7 +291,10 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
     def _is_response_playing(self) -> bool:
         event = getattr(self, "response_playing", None)
-        return event is not None and event.is_set()
+        if event is not None and event.is_set():
+            return True
+        pending = getattr(self, "has_pending_playback", None)
+        return pending is not None and pending()
 
     def _barge_in_speech_min_ms(self) -> int:
         barge_in_ms = getattr(self, "barge_in_ms", 0)
@@ -326,10 +331,10 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         """Score a new-turn candidate; it opens at 1.0 or more. Returns (score, idle seconds).
 
         Confident speech counts against min_confident_speech_ms and the rest of the active
-        speech against min_speech_ms (or barge_in_ms while a response is playing), so a few
-        very confident chunks open a turn alone, enough ordinary ones do too, and mixtures
-        add up. After idle_after_s of nothing, the idle pair replaces both requirements where
-        it is set.
+        speech against min_speech_ms (or barge_in_ms while a response is playing or buffered
+        for playback), so a few very confident chunks open a turn alone, enough ordinary ones
+        do too, and mixtures add up. After idle_after_s of nothing, the idle pair replaces
+        both requirements where it is set.
         """
         idle_s = self._idle_s(start_ms)
         min_speech_ms: float = self.min_speech_ms

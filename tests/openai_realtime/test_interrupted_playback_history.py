@@ -832,3 +832,72 @@ def test_truncate_at_the_end_of_audio_with_a_fractional_millisecond_keeps_the_re
     service.handle_conversation_item_truncate(conn_id, _truncate(item_id, 2000))
 
     assert _history(service, conn_id) == [*EARLIER_TURNS, ("assistant", None, FIRST)]
+
+
+async def test_barge_in_threshold_holds_until_websocket_playback_estimate_elapses(monkeypatch):
+    """After generation finishes, WebSocket's playback estimate keeps barge_in_ms active until playback catches up."""
+    from queue import Queue
+    from threading import Event
+
+    import numpy as np
+    import torch
+
+    from speech_to_speech.api.openai_realtime.pipeline_unit import SessionState
+    from speech_to_speech.pipeline.messages import VADAudio
+    from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+    from speech_to_speech.VAD.vad_handler import VADHandler
+    from tests.test_vad_iterator import _FakeVADModel
+
+    unit, conn_id, transport, clock = _websocket_session()
+    unit.session = SessionState(transport=transport, session_id=conn_id)
+
+    await transport.send_audio_chunk(unit.service, conn_id, b"\x00\x00" * RATE * 2, RESPONSE_KEY)
+    unit.response_playing.clear()
+    clock.now += 0.5
+    assert transport.has_pending_audio()
+    assert unit.is_response_playing()
+
+    probs = [0.7] * 8 + [0.0] * 4 + [0.7] * 8 + [0.0] * 4
+    monkeypatch.setattr(torch.hub, "load", lambda *_args, **_kwargs: (_FakeVADModel(probs), None))
+    should_listen = Event()
+    should_listen.set()
+    vad = VADHandler(
+        Event(),
+        Queue(),
+        Queue(),
+        setup_kwargs={
+            "should_listen": should_listen,
+            "speculative_turns": SpeculativeTurnTracker(),
+            "thresh": 0.6,
+            "min_silence_ms": 64,
+            "min_speech_ms": 192,
+            "barge_in_ms": 384,
+            "speech_pad_ms": 0,
+            "smart_turn": False,
+            "response_playing": unit.response_playing,
+            "has_pending_playback": unit.has_pending_playback,
+        },
+    )
+    chunk = np.zeros(512, dtype=np.int16).tobytes()
+
+    # 256 ms (8 chunks) is rejected while estimated WebSocket playback is still running.
+    before_drain = [out for _ in range(12) for out in vad.process(chunk) if isinstance(out, VADAudio)]
+    assert before_drain == []
+
+    # Once the playback estimate elapses, the same 256 ms candidate opens a turn.
+    clock.now += 1.5
+    assert not transport.has_pending_audio()
+    assert not unit.is_response_playing()
+    after_drain = [out for _ in range(12) for out in vad.process(chunk) if isinstance(out, VADAudio)]
+    assert [(item.turn_id, item.turn_revision) for item in after_drain] == [("turn_1", 0)]
+
+    # Discarding pending audio or releasing the session immediately drops playback protection.
+    await transport.send_audio_chunk(unit.service, conn_id, b"\x00\x00" * RATE, RESPONSE_KEY)
+    assert unit.has_pending_playback()
+    unit.session.released_at = 1.0
+    assert not unit.has_pending_playback()
+    unit.session.released_at = None
+    assert unit.has_pending_playback()
+    transport.discard_pending_audio()
+    assert not transport.has_pending_audio()
+    assert not unit.has_pending_playback()

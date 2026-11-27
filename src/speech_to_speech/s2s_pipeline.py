@@ -735,7 +735,7 @@ def _build_pipeline_unit(
             known = set(capabilities.languages)
             setattr(service, f"{kind}_supported_languages", known if allowed is None else allowed & known)
 
-    return PipelineUnit(
+    unit = PipelineUnit(
         index=index,
         service=service,
         cancel_scope=cancel_scope,
@@ -748,6 +748,8 @@ def _build_pipeline_unit(
         output_signal=output_signal,
         handlers=handlers,
     )
+    handlers[0].has_pending_playback = unit.has_pending_playback
+    return unit
 
 
 def build_pipeline(

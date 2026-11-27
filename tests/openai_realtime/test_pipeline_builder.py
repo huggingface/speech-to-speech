@@ -260,3 +260,4 @@ def test_build_pipeline_unit_wires_response_playing_into_vad(monkeypatch):
     )
 
     assert vad_setup_kwargs["response_playing"] is unit.response_playing
+    assert unit.handlers[0].has_pending_playback == unit.has_pending_playback

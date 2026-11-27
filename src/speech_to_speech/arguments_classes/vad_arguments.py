@@ -46,7 +46,9 @@ class VADHandlerArguments:
     barge_in_ms: int = field(
         default=0,
         metadata={
-            "help": "Active speech (ms) required to open a turn while the assistant is speaking and interrupt it. 0 keeps min_speech_ms. Default is 0."
+            "help": "min_speech_ms to use while the assistant is speaking (including buffered playback) to interrupt it. "
+            "When min_confident_speech_ms is set, this replaces only the ordinary-speech term; confident speech still uses min_confident_speech_ms. "
+            "0 keeps min_speech_ms. Default is 0."
         },
     )
     min_speech_continuation_ms: int = field(

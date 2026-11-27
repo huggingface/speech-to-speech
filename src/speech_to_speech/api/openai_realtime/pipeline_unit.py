@@ -140,3 +140,15 @@ class PipelineUnit(BaseModel):
     handlers: list[Any]
 
     session: Optional[SessionState] = None
+
+    def has_pending_playback(self) -> bool:
+        """Return whether the attached transport still holds unplayed assistant audio."""
+        session = self.session
+        if session is None or session.released_at is not None:
+            return False
+        transport = session.transport
+        return transport is not None and transport.has_pending_audio()
+
+    def is_response_playing(self) -> bool:
+        """Return whether assistant audio is being generated or still pending playback."""
+        return self.response_playing.is_set() or self.has_pending_playback()

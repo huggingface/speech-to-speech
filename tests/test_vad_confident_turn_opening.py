@@ -240,3 +240,22 @@ def test_default_barge_in_ms_keeps_min_speech_ms_while_playing(monkeypatch) -> N
 
     assert _opened_turns(handler, 17) == 0  # 416 ms stays below min_speech_ms=800 when barge_in_ms=0
     assert _opened_turns(handler, 29) == 1
+
+
+def test_confident_speech_still_uses_min_confident_speech_ms_during_barge_in(monkeypatch) -> None:
+    response_playing = Event()
+    response_playing.set()
+    probs = [ORDINARY] * 8 + SILENCE + [CONFIDENT] * 4 + SILENCE
+    handler = _handler(
+        monkeypatch,
+        probs,
+        min_speech_ms=192,
+        barge_in_ms=384,
+        min_confident_speech_ms=128,
+        response_playing=response_playing,
+    )
+
+    # 256 ms of ordinary speech is below barge_in_ms=384 during playback.
+    assert _opened_turns(handler, 12) == 0
+    # 128 ms of confident speech still opens because barge_in_ms replaces only the ordinary-speech term.
+    assert _opened_turns(handler, 8) == 1
