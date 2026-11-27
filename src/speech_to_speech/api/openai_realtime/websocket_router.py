@@ -709,22 +709,26 @@ async def _confirm_interruption(
         pending.turn_id,
         reason,
     )
-    await _send_interruption_event(
-        transport,
-        st,
-        SpeechToSpeechInterruptionResolvedEvent(
-            event_id=service._next_event_id(),
-            interrupted=True,
-            transcript=pending.transcript,
-        ),
-    )
-    index = 0
-    while index < len(pending.events):
-        await _deliver_text_event(unit, session, transport, session_id, pending.events[index])
-        index += 1
-    st.pending_interruption = None
-    # The replayed speech start discarded the paused audio; play what follows.
-    transport.set_playback("play")
+    try:
+        await _send_interruption_event(
+            transport,
+            st,
+            SpeechToSpeechInterruptionResolvedEvent(
+                event_id=service._next_event_id(),
+                interrupted=True,
+                transcript=pending.transcript,
+            ),
+        )
+        index = 0
+        while index < len(pending.events):
+            await _deliver_text_event(unit, session, transport, session_id, pending.events[index])
+            index += 1
+    finally:
+        # Even when a replayed event fails, the hold ends here: left in place,
+        # it would swallow the rest of this turn and never hold speech again.
+        st.pending_interruption = None
+        # The replayed speech start discarded the paused audio; play what follows.
+        transport.set_playback("play")
 
 
 async def _release_interruption(

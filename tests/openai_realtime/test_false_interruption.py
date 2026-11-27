@@ -124,7 +124,14 @@ def test_session_field_values():
     assert parse_false_interruption({"playback": "pause", "min_words": 2}) == FalseInterruptionConfig(
         playback="pause", min_words=2
     )
-    for bad in ({"min_words": 0}, {"playback": "mute"}, {"unknown": 1}, "yes", 3):
+    for bad in (
+        {"min_words": 0},
+        {"timeout_ms": 0},
+        {"playback": "mute"},
+        {"unknown": 1},
+        "yes",
+        3,
+    ):
         with pytest.raises(ValueError, match="false_interruption"):
             parse_false_interruption(bad)
 
@@ -997,6 +1004,37 @@ def test_server_flags_build_the_session_default():
     assert _default_false_interruption(flags) is None
     flags.false_interruption = "duck"
     assert _default_false_interruption(flags) == FalseInterruptionConfig(playback="duck", min_words=2, min_speech_ms=0)
+
+
+def test_a_failed_replay_ends_the_hold(call, monkeypatch):
+    """The send loop logs a failing event and goes on; the hold must not outlive it."""
+    from speech_to_speech.api.openai_realtime import websocket_router
+
+    original = websocket_router._deliver_text_event
+    armed: list[bool] = []
+    failed: list[bool] = []
+
+    async def fail_once(unit, session, transport, session_id, text_msg, parked_index=None):
+        if armed and not failed and isinstance(text_msg, SpeechStartedEvent):
+            failed.append(True)
+            raise RuntimeError("replay failed")
+        await original(unit, session, transport, session_id, text_msg, parked_index)
+
+    monkeypatch.setattr(websocket_router, "_deliver_text_event", fail_once)
+    call.configure({"playback": "pause"}, extensions=["speech_to_speech.interruption"])
+    _coach_is_reading(call)
+    armed.append(True)
+
+    real = call.speech()
+    call.receive_until("speech_to_speech.interruption.pending")
+    call.stop(real)
+    call.final(real, "Stop.")
+    _wait_for(lambda: bool(failed) and _pending(call) is None)
+    assert call.unit.session.transport._paused_at is None  # playback was not left paused
+
+    # The next speech over the reply is held again.
+    call.speech()
+    call.receive_until("speech_to_speech.interruption.pending")
 
 
 def test_router_pauses_playback_while_pending_and_resumes_after(call, monkeypatch):

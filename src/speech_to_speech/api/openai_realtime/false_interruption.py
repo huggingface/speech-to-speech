@@ -194,8 +194,12 @@ class FalseInterruptionConfig(BaseModel):
     learn the mode from the opt-in ``speech_to_speech.interruption.*`` events
     and apply it themselves; without those events their playback continues.
     """
-    timeout_ms: int = Field(default=2000, ge=0, le=30000)
-    """Give up and resume if no transcript arrives this long after speech stops."""
+    timeout_ms: int = Field(default=2000, gt=0, le=30000)
+    """Give up and resume if no transcript arrives this long after speech stops.
+
+    Keep it above the STT's slowest final transcript: a short real
+    interruption ("No.") whose transcript misses it is dropped as noise.
+    """
     fillers: tuple[str, ...] | None = None
     """Non-lexical sounds that never count ("uh", "mm-hmm", "ahem"). ``None`` uses ``DEFAULT_FILLERS``."""
     backchannels: tuple[str, ...] | None = None
