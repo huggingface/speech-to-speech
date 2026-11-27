@@ -81,8 +81,35 @@ class BaseTTSHandler(BaseHandler[TTSIn, TTSOut]):
             return False
         return True
 
-    def _commit_first_audio(self, tts_input: TTSInput | None, *, generation: int | None = None) -> bool:
+    def _commit_first_audio(
+        self,
+        tts_input: TTSInput | None,
+        *,
+        generation: int | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> bool:
         """Wait for the reopen grace / Smart Turn gate and commit before yielding first audio."""
+        effective_gen = generation
+        if effective_gen is None and tts_input is not None:
+            effective_gen = tts_input.cancel_generation
+        if effective_gen is None and self.cancel_scope is not None:
+            effective_gen = self.cancel_scope.generation
+        stop_event = getattr(self, "stop_event", None)
+
+        def _aborted() -> bool:
+            return (
+                (stop_event is not None and stop_event.is_set())
+                or self._is_stale(effective_gen, tts_input)
+                or (
+                    tts_input is not None
+                    and tts_input.cancel_generation is not None
+                    and self._is_stale(tts_input.cancel_generation, tts_input)
+                )
+                or (cancelled is not None and cancelled())
+            )
+
+        if _aborted():
+            return False
         tracker = self.speculative_turns
         if (
             tracker is not None
@@ -90,14 +117,19 @@ class BaseTTSHandler(BaseHandler[TTSIn, TTSOut]):
             and tts_input.turn_id is not None
             and tts_input.turn_revision is not None
         ):
-            if not tracker.wait_for_gate(tts_input.turn_id, tts_input.turn_revision, commit=True):
+            if not tracker.wait_for_gate(
+                tts_input.turn_id,
+                tts_input.turn_revision,
+                commit=True,
+                should_abort=_aborted,
+            ):
                 logger.debug(
                     "Dropping speculative TTS audio before commit for turn=%s rev=%s",
                     tts_input.turn_id,
                     tts_input.turn_revision,
                 )
                 return False
-        return not self._is_stale(generation, tts_input)
+        return not _aborted()
 
     def _first_audio_emitter(
         self,
@@ -105,6 +137,7 @@ class BaseTTSHandler(BaseHandler[TTSIn, TTSOut]):
         timer: TTSResponseTimer,
         generation: int | None = None,
         *,
+        cancelled: Callable[[], bool] | None = None,
         on_first: Callable[[], None] | None = None,
     ) -> Callable[[np.ndarray], Iterator[np.ndarray]]:
         """Return an ``emit(block)`` helper that commits on first audio or aborts cleanly."""
@@ -113,7 +146,7 @@ class BaseTTSHandler(BaseHandler[TTSIn, TTSOut]):
         def emit(block: np.ndarray) -> Iterator[np.ndarray]:
             nonlocal committed
             if not committed:
-                if not self._commit_first_audio(tts_input, generation=generation):
+                if not self._commit_first_audio(tts_input, generation=generation, cancelled=cancelled):
                     raise _TurnCommitDropped
                 committed = True
                 if on_first is not None:

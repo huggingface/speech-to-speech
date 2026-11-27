@@ -134,3 +134,33 @@ def test_is_stale_and_latency_timer_honor_speculative_reopen() -> None:
     response_tracker = store.get_response("resp_1")
     assert response_tracker is not None
     assert response_tracker.tts_ttfa_s is None
+
+
+def test_commit_first_audio_cancellation_during_grace_does_not_commit_and_allows_reopen() -> None:
+    tracker = SpeculativeTurnTracker()
+    turn_id, rev, _ = tracker.speech_started(0)
+    tracker.segment_finalized(1000, output_hold_ms=300)
+    scope = CancelScope()
+    handler = _Handler(threading.Event(), queue.Queue(), queue.Queue())
+    handler.speculative_turns = tracker
+    handler.cancel_scope = scope
+    tts_input = TTSInput(text="hi", turn_id=turn_id, turn_revision=rev, cancel_generation=scope.generation)
+
+    done = threading.Event()
+    committed: list[bool] = []
+
+    def run_commit() -> None:
+        committed.append(handler._commit_first_audio(tts_input, generation=scope.generation))
+        done.set()
+
+    thread = threading.Thread(target=run_commit)
+    thread.start()
+    assert not done.wait(0.03)
+    scope.cancel()
+    assert done.wait(0.2)
+    thread.join(timeout=1.0)
+
+    assert committed == [False]
+    assert not tracker.is_committed(turn_id, rev)
+    assert tracker.can_reopen(1100)
+    assert tracker.speech_started(1100) == (turn_id, 1, True)

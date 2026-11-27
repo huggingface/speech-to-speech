@@ -1580,3 +1580,39 @@ def test_openai_tts_drops_speculative_audio_when_turn_reopens_during_grace(monke
 
     assert outputs == []
     assert not tracker.is_committed("turn_1", 0)
+
+
+def test_openai_tts_cancellation_during_grace_drops_audio_and_allows_reopen(monkeypatch):
+    tracker = SpeculativeTurnTracker()
+    turn_id, rev, _ = tracker.speech_started(0)
+    tracker.segment_finalized(1000, output_hold_ms=300)
+    scope = CancelScope()
+    handler = _openai_tts_handler(monkeypatch, cancel_scope=scope, speculative_turns=tracker)
+
+    request_started = Event()
+    _FakeSpeechOperation.startup_action = request_started.set
+
+    done = Event()
+    outputs = []
+
+    def run_process() -> None:
+        outputs.extend(
+            handler.process(
+                TTSInput(text="Hello.", turn_id=turn_id, turn_revision=rev, cancel_generation=scope.generation)
+            )
+        )
+        done.set()
+
+    thread = Thread(target=run_process)
+    thread.start()
+
+    assert request_started.wait(0.5)
+    assert not done.wait(0.03)
+    scope.cancel()
+    assert done.wait(0.2)
+    thread.join(timeout=1.0)
+
+    assert outputs == []
+    assert not tracker.is_committed(turn_id, rev)
+    assert tracker.can_reopen(1100)
+    assert tracker.speech_started(1100) == (turn_id, 1, True)

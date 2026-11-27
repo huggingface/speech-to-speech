@@ -557,7 +557,7 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
                     operation.cancel()
                     return
                 if first_audio:
-                    if not self._commit_first_audio(tts_input):
+                    if not self._commit_first_audio(tts_input, generation=cancel_generation, cancelled=cancel_check):
                         operation.cancel()
                         return
                     self._log_first_audio_latency(tts_input, timer)

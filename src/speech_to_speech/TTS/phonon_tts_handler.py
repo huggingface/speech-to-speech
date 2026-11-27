@@ -250,6 +250,7 @@ class PhononTTSHandler(BaseTTSHandler):
             tts_input,
             timer,
             generation,
+            cancelled=lambda: self._is_cancelled(generation, tts_input),
             on_first=lambda: console.print(f"[green]ASSISTANT: {tts_input.text}"),
         )
 

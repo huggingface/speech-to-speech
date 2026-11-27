@@ -11,6 +11,7 @@ from openai.types.realtime import RealtimeSessionCreateRequest
 
 import speech_to_speech.TTS.qwen3_tts_handler as qwen3_tts_module
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, AudioOutput, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
@@ -881,6 +882,62 @@ def test_speculative_tts_aborts_mid_stream_when_turn_reopens(monkeypatch):
     assert printed == []
     assert not tracker.is_committed("turn_1", 0)
     assert not second_chunk_pulled.is_set()
+
+
+def test_speculative_tts_cancellation_during_grace_drops_audio_and_allows_reopen(monkeypatch):
+    tracker = SpeculativeTurnTracker()
+    turn_id, rev, _ = tracker.speech_started(0)
+    tracker.segment_finalized(1000, output_hold_ms=300)
+    scope = CancelScope()
+
+    handler = object.__new__(Qwen3TTSHandler)
+    handler.should_listen = Event()
+    handler.cancel_scope = scope
+    handler.speculative_turns = tracker
+    handler.ref_audio = "TTS/ref_audio.wav"
+    handler.speaker = None
+    handler.instruct = None
+    handler.language = "English"
+    handler.backend = "mlx"
+    handler.queue_in = Queue()
+    handler.model = SimpleNamespace(config=SimpleNamespace(tts_model_type="base"))
+    handler._apply_session_voice_override = lambda model_type, runtime_config=None, response=None: None
+
+    synth_ready = Event()
+
+    def _process_voice_clone(text, language=None, timer=None):
+        synth_ready.set()
+        yield np.ones(512, dtype=np.int16)
+
+    handler._process_voice_clone = _process_voice_clone
+    printed: list[str] = []
+    monkeypatch.setattr(qwen3_tts_module.console, "print", lambda msg, *args, **kwargs: printed.append(msg))
+
+    done = Event()
+    outputs = []
+
+    def run_process():
+        outputs.extend(
+            handler.process(
+                TTSInput(text="Hello.", turn_id=turn_id, turn_revision=rev, cancel_generation=scope.generation)
+            )
+        )
+        done.set()
+
+    thread = Thread(target=run_process)
+    thread.start()
+
+    assert synth_ready.wait(0.5)
+    assert not done.wait(0.03)
+    scope.cancel()
+    assert done.wait(0.2)
+    thread.join(timeout=1.0)
+
+    assert outputs == []
+    assert printed == []
+    assert not tracker.is_committed(turn_id, rev)
+    assert tracker.can_reopen(1100)
+    assert tracker.speech_started(1100) == (turn_id, 1, True)
 
 
 def test_process_does_not_set_should_listen_when_generation_fails(monkeypatch):

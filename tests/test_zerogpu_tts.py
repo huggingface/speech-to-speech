@@ -15,6 +15,7 @@ from speech_to_speech.pipeline import transcript_logging
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.turn_latency import TurnLatencyTracker
 
 
@@ -278,3 +279,44 @@ def test_session_end_cancels_pending_stream_without_reporting_failure(adapter):
         release.set()
         thread.join(2)
     assert closed.wait(1)
+
+
+def test_zerogpu_cancellation_during_grace_drops_audio_and_allows_reopen(adapter):
+    handler, worker, scope, _ = adapter
+    tracker = SpeculativeTurnTracker()
+    turn_id, rev, _ = tracker.speech_started(0)
+    tracker.segment_finalized(1000, output_hold_ms=300)
+    handler.speculative_turns = tracker
+
+    chunk_ready = Event()
+
+    def synthesize(*args, **kwargs):
+        chunk_ready.set()
+        yield np.ones(512, dtype=np.int16)
+
+    worker.synthesize_chunks = synthesize
+    done = Event()
+    outputs = []
+
+    def consume():
+        outputs.extend(
+            handler.process(
+                TTSInput(text="Hello.", turn_id=turn_id, turn_revision=rev, cancel_generation=scope.generation)
+            )
+        )
+        done.set()
+
+    thread = Thread(target=consume)
+    thread.start()
+    try:
+        assert chunk_ready.wait(0.5)
+        assert not done.wait(0.03)
+        scope.cancel()
+        assert done.wait(0.2)
+    finally:
+        thread.join(2)
+
+    assert outputs == []
+    assert not tracker.is_committed(turn_id, rev)
+    assert tracker.can_reopen(1100)
+    assert tracker.speech_started(1100) == (turn_id, 1, True)

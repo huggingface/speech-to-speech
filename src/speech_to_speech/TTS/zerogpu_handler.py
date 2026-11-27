@@ -116,7 +116,11 @@ class ZeroGPUTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 if len(chunk) == 0:
                     continue
                 if first:
-                    if tracker and not tracker.wait_for_gate(item.turn_id, item.turn_revision, commit=True):
+                    if tracker and not tracker.wait_for_gate(
+                        item.turn_id, item.turn_revision, commit=True, should_abort=cancelled
+                    ):
+                        return
+                    if cancelled():
                         return
                     store = getattr(self, "turn_latency_store", None)
                     record_response_tts_ttfa(store, item.response_key, perf_counter() - started)
