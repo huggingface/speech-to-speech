@@ -22,11 +22,18 @@ import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
 import { BODIES } from "./robot-bodies.js";
 import { FaceDriver, mouthParams, smooth } from "./face-driver.js";
 import { HeadWobbler } from "./head-wobbler.js";
-import { duckGreet, QUACK_RATE } from "./quack.js";
+import { duckGreet, duckWaks, QUACK_RATE } from "./quack.js";
 import { Stage } from "./stage.js";
 
 /** @typedef {{ name: string, fps: number, frames: number[][] }} Move */
 /** @typedef {import("./robot-bodies.js").Pose} Pose */
+
+/** Seconds of silence before a sound starts. @param {AudioBuffer} buf */
+function soundLead(buf) {
+  const x = buf.getChannelData(0);
+  const i = x.findIndex((v) => Math.abs(v) > 0.01);
+  return i < 0 ? 0 : i / buf.sampleRate;
+}
 
 /** Quiz moments whose emotion also plays its recorded sound (not the frequent listening and thinking). */
 const SOUND_KINDS = new Set(["hello", "correct", "streak", "celebrate", "partial", "incorrect", "skipped", "surprised"]);
@@ -108,7 +115,7 @@ export class RobotAvatar extends FaceDriver {
     this.body = null;
     /** @type {Record<string, Move>} */
     this.moves = {};
-    /** @type {{ move: Move, t: number, from: Pose, rate: number, fadeIn: number } | null} */
+    /** @type {{ move: Move, t: number, age: number, from: Pose, rate: number, fadeIn: number } | null} */
     this.playingMove = null;
     this.lastMove = "";
     this.pose = newPose();
@@ -121,6 +128,14 @@ export class RobotAvatar extends FaceDriver {
     this.wobbler = new HeadWobbler(this.inRate);
     /** Decoded move sounds, by move name. @type {Map<string, Promise<AudioBuffer | null>>} */
     this.sounds = new Map();
+    /** The same, once decoded. @type {Map<string, AudioBuffer>} */
+    this.decoded = new Map();
+    /** Seconds each move holds still before it starts moving. @type {Map<string, number>} */
+    this.leads = new Map();
+    /** The body's clock, and its quacks still to come (Microduck's stand-up). */
+    this.bodyT = 0;
+    /** @type {{ at: number, buf: AudioBuffer }[]} */
+    this.quackQueue = [];
     this.wob = { pitch: 0, yaw: 0, roll: 0, x: 0, y: 0, z: 0 };
     if (coach.mouth === "beak") {
       // The beak trails the sound by its smoothing; it runs that far ahead
@@ -157,6 +172,9 @@ export class RobotAvatar extends FaceDriver {
   /** @param {(ev: { lengthComputable: boolean, loaded: number, total: number }) => void} [onProgress] */
   async init(onProgress) {
     await this.initAudio();
+    // Fetch and decode the emotion sounds while the model loads, so each one
+    // is ready to start with its move.
+    if (this.coach.robot !== "duck") for (const kind of SOUND_KINDS) for (const n of REACTION_MOVES[kind] ?? []) this.moveSound(n);
     const draco = new DRACOLoader().setDecoderPath("vendor/three/examples/jsm/libs/draco/gltf/");
     const loader = new GLTFLoader().setDRACOLoader(draco);
     const load = BODIES[this.coach.robot];
@@ -181,10 +199,17 @@ export class RobotAvatar extends FaceDriver {
     const sleep = this.moves.sleep;
     if (sleep) this.moveFrame(sleep, 0, this.pose);
     this.playFor("hello", 1.4);
-    // Microduck quacks as it stands up, when its beak opens.
-    if (body.quackAt !== undefined) {
-      const at = body.quackAt;
-      window.setTimeout(() => this.whenAudible(() => this.playPcm(duckGreet(), 1)), at * 1000);
+    // Microduck quacks as it stands up, each time its beak opens.
+    if (body.quacks?.length && this.ctx) {
+      const ctx = this.ctx;
+      const waks = duckWaks(body.quacks.length);
+      this.quackQueue = body.quacks.map((at, i) => {
+        const buf = ctx.createBuffer(1, waks[i].length, QUACK_RATE);
+        buf.copyToChannel(/** @type {Float32Array<ArrayBuffer>} */ (waks[i]), 0);
+        return { at, buf };
+      });
+      // Sound blocked at load: quack hello on the first click instead.
+      if (ctx.state !== "running") this.whenAudible(() => this.quackQueue.length === 0 && this.playPcm(duckGreet(), 1));
     }
   }
 
@@ -198,14 +223,31 @@ export class RobotAvatar extends FaceDriver {
       sound = fetch(`${SOUND_DIR}/${name}.ogg`)
         .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(`${r.status}`))))
         .then((buf) => (ctx ? ctx.decodeAudioData(buf) : null))
+        .then((buf) => {
+          if (buf) this.decoded.set(name, buf);
+          return buf;
+        })
         .catch(() => null);
       this.sounds.set(name, sound);
     }
     return sound;
   }
 
-  /** @param {AudioBuffer | null} buf @param {number} gain */
-  playBuffer(buf, gain) {
+  /** Seconds a move holds still before it starts moving. @param {string} name */
+  moveLead(name) {
+    let lead = this.leads.get(name);
+    if (lead === undefined) {
+      const m = this.moves[name];
+      const f = m?.frames ?? [];
+      const i = f.findIndex((fr) => fr.reduce((s, v, k) => s + Math.abs(v - f[0][k]), 0) > 0.02);
+      lead = m && i > 0 ? i / m.fps : 0;
+      this.leads.set(name, lead);
+    }
+    return lead;
+  }
+
+  /** @param {AudioBuffer | null} buf @param {number} gain @param {number} [offset] seconds into the sound */
+  playBuffer(buf, gain, offset = 0) {
     const ctx = this.ctx;
     if (!buf || !ctx || ctx.state !== "running") return;
     const src = ctx.createBufferSource();
@@ -213,7 +255,7 @@ export class RobotAvatar extends FaceDriver {
     const g = ctx.createGain();
     g.gain.value = gain;
     src.connect(g).connect(ctx.destination);
-    src.start();
+    src.start(0, Math.min(offset, buf.duration));
   }
 
   /** @param {Float32Array} pcm 24 kHz mono @param {number} gain */
@@ -252,11 +294,11 @@ export class RobotAvatar extends FaceDriver {
 
   // ── Moves ───────────────────────────────────────────────────────────────
 
-  /** @param {string} name @param {number} [fadeIn] seconds @param {number} [rate] */
-  play(name, fadeIn = 0.35, rate = 1) {
+  /** @param {string} name @param {number} [fadeIn] seconds @param {number} [rate] @param {number} [from] seconds into the move */
+  play(name, fadeIn = 0.35, rate = 1, from = 0) {
     const move = this.moves[name];
     if (!move) return false;
-    this.playingMove = { move, t: 0, from: copyPose(newPose(), this.pose), rate, fadeIn };
+    this.playingMove = { move, t: from, age: 0, from: copyPose(newPose(), this.pose), rate, fadeIn };
     this.lastMove = name;
     return true;
   }
@@ -267,20 +309,27 @@ export class RobotAvatar extends FaceDriver {
     if (!list.length) return;
     const pool = list.length > 1 ? list.filter((n) => n !== this.lastMove) : list;
     const name = pool[Math.floor(Math.random() * pool.length)];
-    this.play(name, fadeIn);
+    // Recorded moves and their sounds open with a still, silent stretch that
+    // the real robot just waits through; here the robot already glides into
+    // the move. Skip both, so the motion and the sound start together.
+    const withSound = SOUND_KINDS.has(kind) && this.coach.robot !== "duck";
+    const buf = withSound ? this.decoded.get(name) : undefined;
+    const skip = Math.max(0, this.moveLead(name) - 0.08);
+    const soundSkip = buf ? Math.max(0, soundLead(buf) - 0.08) : 0;
+    this.play(name, fadeIn, 1, skip);
     // The Reachys' emotions come with their own sounds (Microduck has its quacks).
-    if (!SOUND_KINDS.has(kind) || this.coach.robot === "duck") return;
-    const sound = this.moveSound(name);
+    if (!withSound) return;
     if (kind !== "hello") {
       // Under the coach's voice: a little quieter, and only if sound can play now.
-      sound.then((buf) => this.playBuffer(buf, 0.6));
+      if (buf) this.playBuffer(buf, 0.6, soundSkip);
+      else this.moveSound(name);
       return;
     }
     const startedAt = performance.now();
     this.whenAudible(() => {
       // Blocked until a click: wave hello again, with its sound this time.
-      if (performance.now() - startedAt > 1500) this.play(name, 0.6);
-      sound.then((buf) => this.playBuffer(buf, 1));
+      if (performance.now() - startedAt > 1500) this.play(name, 0.6, 1, skip);
+      this.moveSound(name).then((b) => this.playBuffer(b, 1, b ? Math.max(0, soundLead(b) - 0.08) : 0));
     });
   }
 
@@ -339,9 +388,10 @@ export class RobotAvatar extends FaceDriver {
     const pm = this.playingMove;
     if (pm) {
       pm.t += sdt * pm.rate;
+      pm.age += sdt;
       const dur = pm.move.frames.length / pm.move.fps;
       this.moveFrame(pm.move, pm.t, this.movePose);
-      const fadeIn = smooth(pm.t / pm.fadeIn);
+      const fadeIn = smooth(pm.age / pm.fadeIn);
       const fadeOut = smooth((dur - pm.t) / 0.5);
       blendPose(this.pose, this.base, this.movePose, fadeOut);
       if (fadeIn < 1) blendPose(this.pose, pm.from, this.pose, fadeIn);
@@ -364,6 +414,13 @@ export class RobotAvatar extends FaceDriver {
     T.open = mouthParams(w).open;
 
     this.body?.apply(this.pose, T, sdt);
+    // Microduck's stand-up quacks, a hair early for the audio output's delay.
+    this.bodyT += sdt;
+    const early = (this.ctx?.outputLatency || this.ctx?.baseLatency || 0.02) + 0.02;
+    while (this.quackQueue.length && this.quackQueue[0].at <= this.bodyT + early) {
+      const q = /** @type {{ at: number, buf: AudioBuffer }} */ (this.quackQueue.shift());
+      this.playBuffer(q.buf, 1);
+    }
   }
 
   // ── Body language ───────────────────────────────────────────────────────

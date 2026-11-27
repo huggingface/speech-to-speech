@@ -355,6 +355,21 @@ export function duckGreet() {
   return greets[Math.floor(Math.random() * greets.length)];
 }
 
+/**
+ * Single "wak" syllables of the wake-up call, one per beak opening.
+ * @param {number} n
+ */
+export function duckWaks(n) {
+  const p = new Personality(DUCK_SEED);
+  return Array.from({ length: n }, (_, i) => {
+    const sig = greetSyllable(p, p.variantRng("greet", i), i ? 0.85 : 1, i ? 0.96 : 1);
+    let peak = 1e-9;
+    for (const v of sig) peak = Math.max(peak, Math.abs(v));
+    const gain = 10 ** (-3 / 20) / peak;
+    return sig.map((v) => v * gain);
+  });
+}
+
 export const QUACK_RATE = SR;
 
 // ── Speech in, quacks out ────────────────────────────────────────────────────
