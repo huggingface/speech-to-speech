@@ -731,6 +731,7 @@ class Chat:
         after_item_id: str | None = None,
         kept_calls_before: Collection[str] = (),
         kept_call_after: str | None = None,
+        status: Literal["completed", "incomplete"] = "incomplete",
     ) -> None:
         """Add the heard part of an interrupted reply, addressed by its Realtime *item_id*.
 
@@ -741,6 +742,7 @@ class Chat:
         with self._lock:
             self._unheard_assistant_items.pop(item_id, None)
             message = self._heard_message_locked(item_id, text)
+            message.status = status
             calls = {
                 item.call_id: index
                 for index, item in enumerate(self.buffer)

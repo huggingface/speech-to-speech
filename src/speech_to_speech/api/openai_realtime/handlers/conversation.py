@@ -306,9 +306,7 @@ class ConversationHandler(RealtimeBaseHandler):
             from speech_to_speech.api.openai_realtime.handlers.response import _heard_transcript
 
             segments = st.assistant_audio_segments.get(item_id, [])
-            delivered = sum(segment[1] for segment in segments)
-            cut = st.assistant_audio_cuts.get(item_id, delivered)
-            transcript = _heard_transcript(segments, cut)
+            cut = st.assistant_audio_cuts.get(item_id, sum(seg[1] for seg in segments))
             status: Literal["completed", "incomplete"] = (
                 "incomplete" if item_id in st.assistant_audio_cuts else "completed"
             )
@@ -318,7 +316,7 @@ class ConversationHandler(RealtimeBaseHandler):
                 type="message",
                 role="assistant",
                 status=status,
-                content=[AssistantContent(type="output_audio", transcript=transcript)],
+                content=[AssistantContent(type="output_audio", transcript=_heard_transcript(segments, cut))],
             )
         if item_id in st.runtime_config.chat.unheard_assistant_item_ids():
             # A reply nobody heard is kept out of model history, but like a

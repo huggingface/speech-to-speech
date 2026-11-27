@@ -306,14 +306,14 @@ class ConnState(BaseModel):
     assistant_audio_segments: dict[str, list[list[Any]]] = Field(default_factory=dict)
     # Played position (pipeline samples) each truncated assistant item was cut to.
     assistant_audio_cuts: dict[str, int] = Field(default_factory=dict)
-    # Resumed wire item_id -> (root_item_id, resume_sample, AssistantAudioBuffer).
-    resumed_audio_origins: dict[str, tuple[str, int, Any]] = Field(default_factory=dict)
-    # Active resumed response metadata: (root_item_id, resume_sample, AssistantAudioBuffer).
-    active_resumed_audio: tuple[str, int, Any] | None = None
+    # Resumed wire item_id -> (resume_sample, AssistantAudioBuffer).
+    resumed_audio_origins: dict[str, tuple[int, Any]] = Field(default_factory=dict)
+    # Active resumed response metadata: (resume_sample, AssistantAudioBuffer).
+    active_resumed_audio: tuple[int, Any] | None = None
     # Active false-interruption candidate turn_id (suppresses chat/LLM while under min_interruption_words).
     false_interruption_turn_id: str | None = None
-    # When set for the current response_key, finish_response(cancelled) keeps the turn and key open.
-    preserve_turn_on_cancel_key: str | None = None
+    # When True, the next cancelled finish_response keeps the turn and response key open for replay buffering.
+    preserve_turn_on_cancel: bool = False
     # Keyed by output index so response.done can preserve interleaving with
     # assistant message items.
     pending_function_calls: dict[int, RealtimeConversationItemFunctionCall] = Field(default_factory=dict)
