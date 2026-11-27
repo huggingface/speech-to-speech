@@ -32,14 +32,16 @@ def _models(env: str, default: str) -> list[str]:
 # Inkling-2-Small on Together 10/12, 0/12, 1.2 s (it rejects reasoning off);
 # gpt-oss-120b on Cerebras 10/12, 0/12, 0.5 s. `model@effort` sets the
 # reasoning effort per model.
-# After the grading prompt was reworked (2026-11-27), Gemma 4 31B, the speech
-# backend's own model, judged answers in the student's own words more fairly:
-# a real two-try answer passed 3/3 (Qwen 0/3), with the same 19/64 half answers
-# to two-part questions kept partial and every wrong or vague control rejected,
-# at about 1.1 s a grade instead of 0.2 s. The filler covers the wait.
+# After the grading prompt was reworked (2026-11-27), Qwen with reasoning off
+# was too strict on answers in the student's own words: a real two-try answer
+# passed 0/3. With low reasoning it passes 3/3, keeps the same 20/64 half
+# answers to two-part questions partial and rejects every wrong or vague
+# control, at a median 0.54 s (p90 0.9 s) a grade. Gemma 4 31B judged as
+# fairly but took a median 1.3 s with a p90 of 6 s; medium reasoning sometimes
+# ran out of tokens before the JSON.
 GRADER_MODELS = _models(
     "GRADER_MODELS",
-    "google/gemma-4-31B-it@none,Qwen/Qwen3.8-27B:cerebras@none,openai/gpt-oss-120b:cerebras@low",
+    "Qwen/Qwen3.8-27B:cerebras@low,google/gemma-4-31B-it@none,openai/gpt-oss-120b:cerebras@low",
 )
 # The grader can run on the speech backend's own model instead (any
 # OpenAI-compatible endpoint, e.g. the deployment's Gemma 4 31B), with the
