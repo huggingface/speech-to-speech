@@ -136,6 +136,7 @@ def _make_handler(stream=True, *, base_url="http://fake/v1", reasoning_effort=No
 def test_warmup_uses_request_scoped_sdk_retries():
     handler = _make_handler()
 
+    assert handler.client.chat.completions.last_kwargs["max_completion_tokens"] == 64
     assert handler.client.last_options == {"max_retries": base_mod.WARMUP_MAX_RETRIES}
 
 

@@ -349,6 +349,7 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
                 ],
                 extra_body=self._extra_body,
                 timeout=self.request_timeout,
+                max_completion_tokens=64,
             )
         )
         end = time.time()
