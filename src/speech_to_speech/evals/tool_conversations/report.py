@@ -36,8 +36,15 @@ METRICS = (
     ("extra_call", "Call when none was needed", "extra_call", "free_turns"),
     ("late_result_spoken", "Late result spoken", "late_result_spoken", "late_results"),
     ("late_result_recalled", "Long-running tool called again", "repeated_long_running", "late_results"),
+    ("failed_turns", "Turns whose response failed", "failed_turns", "attempted_turns"),
     ("crashed", "Conversations that crashed", "crashed", "conversations"),
 )
+
+
+def _failed(status: Any) -> bool:
+    # A failed response is a server or provider error, and its text is the server's fallback
+    # apology, so scoring it would charge the model for an outage.
+    return status == "failed"
 
 
 def _reject_json_constant(token: str) -> None:
@@ -92,6 +99,13 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, int]:
             continue
         c["server_errors"] += len(row.get("errors") or [])
         for turn in row.get("turns") or []:
+            c["attempted_turns"] += 1
+            statuses = (
+                [turn.get("status")] if turn["kind"] == "late_result" else [r.get("status") for r in turn["rounds"]]
+            )
+            if any(_failed(status) for status in statuses):
+                c["failed_turns"] += 1
+                continue
             if turn["kind"] == "late_result":
                 c["late_results"] += 1
                 c["late_result_spoken"] += bool(turn["text"])
@@ -166,11 +180,12 @@ def render_comparison(reports: list[dict[str, Any]]) -> str:
     names = [r.get("label") or r.get("url") or f"run {i}" for i, r in enumerate(reports)]
     header = "| Metric | " + " | ".join(names) + " |"
     lines = [header, "|" + "---|" * (len(reports) + 1)]
-    base = reports[0]["summary"]
+    # Recount from the stored turns so reports written before a scoring change use today's rules.
+    summaries = [summarize(r["results"]) if "results" in r else r["summary"] for r in reports]
+    base = summaries[0]
     for _key, label, num, den in METRICS:
         cells = []
-        for i, report in enumerate(reports):
-            s = report["summary"]
+        for i, s in enumerate(summaries):
             cell = _rate(s, num, den)
             if i and s.get(den) and base.get(den):
                 pval = fisher_exact(base[num], base[den] - base[num], s[num], s[den] - s[num])

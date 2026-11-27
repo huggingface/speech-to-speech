@@ -289,6 +289,11 @@ column per report, with a two-sided Fisher exact p-value against the first:
 - **Call markup in spoken text**: call syntax the server did not parse. The check is a regex over
   known formats, so read unusual misses by hand.
 - **Call when none was needed**, **Late result spoken**, **Long-running tool called again**.
+- **Turns whose response failed**: the server ended a response with `failed`, usually because
+  the LLM provider returned an error such as a rate limit. Its spoken text is the server's
+  fallback apology, so these turns are left out of every other rate instead of counting as
+  misses. A whole turn is left out when any of its responses failed. `compare` recounts every
+  report from its turns, so reports written before this rule are scored the same way.
 
 Differences of a few cases out of hundreds are usually not significant; run more `--reps` before
 drawing conclusions, and read the individual turns behind any miss.
