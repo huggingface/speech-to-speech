@@ -33,7 +33,11 @@ def test_local_ttft_precedes_sentence_batching_and_trailing_reply(monkeypatch, t
     monkeypatch.setattr(language_model, "mlx_stream_generate", tokens, raising=False)
     monkeypatch.setattr(language_model, "MLXLockContext", lambda **kwargs: nullcontext(True), raising=False)
     monkeypatch.setattr(language_model, "mx", SimpleNamespace(clear_cache=lambda: None), raising=False)
-    monkeypatch.setattr(language_model.torch.mps, "empty_cache", lambda: None)
+
+    def unexpected_mps_cleanup():
+        pytest.fail("MLX generation called the PyTorch MPS allocator")
+
+    monkeypatch.setattr(language_model.torch.mps, "empty_cache", unexpected_mps_cleanup)
     handler = object.__new__(LanguageModelHandler)
     handler.backend = "mlx"
     handler.model = object()
