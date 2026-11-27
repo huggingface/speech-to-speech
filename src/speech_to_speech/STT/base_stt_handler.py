@@ -185,9 +185,10 @@ class BaseSTTHandler(BaseHandler[STTIn, STTOut]):
             delay_s = max(0.0, deadline - monotonic()) if deadline is not None else 0.0
             return True if delay_s <= 0.0 else self._wait_with_processing_delay(turn_id, turn_revision, delay_s)
         if wait_for_stability:
-            if self.speculative_turns.has_pending_smart_turn(turn_id, turn_revision):
-                # Smart Turn runs in parallel with STT; start transcription immediately
-                # and enforce any incomplete processing delay before emitting the final text.
+            if self.speculative_turns.defers_processing_delay(turn_id, turn_revision):
+                # Async Smart Turn enforces any incomplete processing delay at final
+                # transcript emission in both worker orderings, preserving input
+                # revision settling while allowing STT to start immediately.
                 hold_until = monotonic() + self.final_revision_settle_s if self.final_revision_settle_s > 0 else None
                 return self.speculative_turns.wait_for_gate(
                     turn_id, turn_revision, hold_for_grace=False, hold_for_smart_turn=False, hold_until=hold_until

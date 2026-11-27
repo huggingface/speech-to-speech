@@ -1658,3 +1658,62 @@ def test_wait_for_gate_pending_smart_turn_does_not_charge_hold_observer():
     assert results == [True]
     # Waiting for Smart Turn classification itself is not counted as grace hold_s.
     assert observed == []
+
+
+def test_vad_smart_turn_stale_session_paused_after_gen_check_cannot_resolve_next_session(monkeypatch):
+    analyzer_a = _StaticSmartTurnAnalyzer(SmartTurnResult(complete=False, probability=0.1, inference_ms=20.0))
+    analyzer_b = _BlockingSmartTurnAnalyzer([SmartTurnResult(complete=True, probability=0.95, inference_ms=10.0)])
+    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    handler.smart_turn_analyzer = analyzer_a
+    handler.turn_latency_store = TurnLatencyStore()
+
+    original_resolve = handler.speculative_turns.resolve_smart_turn
+    paused_at_publish = Event()
+    resume_publish = Event()
+    first_call = [True]
+
+    def hooked_resolve(*args, **kwargs):
+        if first_call[0]:
+            first_call[0] = False
+            paused_at_publish.set()
+            resume_publish.wait(2.0)
+        return original_resolve(*args, **kwargs)
+
+    monkeypatch.setattr(handler.speculative_turns, "resolve_smart_turn", hooked_resolve)
+    try:
+        _drive_final_segment(handler)
+        # Session A has finished _classify_smart_turn and passed its generation checks,
+        # pausing right before publishing its result into the tracker / latency store.
+        assert paused_at_publish.wait(1.0)
+
+        # End session A and start session B with its own turn_1 rev=0.
+        handler.iterator.reset_states = lambda: None  # type: ignore[attr-defined]
+        handler.on_session_end()
+        store_b = TurnLatencyStore()
+        handler.turn_latency_store = store_b
+        handler.smart_turn_analyzer = analyzer_b
+        _drive_final_segment(handler)
+        assert handler.speculative_turns.has_pending_smart_turn("turn_1", 0)
+
+        # Release session A's worker; once session B's analyzer begins on the single
+        # worker thread, session A's publish attempt has completely finished.
+        resume_publish.set()
+        assert analyzer_b.started_events[0].wait(1.0)
+
+        # Session B's turn_1 rev=0 must STILL be pending and untouched by session A.
+        assert handler.speculative_turns.has_pending_smart_turn("turn_1", 0)
+        pending_b = store_b.pending_for_turn("turn_1", 0)
+        assert pending_b is None or pending_b.smart_turn_status is None
+
+        # Letting session B finish resolves turn_1 rev=0 with session B's decision.
+        analyzer_b.release_events[0].set()
+        assert handler.wait_for_smart_turn(timeout=2.0)
+        assert not handler.speculative_turns.has_pending_smart_turn("turn_1", 0)
+        pending_b = store_b.pending_for_turn("turn_1", 0)
+        assert pending_b is not None
+        assert pending_b.smart_turn_status == "complete"
+    finally:
+        resume_publish.set()
+        for ev in analyzer_b.release_events:
+            ev.set()
+        handler.cleanup()
