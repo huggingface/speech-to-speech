@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterator
+from contextlib import nullcontext
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
@@ -40,14 +41,15 @@ class BaseTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 yield AUDIO_RESPONSE_DONE
             return
 
-        if not self._admit_input(tts_input):
+        process_generation = tts_input.cancel_generation
+        if process_generation is None and self.cancel_scope is not None:
+            process_generation = self.cancel_scope.generation
+
+        if not self._admit_input(tts_input) or self._is_stale(process_generation, tts_input):
             return
 
         self._active_tts_input = tts_input
         self._active_timer = None
-        process_generation = tts_input.cancel_generation
-        if process_generation is None and self.cancel_scope is not None:
-            process_generation = self.cancel_scope.generation
 
         gen = self._synthesize_input(tts_input)
         try:
@@ -154,11 +156,15 @@ class BaseTTSHandler(BaseHandler[TTSIn, TTSOut]):
         if _aborted():
             return False
         tracker = self.speculative_turns
-        if tracker is not None and self._turn_uncommitted(tts_input):
-            assert tts_input is not None
+        if (
+            tracker is not None
+            and tts_input is not None
+            and tts_input.turn_id is not None
+            and tts_input.turn_revision is not None
+        ):
             # Suspend the MLX lock around any wait for an uncommitted turn so a
             # concurrent pending reopen cannot starve MLX STT behind this gate.
-            with suspend_mlx_lock():
+            with suspend_mlx_lock() if self._turn_uncommitted(tts_input) else nullcontext():
                 committed = tracker.wait_for_gate(
                     tts_input.turn_id,
                     tts_input.turn_revision,

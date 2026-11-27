@@ -186,6 +186,89 @@ def test_commit_first_audio_suspends_mlx_lock_when_pending_reopen_races_in(
     assert tracker.gate(turn_id, rev).action is TurnGateAction.ACCEPT
 
 
+def test_closed_turn_followup_recommits_on_first_audio_and_survives_new_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from speech_to_speech.TTS import base_tts_handler as base_module
+
+    monkeypatch.setattr(base_module.console, "print", lambda *_a, **_kw: None)
+
+    class _TwoBlockHandler(BaseTTSHandler):
+        def _synthesize_input(self, tts_input):
+            yield b"block-1"
+            if self._is_stale(None, tts_input):
+                return
+            yield b"block-2"
+
+    tracker = SpeculativeTurnTracker()
+    turn_id, rev = tracker.start_turn()
+    assert tracker.gate(turn_id, rev, commit=True).action is TurnGateAction.ACCEPT
+    tracker.close(turn_id, rev)
+    assert tracker.is_committed(turn_id, rev)
+
+    handler = _TwoBlockHandler(threading.Event(), queue.Queue(), queue.Queue())
+    handler.speculative_turns = tracker
+    gen = handler.process(TTSInput(text="follow-up", turn_id=turn_id, turn_revision=rev))
+
+    assert next(gen) == b"block-1"
+    # Starting a new turn without cancelling the active follow-up must not drop its tail.
+    tracker.start_turn()
+    assert tracker.is_latest(turn_id, rev)
+    assert list(gen) == [b"block-2"]
+
+
+def test_cancel_during_admission_hold_drops_input_without_explicit_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from speech_to_speech.TTS import base_tts_handler as base_module
+
+    monkeypatch.setattr(base_module.console, "print", lambda *_a, **_kw: None)
+    admitting = threading.Event()
+    synthesized: list[str] = []
+
+    class _SignallingTracker(SpeculativeTurnTracker):
+        def wait_for_gate(self, turn_id, revision, *, hold_for_grace=True, hold_until=None, commit=False, **kwargs):
+            if not commit:
+                admitting.set()
+            return super().wait_for_gate(
+                turn_id, revision, hold_for_grace=hold_for_grace, hold_until=hold_until, commit=commit, **kwargs
+            )
+
+    class _RecordingHandler(BaseTTSHandler):
+        def _synthesize_input(self, tts_input):
+            synthesized.append(tts_input.text)
+            yield b"block-1"
+            yield b"block-2"
+
+    tracker = _SignallingTracker()
+    turn_id, rev = tracker.start_turn()
+    tracker._PENDING_REOPEN_HOLD_S = 1.0
+    assert tracker.begin_reopen_candidate(turn_id, rev) is not None
+    scope = CancelScope()
+
+    handler = _RecordingHandler(threading.Event(), queue.Queue(), queue.Queue())
+    handler.speculative_turns = tracker
+    handler.cancel_scope = scope
+    done, outputs = threading.Event(), []
+    tts_input = TTSInput(text="cancelled", turn_id=turn_id, turn_revision=rev)
+
+    thread = threading.Thread(target=lambda: (outputs.extend(handler.process(tts_input)), done.set()))
+    thread.start()
+    try:
+        assert admitting.wait(0.5)
+        assert not done.wait(0.02)
+        scope.cancel()
+        tracker.cancel_reopen_candidate(turn_id)
+        assert done.wait(1.0)
+    finally:
+        tracker.cancel_reopen_candidate(turn_id)
+        thread.join(timeout=1.0)
+
+    assert outputs == []
+    assert synthesized == []
+    assert not tracker.is_committed(turn_id, rev)
+
+
 @pytest.mark.parametrize("abort", ["cancel", "reopen"])
 def test_process_aborts_cleanly_and_suppresses_ttfa_during_grace(monkeypatch: pytest.MonkeyPatch, abort: str) -> None:
     from speech_to_speech.TTS import base_tts_handler as base_module
