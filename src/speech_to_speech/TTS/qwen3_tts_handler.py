@@ -26,12 +26,10 @@ from openai.types.realtime.realtime_response_create_params import RealtimeRespon
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.api.openai_realtime.utils import StreamingPcm16Resampler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.control import SESSION_END, is_control_message
 from speech_to_speech.pipeline.events import AssistantOutputEvent
-from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
+from speech_to_speech.pipeline.handler_types import TTSOut
 from speech_to_speech.pipeline.messages import (
-    AUDIO_RESPONSE_DONE,
     PIPELINE_END,
     AssistantTextPart,
     EndOfResponse,
@@ -42,7 +40,7 @@ from speech_to_speech.pipeline.transcript_logging import log_exception
 from speech_to_speech.pipeline.turn_latency import TTSResponseTimer, bind_active_turn_latency_tracker
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
 from speech_to_speech.TTS.pcm_blocks import PCMBlockBuffer
-from speech_to_speech.utils.mlx_lock import MLXLockContext
+from speech_to_speech.utils.mlx_lock import MLXLockContext, hand_over_mlx_lock
 from speech_to_speech.utils.utils import resolve_device
 
 logger = logging.getLogger(__name__)
@@ -91,6 +89,17 @@ QWEN3_LANGUAGE_ALIASES = {
     "es": "spanish",
     "it": "italian",
 }
+
+
+def _handing_over_mlx_lock(generation: Iterator[Any]) -> Iterator[Any]:
+    """Between generation steps, let a waiting final transcription take the MLX lock.
+
+    Each item has been consumed (converted to samples) before the next step
+    starts, so no MLX work of this utterance is in flight at the hand-over.
+    """
+    for item in generation:
+        yield item
+        hand_over_mlx_lock("Qwen3TTS")
 
 
 class Qwen3TTSHandler(BaseTTSHandler):
@@ -773,7 +782,8 @@ class Qwen3TTSHandler(BaseTTSHandler):
 
     def _coalesce_pending_tts_input(self, current_input: TTSInput) -> tuple[str, Optional[str]]:
         """Combine already-queued text chunks before the next TTS synthesis call."""
-        if not hasattr(self.queue_in, "mutex") or not hasattr(self.queue_in, "queue"):
+        queue_in = getattr(self, "queue_in", None)
+        if not hasattr(queue_in, "mutex") or not hasattr(queue_in, "queue"):
             return current_input.text, current_input.tts_language_code
 
         text = current_input.text
@@ -832,28 +842,33 @@ class Qwen3TTSHandler(BaseTTSHandler):
         combined_text = " ".join(parts).strip()
         return combined_text, language_code
 
-    def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
-        if isinstance(tts_input, EndOfResponse):
-            if self._gate_end_of_response(tts_input):
-                yield AUDIO_RESPONSE_DONE
-            return
+    def _assistant_text_for_print(self, tts_input: TTSInput) -> str:
+        spoken = getattr(self, "_spoken_text", None)
+        return spoken if isinstance(spoken, str) else tts_input.text
 
-        if not self._admit_input(tts_input):
-            return
+    def _on_first_audio_committed(
+        self,
+        tts_input: TTSInput,
+        timer: TTSResponseTimer | None,
+        e2e_s: float | None = None,
+    ) -> None:
+        super()._on_first_audio_committed(tts_input, timer, e2e_s)
+        if timer is not None:
+            self._log_first_audio_latency(tts_input, timer, e2e_s)
 
+    def _synthesize_input(self, tts_input: TTSInput) -> Iterator[TTSOut]:
         runtime_config = tts_input.runtime_config
         response = tts_input.response
 
         coalesced_text, language_code = self._coalesce_pending_tts_input(tts_input)
 
         text = coalesced_text or "Hello."
+        self._spoken_text: str | None = text
 
         model_type = self._model_type()
         self._apply_session_voice_override(model_type, runtime_config, response)
 
         request_language = self._language_for_utterance(language_code, tts_input.selected_language)
-
-        console.print(f"[green]ASSISTANT: {text}")
 
         logger.info("Qwen3-TTS language=%s (input_code=%s)", request_language, language_code)
         store = getattr(self, "turn_latency_store", None)
@@ -873,20 +888,22 @@ class Qwen3TTSHandler(BaseTTSHandler):
                         "Qwen3-TTS Base model requires a voice-clone reference. "
                         "Provide qwen3_tts_ref_audio or qwen3_tts_ref_spk, or use a CustomVoice/VoiceDesign model."
                     )
-                first_audio = True
-                for audio_chunk in audio_iter:
-                    if first_audio:
-                        self._log_first_audio_latency(tts_input, timer)
-                        first_audio = False
-                    yield audio_chunk
+                yield from audio_iter
         except Exception as exc:
             log_exception(logger, "Error during Qwen3-TTS generation", exc)
+        finally:
+            self._spoken_text = None
 
-    def _log_first_audio_latency(self, tts_input: TTSInput, timer: TTSResponseTimer) -> None:
+    def _log_first_audio_latency(
+        self,
+        tts_input: TTSInput,
+        timer: TTSResponseTimer,
+        e2e_s: float | None = None,
+    ) -> None:
         elapsed_s = timer.speech_stop_elapsed_s()
         if elapsed_s is None or elapsed_s < 0:
             return
-        latency_s = timer.first_yield(ignore_cancel=True)
+        latency_s = e2e_s if e2e_s is not None else timer.first_yield(ignore_cancel=True)
         if latency_s is None:
             if timer.has_tracker:
                 return
@@ -922,9 +939,11 @@ class Qwen3TTSHandler(BaseTTSHandler):
             if not acquired:
                 raise TimeoutError("Timed out waiting for MLX lock")
             yield from self._stream(
-                generation_fn(
-                    **self._mlx_stream_kwargs(max_tokens=max_tokens),
-                    **generation_kwargs,
+                _handing_over_mlx_lock(
+                    generation_fn(
+                        **self._mlx_stream_kwargs(max_tokens=max_tokens),
+                        **generation_kwargs,
+                    ),
                 ),
                 label=label,
                 timer=timer,

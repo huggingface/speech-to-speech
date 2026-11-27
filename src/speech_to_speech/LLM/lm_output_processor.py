@@ -16,6 +16,7 @@ from uuid import uuid4
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline import language_detection
+from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import (
     AssistantOutputEvent,
     AssistantResponseDoneEvent,
@@ -56,10 +57,12 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
         speculative_turns: SpeculativeTurnTracker | None = None,
         text_output_queue: Queue[PipelineEvent] | None = None,
         detect_llm_output_language: bool = False,
+        cancel_scope: CancelScope | None = None,
     ) -> None:
         self.speculative_turns = speculative_turns
         self.text_output_queue = text_output_queue
         self.detect_llm_output_language = detect_llm_output_language
+        self.cancel_scope = cancel_scope
         self._language_detector = language_detection.warm_language_detector() if detect_llm_output_language else None
         self._response_key: str | None = None
         self._tool_call_ids: list[str] = []
@@ -70,6 +73,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
         self._response_tts_language: str | None = None
         self._response_language_resolved = False
         self._assistant_language_probe = ""
+        self._forwarded_audio_tts = False
 
     def _start_response(self, response_key: str | None) -> str:
         key = response_key or self._response_key or uuid4().hex
@@ -86,6 +90,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
         self._response_tts_language = None
         self._response_language_resolved = False
         self._assistant_language_probe = ""
+        self._forwarded_audio_tts = False
 
     def _observe_assistant_language(self, text: str) -> None:
         if self._detected_assistant_language is not None:
@@ -127,10 +132,37 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
             )
         )
 
-    def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
+    def _is_cancelled(self, cancel_generation: int | None) -> bool:
+        stop_event = getattr(self, "stop_event", None)
+        cancel_scope = getattr(self, "cancel_scope", None)
+        return bool(
+            (stop_event is not None and stop_event.is_set())
+            or (cancel_generation is not None and cancel_scope is not None and cancel_scope.is_stale(cancel_generation))
+        )
+
+    def _turn_output_allowed(
+        self,
+        turn_id: str | None,
+        turn_revision: int | None,
+        *,
+        hold_for_grace: bool = True,
+        observe_wait: bool = True,
+        cancel_generation: int | None = None,
+    ) -> bool:
+        if self._is_cancelled(cancel_generation):
+            return False
         if self.speculative_turns is None:
             return True
-        return self.speculative_turns.wait_for_gate(turn_id, turn_revision)
+        has_abort = getattr(self, "stop_event", None) is not None or (
+            cancel_generation is not None and getattr(self, "cancel_scope", None) is not None
+        )
+        return self.speculative_turns.wait_for_gate(
+            turn_id,
+            turn_revision,
+            hold_for_grace=hold_for_grace,
+            observe_wait=observe_wait,
+            should_abort=(lambda: self._is_cancelled(cancel_generation)) if has_abort else None,
+        )
 
     def process(self, lm_output: LLMOut) -> Iterator[TTSIn | PipelineEvent]:
         """
@@ -157,14 +189,20 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
             if not self._turn_output_allowed(
                 lm_output.turn_id,
                 lm_output.turn_revision,
+                observe_wait=not self._forwarded_audio_tts,
+                cancel_generation=lm_output.cancel_generation,
             ):
                 logger.debug(
                     "Dropping stale end-of-response for turn=%s rev=%s",
                     lm_output.turn_id,
                     lm_output.turn_revision,
                 )
+                stop_event = getattr(self, "stop_event", None)
+                stopped = stop_event is not None and stop_event.is_set()
                 self._notify_generation_done(lm_output, response_key, succeeded=False)
                 self._reset_response()
+                if stopped:
+                    return
                 if response_key is not None:
                     # Bypass downstream speculative gates with a lifecycle-only
                     # terminal. The router uses its key to cancel an opened stale
@@ -174,6 +212,8 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
                         response_key=response_key,
                         cleanup_only=True,
                     )
+                elif lm_output.cancel_generation is not None and self._is_cancelled(lm_output.cancel_generation):
+                    yield EndOfResponse(cancel_generation=lm_output.cancel_generation)
                 return
             succeeded = lm_output.error is None and lm_output.status == "completed"
             self._notify_generation_done(lm_output, response_key, succeeded=succeeded)
@@ -213,9 +253,17 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
             logger.warning("LMOutputProcessor received unexpected type: %s", type(lm_output))
             return
 
+        wants_audio = response_wants_audio(lm_output.response)
+        has_spoken_audio = wants_audio and any(
+            isinstance(part, AssistantTextPart) and bool(part.text.strip()) for part in lm_output.parts
+        )
+        # Let spoken audio batches flow straight to TTS during the reopen grace
+        # so synthesis overlaps the wait; TTS and the router hold commit/emission.
         if not self._turn_output_allowed(
             lm_output.turn_id,
             lm_output.turn_revision,
+            hold_for_grace=not has_spoken_audio,
+            cancel_generation=lm_output.cancel_generation,
         ):
             logger.debug("Dropping stale LLM chunk for turn=%s rev=%s", lm_output.turn_id, lm_output.turn_revision)
             return
@@ -228,6 +276,17 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
         for part in lm_output.parts:
             if isinstance(part, AssistantReasoningPart):
                 continue
+            if isinstance(part, AssistantToolCallPart) and has_spoken_audio:
+                # Tool calls must never leave the processor before the reopen grace settles.
+                if not self._turn_output_allowed(
+                    lm_output.turn_id,
+                    lm_output.turn_revision,
+                    cancel_generation=lm_output.cancel_generation,
+                ):
+                    logger.debug(
+                        "Dropping stale tool call chunk for turn=%s rev=%s", lm_output.turn_id, lm_output.turn_revision
+                    )
+                    return
             output_sequence = self._output_sequence
             self._output_sequence += 1
             if isinstance(part, AssistantToolCallPart) and part.tool.call_id not in self._tool_call_ids:
@@ -256,12 +315,9 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn | PipelineEvent]):
             )
             reasoning = []
             yield event
-            if (
-                not isinstance(part, AssistantTextPart)
-                or not part.text.strip()
-                or not response_wants_audio(lm_output.response)
-            ):
+            if not isinstance(part, AssistantTextPart) or not part.text.strip() or not wants_audio:
                 continue
+            self._forwarded_audio_tts = True
             logger.debug("Forwarding to TTS: %s", transcript_for_log(part.text))
             config = lm_output.runtime_config
             if self.detect_llm_output_language or config is not None:

@@ -4,14 +4,14 @@ import numpy as np
 import pytest
 
 from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.messages import TTSInput
-from speech_to_speech.TTS import kitten_tts_handler as kitten_module
 from tests.test_kitten_tts_handler import make_handler
 
 
 @pytest.fixture(autouse=True)
 def _quiet_console(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(kitten_module.console, "print", lambda *_a, **_k: None)
+    monkeypatch.setattr(console, "print", lambda *_a, **_k: None)
 
 
 def test_first_chunk_leaves_before_the_next_chunk_is_synthesized() -> None:

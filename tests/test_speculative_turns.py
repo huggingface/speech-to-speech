@@ -14,6 +14,8 @@ from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.VAD.smart_turn import SmartTurnResult
 from speech_to_speech.VAD.vad_handler import VADHandler
 from speech_to_speech.VAD.vad_iterator import VADIterator
+from tests.test_audio_input_notifier import _notifier as _audio_input_notifier
+from tests.test_stt_stale_filter import _handler as _stt_handler
 from tests.test_vad_iterator import _FakeVADModel
 from tests.turns import reopen
 
@@ -836,7 +838,7 @@ def test_vad_incomplete_smart_turn_selects_longer_speculative_grace():
     outputs = _drive_final_segment(handler)
 
     assert len(outputs) == 1
-    assert outputs[0].processing_delay_s == 0.6
+    assert outputs[0].processing_delay_s == pytest.approx(0.6, abs=0.05)
     grace = handler.speculative_turns._reopen_grace
     assert grace is not None
     assert grace.revision == 0
@@ -923,6 +925,118 @@ def test_vad_max_speech_is_enforced_before_smart_turn():
 
     assert _drive_final_segment(handler, segment_chunks=63) == []
     assert analyzer.calls == []
+
+
+class _SlowSmartTurnAnalyzer:
+    """Advance the fake monotonic clock as if inference took *inference_s*."""
+
+    def __init__(self, clock: list[float], result: SmartTurnResult | None, inference_s: float = 0.1) -> None:
+        self._clock = clock
+        self._result = result
+        self._inference_s = inference_s
+
+    def predict(self, audio: np.ndarray, *, sample_rate: int) -> SmartTurnResult:
+        self._clock[0] += self._inference_s
+        if self._result is None:
+            raise RuntimeError("Smart Turn inference failed")
+        return self._result
+
+
+def _slow_smart_turn(clock: list[float], status: str) -> _SlowSmartTurnAnalyzer | None:
+    if status == "disabled":
+        return None
+    if status == "failed":
+        return _SlowSmartTurnAnalyzer(clock, None)
+    complete = status == "complete"
+    return _SlowSmartTurnAnalyzer(
+        clock, SmartTurnResult(complete=complete, probability=0.9 if complete else 0.2, inference_ms=100.0)
+    )
+
+
+@pytest.mark.parametrize(
+    "status,grace_s,delay_s",
+    [("complete", 0.8, 0.0), ("incomplete", 2.0, 0.6), ("disabled", 0.8, 0.0), ("failed", 0.8, 0.0)],
+)
+def test_vad_smart_turn_windows_run_from_segment_finalization(clock, status, grace_s, delay_s):
+    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    handler.smart_turn_analyzer = _slow_smart_turn(clock, status)
+    store = TurnLatencyStore()
+    handler.turn_latency_store = store
+    finalized_at = clock[0]
+
+    outputs = _drive_final_segment(handler)
+
+    assert len(outputs) == 1
+    assert handler._last_smart_turn_status == status
+    tracker = handler.speculative_turns
+    assert tracker.processing_deadline("turn_1", 0) == pytest.approx(finalized_at + delay_s)
+    # The emitted delay counts from message creation, after Smart Turn ran.
+    assert outputs[0].processing_delay_s == pytest.approx(max(0.0, finalized_at + delay_s - clock[0]))
+    pending = store.pending_for_turn("turn_1", 0)
+    assert pending is not None
+    assert pending.smart_turn_status == status
+    if status != "disabled":
+        assert pending.smart_turn_grace_s == grace_s
+        assert pending.smart_turn_processing_delay_s == delay_s
+
+    clock[0] = finalized_at + grace_s - 0.001
+    assert tracker.gate("turn_1", 0, commit=True).action is HOLD
+    clock[0] = finalized_at + grace_s
+    assert tracker.gate("turn_1", 0, commit=True).action is ACCEPT
+
+
+def _advance_tracker_clock(tracker: SpeculativeTurnTracker, clock: list[float], now: float) -> None:
+    with tracker._condition:
+        clock[0] = now
+        tracker._condition.notify_all()
+
+
+def test_final_stt_and_audio_input_delay_end_600ms_after_finalization(clock, monkeypatch):
+    for module in ("speech_to_speech.STT.base_stt_handler", "speech_to_speech.LLM.audio_input_notifier"):
+        monkeypatch.setattr(f"{module}.monotonic", lambda: clock[0])
+        monkeypatch.setattr(f"{module}.perf_counter", lambda: clock[0])
+    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    handler.smart_turn_analyzer = _slow_smart_turn(clock, "incomplete")
+    store = TurnLatencyStore()
+    handler.turn_latency_store = store
+    finalized_at = clock[0]
+
+    [final_audio] = _drive_final_segment(handler)
+    assert clock[0] == pytest.approx(finalized_at + 0.1)
+
+    tracker = handler.speculative_turns
+    stt = _stt_handler(tracker, Queue(), Queue())
+    stt.turn_latency_store = store
+    notifier = _audio_input_notifier(speculative_turns=tracker)
+    notifier.turn_latency_store = store
+    results: dict[str, bool] = {}
+    waiters = [
+        Thread(target=lambda: results.__setitem__("stt", stt.should_process_input(final_audio))),
+        Thread(target=lambda: results.__setitem__("notifier", notifier.should_process_input(final_audio))),
+    ]
+    for waiter in waiters:
+        waiter.start()
+
+    _advance_tracker_clock(tracker, clock, finalized_at + 0.6 - 0.001)
+    for waiter in waiters:
+        waiter.join(timeout=0.05)
+    held_before_deadline = all(waiter.is_alive() for waiter in waiters)
+    _advance_tracker_clock(tracker, clock, finalized_at + 0.6)
+    for waiter in waiters:
+        waiter.join(timeout=1.0)
+    released_at_deadline = not any(waiter.is_alive() for waiter in waiters)
+    # Always release a failed waiter before asserting.
+    tracker.start_turn()
+    for waiter in waiters:
+        waiter.join(timeout=1.0)
+
+    assert held_before_deadline
+    assert released_at_deadline
+    assert results == {"stt": True, "notifier": True}
+    pending = store.pending_for_turn("turn_1", 0)
+    assert pending is not None
+    assert pending.vad_settle_s == pytest.approx(0.5)
+    assert pending.smart_turn_wait_s == pytest.approx(0.5)
 
 
 def _handler_after_soft_ended_turn() -> VADHandler:
@@ -1474,3 +1588,26 @@ def test_firered_preserves_candidate_audio_through_handler(speech_pad_ms, silent
     streamed = np.frombuffer(b"".join(sink.audio), dtype=np.int16)
     np.testing.assert_array_equal(streamed, pcm[expected_start : expected_start + len(audio)])
     np.testing.assert_array_equal(audio, pcm[expected_start : expected_start + len(audio)].astype(np.float32) / 32768)
+
+
+def test_wait_for_gate_consolidates_wait_observer_across_abort_polls():
+    tracker = SpeculativeTurnTracker()
+    store = TurnLatencyStore()
+    observed: list[tuple[str, int, float, float]] = []
+
+    def observe(turn_id: str, revision: int, start_s: float, end_s: float) -> None:
+        observed.append((turn_id, revision, start_s, end_s))
+        store.record_smart_wait(turn_id, revision, start_s, end_s)
+
+    tracker.wait_observer = observe
+    turn_id, rev = tracker.start_turn()
+    latency = store.get_or_create_response("resp_wait", turn_id=turn_id, turn_revision=rev)
+    latency.smart_turn_status = "incomplete"
+    tracker.start_reopen_grace(turn_id, rev, grace_s=0.09)
+
+    assert tracker.wait_for_gate(turn_id, rev, commit=True, should_abort=lambda: False) is True
+
+    # Multiple 20ms _ABORT_POLL_S ticks during a continuous grace wait must emit one span.
+    assert len(observed) == 1
+    assert len(latency._smart_wait_intervals) == 1
+    assert latency.smart_turn_wait_s >= 0.07

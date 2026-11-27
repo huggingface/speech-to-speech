@@ -11,8 +11,8 @@ from transformers import AutoTokenizer, VitsModel
 
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.console import console
-from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
+from speech_to_speech.pipeline.handler_types import TTSOut
+from speech_to_speech.pipeline.messages import TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
@@ -139,15 +139,7 @@ class FacebookMMSTTSHandler(BaseTTSHandler):
             log_exception(logger, "Error in generate_audio", exc)
             return None
 
-    def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
-        if isinstance(tts_input, EndOfResponse):
-            if self._gate_end_of_response(tts_input):
-                yield AUDIO_RESPONSE_DONE
-            return
-
-        if not self._admit_input(tts_input):
-            return
-
+    def _synthesize_input(self, tts_input: TTSInput) -> Iterator[TTSOut]:
         gen = self.cancel_scope.generation if self.cancel_scope else None
         language_code = tts_input.tts_language_code
         selected = tts_input.selected_language
@@ -158,8 +150,6 @@ class FacebookMMSTTSHandler(BaseTTSHandler):
         if language_code is None and runtime_config is not None and tts_input.selected_language == "auto":
             language_code = self._initial_language
         text = tts_input.text
-
-        console.print(f"[green]ASSISTANT: {text}")
         logger.debug("Processing text: %s", transcript_for_log(text))
         logger.debug(f"Language code: {language_code}")
 
@@ -210,9 +200,7 @@ class FacebookMMSTTSHandler(BaseTTSHandler):
                 logger.info("TTS generation cancelled (interruption)")
                 return
             chunk = audio_int16[i : i + self.chunk_size]
-            block = np.pad(chunk, (0, self.chunk_size - len(chunk)))
-            timer.first_yield()
-            yield block
+            yield np.pad(chunk, (0, self.chunk_size - len(chunk)))
 
     def on_session_end(self) -> None:
         custom_model_changed = self._initial_model_name is not None and self.model_name != self._initial_model_name

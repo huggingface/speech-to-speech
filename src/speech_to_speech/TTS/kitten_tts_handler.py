@@ -11,9 +11,8 @@ import numpy as np
 from scipy.signal import resample_poly
 
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.console import console
-from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.handler_types import TTSOut
+from speech_to_speech.pipeline.messages import TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import transcript_for_log
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
@@ -112,29 +111,16 @@ class KittenTTSHandler(BaseTTSHandler):
                 continue
             yield self.model.generate_single_chunk(text=chunk, voice=voice)
 
-    def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
-        if isinstance(tts_input, EndOfResponse):
-            if self._gate_end_of_response(tts_input):
-                yield AUDIO_RESPONSE_DONE
-            return
-
-        if not self._admit_input(tts_input):
-            return
-
+    def _synthesize_input(self, tts_input: TTSInput) -> Iterator[TTSOut]:
         text = tts_input.text
         if not text.strip():
             return
         cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
         voice = self._resolve_voice(tts_input)
-        console.print(f"[green]ASSISTANT: {text}")
         logger.debug("KittenTTS synthesizing: %s", transcript_for_log(text))
 
         # Synthesis start: after speculative gate / voice resolve, before provider work.
         timer = self._latency_timer(tts_input, cancel_gen)
-
-        def emit(block: np.ndarray) -> Iterator[TTSOut]:
-            timer.first_yield()
-            yield block
 
         # One input can hold several sentences, each a blocking model call. Deliver
         # each chunk before synthesizing the next so the first one is not held back
@@ -159,7 +145,7 @@ class KittenTTSHandler(BaseTTSHandler):
             for i in range(0, n, self.blocksize):
                 if self._is_stale(cancel_gen):
                     return
-                yield from emit(audio_int16[i : i + self.blocksize])
+                yield audio_int16[i : i + self.blocksize]
             carry = audio_int16[n:]
             # Advancing the generator starts the next blocking model call.
             if self._is_stale(cancel_gen):
@@ -167,4 +153,4 @@ class KittenTTSHandler(BaseTTSHandler):
         if len(carry):
             if self._is_stale(cancel_gen):
                 return
-            yield from emit(np.pad(carry, (0, self.blocksize - len(carry))))
+            yield np.pad(carry, (0, self.blocksize - len(carry)))

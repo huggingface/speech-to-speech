@@ -8,10 +8,9 @@ import numpy as np
 import soxr
 
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.events import ResponseFailedEvent
-from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.handler_types import TTSOut
+from speech_to_speech.pipeline.messages import EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import log_exception
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
@@ -188,25 +187,13 @@ class PhononTTSHandler(BaseTTSHandler):
         return voice
 
     def _is_cancelled(self, generation: int | None, tts_input: TTSInput) -> bool:
-        return (
-            self.stop_event.is_set()
-            or self._is_stale(generation)
-            or (
-                self.speculative_turns is not None
-                and not self.speculative_turns.is_latest(tts_input.turn_id, tts_input.turn_revision)
-            )
-        )
+        return self.stop_event.is_set() or self._is_stale(generation, tts_input)
 
-    def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
+    def _on_end_of_response(self, end: EndOfResponse) -> None:
+        self._failed_responses.discard((end.cancel_generation, end.response_key, end.turn_id, end.turn_revision))
+
+    def _synthesize_input(self, tts_input: TTSInput) -> Iterator[TTSOut]:
         identity = (tts_input.cancel_generation, tts_input.response_key, tts_input.turn_id, tts_input.turn_revision)
-        if isinstance(tts_input, EndOfResponse):
-            self._failed_responses.discard(identity)
-            if self._gate_end_of_response(tts_input):
-                yield AUDIO_RESPONSE_DONE
-            return
-
-        if not self._admit_input(tts_input):
-            return
         generation = tts_input.cancel_generation
         if generation is None and self.cancel_scope is not None:
             generation = self.cancel_scope.generation
@@ -241,16 +228,11 @@ class PhononTTSHandler(BaseTTSHandler):
 
     def _synthesize(self, tts_input: TTSInput, generation: int | None) -> Iterator[TTSOut]:
         voice = self._resolve_voice(tts_input)
-        console.print(f"[green]ASSISTANT: {tts_input.text}")
         timer = self._latency_timer(tts_input, also_cancelled=lambda: self._is_cancelled(generation, tts_input))
         first_audio = True
         pcm_blocks = PCMBlockBuffer(self.blocksize)
         tail_ms = self.max_trailing_silence_ms
         trimmer = _TrailingSilenceTrimmer(PIPELINE_SAMPLE_RATE, tail_ms) if tail_ms is not None else None
-
-        def emit(block: np.ndarray) -> np.ndarray:
-            timer.first_yield()
-            return block
 
         # Closing the context on cancellation, exceptions, or generator.close()
         # stops native generation and joins its worker threads.
@@ -267,7 +249,7 @@ class PhononTTSHandler(BaseTTSHandler):
                 for block in pcm_blocks.push(pcm):
                     if self._is_cancelled(generation, tts_input):
                         return
-                    yield emit(block)
+                    yield block
 
             def trimmed_blocks(samples: np.ndarray) -> Iterator[np.ndarray]:
                 if trimmer is None:
@@ -300,4 +282,4 @@ class PhononTTSHandler(BaseTTSHandler):
             for block in pcm_blocks.flush():
                 if self._is_cancelled(generation, tts_input):
                     return
-                yield emit(block)
+                yield block

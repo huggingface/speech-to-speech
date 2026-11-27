@@ -5,8 +5,12 @@ import threading
 
 import pytest
 
-from speech_to_speech.pipeline.messages import EndOfResponse, TTSInput
+from speech_to_speech.pipeline.cancel_scope import CancelScope
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnGateAction
+from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
+from tests.turns import reopen
 
 
 class _Tracker:
@@ -14,13 +18,13 @@ class _Tracker:
         self.accept = accept
         self.calls: list[tuple] = []
 
-    def wait_for_gate(self, turn_id, revision, *, commit=False) -> bool:
-        self.calls.append((turn_id, revision, commit))
+    def wait_for_gate(self, turn_id, revision, *, commit=False, hold_for_grace=True) -> bool:
+        self.calls.append((turn_id, revision, commit, hold_for_grace))
         return self.accept
 
 
 class _Handler(BaseTTSHandler):
-    def process(self, tts_input):  # pragma: no cover - not used
+    def _synthesize_input(self, tts_input):  # pragma: no cover - not used
         yield from ()
 
 
@@ -45,7 +49,7 @@ def test_end_of_response_accepted_does_not_mark_cleanup_only() -> None:
     end = EndOfResponse(turn_id="t", turn_revision=1, response_key="r")
     assert _handler(tracker)._gate_end_of_response(end) is True
     assert end.cleanup_only is False
-    assert tracker.calls == [("t", 1, False)]
+    assert tracker.calls == [("t", 1, False, True)]
 
 
 def test_stale_end_of_response_with_key_is_forwarded_as_cleanup_only() -> None:
@@ -61,17 +65,312 @@ def test_stale_end_of_response_without_key_is_dropped() -> None:
 
 
 @pytest.mark.parametrize("commit", [True, False])
-def test_admit_input_forwards_commit_flag(commit: bool) -> None:
+@pytest.mark.parametrize("hold_for_grace", [True, False])
+def test_admit_input_forwards_flags(commit: bool, hold_for_grace: bool) -> None:
     tracker = _Tracker(accept=True)
-    assert _handler(tracker)._admit_input(_text(), commit=commit) is True
-    assert tracker.calls == [("t", 1, commit)]
+    assert _handler(tracker)._admit_input(_text(), commit=commit, hold_for_grace=hold_for_grace) is True
+    assert tracker.calls == [("t", 1, commit, hold_for_grace)]
 
 
-def test_admit_input_commits_by_default_and_drops_stale() -> None:
+def test_admit_input_is_speculative_by_default_and_drops_stale() -> None:
     tracker = _Tracker(accept=False)
     assert _handler(tracker)._admit_input(_text()) is False
-    assert tracker.calls == [("t", 1, True)]
+    assert tracker.calls == [("t", 1, False, False)]
 
 
 def test_admit_input_passes_without_tracker() -> None:
     assert _handler(None)._admit_input(_text()) is True
+
+
+def test_process_holds_during_grace_releases_mlx_lock_and_defers_latency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time
+
+    from speech_to_speech.TTS import base_tts_handler as base_module
+    from speech_to_speech.utils.mlx_lock import MLXLockContext, acquire_mlx_lock, release_mlx_lock
+
+    printed: list[str] = []
+    monkeypatch.setattr(base_module.console, "print", lambda msg, *_a, **_kw: printed.append(msg))
+    synth_done = threading.Event()
+
+    class _StreamingHandler(BaseTTSHandler):
+        def _synthesize_input(self, tts_input):
+            with MLXLockContext(handler_name="TestTTS"):
+                self._latency_timer(tts_input).first_provider_audio()
+                synth_done.set()
+                yield b"chunk-1"
+                yield b"chunk-2"
+
+    tracker = SpeculativeTurnTracker()
+    turn_id, rev = tracker.start_turn()
+    tracker.start_reopen_grace(turn_id, rev, grace_s=0.1)
+    store = TurnLatencyStore()
+    latency = store.get_or_create_response("resp_1", turn_id=turn_id, turn_revision=rev)
+
+    handler = _StreamingHandler(threading.Event(), queue.Queue(), queue.Queue())
+    handler.speculative_turns = tracker
+    handler.turn_latency_store = store
+    tts_input = TTSInput(
+        text="hello", turn_id=turn_id, turn_revision=rev, response_key="resp_1", speech_stopped_at_s=time.perf_counter()
+    )
+    done, outputs = threading.Event(), []
+
+    thread = threading.Thread(target=lambda: (outputs.extend(handler.process(tts_input)), done.set()))
+    thread.start()
+    try:
+        assert synth_done.wait(0.5)
+        assert not done.wait(0.02)
+        assert outputs == [] and printed == [] and not tracker.is_committed(turn_id, rev)
+        assert latency.tts_ttfa_s is None and latency.e2e_s is None
+        # MLX lock must be free while waiting in reopen grace.
+        assert acquire_mlx_lock(timeout=0.05, handler_name="TestOther") is True
+        release_mlx_lock(handler_name="TestOther")
+        assert done.wait(1.0)
+    finally:
+        thread.join(timeout=1.0)
+
+    assert outputs == [b"chunk-1", b"chunk-2"]
+    assert printed == ["[green]ASSISTANT: hello"]
+    assert tracker.is_committed(turn_id, rev)
+    assert latency.tts_ttfa_s is not None and latency.tts_ttfa_s < 0.05
+    assert latency.e2e_s is not None and latency.e2e_s >= 0.08
+
+
+def test_commit_first_audio_suspends_mlx_lock_when_pending_reopen_races_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from speech_to_speech.TTS import base_tts_handler as base_module
+    from speech_to_speech.utils.mlx_lock import MLXLockContext, acquire_mlx_lock, release_mlx_lock
+
+    monkeypatch.setattr(base_module.console, "print", lambda *_a, **_kw: None)
+    waiting = threading.Event()
+
+    class _RacyTracker(SpeculativeTurnTracker):
+        def wait_for_gate(self, turn_id, revision, *, hold_for_grace=True, hold_until=None, commit=False, **kwargs):
+            if commit:
+                # Simulate VAD starting a pending reopen right as TTS reaches commit.
+                self.begin_reopen_candidate(turn_id, revision)
+                waiting.set()
+            return super().wait_for_gate(
+                turn_id, revision, hold_for_grace=hold_for_grace, hold_until=hold_until, commit=commit, **kwargs
+            )
+
+    class _MLXHandler(BaseTTSHandler):
+        def _synthesize_input(self, tts_input):
+            with MLXLockContext(handler_name="TestMLX"):
+                yield b"chunk"
+
+    tracker = _RacyTracker()
+    turn_id, rev = tracker.start_turn()
+    tracker._PENDING_REOPEN_HOLD_S = 0.5
+    handler = _MLXHandler(threading.Event(), queue.Queue(), queue.Queue())
+    handler.speculative_turns = tracker
+    done, outputs = threading.Event(), []
+    tts_input = TTSInput(text="hi", turn_id=turn_id, turn_revision=rev)
+
+    thread = threading.Thread(target=lambda: (outputs.extend(handler.process(tts_input)), done.set()))
+    thread.start()
+    try:
+        assert waiting.wait(0.5)
+        assert not done.wait(0.02)
+        assert acquire_mlx_lock(timeout=0.1, handler_name="MLX-STT") is True
+        release_mlx_lock(handler_name="MLX-STT")
+        tracker.cancel_reopen_candidate(turn_id)
+        assert done.wait(1.0)
+    finally:
+        tracker.cancel_reopen_candidate(turn_id)
+        thread.join(timeout=1.0)
+
+    assert outputs == [b"chunk"]
+    assert tracker.gate(turn_id, rev).action is TurnGateAction.ACCEPT
+
+
+def test_closed_turn_followup_recommits_on_first_audio_and_survives_new_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from speech_to_speech.TTS import base_tts_handler as base_module
+
+    monkeypatch.setattr(base_module.console, "print", lambda *_a, **_kw: None)
+
+    class _TwoBlockHandler(BaseTTSHandler):
+        def _synthesize_input(self, tts_input):
+            yield b"block-1"
+            if self._is_stale(None, tts_input):
+                return
+            yield b"block-2"
+
+    tracker = SpeculativeTurnTracker()
+    turn_id, rev = tracker.start_turn()
+    assert tracker.gate(turn_id, rev, commit=True).action is TurnGateAction.ACCEPT
+    tracker.close(turn_id, rev)
+    assert tracker.is_committed(turn_id, rev)
+
+    handler = _TwoBlockHandler(threading.Event(), queue.Queue(), queue.Queue())
+    handler.speculative_turns = tracker
+    gen = handler.process(TTSInput(text="follow-up", turn_id=turn_id, turn_revision=rev))
+
+    assert next(gen) == b"block-1"
+    # Starting a new turn without cancelling the active follow-up must not drop its tail.
+    tracker.start_turn()
+    assert tracker.is_latest(turn_id, rev)
+    assert list(gen) == [b"block-2"]
+
+
+def test_cancel_during_admission_hold_drops_input_without_explicit_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from speech_to_speech.TTS import base_tts_handler as base_module
+
+    monkeypatch.setattr(base_module.console, "print", lambda *_a, **_kw: None)
+    admitting = threading.Event()
+    synthesized: list[str] = []
+
+    class _SignallingTracker(SpeculativeTurnTracker):
+        def wait_for_gate(self, turn_id, revision, *, hold_for_grace=True, hold_until=None, commit=False, **kwargs):
+            if not commit:
+                admitting.set()
+            return super().wait_for_gate(
+                turn_id, revision, hold_for_grace=hold_for_grace, hold_until=hold_until, commit=commit, **kwargs
+            )
+
+    class _RecordingHandler(BaseTTSHandler):
+        def _synthesize_input(self, tts_input):
+            synthesized.append(tts_input.text)
+            yield b"block-1"
+            yield b"block-2"
+
+    tracker = _SignallingTracker()
+    turn_id, rev = tracker.start_turn()
+    tracker._PENDING_REOPEN_HOLD_S = 1.0
+    assert tracker.begin_reopen_candidate(turn_id, rev) is not None
+    scope = CancelScope()
+
+    handler = _RecordingHandler(threading.Event(), queue.Queue(), queue.Queue())
+    handler.speculative_turns = tracker
+    handler.cancel_scope = scope
+    done, outputs = threading.Event(), []
+    tts_input = TTSInput(text="cancelled", turn_id=turn_id, turn_revision=rev)
+
+    thread = threading.Thread(target=lambda: (outputs.extend(handler.process(tts_input)), done.set()))
+    thread.start()
+    try:
+        assert admitting.wait(0.5)
+        assert not done.wait(0.02)
+        scope.cancel()
+        tracker.cancel_reopen_candidate(turn_id)
+        assert done.wait(1.0)
+    finally:
+        tracker.cancel_reopen_candidate(turn_id)
+        thread.join(timeout=1.0)
+
+    assert outputs == []
+    assert synthesized == []
+    assert not tracker.is_committed(turn_id, rev)
+
+
+@pytest.mark.parametrize("abort", ["cancel", "reopen"])
+def test_process_aborts_cleanly_and_suppresses_ttfa_during_grace(monkeypatch: pytest.MonkeyPatch, abort: str) -> None:
+    from speech_to_speech.TTS import base_tts_handler as base_module
+
+    printed: list[str] = []
+    monkeypatch.setattr(base_module.console, "print", lambda msg, *_a, **_kw: printed.append(msg))
+    first_ready, second_pulled, caught, closed = (
+        threading.Event(),
+        threading.Event(),
+        threading.Event(),
+        threading.Event(),
+    )
+
+    class _StreamingHandler(BaseTTSHandler):
+        def _synthesize_input(self, tts_input):
+            try:
+                self._latency_timer(tts_input).first_provider_audio()
+                first_ready.set()
+                yield b"chunk-1"
+                second_pulled.set()
+                yield b"chunk-2"
+            except Exception:
+                caught.set()
+            finally:
+                closed.set()
+
+    tracker = SpeculativeTurnTracker()
+    turn_id, rev, _ = tracker.speech_started(0)
+    tracker.segment_finalized(1000, output_hold_ms=300)
+    scope, store = CancelScope(), TurnLatencyStore()
+    latency = store.get_or_create_response("resp_abort", turn_id=turn_id, turn_revision=rev)
+    handler = _StreamingHandler(threading.Event(), queue.Queue(), queue.Queue())
+    handler.speculative_turns, handler.cancel_scope, handler.turn_latency_store = tracker, scope, store
+
+    tts_input = TTSInput(
+        text="hello", turn_id=turn_id, turn_revision=rev, response_key="resp_abort", cancel_generation=scope.generation
+    )
+    done, outputs = threading.Event(), []
+    thread = threading.Thread(target=lambda: (outputs.extend(handler.process(tts_input)), done.set()))
+    thread.start()
+    try:
+        assert first_ready.wait(0.5)
+        assert not done.wait(0.02)
+        if abort == "cancel":
+            scope.cancel()
+        else:
+            reopen(tracker, turn_id, rev)
+        assert done.wait(0.3)
+    finally:
+        thread.join(timeout=1.0)
+
+    assert outputs == [] and printed == []
+    assert closed.is_set() and not caught.is_set() and not second_pulled.is_set()
+    assert not tracker.is_committed(turn_id, rev)
+    assert latency.tts_ttfa_s is None and latency.e2e_s is None
+    if abort == "cancel":
+        assert tracker.can_reopen(1100) and tracker.speech_started(1100) == (turn_id, 1, True)
+
+
+def test_is_stale_honors_reopen_and_template_process_handles_subclasses_and_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from speech_to_speech.TTS import base_tts_handler as base_module
+
+    printed: list[str] = []
+    monkeypatch.setattr(base_module.console, "print", lambda msg, *_a, **_kw: printed.append(msg))
+
+    tracker, scope, store = SpeculativeTurnTracker(), CancelScope(), TurnLatencyStore()
+    turn_id, rev = tracker.start_turn()
+    stale_latency = store.get_or_create_response("resp_stale", turn_id=turn_id, turn_revision=rev)
+
+    handler = _Handler(threading.Event(), queue.Queue(), queue.Queue())
+    handler.speculative_turns, handler.cancel_scope, handler.turn_latency_store = tracker, scope, store
+    tts_input = TTSInput(text="hi", turn_id=turn_id, turn_revision=rev, response_key="resp_stale")
+    gen = scope.generation
+    timer = handler._latency_timer(tts_input, gen)
+    assert not handler._is_stale(gen, tts_input)
+    reopen(tracker, turn_id, rev)
+    assert handler._is_stale(gen, tts_input)
+    timer.first_provider_audio()
+    assert stale_latency.tts_ttfa_s is None
+
+    ended: list[EndOfResponse] = []
+
+    class _Parent(BaseTTSHandler):
+        def _on_end_of_response(self, end: EndOfResponse) -> None:
+            ended.append(end)
+
+        def _synthesize_input(self, item):
+            self._latency_timer(item).first_provider_audio()
+            yield b"audio"
+
+    class _Child(_Parent):
+        def _synthesize_input(self, item):
+            yield from super()._synthesize_input(item)
+
+    nested_latency = store.get_or_create_response("resp_nested")
+    child = _Child(threading.Event(), queue.Queue(), queue.Queue())
+    child.turn_latency_store = store
+    assert list(child.process(TTSInput(text="nested", response_key="resp_nested"))) == [b"audio"]
+    end = EndOfResponse(response_key="resp_nested")
+    assert list(child.process(end)) == [AUDIO_RESPONSE_DONE]
+    assert ended == [end]
+    assert printed == ["[green]ASSISTANT: nested"]
+    assert nested_latency.tts_ttfa_s is not None
