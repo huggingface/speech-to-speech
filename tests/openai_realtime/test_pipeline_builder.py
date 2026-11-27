@@ -227,3 +227,37 @@ def test_diarizer_ledger_registration_precedes_warmup(monkeypatch):
             resource_ledger=ledger,
         )
     assert ledger == [vad, diarizer]
+
+
+def test_build_pipeline_unit_wires_response_playing_into_vad(monkeypatch):
+    from speech_to_speech import s2s_pipeline
+
+    args = parse_arguments(["--stt", "openai", "--llm_backend", "chat-completions", "--tts", "openai"])
+    vad_setup_kwargs = {}
+
+    class DummyVAD:
+        def __init__(self, *_args, **kwargs):
+            vad_setup_kwargs.update(kwargs.get("setup_kwargs", {}))
+            self.sample_rate = 16000
+
+    class DummyHandler:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    monkeypatch.setattr(s2s_pipeline, "VADHandler", DummyVAD)
+    monkeypatch.setattr(s2s_pipeline, "TranscriptionNotifier", DummyHandler)
+    monkeypatch.setattr("speech_to_speech.LLM.lm_output_processor.LMOutputProcessor", DummyHandler)
+    monkeypatch.setattr(s2s_pipeline, "create_backend_handler", lambda *_args, **_kwargs: DummyHandler())
+
+    unit = s2s_pipeline._build_pipeline_unit(
+        index=0,
+        stop_event=Event(),
+        module_kwargs=args.module_kwargs,
+        vad_handler_kwargs=args.vad_handler_kwargs,
+        stt_backend=args.stt_backend,
+        llm_backend=args.llm_backend,
+        tts_backend=args.tts_backend,
+    )
+
+    assert vad_setup_kwargs["response_playing"] is unit.response_playing
+    assert unit.handlers[0].has_pending_playback == unit.has_pending_playback

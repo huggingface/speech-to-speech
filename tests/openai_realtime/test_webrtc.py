@@ -919,6 +919,82 @@ class TestBargeInAfterResponseDone:
                 assert seen_at_speech_start == ["Sure, here are"]
         stop_event.set()
 
+    @pytest.mark.asyncio
+    async def test_barge_in_threshold_holds_until_webrtc_buffer_drains(self, monkeypatch):
+        """After response completion clears response_playing, buffered WebRTC audio still keeps barge_in_ms active."""
+        from queue import Queue
+
+        import torch
+
+        from speech_to_speech.api.openai_realtime.pipeline_unit import SessionState
+        from speech_to_speech.pipeline.messages import VADAudio
+        from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+        from speech_to_speech.VAD.vad_handler import VADHandler
+        from tests.test_vad_iterator import _FakeVADModel
+
+        unit = _make_unit()
+        session_id = unit.service.register()
+        pc = Mock(sctp=None)
+        pc.getTransceivers.return_value = []
+        pc.close = AsyncMock()
+        rtc = WebRTCSession(pc, on_client_event=AsyncMock(), on_audio=Mock(), on_open=AsyncMock(), on_closed=Mock())
+        unit.session = SessionState(transport=rtc, session_id=session_id)
+
+        # Write two 20 ms frames (40 ms at 16 kHz -> 1920 samples at 48 kHz) and finish the response,
+        # mirroring AUDIO_RESPONSE_DONE clearing unit.response_playing while WebRTC audio is still queued.
+        await rtc.send_audio_chunk(unit.service, session_id, bytes(640 * 2))
+        await rtc.send_events(unit.service.finish_response(session_id))
+        unit.response_playing.clear()
+        assert rtc.has_pending_audio()
+        assert unit.is_response_playing()
+
+        probs = [0.7] * 8 + [0.0] * 4 + [0.7] * 8 + [0.0] * 4
+        monkeypatch.setattr(torch.hub, "load", lambda *_args, **_kwargs: (_FakeVADModel(probs), None))
+        should_listen = ThreadingEvent()
+        should_listen.set()
+        vad = VADHandler(
+            ThreadingEvent(),
+            Queue(),
+            Queue(),
+            setup_kwargs={
+                "should_listen": should_listen,
+                "speculative_turns": SpeculativeTurnTracker(),
+                "thresh": 0.6,
+                "min_silence_ms": 64,
+                "min_speech_ms": 192,
+                "barge_in_ms": 384,
+                "speech_pad_ms": 0,
+                "smart_turn": False,
+                "response_playing": unit.response_playing,
+                "has_pending_playback": unit.has_pending_playback,
+            },
+        )
+        chunk = np.zeros(512, dtype=np.int16).tobytes()
+
+        # 256 ms (8 chunks) is rejected while WebRTC still holds unplayed audio.
+        before_drain = [out for _ in range(12) for out in vad.process(chunk) if isinstance(out, VADAudio)]
+        assert before_drain == []
+
+        # Drain the paced WebRTC track buffer; once empty, the same 256 ms candidate opens a turn.
+        while rtc._track.buffered_bytes > 0:
+            await rtc._track.recv()
+        assert not rtc.has_pending_audio()
+        assert not unit.is_response_playing()
+
+        after_drain = [out for _ in range(12) for out in vad.process(chunk) if isinstance(out, VADAudio)]
+        assert [(item.turn_id, item.turn_revision) for item in after_drain] == [("turn_1", 0)]
+
+        # Explicit discard and session close clear pending state immediately without waiting for track drain.
+        await rtc.send_audio_chunk(unit.service, session_id, bytes(640 * 2))
+        assert rtc.has_pending_audio()
+        rtc.discard_pending_audio()
+        assert not rtc.has_pending_audio()
+
+        await rtc.send_audio_chunk(unit.service, session_id, bytes(640 * 2))
+        assert rtc.has_pending_audio()
+        await rtc.close()
+        assert not rtc.has_pending_audio()
+
     def test_speech_start_cuts_completed_reply_to_played_audio(self):
         unit = _make_unit()
         stop_event = ThreadingEvent()

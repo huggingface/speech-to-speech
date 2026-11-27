@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from queue import Queue
 from threading import Event
@@ -40,8 +40,8 @@ class _PendingShortSegment:
 
 
 # Fragments with less active speech than this are treated as noise and never
-# held for stitching, so sub-threshold bursts cannot sum past min_speech_ms
-# and fire a false barge-in.
+# held for stitching, so sub-threshold bursts cannot sum past the speech-start
+# threshold and fire a false barge-in.
 _SHORT_SEGMENT_MIN_FRAGMENT_MS = 100
 
 
@@ -66,6 +66,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         sample_rate: int = 16000,
         min_silence_ms: int = 64,
         min_speech_ms: int = 384,
+        barge_in_ms: int = 0,
         min_speech_continuation_ms: int = 192,
         max_speech_ms: float = float("inf"),
         speech_pad_ms: int = 30,
@@ -90,9 +91,13 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         idle_after_s: float = 0.0,
         idle_min_speech_ms: int = 0,
         idle_min_confident_speech_ms: int = 0,
+        response_playing: Event | None = None,
+        has_pending_playback: Callable[[], bool] | None = None,
     ) -> None:
         if not 0 < confident_thresh <= 1:
             raise ValueError("confident_thresh must be in (0, 1]")
+        if barge_in_ms < 0:
+            raise ValueError("barge_in_ms must not be negative")
         if min(min_confident_speech_ms, idle_min_speech_ms, idle_min_confident_speech_ms) < 0 or idle_after_s < 0:
             raise ValueError("Confident-speech and idle turn-opening settings must not be negative")
         if (idle_after_s or idle_min_speech_ms or idle_min_confident_speech_ms) and min_confident_speech_ms <= 0:
@@ -106,9 +111,12 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         # Audio time of the last accepted segment; with the last finished response it dates idleness.
         self._last_accept_audio_ms = 0
         self.should_listen = should_listen
+        self.response_playing = response_playing if response_playing is not None else Event()
+        self.has_pending_playback = has_pending_playback
         self.sample_rate = sample_rate
         self.min_silence_ms = min_silence_ms
         self.min_speech_ms = min_speech_ms
+        self.barge_in_ms = barge_in_ms
         self.min_speech_continuation_ms = self._resolve_min_speech_continuation_ms(
             self.min_speech_ms,
             min_speech_continuation_ms,
@@ -281,10 +289,23 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             max(_SHORT_SEGMENT_MIN_FRAGMENT_MS, min_speech_continuation_ms),
         )
 
+    def _is_response_playing(self) -> bool:
+        event = getattr(self, "response_playing", None)
+        if event is not None and event.is_set():
+            return True
+        pending = getattr(self, "has_pending_playback", None)
+        return pending is not None and pending()
+
+    def _barge_in_speech_min_ms(self) -> int:
+        barge_in_ms = getattr(self, "barge_in_ms", 0)
+        return barge_in_ms if barge_in_ms > 0 else self.min_speech_ms
+
     def _active_speech_min_ms(self, start_ms: int) -> float:
-        """Duration hysteresis for speech that continues a reopenable turn."""
+        """Active speech needed to start: less to continue a reopenable turn, barge_in_ms while playing."""
         if self.speculative_turns.has_speech_candidate() or self.speculative_turns.can_reopen(start_ms):
             return self.min_speech_continuation_ms
+        if self._is_response_playing():
+            return self._barge_in_speech_min_ms()
         return self.min_speech_ms
 
     def _should_score_new_turn(self, start_ms: int, *, stitched: bool = False) -> bool:
@@ -310,14 +331,17 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         """Score a new-turn candidate; it opens at 1.0 or more. Returns (score, idle seconds).
 
         Confident speech counts against min_confident_speech_ms and the rest of the active
-        speech against min_speech_ms, so a few very confident chunks open a turn alone, enough
-        ordinary ones do too, and mixtures add up. After idle_after_s of nothing, the idle pair
-        replaces both requirements where it is set.
+        speech against min_speech_ms (or barge_in_ms while a response is playing or buffered
+        for playback), so a few very confident chunks open a turn alone, enough ordinary ones
+        do too, and mixtures add up. After idle_after_s of nothing, the idle pair replaces
+        both requirements where it is set.
         """
         idle_s = self._idle_s(start_ms)
         min_speech_ms: float = self.min_speech_ms
         min_confident_ms: float = self.min_confident_speech_ms
-        if self.idle_after_s > 0 and idle_s > self.idle_after_s:
+        if self._is_response_playing() and getattr(self, "barge_in_ms", 0) > 0:
+            min_speech_ms = self.barge_in_ms
+        elif self.idle_after_s > 0 and idle_s > self.idle_after_s:
             min_speech_ms = self.idle_min_speech_ms or min_speech_ms
             min_confident_ms = self.idle_min_confident_speech_ms or min_confident_ms
         # A zero effective minimum disables duration filtering for VAD-detected speech.

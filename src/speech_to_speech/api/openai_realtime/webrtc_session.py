@@ -422,6 +422,9 @@ class WebRTCSession(SessionTransport):
             await self.send_events(events)
         self._track.write(self._out_resampler.resample_pcm(pcm, PIPELINE_SAMPLE_RATE))
 
+    def has_pending_audio(self) -> bool:
+        return not self._closed and self._track.readyState == "live" and self._track.buffered_bytes > 0
+
     def discard_pending_audio(self) -> float:
         unplayed_ms = self._track.buffered_bytes / 2 / WEBRTC_SAMPLE_RATE * 1000
         self._out_resampler = PcmResampler(WEBRTC_SAMPLE_RATE)

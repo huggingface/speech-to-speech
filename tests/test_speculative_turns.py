@@ -536,7 +536,9 @@ def _vad_handler_for_iterator(iterator: _StaticVADIterator) -> VADHandler:
     handler.sample_rate = 16000
     handler.min_silence_ms = 300
     handler.min_speech_ms = 384
+    handler.barge_in_ms = 0
     handler.min_speech_continuation_ms = handler.min_speech_ms
+    handler.response_playing = Event()
     handler.max_speech_ms = float("inf")
     handler.enable_realtime_transcription = False
     handler.realtime_processing_pause = 0.5
@@ -1133,6 +1135,39 @@ def test_confirmed_segment_not_discarded_at_finalization():
 
     assert len(outputs) == 1
     assert (outputs[0].turn_id, outputs[0].turn_revision) == ("turn_1", 1)
+
+
+def test_barge_in_defaults_to_min_speech_ms_when_unset():
+    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    handler.min_speech_ms = 800
+    handler.barge_in_ms = 0
+
+    assert handler._active_speech_min_ms(0) == 800
+    handler.response_playing.set()
+    assert handler._active_speech_min_ms(0) == 800
+
+
+def test_barge_in_needs_more_speech_than_a_new_turn():
+    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    handler.min_speech_ms = 192
+    handler.barge_in_ms = 384
+
+    assert handler._active_speech_min_ms(0) == 192
+    handler.response_playing.set()
+    assert handler._active_speech_min_ms(0) == 384
+
+    # 8 chunks = 256 ms: rejected while the assistant is playing, accepted once silent.
+    assert _drive_final_segment(handler, active_chunks=8, segment_chunks=8) == []
+    handler.response_playing.clear()
+    first = _drive_final_segment(handler, active_chunks=8, segment_chunks=8)
+    assert [(item.turn_id, item.turn_revision) for item in first] == [("turn_1", 0)]
+
+    # Commit the answered turn so the next speech is a genuine barge-in, not a continuation.
+    handler.speculative_turns.gate("turn_1", 0, hold_for_grace=False, commit=True)
+    handler.response_playing.set()
+    assert _drive_final_segment(handler, active_chunks=8, segment_chunks=8) == []
+    barge_in = _drive_final_segment(handler, active_chunks=12, segment_chunks=12)
+    assert [(item.turn_id, item.turn_revision) for item in barge_in] == [("turn_2", 0)]
 
 
 def test_continuation_threshold_clamping():

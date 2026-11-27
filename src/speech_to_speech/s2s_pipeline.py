@@ -397,6 +397,7 @@ def _build_handlers(
     speculative_turns: SpeculativeTurnTracker,
     cancel_scope: CancelScope,
     pipeline_index: int,
+    response_playing: Event | None = None,
     resource_ledger: list[Any] | None = None,
 ) -> list[Any]:
     """Build a handler chain: VAD → STT/AudioInput → LM → TTS."""
@@ -414,6 +415,7 @@ def _build_handlers(
             },
             "text_output_queue": text_output_queue,
             "speculative_turns": speculative_turns,
+            "response_playing": response_playing,
         },
     )
 
@@ -674,6 +676,7 @@ def _build_pipeline_unit(
         speculative_turns=speculative_turns,
         cancel_scope=cancel_scope,
         pipeline_index=index,
+        response_playing=response_playing,
         **({"resource_ledger": resource_ledger} if resource_ledger is not None else {}),
     )
     for h in handlers:
@@ -732,7 +735,7 @@ def _build_pipeline_unit(
             known = set(capabilities.languages)
             setattr(service, f"{kind}_supported_languages", known if allowed is None else allowed & known)
 
-    return PipelineUnit(
+    unit = PipelineUnit(
         index=index,
         service=service,
         cancel_scope=cancel_scope,
@@ -745,6 +748,8 @@ def _build_pipeline_unit(
         output_signal=output_signal,
         handlers=handlers,
     )
+    handlers[0].has_pending_playback = unit.has_pending_playback
+    return unit
 
 
 def build_pipeline(

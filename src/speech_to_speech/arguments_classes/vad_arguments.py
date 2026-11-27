@@ -43,10 +43,18 @@ class VADHandlerArguments:
             "help": "Minimum length of speech segments to be considered valid speech. Measured in milliseconds. Default is 384 ms."
         },
     )
+    barge_in_ms: int = field(
+        default=0,
+        metadata={
+            "help": "min_speech_ms to use while the assistant is speaking (including buffered playback) to interrupt it. "
+            "When min_confident_speech_ms is set, this replaces only the ordinary-speech term; confident speech still uses min_confident_speech_ms. "
+            "0 keeps min_speech_ms. Default is 0."
+        },
+    )
     min_speech_continuation_ms: int = field(
         default=192,
         metadata={
-            "help": "Hysteresis threshold (ms of active speech) for accepting speech that continues a reopenable turn (soft-ended, uncommitted, within the reopen window). Set to 0 to disable the split and use min_speech_ms. Clamped to [100, min_speech_ms]. New turns and barge-ins always require min_speech_ms. Default and recommended: 192 with min_speech_ms 384."
+            "help": "Hysteresis threshold (ms of active speech) for accepting speech that continues a reopenable turn (soft-ended, uncommitted, within the reopen window). Set to 0 to disable the split and use min_speech_ms. Clamped to [100, min_speech_ms]. New turns require min_speech_ms, and barge-ins use barge_in_ms when set. Default and recommended: 192 with min_speech_ms 384."
         },
     )
     confident_thresh: float = field(

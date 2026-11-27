@@ -59,6 +59,10 @@ class SessionTransport(ABC):
         Returns the duration of unplayed audio in milliseconds.
         """
 
+    def has_pending_audio(self) -> bool:
+        """Return whether assistant audio is still buffered or estimated to be playing."""
+        return False
+
     @abstractmethod
     async def close(self) -> None: ...
 
@@ -102,6 +106,7 @@ class WebSocketTransport(SessionTransport):
         # finishing after a discard not to add its discarded audio back.
         self._sending_seconds = 0.0
         self._discards = 0
+        self._closed = False
 
     async def send_events(self, events: list[ServerEvent]) -> None:
         async with self._send_lock:
@@ -123,11 +128,16 @@ class WebSocketTransport(SessionTransport):
         self._sending_seconds += seconds
         try:
             await self.send_events(events)
+            # Advance the playback estimate before clearing _sending_seconds so
+            # concurrent readers never observe a gap between in-flight and queued audio.
+            if seconds and discards == self._discards:
+                self._playback_end = max(self._playback_end, self._clock()) + seconds
         finally:
             if discards == self._discards:
                 self._sending_seconds -= seconds
-        if seconds and discards == self._discards:
-            self._playback_end = max(self._playback_end, self._clock()) + seconds
+
+    def has_pending_audio(self) -> bool:
+        return not self._closed and (self._sending_seconds > 0.0 or self._playback_end > self._clock())
 
     def discard_pending_audio(self) -> float:
         # The client flushes its own player on barge-in. Report the audio it
@@ -142,6 +152,7 @@ class WebSocketTransport(SessionTransport):
         return unplayed * 1000
 
     async def close(self) -> None:
+        self._closed = True
         try:
             await self.websocket.close()
         except Exception:  # noqa: BLE001
