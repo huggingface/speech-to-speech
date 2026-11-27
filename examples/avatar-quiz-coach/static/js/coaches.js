@@ -43,7 +43,7 @@ export const COACHES = {
   },
   reachy: {
     name: "Reachy Mini",
-    voice: "auto-oliver_m",
+    voice: "Aiden",
     renderer: "robot",
     robot: "mini",
     lipGain: 1,

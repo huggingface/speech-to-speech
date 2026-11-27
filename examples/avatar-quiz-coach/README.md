@@ -131,7 +131,7 @@ reactions.
 | `SESSION_PROXY_URL` | Or piggyback another deployment's session API, e.g. `https://smolagents-hf-realtime-voice.hf.space/api` |
 | `GRADER_BASE_URL`, `GRADER_MODEL` | Grade on the speech backend's own model through any OpenAI-compatible endpoint (e.g. the deployment's Gemma 4 31B); `GRADER_REASONING_EFFORT` (default `none`) and `GRADER_API_KEY` (default `HF_TOKEN`) go with it. The hosted chain below stays as fallback. |
 | `GRADER_MODELS`, `WRITER_MODELS` | Comma-separated Inference Providers fallback chains (defaults: Qwen3.8-27B on Cerebras with reasoning off for grading, GLM-5.3 for writing; `model@effort` sets a model's reasoning effort) |
-| `COACH_VOICE` | Overrides the TTS voice (by default Max uses `en-arthur_m`, Ada `en-maya_f`, Reachy Mini `auto-oliver_m`, Reachy 2 `auto-arthur_m` and Microduck `auto-clara_f`, voices of the hosted stack; a Qwen3-TTS CustomVoice backend needs e.g. `Aiden` / `Serena`) |
+| `COACH_VOICE` | Overrides the TTS voice (by default Max uses `en-arthur_m`, Ada `en-maya_f`, Reachy Mini `Aiden`, Reachy 2 `auto-arthur_m` and Microduck `auto-clara_f`, voices of the hosted stack; a Qwen3-TTS CustomVoice backend needs e.g. `Aiden` / `Serena`) |
 | `SERPER_API_KEY` | Adds Google results to research |
 | `LOG_TURNS` | `1` logs each graded turn (the student's words and the grader's decision) for debugging |
 | `GITHUB_TOKEN` | Optional, for reading GitHub repositories past the anonymous API limit (60 requests an hour per IP) |
