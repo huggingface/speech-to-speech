@@ -575,3 +575,8 @@ def test_qwen_call_cannot_deliver_nonfinite_json_arguments():
     tool = _make_tool("configure", {"value": {"type": "array"}})
     block = "<tool_call><function=configure><parameter=value>[1e999]</parameter></function></tool_call>"
     assert function_call_module.parse_tool_call_block(block, [tool]) == []
+
+
+@pytest.mark.parametrize("key", ["__arg_0__", "K"])
+def test_history_preserves_native_call_when_python_would_change_the_key(key):
+    assert function_call_module.format_history_call("lookup", {key: "data"}, {key: key}) is None

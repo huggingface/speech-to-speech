@@ -9,6 +9,7 @@ strings containing ')' characters, tuples, dicts, etc. are handled correctly.
 import ast
 import io
 import json
+import keyword
 import logging
 import re
 import tokenize
@@ -308,6 +309,22 @@ def find_json_tool_call_end(block: str) -> int | None:
         elif block.startswith(JSON_TOOL_CALL_END, index):
             return index + len(JSON_TOOL_CALL_END)
     return None
+
+
+def format_history_call(name: str, arguments: dict[str, Any], aliases: dict[str, str] | None) -> str | None:
+    """Render a previous call only when the Python syntax preserves its names."""
+    if aliases is None or not name.isascii() or not name.isidentifier() or keyword.iskeyword(name):
+        return None
+    fields = []
+    for key, value in arguments.items():
+        alias = aliases.get(key)
+        # Python normalizes Unicode identifiers and the parser reserves its positional markers.
+        if alias is None or not alias.isascii() or _POSITIONAL_RE.fullmatch(alias):
+            return None
+        fields.append(f"{alias}={value!r}")
+    # Escape delimiters inside string literals, including nested lists and dicts.
+    args = ", ".join(fields).replace("<", "\\x3c")
+    return f"<code>{name}({args})</code>"
 
 
 def find_tool_call_end(block: str) -> int | None:

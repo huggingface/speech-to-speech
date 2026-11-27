@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import keyword
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Sized
@@ -50,6 +49,7 @@ from speech_to_speech.LLM.tool_call.function_call import (
     JSON_TOOL_CALL_ENTER,
     extract_function_calls_from_text,
     find_tool_call_end,
+    format_history_call,
     parse_tool_call_block,
 )
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
@@ -302,11 +302,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         if not tools or not isinstance(template, str) or "<function=" not in template or "<tool_call>" not in template:
             return messages
 
-        aliases = {
-            tool.name: parameter_names_from_schema(tool.parameters)
-            for tool in tools
-            if tool.name.isidentifier() and not keyword.iskeyword(tool.name)
-        }
+        aliases = {tool.name: parameter_names_from_schema(tool.parameters) for tool in tools}
         for message in messages:
             calls = message.get("tool_calls")
             if not calls:
@@ -314,15 +310,12 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             parts = [message["content"]] if message["content"] else []
             for call in calls:
                 function = call["function"]
-                name, args = function["name"], function["arguments"]
-                names = aliases.get(name)
-                if names is None or args.keys() - names.keys():
-                    # The tool list can change between turns. Let the template render this turn.
+                name = function["name"]
+                block = format_history_call(name, function["arguments"], aliases.get(name))
+                if block is None:
+                    # The tool list can change between turns. Keep the original group intact.
                     break
-                arguments = ", ".join(f"{names[key]}={value!r}" for key, value in args.items())
-                # A delimiter inside a string is data, including in lists and dicts.
-                arguments = arguments.replace("<", "\\x3c")
-                parts.append(f"<code>{name}({arguments})</code>")
+                parts.append(block)
             else:
                 del message["tool_calls"]
                 message["content"] = "\n".join(parts)
