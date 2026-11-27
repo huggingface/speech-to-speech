@@ -248,11 +248,15 @@ def hand_over_mlx_lock(handler_name: str = "Unknown") -> bool:
 def suspend_mlx_lock() -> Iterator[None]:
     """Release the MLX lock while its owner blocks on non-MLX work, then re-acquire."""
     with _mlx_lock_state:
-        if _lock_owner_ident != get_ident() or _lock_depth <= 0:
-            yield
-            return
-        depth = _lock_depth
-        handler_name = _lock_owner_handler or "Unknown"
+        if _lock_owner_ident == get_ident() and _lock_depth > 0:
+            depth = _lock_depth
+            handler_name = _lock_owner_handler or "Unknown"
+        else:
+            depth = 0
+            handler_name = "Unknown"
+    if depth == 0:
+        yield
+        return
     _synchronize_mlx()
     for _ in range(depth):
         release_mlx_lock(handler_name=handler_name)

@@ -96,9 +96,6 @@ def test_hand_over_without_waiters_or_without_the_lock_does_nothing():
 
 
 def test_suspend_mlx_lock_releases_and_restores_reentrant_owner():
-    with suspend_mlx_lock():  # no-op when unheld
-        pass
-
     def try_acquire(timeout: float) -> bool:
         got: list[bool] = []
 
@@ -112,6 +109,11 @@ def test_suspend_mlx_lock_releases_and_restores_reentrant_owner():
         t.start()
         t.join(1.0)
         return got == [True]
+
+    # Non-owner suspension must release _mlx_lock_state before yielding so
+    # unrelated MLX threads can acquire an idle lock during the suspension.
+    with suspend_mlx_lock():
+        assert try_acquire(0.1) is True
 
     with MLXLockContext(handler_name="TTS"), MLXLockContext(handler_name="TTS"):
         with suspend_mlx_lock():
