@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import io
 import logging
 import os
@@ -30,6 +31,46 @@ from speech_to_speech.utils.request_tracing import HttpRequestContext, HttpReque
 logger = logging.getLogger(__name__)
 
 PIPELINE_SAMPLE_RATE = 16000
+
+# Shared HTTP stack. Building a fresh event loop and a fresh httpx2.AsyncClient for
+# every TTS request costs 4-5 s on Windows (measured 4.35/4.89/5.17 s), while reusing
+# one stack costs 0.26-0.32 s. Keep a single loop running in a background thread and
+# submit each request through run_coroutine_threadsafe.
+_SHARED_LOOP: asyncio.AbstractEventLoop | None = None
+_SHARED_LOOP_THREAD: Thread | None = None
+_SHARED_CLIENT: httpx2.AsyncClient | None = None
+_SHARED_STACK_LOCK = Lock()
+
+
+def _shared_loop() -> asyncio.AbstractEventLoop:
+    """Return the shared event loop, starting it in a background thread on first use."""
+    global _SHARED_LOOP, _SHARED_LOOP_THREAD
+    with _SHARED_STACK_LOCK:
+        if _SHARED_LOOP is None or _SHARED_LOOP.is_closed():
+            loop = asyncio.new_event_loop()
+            ready = Event()
+
+            def _run() -> None:
+                asyncio.set_event_loop(loop)
+                loop.call_soon(ready.set)
+                loop.run_forever()
+
+            thread = Thread(target=_run, name="tts-http-loop", daemon=True)
+            thread.start()
+            ready.wait()
+            _SHARED_LOOP = loop
+            _SHARED_LOOP_THREAD = thread
+        return _SHARED_LOOP
+
+
+async def _shared_client() -> httpx2.AsyncClient:
+    """Return the shared httpx2.AsyncClient. Must be used from _shared_loop()."""
+    global _SHARED_CLIENT
+    client = _SHARED_CLIENT
+    if client is None or client.is_closed:
+        client = httpx2.AsyncClient()
+        _SHARED_CLIENT = client
+    return client
 QWEN3_TTS_LANGUAGE_CODES = frozenset({"zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"})
 
 
@@ -74,7 +115,7 @@ class HttpSpeechOperation:
         self._cancelled = Event()
         self._transport_lock = Lock()
         self._worker_loop: asyncio.AbstractEventLoop | None = None
-        self._worker_task: asyncio.Task[None] | None = None
+        self._worker_future: concurrent.futures.Future[None] | None = None
         self._deadline_exceeded = Event()
         self.trace: HttpRequestTrace | None = None
 
@@ -130,27 +171,28 @@ class HttpSpeechOperation:
         trace: HttpRequestTrace | None = None,
     ) -> None:
         result: tuple[bool, object] = (True, _SPEECH_STREAM_DONE)
-        loop = asyncio.new_event_loop()
-        task = loop.create_task(self._read_stream_async(headers, results, cancel_check, trace))
+        loop = _shared_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            self._read_stream_async(headers, results, cancel_check, trace), loop
+        )
         with self._transport_lock:
             self._worker_loop = loop
-            self._worker_task = task
+            self._worker_future = future
             cancelled_before_start = self._cancelled.is_set()
         if cancelled_before_start:
-            task.cancel()
+            future.cancel()
         try:
-            loop.run_until_complete(task)
-        except asyncio.CancelledError:
+            future.result()
+        except (asyncio.CancelledError, concurrent.futures.CancelledError):
             result = (False, SpeechRequestCancelled())
         except Exception as exc:
             result = (False, self._normalize_error(exc))
         finally:
             with self._transport_lock:
-                if self._worker_task is task:
-                    self._worker_task = None
+                if self._worker_future is future:
+                    self._worker_future = None
                 if self._worker_loop is loop:
                     self._worker_loop = None
-            loop.close()
 
         self._publish(results, result)
 
@@ -161,7 +203,7 @@ class HttpSpeechOperation:
         cancel_check: Callable[[], bool],
         trace: HttpRequestTrace | None = None,
     ) -> None:
-        client = httpx2.AsyncClient(timeout=self.timeout_s)
+        client = await _shared_client()
         try:
             if self._cancelled.is_set() or cancel_check():
                 self._cancelled.set()
@@ -169,7 +211,9 @@ class HttpSpeechOperation:
 
             if trace is not None:
                 trace.dispatch()
-            async with client.stream("POST", self.endpoint_url, headers=headers, json=self.payload) as response:
+            async with client.stream(
+                "POST", self.endpoint_url, headers=headers, json=self.payload, timeout=self.timeout_s
+            ) as response:
                 try:
                     response.raise_for_status()
                 except httpx2.HTTPStatusError as exc:
@@ -181,12 +225,9 @@ class HttpSpeechOperation:
                     if chunk and not self._publish(results, (True, chunk)):
                         return
         finally:
-            close_task = asyncio.create_task(client.aclose())
-            try:
-                await asyncio.shield(close_task)
-            except asyncio.CancelledError:
-                await close_task
-                raise
+            # The client is owned by _shared_client() and reused across requests.
+            # Creating and closing one per request costs 4-5 s on Windows (measured).
+            pass
 
     def _publish(self, results: Queue[tuple[bool, object]], result: tuple[bool, object]) -> bool:
         while not self._cancelled.is_set():
@@ -238,14 +279,12 @@ class HttpSpeechOperation:
             if self._cancelled.is_set():
                 return
             self._cancelled.set()
-            loop = self._worker_loop
-            task = self._worker_task
-        if loop is not None and task is not None:
+            future = self._worker_future
+        if future is not None:
             try:
-                loop.call_soon_threadsafe(task.cancel)
+                future.cancel()
             except RuntimeError:
-                # The worker may have completed and closed its loop between the
-                # lock snapshot and this cancellation request.
+                # The request may have finished between the lock snapshot and this cancel.
                 pass
 
     def _raise_if_stopped(self, cancel_check: Callable[[], bool]) -> None:
