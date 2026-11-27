@@ -87,6 +87,9 @@ class TurnLatencyTracker:
     TTFT remains an internal measurement, omitted from the simplified record.
 
     ``vad_settle_s`` is the whole final STT input gate wait.
+    ``smart_turn_grace_s`` and ``smart_turn_processing_delay_s`` are the chosen
+    windows; both run from VAD finalization, so they overlap
+    ``smart_turn_analysis_s`` rather than follow it.
     ``smart_turn_wait_s`` is the union of actual waits for the processing
     delay and the output grace.
 

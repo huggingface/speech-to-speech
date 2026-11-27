@@ -9,7 +9,6 @@
 ## Evals
 
 - Changes to conversation history, prompts, tool handling, chat templates or the LLM backend: run the tool-use conversation eval (`python -m speech_to_speech.evals.tool_conversations`) against `main` and against the change, then `compare` the reports. Setup, text-only runs and how to read results are in `docs/vibe-checks.md#tool-use-conversations`.
-- Changes to the audio path (VAD, STT, TTS, latency): Big Bench Audio, in the same document.
 
 ## Publishing to PyPI
 

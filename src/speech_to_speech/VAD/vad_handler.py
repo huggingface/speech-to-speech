@@ -921,6 +921,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     turn_id,
                     turn_revision,
                 )
+                # Smart Turn's grace and processing delay run from finalization, so
+                # its inference and any audio enhancement happen inside both windows.
+                finalized_at = time.monotonic()
                 analysis_audio = self._combined_raw_turn_audio(array)
                 reopen_grace_ms, processing_delay_ms = self._smart_turn_timing_ms(analysis_audio)
                 store = getattr(self, "turn_latency_store", None)
@@ -964,6 +967,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     end_ms,
                     output_hold_ms=reopen_grace_ms,
                     processing_delay_ms=processing_delay_ms,
+                    finalized_at=finalized_at,
                 )
                 # Queue the provider boundary before yielding downstream. The
                 # next microphone chunk can then never overtake this commit.
@@ -975,7 +979,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     mode="final",
                     turn_id=turn_id,
                     turn_revision=turn_revision,
-                    processing_delay_s=processing_delay_ms / 1000.0,
+                    # Consumers count this from message creation: pass what remains.
+                    processing_delay_s=max(0.0, finalized_at + processing_delay_ms / 1000.0 - time.monotonic()),
                     speech_end_at_s=speech_end_at_s,
                 )
                 self.last_process_time = 0.0
