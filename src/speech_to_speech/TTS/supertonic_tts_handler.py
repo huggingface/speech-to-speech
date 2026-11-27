@@ -9,9 +9,8 @@ import numpy as np
 import scipy.signal
 
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.console import console
-from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
+from speech_to_speech.pipeline.handler_types import TTSOut
+from speech_to_speech.pipeline.messages import TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
 
@@ -131,16 +130,7 @@ class SupertonicTTSHandler(BaseTTSHandler):
         )
         return self.lang
 
-    def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
-
-        if isinstance(tts_input, EndOfResponse):
-            if self._gate_end_of_response(tts_input):
-                yield AUDIO_RESPONSE_DONE
-            return
-
-        if not self._admit_input(tts_input):
-            return
-
+    def _synthesize_input(self, tts_input: TTSInput) -> Iterator[TTSOut]:
         cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
 
         text = tts_input.text
@@ -156,8 +146,6 @@ class SupertonicTTSHandler(BaseTTSHandler):
             # A detected language Supertonic cannot speak keeps the session language.
             language_code = selected
         lang = self._resolve_language(language_code)
-
-        console.print(f"[green]ASSISTANT: {text}")
 
         # Synthesis start: after speculative gate / language resolve, before provider work.
         timer = self._latency_timer(tts_input, cancel_gen)
@@ -192,17 +180,13 @@ class SupertonicTTSHandler(BaseTTSHandler):
         # Convert to int16 format expected by the audio pipeline
         audio_int16 = np.clip(audio_16k_float * 32768, -32768, 32767).astype(np.int16)
 
-        def emit(block: np.ndarray) -> Iterator[TTSOut]:
-            timer.first_yield()
-            yield block
-
         # Yield in block-aligned chunks so the streamer can handle it smoothly
         n = (len(audio_int16) // self.blocksize) * self.blocksize
         for i in range(0, n, self.blocksize):
             if self._is_stale(cancel_gen):
                 logger.info("Supertonic TTS output cancelled (interruption)")
                 return
-            yield from emit(audio_int16[i : i + self.blocksize])
+            yield audio_int16[i : i + self.blocksize]
 
         # Pad the tail so the audio streamer's fixed-blocksize callback doesn't crash
         if n < len(audio_int16):
@@ -210,4 +194,4 @@ class SupertonicTTSHandler(BaseTTSHandler):
                 logger.info("Supertonic TTS output cancelled (interruption)")
                 return
             tail = audio_int16[n:]
-            yield from emit(np.pad(tail, (0, self.blocksize - len(tail))))
+            yield np.pad(tail, (0, self.blocksize - len(tail)))

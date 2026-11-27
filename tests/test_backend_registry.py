@@ -105,6 +105,64 @@ def test_parakeet_session_language_selection_remains_unsupported():
     assert s2s_pipeline._stt_session_languages(selection, SimpleNamespace()) == set()
 
 
+@pytest.mark.parametrize(
+    ("cli", "language", "backend", "selectable"),
+    [
+        # Parakeet TDT v3 transcribes Spanish but its decoder accepts no hint.
+        (["--tts", "openai"], "es", "STT", False),
+        (["--tts", "openai"], "zh", "STT", None),
+        (["--stt", "openai", "--tts", "pocket"], "en", "TTS", False),
+        (["--stt", "openai", "--tts", "pocket"], "es", "TTS", None),
+        (["--stt", "openai-realtime", "--tts", "openai"], "es", "STT", False),
+        (["--stt", "openai-realtime", "--openai_realtime_stt_language", "en", "--tts", "openai"], "es", "STT", True),
+    ],
+)
+def test_session_language_rejection_separates_coverage_from_hint_support(
+    monkeypatch, cli, language, backend, selectable
+):
+    from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
+    from speech_to_speech.TTS.pocket_tts_handler import PocketTTSHandler
+
+    args = parse_arguments(cli)
+    handlers = [SimpleNamespace() for _ in range(6)]
+    if args.stt_backend.name == "parakeet-tdt":
+        handlers[1] = ParakeetTDTSTTHandler.__new__(ParakeetTDTSTTHandler)
+        handlers[1].model_name = "nvidia/parakeet-tdt-0.6b-v3"
+    if args.tts_backend.name == "pocket":
+        handlers[-1] = PocketTTSHandler.__new__(PocketTTSHandler)
+        handlers[-1].language = "english"
+        handlers[-1].is_farsi = False
+    monkeypatch.setattr(s2s_pipeline, "_build_handlers", lambda **_kwargs: handlers)
+    unit = s2s_pipeline._build_pipeline_unit(
+        index=0,
+        stop_event=Event(),
+        module_kwargs=args.module_kwargs,
+        vad_handler_kwargs=args.vad_handler_kwargs,
+        stt_backend=args.stt_backend,
+        llm_backend=args.llm_backend,
+        tts_backend=args.tts_backend,
+    )
+    conn_id = unit.service.register()
+    update = SessionUpdateEvent.model_validate(
+        {
+            "type": "session.update",
+            "session": {"type": "realtime", "audio": {"input": {"transcription": {"language": language}}}},
+        }
+    )
+
+    error = unit.service.handle_session_update(conn_id, update)
+
+    assert isinstance(error, RealtimeErrorEvent)
+    assert unit.service._state(conn_id).runtime_config.selected_language is None
+    if selectable is None:
+        assert error.error.message == f"Language {language!r} is not supported by the active {backend} backend."
+    else:
+        assert f"The active {backend} backend cannot accept a per-session language hint" in error.error.message
+        assert "not supported" not in error.error.message
+        # "auto" is only useful advice when the session accepts it.
+        assert ('"auto"' in error.error.message) is not selectable
+
+
 def test_language_coverage_uses_loaded_metadata_and_native_language_tables():
     from speech_to_speech.STT.parakeet_tdt_handler import SUPPORTED_LANGUAGES, ParakeetTDTSTTHandler
     from speech_to_speech.TTS.kokoro_handler import KOKORO_NATIVE_LANGUAGES, KokoroTTSHandler
@@ -569,6 +627,36 @@ def test_omnivoice_cli_config_is_normalized_for_the_handler():
     }
 
 
+def test_irodori_cli_config_is_normalized_for_the_handler():
+    args = parse_arguments(
+        [
+            "--tts",
+            "irodori",
+            "--irodori_model_name",
+            "local/model.safetensors",
+            "--irodori_device",
+            "mps",
+            "--irodori_caption",
+            "落ち着いた男性の声",
+            "--irodori_num_steps",
+            "8",
+        ]
+    )
+
+    assert args.tts_backend.name == "irodori"
+    # Not on PyPI, so there is no extra for the import error to name.
+    assert args.tts_backend.spec.required_extra is None
+    assert args.tts_backend.config == {
+        "model_name": "local/model.safetensors",
+        "device": "mps",
+        "caption": "落ち着いた男性の声",
+        "ref_audio": None,
+        "num_steps": 8,
+        "blocksize": 512,
+        "gen_kwargs": {},
+    }
+
+
 def test_registry_rejects_duplicate_names_and_wrong_kinds():
     spec = BackendSpec("fake", "stt", FakeArguments, _factory)
 
@@ -616,13 +704,6 @@ def test_audio_input_validation_uses_registry_capability_not_backend_name():
     module_args = ModuleArguments(stt="none", llm_backend=selection.name)
 
     prepare_module_args(module_args, selection)
-
-
-@pytest.mark.parametrize("stt", ["none", "faster-whisper"])
-def test_audio_input_mode_reaches_api_handler_config(stt):
-    args = parse_arguments(["--stt", stt, "--llm_backend", "chat-completions"])
-    prepare_all_args(args)
-    assert args.llm_backend.config["audio_input"] is (stt == "none")
 
 
 def test_llm_proxy_validation_uses_registry_capability():
@@ -745,10 +826,16 @@ def test_nemotron_stt_profile_and_terms_construct_through_registry(monkeypatch):
             "30",
             "--openai_stt_max_output_tokens",
             "512",
+            "--openai_stt_instruction",
+            "Audio transcription. Output: transcript only.",
+            "--openai_stt_drop_filler_only",
+            "true",
         ]
     )
     stt = create_backend_handler(args.stt_backend, _context())
     assert stt.profile == "nemotron"
+    assert stt.instruction == "Audio transcription. Output: transcript only."
+    assert stt.drop_filler_only is True
     assert stt.endpoint_url.endswith("/v1/chat/completions")
     assert stt.context_terms == ("Reachy Mini", "Pollen Robotics", "Hugging Face")
     assert stt.max_window_s == 30
@@ -1125,8 +1212,6 @@ def test_global_device_only_updates_device_aware_builtin_configs(kind, backend_n
     prepare_all_args(args)
 
     expected = deepcopy(before)
-    if kind == "llm" and args.llm_backend.spec.capabilities.supports_audio_input:
-        expected["audio_input"] = args.module_kwargs.stt == "none"
     if "device" in expected:
         expected["device"] = "cpu"
     assert getattr(args, field_name).config == expected

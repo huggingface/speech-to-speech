@@ -363,6 +363,21 @@ def test_tts_response_timer_cancelled_output_records_nothing_and_stays_armed() -
     assert tracker.e2e_s is None
 
 
+def test_tts_response_timer_defers_until_commit(monkeypatch) -> None:
+    store = TurnLatencyStore()
+    tracker = store.get_or_create_response("resp_d", turn_id="turn_d", turn_revision=0)
+    clock = iter([10.0, 10.5, 11.5])
+    monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: next(clock))
+
+    timer = TTSResponseTimer(store, "resp_d", speech_stopped_at_s=9.0, defer_until_commit=True)
+    assert timer.first_provider_audio() is True
+    assert timer.first_yield() is None
+    assert tracker.tts_ttfa_s is None and tracker.e2e_s is None
+    assert timer.commit() == 2.5
+    assert tracker.tts_ttfa_s == 0.5
+    assert tracker.e2e_s == 2.5
+
+
 def test_llm_chain_tracks_only_explicit_same_session_and_revision_parents():
     store = TurnLatencyStore()
     first = store.get_or_create_response("first", turn_id="turn", turn_revision=0, session_id="s")

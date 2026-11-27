@@ -1,4 +1,5 @@
 import json
+import logging
 
 import pytest
 
@@ -9,6 +10,7 @@ from speech_to_speech.LLM.tool_call.function_call import (
     parse_function_call,
 )
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
+from speech_to_speech.pipeline.transcript_logging import set_log_transcripts
 
 # ---------------------------------------------------------------------------
 # parse_function_call – single calls
@@ -418,6 +420,21 @@ class TestJsonToolCallBlocks:
         assert parse_json_tool_call_block("<tool_call>{not json}</tool_call>") == []
         assert parse_json_tool_call_block('<tool_call>{"arguments": {}}</tool_call>') == []
 
+    def test_malformed_json_warning_respects_transcript_logging(self, caplog, monkeypatch):
+        private_value = "account-number-8675309"
+        block = '<tool_call>{"name":"remember","arguments":{"note":"' + private_value + '"},}</tool_call>'
+        monkeypatch.setattr("speech_to_speech.pipeline.transcript_logging._log_transcripts", False)
+        with caplog.at_level(logging.WARNING, logger=function_call_module.__name__):
+            assert function_call_module.parse_json_tool_call_block(block) == []
+        assert "Ignoring malformed <tool_call> block" in caplog.text
+        assert private_value not in caplog.text
+
+        caplog.clear()
+        set_log_transcripts(True)
+        with caplog.at_level(logging.WARNING, logger=function_call_module.__name__):
+            assert function_call_module.parse_json_tool_call_block(block) == []
+        assert private_value in caplog.text
+
     @pytest.mark.parametrize("arguments", ["{not json}", [99], None, "", "[]", "null", 42])
     def test_invalid_arguments_do_not_become_empty_calls(self, arguments):
         from speech_to_speech.LLM.tool_call.function_call import parse_json_tool_call_block
@@ -454,6 +471,8 @@ def test_qwen_native_calls_preserve_schema_types_and_raw_strings():
         "enabled": False,
         "unset": None,
         "options": {"a": [1, None]},
+        "__arg_0__": "literal key",
+        "postal code": "12345",
     }
     tool = _make_tool(
         "configure",
@@ -463,6 +482,8 @@ def test_qwen_native_calls_preserve_schema_types_and_raw_strings():
             "enabled": {"type": "boolean"},
             "unset": {"type": "null"},
             "options": {"$ref": "#/$defs/Options"},
+            "__arg_0__": {"type": "string"},
+            "postal code": {"type": "string"},
         },
     )
     tool.parameters["$defs"] = {"Options": {"type": "object"}}
@@ -548,3 +569,9 @@ def test_qwen_native_calls_reject_invalid_schemas_without_fetching(monkeypatch, 
     block = "<tool_call><function=configure><parameter=value>7</parameter></function></tool_call>"
     assert function_call_module.parse_tool_call_block(block, [tool]) == []
     assert requests == []
+
+
+def test_qwen_call_cannot_deliver_nonfinite_json_arguments():
+    tool = _make_tool("configure", {"value": {"type": "array"}})
+    block = "<tool_call><function=configure><parameter=value>[1e999]</parameter></function></tool_call>"
+    assert function_call_module.parse_tool_call_block(block, [tool]) == []

@@ -68,7 +68,7 @@ def _response_end(response: Any, *, status: str | None = None) -> ProviderRespon
     if status == "failed":
         error = getattr(response, "error", None)
         return ProviderResponseEnd(status="failed", error=getattr(error, "message", None))
-    return ProviderResponseEnd()
+    return ProviderResponseEnd(finish_reason=status)
 
 
 class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
@@ -109,7 +109,6 @@ class ResponsesApiModelHandler(BaseOpenAICompatibleHandler):
                     {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello"}]},
                 ],
                 timeout=self.request_timeout,
-                max_output_tokens=64,
                 **self._reasoning_kwargs(),
             )
         )

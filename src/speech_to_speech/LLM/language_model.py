@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import keyword
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Sized
@@ -7,6 +8,7 @@ from queue import Empty
 from threading import Lock, Thread
 from time import perf_counter
 from typing import Any, Literal, Optional, Protocol, runtime_checkable
+from zoneinfo import ZoneInfo
 
 import torch
 from nltk import sent_tokenize
@@ -51,10 +53,13 @@ from speech_to_speech.LLM.tool_call.function_call import (
     parse_tool_call_block,
 )
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
+from speech_to_speech.LLM.tool_call.signature_from_schema import parameter_names_from_schema
 from speech_to_speech.LLM.tool_call.tool_prompt import END_CODE, ENTER_CODE, build_block_regex, build_tool_system_prompt
 from speech_to_speech.LLM.utils import (
+    current_date_for_prompt,
     image_url_to_pil,
     language_name_for_prompt,
+    prompt_timezone,
     remove_markdown,
     remove_unspeechable,
     resolve_auto_language,
@@ -100,16 +105,6 @@ except ImportError:
     HAS_MLX_VLM = False
 
 logger = logging.getLogger(__name__)
-
-
-def _set_chat_eos(model: PreTrainedModel, tokenizer: PreTrainedTokenizerBase) -> None:
-    """Stop at the tokenizer's chat boundary as well as the model's document end."""
-    if tokenizer.eos_token_id is None:
-        return
-    eos = model.generation_config.eos_token_id
-    tokens = list(eos) if isinstance(eos, list) else [eos] if eos is not None else []
-    if tokenizer.eos_token_id not in tokens:
-        model.generation_config.eos_token_id = [*tokens, tokenizer.eos_token_id]
 
 
 @runtime_checkable
@@ -189,6 +184,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
     _cancel_criteria: _CancelCriteria
     streamer: Iterable[str]
     tokenizer: _Tokenizer
+    current_date: bool = False
+    current_date_tz: ZoneInfo | None = None
 
     def setup(
         self,
@@ -204,6 +201,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         stream_batch_sentences: int = 3,
         enable_lang_prompt: bool = False,
         compact_history: bool = False,
+        current_date: bool = False,
+        timezone: Optional[str] = None,
         **_kwargs: Any,
     ) -> None:
         if backend == "transformers":
@@ -216,6 +215,8 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.enable_thinking = enable_thinking
         self.stream_batch_sentences = max(1, stream_batch_sentences)
         self.enable_lang_prompt = enable_lang_prompt
+        self.current_date = current_date
+        self.current_date_tz = prompt_timezone(timezone)
 
         self._load_model(model_name, device, torch_dtype, gen_kwargs)
 
@@ -229,10 +230,12 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
     def _turn_is_latest(self, turn_id: str | None, turn_revision: int | None) -> bool:
         return self.speculative_turns is None or self.speculative_turns.is_latest(turn_id, turn_revision)
 
-    def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
-        if self.speculative_turns is None:
-            return True
-        return self.speculative_turns.wait_for_gate(turn_id, turn_revision)
+    def _turn_output_allowed(
+        self, turn_id: str | None, turn_revision: int | None, *, hold_for_grace: bool = True
+    ) -> bool:
+        return self.speculative_turns is None or self.speculative_turns.wait_for_gate(
+            turn_id, turn_revision, hold_for_grace=hold_for_grace
+        )
 
     @abstractmethod
     def _load_model(
@@ -291,20 +294,39 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
     # Shared helpers
     # ------------------------------------------------------------------
 
-    def _uses_native_tool_template(self) -> bool:
-        """Qwen XML templates must supply the same grammar used for past calls."""
+    def _chat_messages(self, chat: Chat, tools: list[FunctionTool]) -> list[dict[str, Any]]:
+        """Show Qwen past calls in the same Python format as the system prompt."""
+        messages = chat.to_transformers_chat()
         formatter = getattr(self, "processor", None) or getattr(self, "tokenizer", None)
         template = getattr(formatter, "chat_template", None)
-        return isinstance(template, str) and "<tool_call>" in template and "<function=" in template
+        if not tools or not isinstance(template, str) or "<function=" not in template or "<tool_call>" not in template:
+            return messages
 
-    def _native_tool_kwargs(self, tools: list[FunctionTool]) -> dict[str, Any]:
-        if not self._uses_native_tool_template():
-            return {}
-        return {
-            "tools": [
-                {"type": "function", "function": tool.model_dump(exclude={"type"}, exclude_none=True)} for tool in tools
-            ]
+        aliases = {
+            tool.name: parameter_names_from_schema(tool.parameters)
+            for tool in tools
+            if tool.name.isidentifier() and not keyword.iskeyword(tool.name)
         }
+        for message in messages:
+            calls = message.get("tool_calls")
+            if not calls:
+                continue
+            parts = [message["content"]] if message["content"] else []
+            for call in calls:
+                function = call["function"]
+                name, args = function["name"], function["arguments"]
+                names = aliases.get(name)
+                if names is None or args.keys() - names.keys():
+                    # The tool list can change between turns. Let the template render this turn.
+                    break
+                arguments = ", ".join(f"{names[key]}={value!r}" for key, value in args.items())
+                # A delimiter inside a string is data, including in lists and dicts.
+                arguments = arguments.replace("<", "\\x3c")
+                parts.append(f"<code>{name}({arguments})</code>")
+            else:
+                del message["tool_calls"]
+                message["content"] = "\n".join(parts)
+        return messages
 
     def _apply_instructions(
         self,
@@ -316,25 +338,23 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         wants_audio: bool = True,
         *,
         language_name: str | None = None,
+        current_date: str | None = None,
     ) -> None:
         raw_tools = raw_tools or []
 
         function_tools = [FunctionTool(**t.model_dump()) for t in raw_tools if t.type == "function"]
-        if not instructions and not language_name and not function_tools:
+        if not instructions and not language_name and not function_tools and not current_date:
             return
 
         build_system_prompt = build_voice_system_prompt if wants_audio else build_text_system_prompt
 
         if function_tools and tool_choice != "none":
-            tool_section = (
-                ""
-                if self._uses_native_tool_template()
-                else build_tool_system_prompt(function_tools, text_only=not wants_audio)
-            )
+            tool_section = build_tool_system_prompt(function_tools, text_only=not wants_audio)
             full_instructions = build_system_prompt(
                 instructions or "",
                 tool_section=tool_section,
                 language_name=language_name,
+                current_date=current_date,
             )
             block_regex = build_block_regex()
             enter_code = ENTER_CODE
@@ -344,13 +364,17 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             # Models that saw earlier tool calls may still emit one; keep detecting
             # tool blocks so they are stripped from speech, but expose no tools so
             # nothing gets executed.
-            full_instructions = build_system_prompt(instructions or "", language_name=language_name)
+            full_instructions = build_system_prompt(
+                instructions or "", language_name=language_name, current_date=current_date
+            )
             block_regex = build_block_regex()
             enter_code = ENTER_CODE
             end_code = END_CODE
             function_tools = []
         else:
-            full_instructions = build_system_prompt(instructions or "", language_name=language_name)
+            full_instructions = build_system_prompt(
+                instructions or "", language_name=language_name, current_date=current_date
+            )
             block_regex = None
             enter_code = None
             end_code = None
@@ -396,11 +420,9 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 cancel_generation=ctx.cancel_generation,
             )
 
-        # Parse prompted Python calls and native JSON/Qwen blocks at the model
-        # boundary. Downstream execution uses the same structured calls.
         markers: list[tuple[str, str, str]] = []
         if ctx.enter_code and ctx.end_code:
-            markers = [(ctx.enter_code, ctx.end_code, "code"), (JSON_TOOL_CALL_ENTER, JSON_TOOL_CALL_END, "json")]
+            markers = [(ctx.enter_code, ctx.end_code, "code"), (JSON_TOOL_CALL_ENTER, JSON_TOOL_CALL_END, "native")]
 
         while True:
             found = [(printable_text.index(m[0]), m) for m in markers if m[0] in printable_text]
@@ -418,7 +440,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if ctx.sentence_batch:
                 chunks.append(text_chunk(" ".join(ctx.sentence_batch)))
                 ctx.sentence_batch = []
-            if kind == "json":
+            if kind == "native":
                 block_end = find_tool_call_end(code_and_after)
             else:
                 block_end = code_and_after.index(end) + len(end) if ctx.block_regex and end in code_and_after else None
@@ -590,7 +612,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 runtime_config,
                 response,
             )
-            if chunks and not self._turn_output_allowed(ctx.turn_id, ctx.turn_revision):
+            if chunks and not self._turn_output_allowed(ctx.turn_id, ctx.turn_revision, hold_for_grace=not wants_audio):
                 ctx.cancelled = True
                 logger.info("LLM generation cancelled (stale speculative turn)")
                 break
@@ -613,7 +635,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 leftover = ctx.printable_text.strip()
                 ctx.sentence_batch.append(remove_markdown(leftover) if wants_audio else leftover)
                 ctx.printable_text = ""
-            if not self._turn_output_allowed(ctx.turn_id, ctx.turn_revision):
+            if not self._turn_output_allowed(ctx.turn_id, ctx.turn_revision, hold_for_grace=not wants_audio):
                 ctx.cancelled = True
                 logger.info("LLM generation cancelled (stale speculative turn)")
                 return
@@ -664,15 +686,6 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
         # speech appends a newer user message while the model is still running.
         active_chat = original_chat.copy(deep=True)
         history_anchor_id = active_chat.history_anchor_id()
-        if not out_of_band and active_chat.has_pending_tool_calls():
-            yield EndOfResponse(
-                turn_id=ctx.turn_id,
-                turn_revision=ctx.turn_revision,
-                cancel_generation=gen,
-                response_key=request.response_key,
-                error="Cannot generate a response while function call outputs are pending.",
-            )
-            return
         if out_of_band:
             try:
                 active_chat = build_active_chat(active_chat, response)
@@ -704,6 +717,7 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             ctx,
             response_wants_audio(response),
             language_name=lang_name,
+            current_date=current_date_for_prompt(enable=self.current_date, timezone=self.current_date_tz),
         )
 
         # Images the model sees this turn; only these are stripped on write-back,
@@ -746,7 +760,9 @@ class BaseLanguageModelHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if ctx.stopped:
                 return
 
-            turn_output_allowed = not ctx.cancelled and self._turn_output_allowed(ctx.turn_id, ctx.turn_revision)
+            turn_output_allowed = not ctx.cancelled and self._turn_output_allowed(
+                ctx.turn_id, ctx.turn_revision, hold_for_grace=not response_wants_audio(response)
+            )
             # Out-of-band responses still emit output, but never write back to the default
             # conversation (their context was a throwaway chat).
             commit_allowed = turn_output_allowed and not out_of_band
@@ -864,7 +880,6 @@ class LanguageModelHandler(BaseLanguageModelHandler):
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_name, torch_dtype=torch_dtype, trust_remote_code=True
             ).to(device)  # type: ignore[arg-type]
-            _set_chat_eos(self.model, self.tokenizer)
             self.pipe = pipeline(  # type: ignore[call-overload]
                 "text-generation", model=self.model, tokenizer=self.tokenizer, device=device
             )
@@ -891,14 +906,16 @@ class LanguageModelHandler(BaseLanguageModelHandler):
         runtime_config: RuntimeConfig | None = None,
         response: RealtimeResponseCreateParams | None = None,
     ) -> Iterator[LLMResponseChunk]:
-        chat_messages = chat.to_transformers_chat()
-        tool_kwargs = self._native_tool_kwargs(ctx.function_tools)
-        chat_input = self.tokenizer.apply_chat_template(chat_messages, tokenize=True, **tool_kwargs)
+        chat_messages = self._chat_messages(chat, ctx.function_tools)
+        # Count the same prompt the model receives, generation prompt included.
+        chat_input = self.tokenizer.apply_chat_template(
+            chat_messages, tokenize=True, add_generation_prompt=True, enable_thinking=False
+        )
         ctx.input_tokens += len(chat_input if isinstance(chat_input, list) else chat_input["input_ids"])  # type: ignore[index]
         logger.debug("Prompt token count: %d", ctx.input_tokens)
 
         chat_prompt = self.tokenizer.apply_chat_template(
-            chat_messages, tokenize=False, add_generation_prompt=True, enable_thinking=False, **tool_kwargs
+            chat_messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
         )
 
         if self.backend == "mlx":
@@ -930,6 +947,7 @@ class LanguageModelHandler(BaseLanguageModelHandler):
                 mx.clear_cache()
             except Exception:
                 pass
+            torch.mps.empty_cache()
         else:
             self._cancel_criteria.reset()
             if ctx.prefetch_transaction is not None:
@@ -1063,13 +1081,17 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             self.tokenizer = self.processor.tokenizer  # type: ignore[assignment]
             self.gen_kwargs = gen_kwargs
         else:
+            # Unlike the text handler, this one has no warmup, so an invalid
+            # sampling setting would otherwise first fail inside a turn.
+            temperature = gen_kwargs.get("temperature")
+            if gen_kwargs.get("do_sample") and temperature is not None and temperature <= 0:
+                raise ValueError("Sampling requires a temperature above 0; set --llm_gen_temperature.")
             self.torch_dtype = getattr(torch, torch_dtype)
             self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)  # type: ignore[assignment]
             self.tokenizer = self.processor.tokenizer  # type: ignore[assignment]
             self.model = AutoModelForImageTextToText.from_pretrained(
                 model_name, torch_dtype=self.torch_dtype, trust_remote_code=True
             ).to(device)  # type: ignore[arg-type]
-            _set_chat_eos(self.model, self.tokenizer)
             self.streamer = TextIteratorStreamer(
                 self.tokenizer,  # type: ignore[arg-type]
                 skip_prompt=True,
@@ -1088,10 +1110,9 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
         runtime_config: RuntimeConfig | None = None,
         response: RealtimeResponseCreateParams | None = None,
     ) -> Iterator[LLMResponseChunk]:
-        prepared = chat.to_transformers_chat()
-        tool_kwargs = self._native_tool_kwargs(ctx.function_tools)
+        prepared = self._chat_messages(chat, ctx.function_tools)
         if self.backend == "mlx":
-            images, formatted_prompt = self._prepare_mlx_vlm_inputs(prepared, **tool_kwargs)
+            images, formatted_prompt = self._prepare_mlx_vlm_inputs(prepared)
             ctx.input_tokens += len(self.tokenizer.encode(formatted_prompt))
             logger.debug("MLX VLM prompt token count: %d", ctx.input_tokens)
 
@@ -1122,8 +1143,9 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
                 mx.clear_cache()
             except Exception:
                 pass
+            torch.mps.empty_cache()
         else:
-            inputs, input_tokens = self._prepare_vlm_inputs(prepared, **tool_kwargs)
+            inputs, input_tokens = self._prepare_vlm_inputs(prepared)
             ctx.input_tokens += input_tokens
             logger.debug("VLM prompt token count: %d", ctx.input_tokens)
 
@@ -1132,6 +1154,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
                 ctx.prefetch_transaction.register_abort(self._cancel_criteria.cancel)
             generate_kwargs = {
                 **inputs,
+                **self.gen_kwargs,
                 "max_new_tokens": self.gen_kwargs.get("max_new_tokens", 1024),
                 "streamer": self.streamer,
                 "stopping_criteria": StoppingCriteriaList([self._cancel_criteria]),
@@ -1192,7 +1215,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
 
             return generate_transformers
 
-    def _prepare_vlm_inputs(self, chat_messages: list[dict[str, Any]], **template_kwargs: Any) -> tuple[Any, int]:
+    def _prepare_vlm_inputs(self, chat_messages: list[dict[str, Any]]) -> tuple[Any, int]:
         """Build processor inputs for transformers VLM generation.
 
         Converts Realtime-style content (``input_text``/``input_image``) to the
@@ -1220,8 +1243,6 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             converted_messages,
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=self.enable_thinking,
-            **template_kwargs,
         )
         inputs = self.processor(
             text=[text_prompt],
@@ -1231,9 +1252,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
         ).to(self.device)
         return inputs, len(inputs["input_ids"][0])
 
-    def _prepare_mlx_vlm_inputs(
-        self, chat_messages: list[dict[str, Any]], **template_kwargs: Any
-    ) -> tuple[list[Any], str]:
+    def _prepare_mlx_vlm_inputs(self, chat_messages: list[dict[str, Any]]) -> tuple[list[Any], str]:
         """Build formatted prompt and extract PIL images for MLX VLM generation.
 
         Converts Realtime-style content (``input_text``/``input_image``) to the
@@ -1262,7 +1281,5 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             converted_messages,
             tokenize=False,
             add_generation_prompt=True,
-            enable_thinking=self.enable_thinking,
-            **template_kwargs,
         )
         return images, formatted_prompt

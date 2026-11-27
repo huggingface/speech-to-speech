@@ -1,6 +1,31 @@
-from speech_to_speech.LLM.text_prompt import TEXT_SYSTEM_PROMPT, build_text_system_prompt
+from speech_to_speech.LLM.text_prompt import (
+    TEXT_SYSTEM_PROMPT,
+    TEXT_SYSTEM_PROMPT_LEAD,
+    TEXT_SYSTEM_PROMPT_TAIL,
+    build_text_system_prompt,
+)
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.LLM.tool_call.tool_prompt import build_tool_system_prompt
+
+TEXT_SNAPSHOT = (
+    f"{TEXT_SYSTEM_PROMPT_LEAD.rstrip()}\n\n"
+    "Session Prompt:\nBe helpful.\n\nTOOLS\n\nPlease reply to my message in swedish.\n\n"
+    f"{TEXT_SYSTEM_PROMPT_TAIL.rstrip()}\n"
+)
+
+
+def test_text_prompt_without_current_date_matches_snapshot():
+    prompt = build_text_system_prompt("Be helpful.", tool_section="TOOLS", language_name="swedish")
+
+    assert prompt == TEXT_SNAPSHOT
+
+
+def test_text_prompt_current_date_is_the_first_line():
+    date = "Today is Wednesday, November 4, 2026."
+    prompt = build_text_system_prompt("Be helpful.", tool_section="TOOLS", language_name="swedish", current_date=date)
+
+    assert prompt.splitlines()[0] == date
+    assert prompt == f"{date}\n\n{TEXT_SNAPSHOT}"
 
 
 def test_text_prompt_keeps_persona_in_session_prompt():

@@ -18,7 +18,7 @@ TEXT_SYSTEM_PROMPT_TAIL = """\
 
 # Skeleton for the assembled system message (placeholders filled in build_text_system_prompt).
 _TEXT_SYSTEM_PROMPT_FULL = """\
-{lead}
+{optional_date}{lead}
 
 Session Prompt:
 {session_prompt}{optional_tools}{optional_language}
@@ -32,14 +32,16 @@ def build_text_system_prompt(
     *,
     tool_section: str = "",
     language_name: str | None = None,
+    current_date: str | None = None,
 ) -> str:
-    """Context → session prompt → optional tool block → optional language hint → text rules."""
+    """Optional date → context → session prompt → optional tool block → optional language hint → text rules."""
     tools = tool_section.strip()
     optional_tools = f"\n\n{tools}" if tools else ""
     optional_language = ""
     if language_name:
         optional_language = f"\n\n{format_language_instruction(language_name)}"
     return _TEXT_SYSTEM_PROMPT_FULL.format(
+        optional_date=f"{current_date}\n\n" if current_date else "",
         lead=TEXT_SYSTEM_PROMPT_LEAD.rstrip(),
         session_prompt=session_prompt.strip(),
         optional_tools=optional_tools,

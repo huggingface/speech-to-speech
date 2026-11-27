@@ -387,6 +387,12 @@ sent.
 - Backend: [huggingface/speech-to-speech](https://github.com/huggingface/speech-to-speech)
 - UI verbatim from `amir-tfrere/minimal-conversation-app-s2s-backend` (Pollen Robotics × Hugging Face)
 
-Choose **Language** on the conversation screen or in Settings to set transcription and response language. The choice persists across reloads and can change during a conversation; **Auto** restores automatic language selection. Language support depends on the configured speech backends.
+Choose **Language** on the conversation screen or in Settings to set the preferred
+reply language. The choice persists across reloads. Changes made while queued
+apply when the conversation starts.
 
-The demo checks backend language capabilities before connecting. When Auto is unsupported or discovery is unavailable, it preserves the backend default and disables switching back to Auto during that conversation. End the conversation to select backend defaults for the next one. Language changes while queued apply when the conversation starts.
+The demo also uses the selection as a speech hint when the backends support it.
+If every pipeline rules out that hint, the demo uses **Auto** when available. If
+discovery cannot confirm that every pipeline accepts a named hint, the demo sends
+it in a separate update so a rejection cannot discard the audio settings. Switching back to **Auto** during
+a call requires backend support.

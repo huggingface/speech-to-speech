@@ -124,6 +124,8 @@ export class S2sRealtimeClient extends EventTarget {
     super();
     this.options = options;
     this._tools = options.tools ?? [];
+    /** @type {({code: string}[] | null | undefined)[]} */
+    this._selectableLanguages = [];
     this._directUrl = options.directUrl ?? "";
     this._sessionUrl = options.sessionUrl
       ? options.sessionUrl
@@ -296,8 +298,8 @@ export class S2sRealtimeClient extends EventTarget {
       throw connectionError(error);
     }
     if (this.options.reasoningEffort !== initialEffort) this.setReasoningEffort(this.options.reasoningEffort);
-    // Send the choice explicitly as well as in the SDK's initial config. This
-    // guarantees it reaches the split pipeline before the first mic frames.
+    // Send the hint before the first mic frames, even if discovery could
+    // not confirm it for the SDK's initial config.
     this._sendLanguageUpdate(this.options.language || "auto");
     if (this.options.transport === "webrtc") this._attachRtcOutput();
     const greeting = this.options.startupGreeting?.trim();
@@ -321,6 +323,7 @@ export class S2sRealtimeClient extends EventTarget {
 
   async _loadLanguageCapabilities(connectUrl) {
     this._autoLanguageSupported = false;
+    this._selectableLanguages = [];
     try {
       const url = new URL(this.options.capabilitiesUrl || connectUrl, globalThis.location?.href);
       url.protocol = url.protocol === "wss:" ? "https:" : url.protocol === "ws:" ? "http:" : url.protocol;
@@ -330,10 +333,11 @@ export class S2sRealtimeClient extends EventTarget {
       const response = await fetch(url, { signal: AbortSignal.timeout(2000) });
       if (!response.ok) return;
       const data = await response.json();
-      this._autoLanguageSupported = Array.isArray(data.pipelines) && data.pipelines.length > 0
-        && data.pipelines.every(pipeline => pipeline.conversation?.session_auto_supported === true);
+      if (!Array.isArray(data.pipelines) || data.pipelines.length === 0) return;
+      this._autoLanguageSupported = data.pipelines.every(pipeline => pipeline.conversation?.session_auto_supported === true);
+      this._selectableLanguages = data.pipelines.map(pipeline => pipeline.conversation?.selectable_languages);
     } catch {
-      // Older servers and inaccessible discovery endpoints keep backend defaults.
+      // Older servers or cross-origin deployments may lack readable capabilities.
     } finally {
       this.dispatchEvent(new CustomEvent("language-capabilities", {
         detail: { autoSupported: this._autoLanguageSupported },
@@ -341,9 +345,23 @@ export class S2sRealtimeClient extends EventTarget {
     }
   }
 
+  _languageHint(language, allowUnknown = false) {
+    const auto = this._autoLanguageSupported ? "auto" : undefined;
+    if (language === "auto") return auto;
+    // The server can route the connection to any pipeline in the pool.
+    const pipelines = this._selectableLanguages;
+    const known = pipelines.length > 0 && pipelines.every(Array.isArray);
+    const accepts = pipelines.map(languages => Array.isArray(languages)
+      && languages.some(choice => choice?.code === language));
+    // A separate hint can fail harmlessly, so skip it only when every pipeline rejects it.
+    if (allowUnknown) return known && !accepts.some(Boolean) ? auto : language;
+    if (known && accepts.every(Boolean)) return language;
+    if (pipelines.some((languages, index) => Array.isArray(languages) && !accepts[index])) return auto;
+  }
+
   _languageConfig(language) {
-    return language !== "auto" || this._autoLanguageSupported
-      ? { language } : {};
+    const hint = this._languageHint(language);
+    return hint ? { language: hint } : {};
   }
 
   _sessionConfig() {
@@ -940,12 +958,14 @@ export class S2sRealtimeClient extends EventTarget {
 
   /** @param {string} language */
   _sendLanguageUpdate(language) {
-    if (language === "auto" && !this._autoLanguageSupported) return;
+    const hint = this._languageHint(language, true);
+    if (!hint) return;
+    // An unverified hint can fail without rejecting the audio or agent config.
     this._transport?.sendEvent({
       type: "session.update",
       session: {
         type: "realtime",
-        audio: { input: { transcription: { language } } },
+        audio: { input: { transcription: { language: hint } } },
       },
     });
   }

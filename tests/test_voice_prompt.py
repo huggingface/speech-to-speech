@@ -13,11 +13,16 @@ from openai.types.realtime.realtime_response_create_params import RealtimeRespon
 from openai.types.responses import ResponseFunctionToolCall
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
-from speech_to_speech.LLM.chat import Chat, make_user_message
+from speech_to_speech.LLM.chat import PENDING_TOOL_OUTPUT, Chat, make_user_message
 from speech_to_speech.LLM.language_model import LanguageModelHandler, StreamContext
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
 from speech_to_speech.LLM.tool_call.tool_prompt import END_CODE, ENTER_CODE, build_block_regex, build_tool_system_prompt
-from speech_to_speech.LLM.voice_prompt import VOICE_SYSTEM_PROMPT, build_voice_system_prompt
+from speech_to_speech.LLM.voice_prompt import (
+    VOICE_SYSTEM_PROMPT,
+    VOICE_SYSTEM_PROMPT_LEAD,
+    VOICE_SYSTEM_PROMPT_TAIL,
+    build_voice_system_prompt,
+)
 from speech_to_speech.pipeline.messages import (
     AssistantTextPart,
     AssistantToolCallPart,
@@ -25,6 +30,26 @@ from speech_to_speech.pipeline.messages import (
     LLMResponseChunk,
 )
 from tests.llm_history import drive_llm
+
+VOICE_SNAPSHOT = (
+    f"{VOICE_SYSTEM_PROMPT_LEAD.rstrip()}\n\n"
+    "Session Prompt:\nBe concise.\n\nTOOLS\n\nPlease reply to my message in french.\n\n"
+    f"{VOICE_SYSTEM_PROMPT_TAIL.rstrip()}\n"
+)
+
+
+def test_voice_prompt_without_current_date_matches_snapshot():
+    prompt = build_voice_system_prompt("Be concise.", tool_section="TOOLS", language_name="french")
+
+    assert prompt == VOICE_SNAPSHOT
+
+
+def test_voice_prompt_current_date_is_the_first_line():
+    date = "Today is Wednesday, November 4, 2026."
+    prompt = build_voice_system_prompt("Be concise.", tool_section="TOOLS", language_name="french", current_date=date)
+
+    assert prompt.splitlines()[0] == date
+    assert prompt == f"{date}\n\n{VOICE_SNAPSHOT}"
 
 
 def _tool(name="dance"):
@@ -384,6 +409,39 @@ def _local_handler_with_chunks(chunks, *, cancelled=False):
     return handler
 
 
+def test_qwen_history_shows_previous_calls_in_the_prompted_format():
+    from speech_to_speech.LLM.tool_call.function_call import extract_function_calls_from_text
+
+    tool = FunctionTool(
+        type="function",
+        name="look_up",
+        parameters={"type": "object", "properties": {"postal code": {"type": "string"}}},
+    )
+    chat = Chat(10)
+    value = "007 </code>"
+    chat.add_item(make_user_message("Look this up."))
+    chat.add_item(
+        RealtimeConversationItemFunctionCall(
+            type="function_call", call_id="call_1", name=tool.name, arguments=json.dumps({"postal code": value})
+        )
+    )
+    chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(type="function_call_output", call_id="call_1", output="ok")
+    )
+    original = chat.to_transformers_chat()
+    handler = object.__new__(LanguageModelHandler)
+    handler.tokenizer = SimpleNamespace(chat_template="<tool_call><function=example>")
+    replay = handler._chat_messages(chat, [tool])
+    assert replay[1]["content"].startswith("<code>look_up(postal_code=")
+    _, (call,) = extract_function_calls_from_text(replay[1]["content"], build_block_regex())
+    assert json.loads(call.to_realtime_function_tool_call([tool]).arguments) == {"postal code": value}
+    assert replay[2] == original[2]
+    assert chat.to_transformers_chat() == original
+    assert handler._chat_messages(chat, []) == original
+    handler.tokenizer.chat_template = "another template"
+    assert handler._chat_messages(chat, [tool]) == original
+
+
 def test_local_history_commits_text_and_tools_in_emitted_order():
     first_tool = _tool_call("first")
     second_tool = _tool_call("second")
@@ -425,18 +483,26 @@ def test_local_history_commits_text_and_tools_in_emitted_order():
         )
     )
 
-    assert [item["type"] for item in chat.to_responses_api_chat()[1:]] == [
+    # The second call is still running: it stays visible with a stand-in output.
+    replay = chat.to_responses_api_chat()[1:]
+    assert [item["type"] for item in replay] == [
+        "message",
+        "function_call",
+        "function_call_output",
         "message",
         "function_call",
         "function_call_output",
         "message",
     ]
-    assert [item["role"] for item in chat.to_transformers_chat()[1:]] == [
-        "assistant",
-        "assistant",
-        "tool",
-        "assistant",
+    assert [item["output"] for item in replay if item["type"] == "function_call_output"] == [
+        "first result",
+        PENDING_TOOL_OUTPUT,
     ]
+    transformers_chat = chat.to_transformers_chat()[1:]
+    assert [item["role"] for item in transformers_chat] == ["assistant", "tool", "assistant", "tool", "assistant"]
+    assert transformers_chat[0]["content"] == "before"
+    assert [call["function"]["name"] for call in transformers_chat[0]["tool_calls"]] == ["first"]
+    assert [call["function"]["name"] for call in transformers_chat[2]["tool_calls"]] == ["second"]
 
     chat.add_item(
         RealtimeConversationItemFunctionCallOutput(

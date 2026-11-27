@@ -26,7 +26,7 @@ def _native_handler(monkeypatch: pytest.MonkeyPatch, *, stream) -> KokoroTTSHand
     monkeypatch.setitem(sys.modules, "kokoro", SimpleNamespace(KPipeline=FakePipeline))
     monkeypatch.setattr(kokoro_handler, "platform", "linux")
     monkeypatch.setattr(KokoroTTSHandler, "warmup", lambda self: None)
-    monkeypatch.setattr(kokoro_handler.console, "print", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("speech_to_speech.pipeline.console.console.print", lambda *_args, **_kwargs: None)
     handler = KokoroTTSHandler.__new__(KokoroTTSHandler)
     handler.setup(Event(), device="cpu", lang_code="b", voice="bm_fable", blocksize=4)
     return handler
@@ -113,7 +113,7 @@ def test_kokoro_mlx_records_ttfa_before_silence_trim(monkeypatch):
     monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     monkeypatch.setattr(kokoro_handler, "platform", "darwin")
     monkeypatch.setattr(KokoroTTSHandler, "warmup", lambda self: None)
-    monkeypatch.setattr(kokoro_handler.console, "print", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("speech_to_speech.pipeline.console.console.print", lambda *_args, **_kwargs: None)
 
     class FakePipeline:
         def load_voice(self, voice: str) -> None:

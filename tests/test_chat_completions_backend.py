@@ -104,14 +104,7 @@ class _FakeClient:
         return self
 
 
-def _make_handler(
-    stream=True,
-    *,
-    base_url="http://fake/v1",
-    reasoning_effort=None,
-    audio_input=False,
-    audio_content_type="input_audio",
-):
+def _make_handler(stream=True, *, base_url="http://fake/v1", reasoning_effort=None):
     """Build a handler whose warmup hits the fake client (no network)."""
     orig_openai = base_mod.OpenAI
     orig_async_client = ChatCompletionsApiModelHandler._make_async_client
@@ -131,8 +124,6 @@ def _make_handler(
                 disable_thinking=True,
                 reasoning_effort=reasoning_effort,
                 compact_history=False,
-                audio_input=audio_input,
-                audio_content_type=audio_content_type,
             ),
         )
     finally:
@@ -142,25 +133,10 @@ def _make_handler(
     return h
 
 
-@pytest.mark.parametrize(
-    "audio_input,audio_content_type", [(False, "input_audio"), (True, "input_audio"), (True, "audio_url")]
-)
-def test_warmup_uses_request_scoped_sdk_retries(audio_input, audio_content_type):
-    handler = _make_handler(audio_input=audio_input, audio_content_type=audio_content_type)
+def test_warmup_uses_request_scoped_sdk_retries():
+    handler = _make_handler()
 
     assert handler.client.last_options == {"max_retries": base_mod.WARMUP_MAX_RETRIES}
-    kwargs = handler.client.chat.completions.last_kwargs
-    assert kwargs["max_completion_tokens"] == 64
-    user = kwargs["messages"][-1]
-    if audio_input:
-        assert user["content"][0]["type"] == audio_content_type
-        part = user["content"][0][audio_content_type]
-        if audio_content_type == "input_audio":
-            assert part["format"] == "wav" and part["data"]
-        else:
-            assert part["url"].startswith("data:audio/wav;base64,")
-    else:
-        assert user["content"] == "Hello"
 
 
 def _chunk(content=None, tool_calls=None, usage=None):
@@ -206,6 +182,69 @@ def _drive(
         elif isinstance(out, EndOfResponse):
             end = out
     return text, tools_out, usage, chat, end
+
+
+# ── Empty completions ────────────────────────────────────────────────────────
+
+
+def _finish(reason):
+    return SimpleNamespace(
+        choices=[SimpleNamespace(delta=SimpleNamespace(content=None, tool_calls=None), finish_reason=reason)],
+        usage=None,
+    )
+
+
+def _empty_completion_logs(caplog):
+    return [record.getMessage() for record in caplog.records if "LLM completed without output" in record.getMessage()]
+
+
+def test_empty_completion_logs_the_provider_terminal_but_no_conversation_text(caplog):
+    handler = _make_handler(stream=True)
+    handler.client.chat.completions.next_result = _FakeStream([_finish("stop")])
+
+    with caplog.at_level("WARNING"):
+        text, tools, _, _, end = _drive(handler, user="secret question", instructions="secret instructions")
+
+    assert (text, tools, end.error, end.status) == ("", [], None, "completed")
+    [message] = _empty_completion_logs(caplog)
+    assert "finish_reason=stop" in message
+    assert "last_item=user" in message
+    assert "secret" not in message
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        [_chunk(content="Hello."), _finish("stop")],
+        [_chunk(tool_calls=[_tc_delta(0, id="c1", name="f", arguments="{}")]), _finish("tool_calls")],
+    ],
+    ids=["text", "tool_only"],
+)
+def test_completion_with_output_is_not_reported_empty(caplog, chunks):
+    handler = _make_handler(stream=True)
+    handler.client.chat.completions.next_result = _FakeStream(chunks)
+
+    with caplog.at_level("WARNING"):
+        _drive(handler)
+
+    assert _empty_completion_logs(caplog) == []
+
+
+def test_cancelled_generation_is_not_reported_empty(caplog):
+    handler = _make_handler(stream=True)
+    scope = CancelScope()
+    handler.cancel_scope = scope
+
+    def cancel_then_finish():
+        scope.cancel()
+        yield _finish("stop")
+
+    handler.client.chat.completions.next_result = _FakeStream(cancel_then_finish())
+
+    with caplog.at_level("WARNING"):
+        _drive(handler)
+
+    assert _empty_completion_logs(caplog) == []
 
 
 # ── Converter tests ──────────────────────────────────────────────────────────
@@ -535,6 +574,64 @@ def test_streaming_text_and_usage():
     assert any(getattr(i, "role", None) == "assistant" for i in chat.buffer)
 
 
+class _RecordingDeltas:
+    """Provider chunks that record how many have been consumed so far."""
+
+    def __init__(self, deltas: list[str]):
+        self.chunks = [_chunk(content=d) for d in deltas]
+        self.chunks.append(_chunk(usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1)))
+        self.consumed = 0
+
+    def __iter__(self):
+        for chunk in self.chunks:
+            self.consumed += 1
+            yield chunk
+
+
+def _stream_spoken_reply(deltas: list[str], language_code: str) -> list[tuple[str, int]]:
+    """Drive a streamed audio reply; return (chunk text, provider chunks consumed when it was emitted)."""
+    h = _make_handler(stream=True)
+    h.stream_batch_sentences = 1
+    provider = _RecordingDeltas(deltas)
+    h.client.chat.completions.create = lambda **k: _FakeStream(provider)
+    chat = Chat(10)
+    chat.add_item(make_user_message("hi"))
+    rc = RuntimeConfig(chat=chat, session=RealtimeSessionCreateRequest(type="realtime", instructions="x"))
+    req = GenerateResponseRequest(
+        runtime_config=rc, response=None, language_code=language_code, turn_id="turn_1", turn_revision=0
+    )
+    return [
+        (out.text, provider.consumed) for out in drive_llm(h, req) if isinstance(out, LLMResponseChunk) and out.text
+    ]
+
+
+def test_streaming_flushes_chinese_sentences_as_they_complete():
+    """NLTK never ends a sentence at '。', so a Chinese reply used to reach TTS as one
+    chunk after the whole stream finished instead of sentence by sentence."""
+    emitted = _stream_spoken_reply(["你好。我很", "好。今天天气", "不错。"], "zh")
+    assert emitted == [("你好。", 1), ("我很好。", 2), ("今天天气不错。", 4)]
+
+
+def test_streaming_flushes_arabic_sentences_as_they_complete():
+    """'؟' is stripped by remove_unspeechable and ignored by NLTK, so an Arabic reply used
+    to reach TTS as one chunk after the whole stream finished."""
+    emitted = _stream_spoken_reply(["مرحبا؟ كيف ", "حالك؟ أنا ", "بخير"], "ar")
+    assert emitted == [("مرحبا؟", 1), ("كيف حالك؟", 2), ("أنا بخير", 4)]
+
+
+@pytest.mark.parametrize(
+    ("deltas", "expected"),
+    [
+        (["运行 `print('a。b", "')` 即可。然后重启。"], ["运行 print('a。b') 即可。", "然后重启。"]),
+        (["运行 ``print('a。b')`", "` 即可。然后重启。"], ["运行 print('a。b') 即可。", "然后重启。"]),
+        (["**重要。", "** 然后重启。"], ["重要。 然后重启。"]),
+    ],
+)
+def test_streaming_does_not_split_markdown_spans_that_are_still_open(deltas, expected):
+    """A '。' inside code or emphasis whose closing delimiter has not arrived is not a boundary."""
+    assert [text for text, _ in _stream_spoken_reply(deltas, "zh")] == expected
+
+
 def test_streaming_strips_markdown_delimiters_split_across_deltas():
     """A '*' pair can arrive split across two token deltas (e.g. '*ita' / 'lic*').
     remove_markdown must not run per-delta -- it has to see the reassembled
@@ -638,13 +735,10 @@ def test_streaming_preserves_text_tool_text_order():
         "message",
         "function_call_output",
     ]
-    assert [message["role"] for message in h._serialize(chat)] == [
-        "user",
-        "assistant",
-        "assistant",
-        "tool",
-        "assistant",
-    ]
+    messages = h._serialize(chat)
+    assert [message["role"] for message in messages] == ["user", "assistant", "tool", "assistant"]
+    assert messages[1]["content"] == "Before."
+    assert [tool_call["function"]["name"] for tool_call in messages[1]["tool_calls"]] == ["lookup"]
 
 
 def test_prefetch_defers_irreversible_chat_cleanup_until_claim():
@@ -1067,6 +1161,58 @@ def test_provider_failure_before_output_speaks_fallback_then_fails_without_histo
         ResponseFailedEvent,
         EndOfResponse,
     ]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_image_rejected_by_text_only_backend_does_not_break_later_turns(stream):
+    """A backend without vision rejects the image once; the image must not stay in
+    history, or every later text turn is rejected too."""
+    h = _make_handler(stream=stream)
+    requests = []
+
+    def create(**kwargs):
+        requests.append(kwargs)
+        if "image_url" in json.dumps(kwargs["messages"]):
+            raise InternalServerError(
+                "image input is not supported - hint: if this is unexpected, you may need to provide the mmproj",
+                response=_api_error_response(500),
+                body=None,
+            )
+        text = "The server could not process the photo." if len(requests) == 2 else "Dublin."
+        if stream:
+            return _FakeStream([_chunk(content=text)])
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=text, tool_calls=[]), finish_reason="stop")],
+            usage=None,
+        )
+
+    h.client.chat.completions.create = create
+    chat = Chat(10)
+    chat.add_item(make_user_message("Hello"))
+    chat.add_item(
+        RealtimeConversationItemUserMessage(
+            type="message",
+            role="user",
+            content=[UserContent(type="input_image", image_url="data:image/jpeg;base64,abc")],
+        )
+    )
+    text, _, _, _, end = _drive(h, user="How many fingers?", chat=chat)
+    assert text == "The server could not process the photo."
+    assert end is not None and end.error is None
+    assert len(requests) == 2
+    assert "image_url" not in json.dumps(requests[1]["messages"])
+    assert "image input is not supported" in json.dumps(requests[1]["messages"])
+    assert requests[1]["tool_choice"] == "none"
+
+    text, _, _, _, end = _drive(h, user="What is the capital of Ireland?", chat=chat)
+    assert end is not None and end.error is None
+    assert text == "Dublin."
+    assert len(requests) == 3
+    assert "image_url" not in json.dumps(requests[2]["messages"])
+    user_texts = [
+        p.text for i in chat.buffer if getattr(i, "role", None) == "user" for p in i.content if p.type == "input_text"
+    ]
+    assert "Hello" in user_texts
 
 
 def test_cancelled_provider_failure_does_not_emit_fallback():

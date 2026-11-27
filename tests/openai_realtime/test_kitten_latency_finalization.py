@@ -29,7 +29,7 @@ def test_internal_chunks_keep_first_model_audio_in_terminal_record(
     clock = [100.0]
     monkeypatch.setattr(kitten_module, "perf_counter", lambda: clock[0])
     monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
-    monkeypatch.setattr(kitten_module.console, "print", lambda *_a, **_k: None)
+    monkeypatch.setattr("speech_to_speech.pipeline.console.console.print", lambda *_a, **_k: None)
     handler._chunk_text = lambda text: ["empty", "first", "second"] if empty_first_chunk else ["first", "second"]
     calls = []
 
@@ -75,9 +75,11 @@ def test_internal_chunks_keep_first_model_audio_in_terminal_record(
     assert payload["response_key"] == request.response_key
     assert payload["status"] == "completed"
     assert payload["tts_ttfa_s"] == pytest.approx(0.10)
-    assert payload["e2e_s"] == pytest.approx(1.80)
+    # The first chunk is delivered before the second is synthesized, so e2e stops
+    # at the first chunk's resample (100.30), not after the second one (100.80).
+    assert payload["e2e_s"] == pytest.approx(1.30)
     lines = [r.message for r in caplog.records if r.name == logger and " latency: " in r.message]
     assert len(lines) == 1
     assert f"response_key={request.response_key}" in lines[0]
-    assert "tts_ttfa=0.10s e2e=1.80s" in lines[0]
+    assert "tts_ttfa=0.10s e2e=1.30s" in lines[0]
     assert service.turn_latency_store.get_response(request.response_key) is None

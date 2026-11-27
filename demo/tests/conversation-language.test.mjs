@@ -3,7 +3,26 @@ import assert from "node:assert/strict";
 
 import { S2sRealtimeClient } from "../s2s-realtime-client.js";
 
-test("selected language reaches transcription, the agent, and live updates", async () => {
+async function discoverCapabilities(t, client, ...conversations) {
+  const fetch = t.mock.method(globalThis, "fetch", async (url) => {
+    assert.equal(url.pathname, "/v1/realtime/capabilities");
+    assert.equal(url.protocol, "https:");
+    return { ok: true, json: async () => ({
+      pipelines: conversations.map(conversation => ({ conversation })),
+    }) };
+  });
+  await client._loadLanguageCapabilities("wss://backend.test/v1/realtime");
+  fetch.mock.restore();
+}
+
+function conversationCapabilities(codes, autoSupported = true) {
+  return {
+    selectable_languages: codes === null ? null : codes.map(code => ({ code })),
+    session_auto_supported: autoSupported,
+  };
+}
+
+test("selected language reaches transcription, the agent, and live updates", async (t) => {
   globalThis.OpenAIAgentsRealtime = {
     RealtimeAgent: class {
       constructor(options) { Object.assign(this, options); }
@@ -14,7 +33,7 @@ test("selected language reaches transcription, the agent, and live updates", asy
   const client = new S2sRealtimeClient({
     transport: "websocket", voice: "Aiden", instructions: "Be helpful.", language: "es",
   });
-  client._autoLanguageSupported = true;
+  await discoverCapabilities(t, client, conversationCapabilities(["es", "de"]));
   client._transport = { sendEvent: (event) => events.push(event) };
   client._session = { options: { config: client._sessionConfig() }, updateAgent: async () => {} };
 
@@ -47,7 +66,9 @@ test("Auto is sent explicitly at session initialization", () => {
   assert.equal(events[0].session.audio.input.transcription.language, "auto");
 });
 
-for (const [initial, selected] of [["auto", "fr"], ["es", "de"], ["fr", "auto"]]) {
+for (const [initial, selected, hint = selected] of [
+  ["auto", "fr"], ["es", "de"], ["fr", "auto"], ["es", "it", "auto"],
+]) {
   test(`live language ${initial} → ${selected} and reasoning survive agent and tool updates`, async (t) => {
     const realtime = await import("@openai/agents/realtime");
     globalThis.OpenAIAgentsRealtime = realtime;
@@ -58,7 +79,7 @@ for (const [initial, selected] of [["auto", "fr"], ["es", "de"], ["fr", "auto"]]
     const client = new S2sRealtimeClient({
       transport: "websocket", voice: "Aiden", instructions: "Be helpful.", language: initial, reasoningEffort: "low",
     });
-    client._autoLanguageSupported = true;
+    await discoverCapabilities(t, client, conversationCapabilities(["es", "de", "fr"]));
     client._transport = transport;
     client._session = new realtime.RealtimeSession(client._buildAgent(), {
       transport, config: client._sessionConfig(), tracingDisabled: true,
@@ -71,7 +92,7 @@ for (const [initial, selected] of [["auto", "fr"], ["es", "de"], ["fr", "auto"]]
       const updates = events.filter((event) => event.session?.audio?.input?.transcription);
       assert.ok(updates.length > 0);
       for (const update of updates) {
-        assert.equal(update.session.audio.input.transcription.language, selected);
+        assert.equal(update.session.audio.input.transcription.language, hint);
       }
       const reasoningUpdates = events.filter(event => Object.hasOwn(event.session || {}, "reasoning"));
       assert.ok(reasoningUpdates.length > 0);
@@ -94,7 +115,7 @@ for (const [initial, selected] of [["auto", "fr"], ["es", "de"], ["fr", "auto"]]
     assertLanguage();
     client.setReasoningEffort(null);
     expectedReasoning = null;
-    assert.equal(client._session.options.config.audio.input.transcription.language, selected);
+    assert.equal(client._session.options.config.audio.input.transcription.language, hint);
     client.updateSession({ voice: "Vivian", instructions: "Be concise." });
     await flush();
     assertLanguage();
@@ -104,27 +125,85 @@ for (const [initial, selected] of [["auto", "fr"], ["es", "de"], ["fr", "auto"]]
 for (const supported of [true, false, null]) {
   test(`capability discovery gates Auto in initial and subsequent config: ${supported}`, async (t) => {
     const client = new S2sRealtimeClient({ transport: "websocket", language: "auto" });
-    t.mock.method(globalThis, "fetch", async (url) => {
-      assert.equal(url.pathname, "/v1/realtime/capabilities");
-      assert.equal(url.protocol, "https:");
-      return { ok: true, json: async () => ({ pipelines: [{ conversation: { session_auto_supported: supported } }] }) };
-    });
-    await client._loadLanguageCapabilities("wss://backend.test/v1/realtime");
+    await discoverCapabilities(t, client, conversationCapabilities(null, supported));
     assert.deepEqual(client._sessionConfig().audio.input.transcription,
       supported === true ? { model: "whisper-1", language: "auto" } : { model: "whisper-1" });
     const events = [];
     client._transport = { sendEvent: event => events.push(event) };
     client._sendLanguageUpdate("auto");
     assert.equal(events.length, supported === true ? 1 : 0);
-    assert.deepEqual(client._languageConfig("es"), { language: "es" });
   });
 }
 
-test("unavailable discovery leaves backend defaults intact", async (t) => {
+test("Parakeet capabilities keep named preferences out of audio configuration and live updates", async (t) => {
+  const realtime = await import("@openai/agents/realtime");
+  globalThis.OpenAIAgentsRealtime = realtime;
+  t.after(() => { delete globalThis.OpenAIAgentsRealtime; });
+  const client = new S2sRealtimeClient({
+    transport: "websocket", language: "en", voice: "Aiden", instructions: "Be helpful.",
+  });
+  await discoverCapabilities(t, client, conversationCapabilities([]));
+  const events = [];
+  const transport = new realtime.OpenAIRealtimeWebSocket();
+  transport.sendEvent = event => events.push(event);
+  client._transport = transport;
+  client._session = new realtime.RealtimeSession(client._buildAgent(), {
+    transport, config: client._sessionConfig(), tracingDisabled: true,
+  });
+  const initial = await client._session.getInitialSessionConfig();
+  assert.equal(initial.audio.input.format.rate, 24_000);
+  assert.equal(initial.audio.output.format.rate, 24_000);
+  assert.equal(initial.audio.input.transcription.language, "auto");
+  assert.match(initial.instructions, /Respond in English\./);
+  client._sendLanguageUpdate("en");
+
+  client.updateSession({ language: "es", voice: "Vivian", instructions: "Be brief." });
+  await new Promise(resolve => setImmediate(resolve));
+  const updates = events.filter(event => event.type === "session.update");
+  assert.ok(updates.length > 0);
+  for (const { session } of updates) {
+    const language = session.audio?.input?.transcription?.language;
+    assert.ok(language === undefined || language === "auto", `Unexpected hint: ${language}`);
+  }
+  const session = updates.find(event => event.session.instructions)?.session;
+  assert.equal(session?.instructions, "Be brief.\nRespond in Spanish.");
+  assert.equal(session.audio.output.format.rate, 24_000);
+  assert.equal(session.audio.output.voice, "Vivian");
+});
+
+test("a language partly selectable across pipelines is sent only in the separate update", async (t) => {
+  const client = new S2sRealtimeClient({ transport: "websocket", language: "es" });
+  await discoverCapabilities(t, client,
+    conversationCapabilities(["en", "es"], false), conversationCapabilities(["en"], false));
+  assert.deepEqual(client._sessionConfig().audio.input.transcription, { model: "whisper-1" });
+  const events = [];
+  client._transport = { sendEvent: event => events.push(event) };
+  client._sendLanguageUpdate("es");
+  assert.deepEqual(events[0].session.audio, { input: { transcription: { language: "es" } } });
+  client._sendLanguageUpdate("en");
+  assert.equal(events[1].session.audio.input.transcription.language, "en");
+});
+
+test("a language no pipeline can select is never sent", async (t) => {
+  const client = new S2sRealtimeClient({ transport: "websocket", language: "es" });
+  await discoverCapabilities(t, client,
+    conversationCapabilities(["en", "de"], false), conversationCapabilities(["en"], false));
+  assert.deepEqual(client._sessionConfig().audio.input.transcription, { model: "whisper-1" });
+  const events = [];
+  client._transport = { sendEvent: event => events.push(event) };
+  client._sendLanguageUpdate("es");
+  assert.equal(events.length, 0);
+});
+
+test("unavailable discovery keeps unverified hints separate from audio configuration", async (t) => {
   t.mock.method(globalThis, "fetch", async () => { throw new Error("unavailable"); });
-  const client = new S2sRealtimeClient({ transport: "websocket", language: "auto" });
+  const client = new S2sRealtimeClient({ transport: "websocket", language: "en" });
   await client._loadLanguageCapabilities("ws://backend.test/v1/realtime");
-  assert.equal(Object.hasOwn(client._sessionConfig().audio.input.transcription, "language"), false);
+  assert.deepEqual(client._sessionConfig().audio.input.transcription, { model: "whisper-1" });
+  const events = [];
+  client._transport = { sendEvent: event => events.push(event) };
+  client._sendLanguageUpdate("en");
+  assert.deepEqual(events[0].session.audio, { input: { transcription: { language: "en" } } });
 });
 
 test("queued language choices update options before the SDK session exists", async () => {
@@ -141,6 +220,5 @@ test("queued language choices update options before the SDK session exists", asy
       currentState, LIVE_STATES: new Set(["listening"]) });
     change();
     assert.equal(client.options.language, "es");
-    assert.equal(client._sessionConfig().audio.input.transcription.language, "es");
   }
 });

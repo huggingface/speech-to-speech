@@ -1,5 +1,6 @@
 """One parent proxy supports different providers without importing either model."""
 
+import logging
 from queue import Queue
 from threading import Event, Thread
 from time import perf_counter
@@ -10,9 +11,11 @@ import pytest
 from openai.types.realtime.realtime_response_create_params import RealtimeResponseCreateParams
 
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
+from speech_to_speech.pipeline import transcript_logging
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.turn_latency import TurnLatencyTracker
 
 
@@ -183,6 +186,33 @@ def test_provider_failure_reported_once_and_remaining_response_suppressed(adapte
     assert calls == [1, 1]
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_error_logs_respect_transcript_logging(adapter, monkeypatch, caplog, enabled):
+    handler, worker, scope, _ = adapter
+    marker = "synthetic-private-note-8675309"
+    monkeypatch.setattr(transcript_logging, "_log_transcripts", enabled)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError(marker)
+
+    worker.synthesize_chunks = fail
+    logger = "speech_to_speech.TTS.zerogpu_handler"
+    item = TTSInput(text="Hello.", response_key="response", cancel_generation=scope.generation)
+    with caplog.at_level(logging.ERROR, logger=logger):
+        assert list(handler.process(item)) == []
+
+    failure = handler.queue_out.get_nowait()
+    assert isinstance(failure, ResponseFailedEvent)
+    assert failure.message == "ZeroGPU TTS synthesis failed"
+    assert failure.response_key == item.response_key
+    records = [record for record in caplog.records if record.name == logger]
+    assert len(records) == 1
+    assert records[0].levelno == logging.ERROR
+    assert (marker in caplog.text) is enabled
+    assert (records[0].exc_info is not None) is enabled
+    assert "RuntimeError" in caplog.text
+
+
 def test_stale_speculation_drops_input_but_preserves_response_cleanup(adapter):
     handler, worker, _, _ = adapter
     handler.speculative_turns = SimpleNamespace(
@@ -249,3 +279,51 @@ def test_session_end_cancels_pending_stream_without_reporting_failure(adapter):
         release.set()
         thread.join(2)
     assert closed.wait(1)
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_zerogpu_speculative_reopen_grace_timing_and_cancellation(adapter, cancel):
+    handler, worker, scope, _ = adapter
+    tracker = SpeculativeTurnTracker()
+    turn_id, rev, _ = tracker.speech_started(0)
+    tracker.segment_finalized(1000, output_hold_ms=300 if cancel else 80)
+    handler.speculative_turns = tracker
+    latency = TurnLatencyTracker()
+    handler.turn_latency_store = SimpleNamespace(get_response=lambda key: latency)
+
+    chunk_ready = Event()
+
+    def synthesize(*args, **kwargs):
+        chunk_ready.set()
+        yield np.ones(512, dtype=np.int16)
+
+    worker.synthesize_chunks = synthesize
+    done, outputs = Event(), []
+    item = TTSInput(
+        text="Hello.",
+        turn_id=turn_id,
+        turn_revision=rev,
+        response_key="resp",
+        speech_stopped_at_s=perf_counter(),
+        cancel_generation=scope.generation,
+    )
+
+    thread = Thread(target=lambda: (outputs.extend(handler.process(item)), done.set()))
+    thread.start()
+    try:
+        assert chunk_ready.wait(0.5)
+        assert not done.wait(0.02)
+        if cancel:
+            scope.cancel()
+        assert done.wait(0.5)
+    finally:
+        thread.join(2)
+
+    if cancel:
+        assert outputs == [] and latency.tts_ttfa_s is None and latency.e2e_s is None
+        assert not tracker.is_committed(turn_id, rev)
+        assert tracker.can_reopen(1100) and tracker.speech_started(1100) == (turn_id, 1, True)
+    else:
+        assert len(outputs) == 1 and tracker.is_committed(turn_id, rev)
+        assert latency.tts_ttfa_s is not None and latency.tts_ttfa_s < 0.05
+        assert latency.e2e_s is not None and latency.e2e_s >= 0.07

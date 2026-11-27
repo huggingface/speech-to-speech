@@ -101,6 +101,7 @@ It listens at `ws://127.0.0.1:8765/v1/realtime`. Connect with:
 
 - the packaged audio client: `speech-to-speech talk --url ws://127.0.0.1:8765/v1/realtime`
 - the [browser demo](./demo/README.md#quick-start-local)
+- the optional [Open WebUI local example](./demo/openwebui/README.md), for saved text/voice chat with typed context updates during a call
 - any client using the core OpenAI Realtime events; the OpenAI Agents SDK is tested over both transports (see [Realtime API](#realtime-api))
 - [LiveKit Agents](./demo/livekit/README.md), as the agent's realtime model
 
@@ -117,6 +118,7 @@ It listens at `ws://127.0.0.1:8765/v1/realtime`. Connect with:
 * [LLM backends](#llm-backends)
 * [Multi-language support](#multi-language-support)
 * [OmniVoice](#omnivoice)
+* [Irodori-TTS](#irodori-tts)
 * [Pocket TTS](#pocket-tts)
 * [Phonon TTS](#phonon-tts)
 * [CLI reference](#cli-reference)
@@ -264,6 +266,7 @@ This installs the package in editable mode. With the environment activated, use 
 | TTS | [Phonon](https://github.com/gradium-ai/xn-ptts) | CPU (including Apple Silicon) | `phonon` |
 | TTS | [ChatTTS](https://github.com/2noise/ChatTTS) | CUDA / CPU | `chattts` |
 | TTS | [OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) | CUDA / Intel XPU / Apple Silicon | `omnivoice` |
+| TTS | [Irodori-TTS](https://github.com/Aratako/Irodori-TTS) (`--tts irodori`) | CUDA / Intel XPU / Apple Silicon / CPU | [installed from source](#irodori-tts) |
 | TTS | [MMS TTS](https://huggingface.co/docs/transformers/model_doc/mms) | CUDA / CPU | built-in |
 | TTS | OpenAI-compatible `/v1/audio/speech` endpoint | local or remote HTTP server | built-in |
 | TTS | [Fish Audio Drama-3](https://huggingface.co/fishaudio/drama-3) (`--tts drama3`) | SGLang Omni on a local or remote GPU host | built-in client |
@@ -329,7 +332,7 @@ The packaged client can opt in to local Python tools with `talk --tool-module <m
 
 On macOS, `local` and `serve` already run all three models through MLX. The optional `--mac-optimal-settings` preset also makes MPS the default device for supported components. It only sets defaults: explicit `--device`, component-device flags such as `--qwen3_tts_device`, and `--stt`, `--llm_backend`, `--model_name`, and `--tts` all win.
 
-`--tts pocket`, `--tts phonon`, `--tts kokoro`, `--tts omnivoice`, and `--tts kitten` are also valid on macOS.
+`--tts pocket`, `--tts phonon`, `--tts kokoro`, `--tts omnivoice`, `--tts irodori`, and `--tts kitten` are also valid on macOS.
 
 To compare the MLX quantization variants locally:
 
@@ -499,7 +502,7 @@ Works with any provider or server that implements the OpenAI Responses API. Poin
 # OpenAI
 speech-to-speech local \
     --llm_backend responses-api \
-    --model_name "gpt-4o-mini" \
+    --model_name "gpt-6-luna" \
     --responses_api_api_key "$OPENAI_API_KEY" \
     --responses_api_stream \
     --enable_live_transcription
@@ -631,6 +634,7 @@ Language coverage depends on the STT and TTS backends you pick, not on the pipel
 | TTS | ChatTTS | English and Chinese |
 | TTS | MMS TTS | Broad multilingual coverage through MMS checkpoints |
 | TTS | OmniVoice | 600+ languages; voice cloning, design, and automatic voice selection |
+| TTS | Irodori-TTS | Japanese; voice design and voice cloning |
 | TTS | Supertonic | 32 languages |
 | TTS | Pocket TTS | English, French, German, Portuguese, Italian, Spanish |
 | TTS | OpenAI-compatible `/v1/audio/speech` endpoint | Depends on the connected TTS server/model |
@@ -681,6 +685,30 @@ The `omnivoice` extra is supported on Linux, Windows, and macOS. On non-macOS pl
 
 > [!WARNING]
 > OmniVoice's code is Apache-2.0, but its pretrained weights are CC-BY-NC and are not licensed for commercial use. Use voice cloning only with authorization and consent; do not use it for impersonation, fraud, scams, or other illegal or unethical activity.
+
+## Irodori-TTS
+
+[Irodori-TTS](https://github.com/Aratako/Irodori-TTS) is a Japanese flow-matching model. A voice is described in a sentence, cloned from a reference clip, or both. The default checkpoint, [Irodori-TTS-v4.1-Small-MF](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small-MF), samples in four steps.
+
+Irodori-TTS and its DACVAE codec are not on PyPI, so there is no extra. Install these inspected commits after `speech-to-speech`:
+
+```bash
+pip install --no-deps \
+    "irodori-tts @ git+https://github.com/Aratako/Irodori-TTS@382205679ebc32295b7d1bfb329327d04c8f4eed" \
+    "dacvae @ git+https://github.com/facebookresearch/dacvae@414c20785fc3a28373073ea8ef7a1316eeeaca6e" \
+    "descript-audiotools==0.7.2"
+pip install einops ffmpy flatten-dict importlib-resources julius pyloudnorm randomname tensorboard torchcodec
+speech-to-speech serve \
+    --tts irodori \
+    --irodori_caption "落ち着いた低い声の男性。ゆっくりと丁寧に話す。"
+```
+
+Keep `--no-deps`: `descript-audiotools` declares `protobuf<3.20`, which would downgrade the installed protobuf, and Irodori-TTS lists its training and demo stack as requirements. The second command installs what inference imports.
+
+Irodori-TTS speaks Japanese only, so pair it with an STT backend that recognizes Japanese and an LLM that answers in Japanese; see [Multi-language support](#multi-language-support). See the [TTS component guide](./src/speech_to_speech/TTS/README.md#11-irodori-tts---tts-irodori) for voice cloning, devices, latency, and limits.
+
+> [!WARNING]
+> Irodori-TTS code and weights are MIT, with [ethical restrictions](https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small-MF) in the model card. Clone a voice only with the speaker's consent; do not use it for impersonation or to mislead.
 
 ## Pocket TTS
 
@@ -904,7 +932,14 @@ per-category answer accuracy, audio latency, and protocol failures in JSON repor
 local GPU runs or Hugging Face Jobs;
 `scripts/prepare_eval_space.py` optionally builds the image in a private HF Space.
 Start with four questions, then compare reports across revisions. See
-[Big Bench Audio system tests](docs/vibe-checks.md).
+[Big Bench Audio system tests](docs/vibe-checks.md#big-bench-audio).
+
+## Tool-use conversation tests
+
+Run scripted tool-use conversations as text through a running server and count right calls,
+replies that promise a call without making it, speech before calls, and long-running results.
+A stand-in for the speech services makes it a quick check of any LLM backend. See
+[Tool-use conversations](docs/vibe-checks.md#tool-use-conversations).
 
 ## Contributing
 

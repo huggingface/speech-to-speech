@@ -8,12 +8,13 @@ from speech_to_speech.zerogpu import runtime
 
 
 class ZeroGPULLMHandler(BaseLanguageModelHandler):
-    def setup(self, compact_history=False, **kwargs):
+    def setup(self, compact_history=False, llm_current_date=False, llm_timezone=None, **kwargs):
         if compact_history:
             raise ValueError("ZeroGPU background history compaction is not supported yet.")
         # The parent only formats prompts; inference always runs on worker CUDA.
         kwargs["device"] = "cpu"
-        super().setup(compact_history=False, **kwargs)
+        # The zerogpu_llm config prefix leaves the shared llm_* date options unstripped.
+        super().setup(compact_history=False, current_date=llm_current_date, timezone=llm_timezone, **kwargs)
 
     def _load_model(self, model_name, device, torch_dtype, gen_kwargs):
         # Token counting and prompt formatting are CPU operations.
@@ -23,8 +24,10 @@ class ZeroGPULLMHandler(BaseLanguageModelHandler):
         self.gen_kwargs = dict(gen_kwargs)
 
     def _generate(self, chat, language_code, gen, ctx, runtime_config=None, response=None):
-        messages = chat.to_transformers_chat()
-        ids = self.tokenizer.apply_chat_template(messages, tokenize=True, enable_thinking=False)
+        messages = self._chat_messages(chat, ctx.function_tools)
+        ids = self.tokenizer.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=True, enable_thinking=False
+        )
         ctx.input_tokens += len(ids if isinstance(ids, list) else ids["input_ids"])
         aborted = Event()
 

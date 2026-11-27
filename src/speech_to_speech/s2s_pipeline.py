@@ -319,10 +319,10 @@ def check_mac_settings(module_kwargs: ModuleArguments) -> None:
             logger.warning(
                 "For macOS users, it is recommended to use mlx-lm. You can activate it by passing --llm_backend mlx-lm."
             )
-        if module_kwargs.tts not in ("pocket", "phonon", "kokoro", "omnivoice", "qwen3"):
+        if module_kwargs.tts not in ("pocket", "phonon", "kokoro", "omnivoice", "irodori", "qwen3"):
             logger.warning(
                 "For macOS users, it is recommended to use qwen3 for TTS "
-                "(pocket, phonon, kokoro, and omnivoice are also valid options)."
+                "(pocket, phonon, kokoro, omnivoice, and irodori are also valid options)."
             )
 
 
@@ -367,11 +367,6 @@ def prepare_all_args(args: ParsedArguments) -> None:
     """Validate selectors and apply the global device to selected configs only."""
 
     prepare_module_args(args.module_kwargs, args.llm_backend)
-    if args.llm_backend.spec.capabilities.supports_audio_input:
-        args.llm_backend = replace(
-            args.llm_backend,
-            config={**args.llm_backend.config, "audio_input": args.module_kwargs.stt == "none"},
-        )
     if args.module_kwargs.device is None:
         return
     for field_name in ("stt_backend", "llm_backend", "tts_backend"):
@@ -540,6 +535,7 @@ def _build_handlers(
             "speculative_turns": speculative_turns,
             "text_output_queue": text_output_queue,
             "detect_llm_output_language": module_kwargs.detect_llm_output_language,
+            "cancel_scope": cancel_scope,
         },
     )
 

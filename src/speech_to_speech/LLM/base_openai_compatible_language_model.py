@@ -4,6 +4,7 @@ import asyncio
 import ipaddress
 import logging
 import os
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator, Iterator
 from queue import Empty, Full, Queue
@@ -12,11 +13,13 @@ from threading import Event as ThreadingEvent
 from time import perf_counter
 from typing import Any, Literal, Optional
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 import httpx2
 from nltk import sent_tokenize
 from openai import (
     DEFAULT_CONNECTION_LIMITS,
+    APIStatusError,
     APITimeoutError,
     AsyncOpenAI,
     DefaultAsyncHttpx2Client,
@@ -48,7 +51,9 @@ from speech_to_speech.LLM.chat import (
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_compactor
 from speech_to_speech.LLM.text_prompt import build_text_system_prompt
 from speech_to_speech.LLM.utils import (
+    current_date_for_prompt,
     language_name_for_prompt,
+    prompt_timezone,
     remove_markdown,
     remove_unspeechable,
     resolve_auto_language,
@@ -84,6 +89,23 @@ PREFETCH_WORKER_ACQUIRE_TIMEOUT_S = 0.05
 # A streaming prefetch worker notices cancellation within one 0.05 s poll.
 PREFETCH_WORKER_RELEASE_TIMEOUT_S = 0.5
 PROVIDER_FAILURE_FALLBACK = "I'm having trouble responding right now. Please try again."
+# Provider wording for a deployment that cannot take image input, e.g. llama.cpp
+# without an mmproj ("image input is not supported"), vLLM ("is not a multimodal
+# model") or OpenAI ("image_url is only supported by certain models").
+_IMAGE_INPUT_UNSUPPORTED_RE = re.compile(
+    r"image[^.]*\b(?:not supported|unsupported|only supported)\b"
+    r"|does not support (?:image|vision)|not a multimodal model",
+    re.IGNORECASE,
+)
+
+
+def _is_image_input_rejection(exc: Exception) -> bool:
+    """Whether the provider refused the request because it cannot process images."""
+    return isinstance(exc, (APIStatusError, _ProviderResponseError)) and bool(
+        _IMAGE_INPUT_UNSUPPORTED_RE.search(str(exc))
+    )
+
+
 # How long an idle provider connection stays open for the next request. The
 # SDK's 5 s is shorter than the pause between two turns of a conversation, so
 # every turn would open a new connection.
@@ -112,6 +134,10 @@ def _read_timed_out(exc: Exception) -> bool:
     """Whether a provider read timed out; the SDK raises it as ``APITimeoutError``."""
     cause = exc.__cause__ if isinstance(exc, APITimeoutError) else exc
     return isinstance(cause, httpx2.ReadTimeout)
+
+
+class _ProviderResponseError(RuntimeError):
+    """An error reported inside a provider response rather than by HTTP status."""
 
 
 class TextDelta(BaseModel):
@@ -166,6 +192,8 @@ class ProviderResponseEnd(BaseModel):
     status: Literal["completed", "incomplete", "failed"] = "completed"
     reason: ResponseIncompleteReason | None = None
     error: str | None = None
+    # What the provider said ended a normal completion, kept for diagnostics.
+    finish_reason: str | None = None
     # Responses output_index order, independent of item completion timing.
     history_item_order: list[str] | None = None
 
@@ -226,6 +254,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
     usage, out-of-band handling and error termination.
     """
 
+    current_date: bool = False
+    current_date_tz: ZoneInfo | None = None
+
     # ── setup ─────────────────────────────────────────────────────────────────
 
     def setup(
@@ -245,11 +276,12 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         stream_batch_sentences: int = 3,
         enable_lang_prompt: bool = False,
         compact_history: bool = False,
-        audio_input: bool = False,
         audio_max_tokens: int = 256,
         audio_temperature: float = 0.0,
         audio_content_type: Literal["input_audio", "audio_url"] = "input_audio",
         audio_history_turns: int = 1,
+        llm_current_date: bool = False,
+        llm_timezone: Optional[str] = None,
         **_kwargs: Any,
     ) -> None:
         self.cancel_scope = cancel_scope
@@ -258,8 +290,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.stream = stream
         self.stream_batch_sentences = max(1, stream_batch_sentences)
         self.enable_lang_prompt = enable_lang_prompt
+        self.current_date = llm_current_date
+        self.current_date_tz = prompt_timezone(llm_timezone)
         self.gen_kwargs = dict(gen_kwargs)
-        self.audio_input = audio_input
         self.audio_max_tokens = audio_max_tokens
         self.audio_temperature = audio_temperature
         if audio_content_type not in {"input_audio", "audio_url"}:
@@ -696,10 +729,15 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self._async_runner = None
         self._async_client = None
 
-    def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
-        if self.speculative_turns is None:
-            return True
-        return self.speculative_turns.wait_for_gate(turn_id, turn_revision)
+    def _turn_output_allowed(
+        self, turn_id: str | None, turn_revision: int | None, *, hold_for_grace: bool = True
+    ) -> bool:
+        return self.speculative_turns is None or self.speculative_turns.wait_for_gate(
+            turn_id, turn_revision, hold_for_grace=hold_for_grace
+        )
+
+    def _turn_allowed(self, turn: _Turn) -> bool:
+        return self._turn_output_allowed(turn.turn_id, turn.turn_revision, hold_for_grace=not turn.wants_audio)
 
     def _apply_config(
         self,
@@ -708,11 +746,12 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         wants_audio: bool = True,
         *,
         language_name: str | None = None,
+        current_date: str | None = None,
     ) -> None:
-        if not instructions and not language_name:
+        if not instructions and not language_name and not current_date:
             return
         builder = build_voice_system_prompt if wants_audio else build_text_system_prompt
-        full_instructions = builder(instructions or "", language_name=language_name)
+        full_instructions = builder(instructions or "", language_name=language_name, current_date=current_date)
         chat.prepend_instructions(full_instructions)
 
     # ── output helpers ──────────────────────────────────────────────────────--
@@ -776,7 +815,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             fc_item = ResponsesFunctionCall(
                 **fc_item.model_dump(exclude_unset=True), response_item=event.response_item.model_copy(deep=True)
             )
-        if self._turn_is_cancelled(turn) or not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
+        if self._turn_is_cancelled(turn) or not self._turn_allowed(turn):
             logger.info("LLM generation cancelled (stale speculative turn)")
             return
         state.history_items.append(fc_item)
@@ -806,7 +845,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         def _flush(batch: list[str]) -> Iterator[LLMOut]:
             if not batch:
                 return
-            if not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
+            if not self._turn_allowed(turn):
                 logger.info("LLM generation cancelled (stale speculative turn)")
                 return
             yield self._chunk(turn, state, text=" ".join(batch))
@@ -826,7 +865,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if isinstance(event, ProviderResponseEnd):
                 state.ending = event
                 if event.status == "failed":
-                    raise RuntimeError(event.error or "The language model provider reported a failed response.")
+                    raise _ProviderResponseError(
+                        event.error or "The language model provider reported a failed response."
+                    )
             elif isinstance(event, AssistantMessage):
                 state.history_items.append(event.to_chat_item())
             elif isinstance(event, ResponseReasoningItem):
@@ -842,7 +883,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     sentence_batch.append(remove_markdown(printable_text.strip()))
                     printable_text = ""
                 if sentence_batch:
-                    if not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
+                    if not self._turn_allowed(turn):
                         logger.info("LLM generation cancelled (stale speculative turn)")
                         cancelled = True
                         break
@@ -871,7 +912,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     for s in sentences[:-1]:
                         sentence_batch.append(remove_markdown(s))
                         if len(sentence_batch) >= self.stream_batch_sentences:
-                            if not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
+                            if not self._turn_allowed(turn):
                                 logger.info("LLM generation cancelled (stale speculative turn)")
                                 cancelled = True
                                 break
@@ -895,7 +936,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             not cancelled
             and not self._turn_is_cancelled(turn)
             and self._turn_is_latest(turn.turn_id, turn.turn_revision)
-            and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
+            and self._turn_allowed(turn)
         )
 
     def _consume_nonstreaming(
@@ -917,7 +958,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if isinstance(event, ProviderResponseEnd):
                 state.ending = event
                 if event.status == "failed":
-                    raise RuntimeError(event.error or "The language model provider reported a failed response.")
+                    raise _ProviderResponseError(
+                        event.error or "The language model provider reported a failed response."
+                    )
             elif isinstance(event, AssistantMessage):
                 state.history_items.append(event.to_chat_item())
             elif isinstance(event, ResponseReasoningItem):
@@ -936,11 +979,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 spoken = event.text if not turn.wants_audio else remove_markdown(remove_unspeechable(event.text))
                 state.clean_text += spoken
                 out = spoken if not turn.wants_audio else spoken.strip()
-                if (
-                    out
-                    and not self._turn_is_cancelled(turn)
-                    and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
-                ):
+                if out and not self._turn_is_cancelled(turn) and self._turn_allowed(turn):
                     yield self._chunk(turn, state, text=out)
         logger.debug("Clean text: %s", transcript_for_log(state.clean_text))
         logger.info("Tools: %s", transcript_for_log(state.tools))
@@ -948,10 +987,37 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             not cancelled
             and not self._turn_is_cancelled(turn)
             and self._turn_is_latest(turn.turn_id, turn.turn_revision)
-            and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
+            and self._turn_allowed(turn)
         )
 
     # ── orchestration ─────────────────────────────────────────────────────────
+
+    def _log_empty_completion(
+        self,
+        active_chat: Chat,
+        turn: _Turn,
+        state: _GenState,
+        optional_kwargs: dict[str, Any],
+    ) -> None:
+        """Record what the provider was asked when it finished with nothing to say.
+
+        Clients only see ``response.done`` with no output, which looks the same
+        as a lost response. Log the shape of the request and the provider's
+        terminal so the two can be told apart, without any conversation text.
+        """
+        last_item = active_chat.buffer[-1] if active_chat.buffer else None
+        logger.warning(
+            "LLM completed without output: response_key=%s finish_reason=%s output_tokens=%d "
+            "items=%d last_item=%s tool_choice=%s tools=%d cancel_generation=%s",
+            turn.response_key,
+            state.ending.finish_reason,
+            state.output_tokens,
+            len(active_chat.buffer),
+            getattr(last_item, "role", None) or getattr(last_item, "type", None),
+            optional_kwargs.get("tool_choice"),
+            len(optional_kwargs.get("tools") or []),
+            turn.gen,
+        )
 
     def _generate(
         self,
@@ -966,6 +1032,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         input_history: SupportedItem | None = None,
         audio_history_turns: int | None = None,
         consumed_audio_items: list[RealtimeConversationItemUserMessage] | None = None,
+        generation_started_at_s: float | None = None,
     ) -> Generator[LLMOut, None, bool]:
         api_response: Any = None
         events: Iterator[ProviderEvent] | None = None
@@ -979,6 +1046,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         )
         provider_request_started = False
         consumed_image_ids: set[str] = set()
+        image_input_error: str | None = None
         store = getattr(self, "turn_latency_store", None)
         tracker = store.get_response(turn.response_key) if store else None
         trace_context = HttpRequestContext(
@@ -990,7 +1058,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         )
 
         try:
-            generation_started_at_s = perf_counter()
+            if generation_started_at_s is None:
+                generation_started_at_s = perf_counter()
             if tracker is not None:
                 tracker.record_llm_start(generation_started_at_s)
             try:
@@ -1066,6 +1135,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     log_exception(logger, "LLM generation failed; ending the current response", exc)
                     if error_message is None:
                         error_message = f"Language model generation failed: {exc}"
+                if consumed_image_ids and _is_image_input_rejection(exc):
+                    image_input_error = str(exc)
             finally:
                 self._close_response(events)
                 self._close_response(api_response)
@@ -1073,6 +1144,33 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 # the response on the service thread.
                 if tracker is not None and provider_request_started:
                     tracker.record_llm(perf_counter() - generation_started_at_s)
+
+            if (
+                image_input_error is not None
+                and (turn.prefetch_transaction is None or turn.prefetch_transaction.claimed)
+                and not self._generation_is_stale(turn.gen)
+                and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
+            ):
+                active_chat.strip_images(consumed_image_ids, error=image_input_error)
+                if not is_out_of_band(turn.response):
+                    original_chat.strip_images(consumed_image_ids, error=image_input_error)
+                if not state.output_emitted:
+                    # No images remain in this snapshot, so recovery cannot repeat.
+                    # Disable tools for the explanation; generation failure must not replay actions.
+                    generation_completed = yield from self._generate(
+                        active_chat,
+                        original_chat,
+                        turn,
+                        {**optional_kwargs, "tool_choice": "none"},
+                        serialize_fn=serialize_fn,
+                        request_fn=request_fn,
+                        event_iterator_fn=event_iterator_fn,
+                        input_history=input_history,
+                        audio_history_turns=audio_history_turns,
+                        consumed_audio_items=consumed_audio_items,
+                        generation_started_at_s=generation_started_at_s,
+                    )
+                    return generation_completed
 
             if (
                 provider_request_started
@@ -1096,13 +1194,21 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     prefetch_transaction=turn.prefetch_transaction,
                 )
 
+            if (
+                generation_completed
+                and error_message is None
+                and state.ending.status == "completed"
+                and not state.output_emitted
+            ):
+                self._log_empty_completion(active_chat, turn, state, optional_kwargs)
+
             proposal_allowed = (
                 error_message is None
                 and state.ending.status == "completed"
                 and generation_completed
                 and not self._turn_is_cancelled(turn)
                 and self._turn_is_latest(turn.turn_id, turn.turn_revision)
-                and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
+                and self._turn_allowed(turn)
             )
             if proposal_allowed and not is_out_of_band(turn.response):
                 history = ResponseHistory.capture(
@@ -1182,15 +1288,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         original_chat = runtime_config.chat
         active_chat = original_chat.copy(deep=True)
         history_anchor_id = active_chat.history_anchor_id()
-        if not is_out_of_band(response) and active_chat.has_pending_tool_calls():
-            yield EndOfResponse(
-                turn_id=turn_id,
-                turn_revision=turn_revision,
-                cancel_generation=gen,
-                response_key=request.response_key,
-                error="Cannot generate a response while function call outputs are pending.",
-            )
-            return
         if is_out_of_band(response):
             try:
                 active_chat = build_active_chat(active_chat, response)
@@ -1220,7 +1317,13 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
         )
         wants_audio = response_wants_audio(response)
-        self._apply_config(active_chat, instructions, wants_audio, language_name=lang_name)
+        self._apply_config(
+            active_chat,
+            instructions,
+            wants_audio,
+            language_name=lang_name,
+            current_date=current_date_for_prompt(enable=self.current_date, timezone=self.current_date_tz),
+        )
 
         optional_kwargs = self._build_audio_optional_kwargs(
             response,
@@ -1302,15 +1405,6 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         original_chat = runtime_config.chat
         active_chat = original_chat.copy(deep=True)
         history_anchor_id = active_chat.history_anchor_id()
-        if not is_out_of_band(response) and active_chat.has_pending_tool_calls():
-            yield EndOfResponse(
-                turn_id=turn_id,
-                turn_revision=turn_revision,
-                cancel_generation=gen,
-                response_key=request.response_key,
-                error="Cannot generate a response while function call outputs are pending.",
-            )
-            return
         if is_out_of_band(response):
             try:
                 active_chat = build_active_chat(active_chat, response)
@@ -1339,7 +1433,13 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             response.tool_choice if response and response.tool_choice else runtime_config.session.tool_choice
         )
         wants_audio = response_wants_audio(response)
-        self._apply_config(active_chat, instructions, wants_audio, language_name=lang_name)
+        self._apply_config(
+            active_chat,
+            instructions,
+            wants_audio,
+            language_name=lang_name,
+            current_date=current_date_for_prompt(enable=self.current_date, timezone=self.current_date_tz),
+        )
 
         optional_kwargs = self._build_optional_kwargs(
             req_tools,

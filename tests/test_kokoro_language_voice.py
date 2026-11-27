@@ -33,7 +33,7 @@ def kokoro_calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
     monkeypatch.setitem(sys.modules, "kokoro", SimpleNamespace(KPipeline=FakePipeline))
     monkeypatch.setattr(kokoro_handler, "platform", "linux")
     monkeypatch.setattr(KokoroTTSHandler, "warmup", lambda self: None)
-    monkeypatch.setattr(kokoro_handler.console, "print", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("speech_to_speech.pipeline.console.console.print", lambda *_args, **_kwargs: None)
     return calls
 
 
@@ -93,7 +93,7 @@ def voice_backend(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatc
         SimpleNamespace(load_model=lambda _: SimpleNamespace(_get_pipeline=get_pipeline)),
     )
     monkeypatch.setattr(KokoroTTSHandler, "warmup", lambda self: None)
-    monkeypatch.setattr(kokoro_handler.console, "print", lambda *args, **kwargs: None)
+    monkeypatch.setattr("speech_to_speech.pipeline.console.console.print", lambda *args, **kwargs: None)
     handler = KokoroTTSHandler.__new__(KokoroTTSHandler)
     handler.setup(Event(), device="mps" if request.param == "mlx" else "cpu", lang_code="a", voice="af_heart")
     calls["loaded"].clear()

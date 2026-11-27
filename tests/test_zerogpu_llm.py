@@ -80,6 +80,34 @@ def test_history_stays_host_owned_and_next_turn_sees_it(adapter):
     assert any(m["role"] == "assistant" and "Ada" in str(m["content"]) for m in seen[1])
 
 
+def test_qwen_tools_reach_worker_and_calls_reach_client(adapter):
+    from openai.types.realtime import RealtimeSessionCreateRequest
+
+    module, worker = adapter
+    config = RuntimeConfig(
+        session=RealtimeSessionCreateRequest(
+            type="realtime",
+            tools=[{"type": "function", "name": "check_weather", "description": "Check the forecast."}],
+        )
+    )
+    config.chat.add_item(make_user_message("Check the weather."))
+    h = handler(module, CancelScope())
+    h.tokenizer.chat_template = "<tool_call><function=example>"
+
+    def tokens(messages, kwargs, *, cancelled=None):
+        system = messages[0]["content"]
+        assert messages[0]["role"] == "system"
+        assert "check_weather" in system and "Check the forecast." in system
+        yield "<tool_call>\n<function=check_weather>\n</function>\n</tool_call>"
+
+    worker.tokens = tokens
+    results = list(h.process(request(config)))
+    assert results[-1].error is None
+    assert [t.name for chunk in results if isinstance(chunk, LLMResponseChunk) for t in chunk.tools] == [
+        "check_weather"
+    ]
+
+
 def test_interrupt_while_waiting_for_first_token_cancels_worker(adapter):
     module, worker = adapter
     started = Event()
@@ -232,3 +260,83 @@ def test_zero_gpu_generation_counts_a_latency_round(adapter):
     with bind_active_turn_latency_tracker(tracker):
         list(h._generate(config.chat, "en", None, ctx))
     assert tracker.llm_rounds == 1
+
+
+def test_input_tokens_include_the_generation_prompt_the_worker_sends(adapter):
+    from speech_to_speech.LLM.language_model import StreamContext
+
+    module, worker = adapter
+
+    class TemplateTokenizer:
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False, enable_thinking=True):
+            ids = [1] * len(messages)
+            if add_generation_prompt:
+                ids += [2] if enable_thinking else [2, 3, 4]
+            return ids
+
+    seen = []
+
+    def tokens(messages, kwargs, *, cancelled=None):
+        seen.append(messages)
+        yield "Hello."
+
+    worker.tokens = tokens
+    config = RuntimeConfig()
+    config.chat.add_item(make_user_message("Hello"))
+    h = handler(module, CancelScope())
+    h.tokenizer = TemplateTokenizer()
+    ctx = StreamContext()
+    list(h._generate(config.chat, "en", None, ctx))
+    # The worker renders the prompt with add_generation_prompt=True, enable_thinking=False.
+    expected = h.tokenizer.apply_chat_template(
+        seen[0], tokenize=True, add_generation_prompt=True, enable_thinking=False
+    )
+    assert ctx.input_tokens == len(expected)
+
+
+def _registry_handler(**options):
+    from speech_to_speech.arguments_classes.zerogpu_arguments import ZeroGPULLMArguments
+    from speech_to_speech.backend_registry import LLM_BACKENDS, BackendSelection, HandlerContext, create_backend_handler
+    from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
+
+    spec = LLM_BACKENDS["zerogpu"]
+    context = HandlerContext(
+        stop_event=Event(),
+        queue_in=Queue(),
+        queue_out=Queue(),
+        text_output_queue=Queue(),
+        should_listen=Event(),
+        cancel_scope=CancelScope(),
+        speculative_turns=SpeculativeTurnTracker(),
+        pipeline_index=0,
+        sample_rate=16000,
+        enable_live_transcription=False,
+        live_transcription_update_interval=0.5,
+    )
+    return create_backend_handler(BackendSelection(spec, spec.normalize(ZeroGPULLMArguments(**options))), context)
+
+
+def test_current_date_flags_reach_zero_gpu_handler(adapter):
+    from zoneinfo import ZoneInfo
+
+    module, worker = adapter
+    seen = []
+
+    def tokens(messages, kwargs, *, cancelled=None):
+        seen.append(messages)
+        yield "Hi."
+
+    worker.tokens = tokens
+    h = _registry_handler(llm_current_date=True, llm_timezone="America/New_York")
+    assert h.current_date is True
+    assert h.current_date_tz == ZoneInfo("America/New_York")
+    config = RuntimeConfig()
+    config.chat.add_item(make_user_message("What day is it?"))
+    assert list(h.process(request(config)))[-1].error is None
+    assert seen[0][0]["role"] == "system"
+    assert str(seen[0][0]["content"]).startswith("Today is ")
+
+
+def test_zero_gpu_rejects_invalid_timezone(adapter):
+    with pytest.raises(ValueError, match="Unknown --llm_timezone 'Not/AZone'"):
+        _registry_handler(llm_current_date=True, llm_timezone="Not/AZone")

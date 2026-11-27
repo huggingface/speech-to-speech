@@ -36,7 +36,9 @@ def _handler(*, samples: int = 768, cancel_scope: CancelScope | None = None) -> 
 
 @pytest.fixture(autouse=True)
 def _quiet_console(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(omnivoice_module.console, "print", lambda *_a, **_k: None)
+    from speech_to_speech.pipeline.console import console
+
+    monkeypatch.setattr(console, "print", lambda *_a, **_k: None)
 
 
 def test_records_ttfa_before_resample_and_e2e_on_first_yield(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -139,12 +139,10 @@ def _run_scenario(
 
 
 @pytest.mark.parametrize("modalities", [["audio"], ["text"]], ids=["audio", "text_only"])
-@pytest.mark.parametrize("tool_timing", ["none", "ordered", "early"])
+@pytest.mark.parametrize("tool_timing", ["ordered", "early"])
 @pytest.mark.parametrize("ending", ["complete", "cancel", "cancel_midway", "cancel_after_first_tool"])
-def test_response_lifecycle_holds_across_interleavings(service, conn_id, modalities, tool_timing, ending):
+def test_response_lifecycle_holds_across_tool_interleavings(service, conn_id, modalities, tool_timing, ending):
     """Every modality, tool timing and ending must keep the same contract."""
-    if ending == "cancel_after_first_tool" and tool_timing == "none":
-        pytest.skip("no tool call to cancel after")
     events = _run_scenario(
         service,
         conn_id,
@@ -162,7 +160,7 @@ def test_response_lifecycle_holds_across_interleavings(service, conn_id, modalit
 
 @pytest.mark.parametrize("modalities", [["audio"], ["text"]], ids=["audio", "text_only"])
 @pytest.mark.parametrize("ending", ["complete", "cancel"])
-def test_response_done_reports_the_output_modalities(service, conn_id, modalities, ending):
+def test_response_lifecycle_and_output_modalities_without_tools(service, conn_id, modalities, ending):
     """response.done must report the modality the response was resolved to.
 
     A client reads this to know whether to expect audio at all, so it has to

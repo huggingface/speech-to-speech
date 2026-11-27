@@ -3,6 +3,7 @@
 import json
 import logging
 import sys
+import time
 from contextlib import nullcontext
 from queue import Queue
 from threading import Event, Thread
@@ -215,7 +216,12 @@ def test_vad_decision_reaches_terminal_response_metadata(service, conn_id, final
         vad.smart_turn_analyzer = FailingAnalyzer()
 
     clock = iter([10.0, 10.04, 10.04, 10.07])
-    monkeypatch.setattr(vad_module, "time", SimpleNamespace(time=lambda: 100.0, perf_counter=lambda: next(clock)))
+    # Smart Turn windows use the tracker's real monotonic clock.
+    monkeypatch.setattr(
+        vad_module,
+        "time",
+        SimpleNamespace(time=lambda: 100.0, perf_counter=lambda: next(clock), monotonic=time.monotonic),
+    )
     outputs = list(vad.process(_audio_bytes()))
     assert len(outputs) == 1
     source_audio = outputs[0]

@@ -598,6 +598,64 @@ def test_openai_tts_preserves_per_response_custom_voice_id(monkeypatch):
     assert _FakeSpeechOperation.instances[0].payload["voice"] == {"id": "voice_response"}
 
 
+def _voice_override_handler(monkeypatch, voice_override: str | None) -> OpenAICompatibleTTSHandler:
+    _reset_fake_speech_operation()
+    monkeypatch.setattr(tts_module, "HttpSpeechOperation", _FakeSpeechOperation)
+    return OpenAICompatibleTTSHandler(
+        Event(),
+        queue_in=Queue(),
+        queue_out=Queue(),
+        setup_args=(Event(),),
+        setup_kwargs={"voice": "configured", "voice_override": voice_override, "blocksize": 512},
+    )
+
+
+def _voice_inputs() -> dict[str, TTSInput]:
+    return {
+        "response": TTSInput(
+            text="Hello",
+            response=RealtimeResponseCreateParams(audio={"output": {"voice": "Aiden"}}),
+        ),
+        "session": TTSInput(
+            text="Hello",
+            runtime_config=RuntimeConfig(
+                session=RealtimeSessionCreateRequest(type="realtime", audio={"output": {"voice": "Ryan"}})
+            ),
+        ),
+        "none": TTSInput(text="Hello"),
+    }
+
+
+@pytest.mark.parametrize("voice_override", [None, "", "   "])
+def test_openai_tts_without_voice_override_prefers_client_voice(monkeypatch, voice_override):
+    handler = _voice_override_handler(monkeypatch, voice_override)
+
+    assert handler.voice_override is None
+    assert _FakeSpeechOperation.instances[0].payload["voice"] == "configured"
+    _reset_fake_speech_operation()
+    for tts_input in _voice_inputs().values():
+        assert list(handler.process(tts_input))
+
+    assert [operation.payload["voice"] for operation in _FakeSpeechOperation.instances] == [
+        "Aiden",
+        "Ryan",
+        "configured",
+    ]
+
+
+def test_openai_tts_voice_override_ignores_client_voices(monkeypatch):
+    handler = _voice_override_handler(monkeypatch, " Magpie-Multilingual.EN-US.Aria ")
+
+    assert _FakeSpeechOperation.instances[0].payload["voice"] == "Magpie-Multilingual.EN-US.Aria"
+    _reset_fake_speech_operation()
+    for tts_input in _voice_inputs().values():
+        assert list(handler.process(tts_input))
+
+    assert [operation.payload["voice"] for operation in _FakeSpeechOperation.instances] == [
+        "Magpie-Multilingual.EN-US.Aria"
+    ] * 3
+
+
 def test_openai_tts_invalid_custom_voice_emits_failure(monkeypatch):
     handler = _openai_tts_handler(monkeypatch)
     response = RealtimeResponseCreateParams(
@@ -1457,3 +1515,38 @@ def test_openai_tts_cancellation_unblocks_a_stalled_socket_and_session_end(monke
         release_server.set()
         listener.close()
         server_thread.join(timeout=1)
+
+
+@pytest.mark.parametrize("outcome", ["expire", "reopen", "cancel"])
+def test_openai_tts_speculative_reopen_grace(monkeypatch, outcome):
+    tracker, scope = SpeculativeTurnTracker(), CancelScope()
+    turn_id, rev, _ = tracker.speech_started(0)
+    tracker.segment_finalized(1000, output_hold_ms=80 if outcome == "expire" else 300)
+    handler = _openai_tts_handler(monkeypatch, cancel_scope=scope, speculative_turns=tracker)
+
+    request_started = Event()
+    _FakeSpeechOperation.startup_action = request_started.set
+    done, outputs = Event(), []
+    tts_input = TTSInput(text="Hello.", turn_id=turn_id, turn_revision=rev, cancel_generation=scope.generation)
+
+    thread = Thread(target=lambda: (outputs.extend(handler.process(tts_input)), done.set()))
+    thread.start()
+    try:
+        assert request_started.wait(0.5)
+        assert not done.wait(0.02)
+        assert outputs == [] and not tracker.is_committed(turn_id, rev)
+        if outcome == "reopen":
+            reopen(tracker, turn_id, rev)
+        elif outcome == "cancel":
+            scope.cancel()
+        assert done.wait(1.0)
+    finally:
+        thread.join(timeout=1.0)
+
+    if outcome == "expire":
+        assert len(outputs) >= 1 and tracker.is_committed(turn_id, rev)
+    else:
+        assert outputs == [] and not tracker.is_committed(turn_id, rev)
+        assert _FakeSpeechOperation.instances[-1].cancelled is True
+        if outcome == "cancel":
+            assert tracker.can_reopen(1100) and tracker.speech_started(1100) == (turn_id, 1, True)

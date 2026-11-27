@@ -1,3 +1,4 @@
+import logging
 from queue import Queue
 from threading import Event
 from types import SimpleNamespace
@@ -6,6 +7,7 @@ import numpy as np
 import pytest
 
 from speech_to_speech.backend_registry import STT_BACKENDS, BackendSelection
+from speech_to_speech.pipeline import transcript_logging
 from speech_to_speech.pipeline.messages import PartialTranscription, Transcription, TranscriptionFailure, VADAudio
 from speech_to_speech.s2s_pipeline import _stt_session_languages, parse_arguments
 from speech_to_speech.STT import zerogpu_handler
@@ -45,6 +47,40 @@ def test_failed_final_transcription_reports_failure_without_generating_text(hand
     assert isinstance(output, TranscriptionFailure)
     assert (output.turn_id, output.turn_revision) == ("turn", 2)
     assert list(h.process(VADAudio(audio=np.zeros(1600), mode="progressive"))) == []
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("failure_stage", ["transcription", "language_detection"])
+def test_error_logs_respect_transcript_logging(handler, monkeypatch, caplog, enabled, failure_stage):
+    h, runtime = handler
+    marker = "synthetic-private-note-8675309"
+    monkeypatch.setattr(transcript_logging, "_log_transcripts", enabled)
+
+    def fail(*args):
+        raise RuntimeError(marker)
+
+    if failure_stage == "transcription":
+        runtime.transcribe = fail
+    else:
+        monkeypatch.setattr(zerogpu_handler, "detect_language_from_text", fail)
+
+    with caplog.at_level(logging.ERROR, logger=zerogpu_handler.__name__):
+        (output,) = h.process(VADAudio(audio=np.zeros(1600), mode="final", turn_id="turn", turn_revision=2))
+
+    assert isinstance(output, TranscriptionFailure if failure_stage == "transcription" else Transcription)
+    assert (output.turn_id, output.turn_revision) == ("turn", 2)
+    if failure_stage == "transcription":
+        assert output.message == "ZeroGPU transcription failed"
+    else:
+        assert output.text == "Hello."
+        assert output.language_code is None
+
+    records = [record for record in caplog.records if record.name == zerogpu_handler.__name__]
+    assert len(records) == 1
+    assert records[0].levelno == logging.ERROR
+    assert (marker in caplog.text) is enabled
+    assert (records[0].exc_info is not None) is enabled
+    assert "RuntimeError" in caplog.text
 
 
 def test_native_registry_configuration_and_language_capability(handler):

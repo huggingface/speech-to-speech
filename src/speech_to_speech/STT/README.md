@@ -93,9 +93,10 @@ speech-to-speech local --stt whisper --language auto --stt_device cuda
 
 - Handler: `Qwen3ASRSTTHandler`
 - Model flag: `--qwen3_asr_model_name` (default `Qwen/Qwen3-ASR-0.6B-hf`; `Qwen/Qwen3-ASR-1.7B-hf` is more accurate)
+- Revision flag: `--qwen3_asr_revision` (Hub branch, tag, or commit). Pin a full commit hash to load the same processor and weights in repeat runs.
 - Language flag: `--qwen3_asr_language` (ISO code or name, default `auto`)
 - Context flag: `--qwen3_asr_prompt` (optional hotwords or domain context)
-- Supported languages: the 30 in the checkpoint's language table
+- The default checkpoint supports 30 languages. Fine-tunes may support a subset.
   - `ar`, `yue`, `zh`, `cs`, `da`, `nl`, `en`, `fil`, `fi`, `fr`, `de`, `el`, `hi`, `hu`, `id`, `it`, `ja`, `ko`, `mk`, `ms`, `fa`, `pl`, `pt`, `ro`, `ru`, `es`, `sv`, `th`, `tr`, `vi`
 - Behavior:
   - With `auto`, the model identifies the language of each final turn and reports it with the `-auto` suffix
@@ -243,6 +244,9 @@ speech-to-speech serve --stt qwen3-asr --qwen3_asr_language fr
 speech-to-speech serve --stt qwen3-asr \
   --qwen3_asr_model_name Qwen/Qwen3-ASR-1.7B-hf \
   --qwen3_asr_prompt "Vocabulary: Quilter, apostle."
+speech-to-speech serve --stt qwen3-asr \
+  --qwen3_asr_model_name Qwen/Qwen3-ASR-1.7B-hf \
+  --qwen3_asr_revision <commit-hash>
 ```
 
 ### Parakeet Unified

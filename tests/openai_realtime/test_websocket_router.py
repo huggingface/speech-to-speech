@@ -811,12 +811,19 @@ class TestSendLoop:
 
     def test_audio_output_batches_immediately_available_chunks(self, setup):
         app, _, _, output_queue, *_ = setup
+        chunks = [b"\x01\x00" * 256, b"\x02\x00" * 256]
+
+        async def enqueue_available_chunks():
+            # No await: both chunks must be queued before the send loop resumes.
+            for chunk in chunks:
+                output_queue.put(chunk)
+            output_queue.put(PIPELINE_END)
+
         with TestClient(app) as client:
             with client.websocket_connect("/v1/realtime") as ws:
                 ws.receive_json()  # session.created
-                output_queue.put(_pcm_bytes(256))
-                output_queue.put(_pcm_bytes(256))
-                output_queue.put(PIPELINE_END)
+                assert client.portal is not None
+                client.portal.call(enqueue_available_chunks)
 
                 msg1 = ws.receive_json()
                 assert msg1["type"] == "response.created"
@@ -828,7 +835,7 @@ class TestSendLoop:
                 msg4 = ws.receive_json()
                 assert msg4["type"] == "response.output_audio.delta"
                 decoded = base64.b64decode(msg4["delta"])
-                assert len(decoded) == len(_pcm_bytes(512))
+                assert decoded == b"".join(chunks)
 
                 terminal = [ws.receive_json() for _ in range(4)]
                 assert [event["type"] for event in terminal] == [
@@ -837,6 +844,48 @@ class TestSendLoop:
                     "response.output_item.done",
                     "response.done",
                 ]
+                assert_response_lifecycle_contract(
+                    parse_wire_events([msg1, msg2, msg3, msg4, *terminal]),
+                    wants_audio=True,
+                    expected_status="completed",
+                )
+
+    def test_audio_output_delivers_chunk_before_next_chunk_is_produced(self, setup):
+        app, _, _, output_queue, *_ = setup
+        chunks = [b"\x01\x00" * 256, b"\x02\x00" * 256]
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/realtime") as ws:
+                ws.receive_json()  # session.created
+                output_queue.put(chunks[0])
+
+                opening = [ws.receive_json() for _ in range(4)]
+                assert [event["type"] for event in opening] == [
+                    "response.created",
+                    "response.output_item.added",
+                    "response.content_part.added",
+                    "response.output_audio.delta",
+                ]
+                assert base64.b64decode(opening[-1]["delta"]) == chunks[0]
+
+                # Receiving A establishes delivery before B even exists in the queue.
+                output_queue.put(chunks[1])
+                output_queue.put(PIPELINE_END)
+                second = ws.receive_json()
+                assert second["type"] == "response.output_audio.delta"
+                assert base64.b64decode(second["delta"]) == chunks[1]
+
+                terminal = [ws.receive_json() for _ in range(4)]
+                assert [event["type"] for event in terminal] == [
+                    "response.output_audio.done",
+                    "response.content_part.done",
+                    "response.output_item.done",
+                    "response.done",
+                ]
+                assert_response_lifecycle_contract(
+                    parse_wire_events([*opening, second, *terminal]),
+                    wants_audio=True,
+                    expected_status="completed",
+                )
 
     def test_end_marker_sends_finish_events(self, setup):
         app, _, _, output_queue, *_ = setup
@@ -2189,3 +2238,85 @@ def test_cancellation_while_visemes_send_does_not_restart_audio(setup, monkeypat
             time.sleep(0.1)
             assert audio_sends == []
             assert not service._state(conn_id).in_response
+
+
+def test_response_cancel_unblocks_pending_speculative_output_during_reopen_grace():
+    unit, tracker = _make_unit(0), SpeculativeTurnTracker()
+    unit.service.speculative_turns = tracker
+    with TestClient(create_app(pool=[unit], stop_event=ThreadingEvent())) as client:
+        with client.websocket_connect("/v1/realtime") as ws:
+            ws.receive_json()
+            assert unit.session is not None
+            state = unit.service._state(unit.session.session_id)
+            turn_id, rev = tracker.start_turn()
+            tracker.start_reopen_grace(turn_id, rev, grace_s=1.0)
+            state.mark_response_pending("resp_spec")
+
+            unit.output_queue.put(
+                AssistantOutputEvent(
+                    text="stale",
+                    response_key="resp_spec",
+                    turn_id=turn_id,
+                    turn_revision=rev,
+                    cancel_generation=unit.cancel_scope.generation,
+                )
+            )
+            deadline = time.monotonic() + 1.0
+            while unit.session.pending_output_item is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert isinstance(unit.session.pending_output_item, AssistantOutputEvent)
+
+            started_at = time.monotonic()
+            ws.send_json({"type": "response.cancel"})
+            ws.send_json({"type": "response.create"})
+            assert ws.receive_json()["type"] == "response.created"
+            fresh_key, fresh_gen = state.current_response_key, unit.cancel_scope.generation
+            for item in (
+                AssistantOutputEvent(text="fresh", response_key=fresh_key, cancel_generation=fresh_gen),
+                AssistantResponseDoneEvent(response_key=fresh_key, cancel_generation=fresh_gen),
+                AudioOutput(audio=AUDIO_RESPONSE_DONE, response_key=fresh_key, cancel_generation=fresh_gen),
+            ):
+                unit.output_queue.put(item)
+
+            events = []
+            while not events or events[-1]["type"] != "response.done":
+                events.append(ws.receive_json())
+            assert time.monotonic() - started_at < 0.5
+            assert [e["delta"] for e in events if e["type"] == "response.output_audio_transcript.delta"] == ["fresh"]
+            assert events[-1]["response"]["status"] == "completed"
+
+
+def test_response_cancel_does_not_park_generation_done_during_reopen_grace():
+    unit, tracker = _make_unit(0), SpeculativeTurnTracker()
+    unit.service.speculative_turns = tracker
+    with TestClient(create_app(pool=[unit], stop_event=ThreadingEvent())) as client:
+        with client.websocket_connect("/v1/realtime") as ws:
+            ws.receive_json()
+            assert unit.session is not None
+            state = unit.service._state(unit.session.session_id)
+            turn_id, rev = tracker.start_turn()
+            tracker.start_reopen_grace(turn_id, rev, grace_s=1.0)
+            state.mark_response_pending("resp_spec")
+            stale_gen = unit.cancel_scope.generation
+
+            ws.send_json({"type": "response.cancel"})
+            deadline = time.monotonic() + 1.0
+            while not unit.cancel_scope.is_stale(stale_gen) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert unit.cancel_scope.is_stale(stale_gen)
+
+            unit.text_output_queue.put(
+                ResponseGenerationDoneEvent(
+                    response_key="resp_spec",
+                    succeeded=False,
+                    turn_id=turn_id,
+                    turn_revision=rev,
+                    cancel_generation=stale_gen,
+                )
+            )
+            deadline = time.monotonic() + 1.0
+            while not unit.text_output_queue.empty() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            time.sleep(0.03)
+            assert unit.session.pending_text_output_items == []
+            assert router_module._send_loop_wait_timeout(unit) == router_module.SEND_LOOP_WAIT_TIMEOUT_S

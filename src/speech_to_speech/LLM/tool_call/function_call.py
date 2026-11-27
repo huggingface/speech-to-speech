@@ -23,7 +23,11 @@ from referencing import Registry
 from referencing.exceptions import Unresolvable
 
 from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
-from speech_to_speech.LLM.tool_call.signature_from_schema import signature_from_schema
+from speech_to_speech.LLM.tool_call.signature_from_schema import (
+    parameter_names_from_schema,
+    signature_from_schema,
+)
+from speech_to_speech.pipeline.transcript_logging import transcript_for_log
 from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
@@ -197,13 +201,15 @@ class FunctionToolCall(BaseModel):
     parameters: Dict[str, Any]
     original_string: str
     description: str = ""
+    # Native calls use raw schema names, without Python aliases or positional markers.
+    json_call: bool = False
 
     def to_realtime_function_tool_call(
         self,
         function_tools: list[FunctionTool] | None = None,
     ) -> ResponseFunctionToolCall:
-        positional_keys = [k for k in self.parameters if _POSITIONAL_RE.match(k)]
-        arguments = {k: v for k, v in self.parameters.items() if not _POSITIONAL_RE.match(k)}
+        positional_keys = [] if self.json_call else [k for k in self.parameters if _POSITIONAL_RE.match(k)]
+        arguments = {k: v for k, v in self.parameters.items() if k not in positional_keys}
 
         if function_tools is None:
             # Without the tool schema there is no parameter order to bind against.
@@ -243,6 +249,13 @@ class FunctionToolCall(BaseModel):
                         )
                     bound[name] = self.parameters[key]
                 arguments = {**bound, **arguments}
+
+            # The prompt shows aliases for property names that are not Python
+            # identifiers; map a Python-style call's names back to the schema keys.
+            # JSON tool calls already use the schema keys.
+            if not self.json_call:
+                original_names = {alias: name for name, alias in parameter_names_from_schema(schema).items()}
+                arguments = {original_names.get(key, key): value for key, value in arguments.items()}
 
             undeclared = {k for k in arguments if k not in properties}
             if undeclared:
@@ -340,7 +353,7 @@ def parse_tool_call_block(block: str, function_tools: list[FunctionTool]) -> Lis
         validator = validator_type(schema, registry=Registry())
         arguments: dict[str, Any] = {}
         while body.strip():
-            parameter = re.match(r"\s*<parameter=([^<>\s]+)>(.*?)</parameter>", body, re.DOTALL)
+            parameter = re.match(r"\s*<parameter=([^<>]+)>(.*?)</parameter>", body, re.DOTALL)
             if parameter is None:
                 raise ValueError("invalid parameter block")
             key, value = parameter.groups()
@@ -360,10 +373,12 @@ def parse_tool_call_block(block: str, function_tools: list[FunctionTool]) -> Lis
                 scalar = {"True": "true", "False": "false", "None": "null"}.get(value.strip(), value)
                 arguments[key] = json.loads(scalar)
             body = body[parameter.end() :]
+        # json.loads also accepts infinities, including inside arrays and objects.
+        json.dumps(arguments, allow_nan=False)
         validator.validate(arguments)
-        return [FunctionToolCall(function_name=name, parameters=arguments, original_string=block)]
+        return [FunctionToolCall(function_name=name, parameters=arguments, original_string=block, json_call=True)]
     except (ValueError, TypeError, ValidationError, SchemaError, Unresolvable) as exc:
-        logger.warning("Ignoring invalid Qwen tool call: %s", exc)
+        logger.warning("Ignoring invalid Qwen tool call (%s)", type(exc).__name__)
         return []
 
 
@@ -382,7 +397,7 @@ def parse_json_tool_call_block(block: str) -> List[FunctionToolCall]:
     try:
         payload = json.loads(inner.strip())
     except json.JSONDecodeError:
-        logger.warning("Ignoring malformed <tool_call> block: %r", block[:200])
+        logger.warning("Ignoring malformed <tool_call> block: %s", transcript_for_log(block[:200]))
         return []
     items = payload if isinstance(payload, list) else [payload]
     calls: List[FunctionToolCall] = []
@@ -397,7 +412,9 @@ def parse_json_tool_call_block(block: str) -> List[FunctionToolCall]:
                 continue
         if not isinstance(args, dict):
             continue
-        calls.append(FunctionToolCall(function_name=item["name"], parameters=args, original_string=block))
+        calls.append(
+            FunctionToolCall(function_name=item["name"], parameters=args, original_string=block, json_call=True)
+        )
     return calls
 
 
