@@ -623,9 +623,10 @@ On **WebRTC**, the server pauses and resumes its paced audio track directly. On
 to `session.extensions` to receive `speech_to_speech.interruption.pending`
 (`audio_start_ms`) and `speech_to_speech.interruption.resolved` (`interrupted`,
 `transcript`) and pause/resume locally (while the server freezes its playback
-estimate for history truncation). WebSocket clients that do not opt in keep
-playing until an interruption is committed. The demo client in `demo/` opts in
-and replays from the last word gap.
+estimate for history truncation). For WebSocket clients that do not opt in,
+the option has no effect: they cannot pause, so speech cancels the reply at
+once, as without it. The demo client in `demo/` opts in and replays from the
+last word gap.
 
 Speech that reopens the user's own unanswered turn still cancels the stale
 reply immediately. A tool follow-up `response.create` during a held turn goes

@@ -491,7 +491,7 @@ async def _dispatch_client_event(
         if _reply_audible(st) or st.response_pending:
             # output_audio_buffer.clear drops buffered audio without cancelling
             # an active reply; keep the pause if a hold is still undecided.
-            if st.pending_interruption is not None and _should_pause(transport, st):
+            if st.pending_interruption is not None and _can_pause(transport, st):
                 transport.set_paused(True)
         else:
             await _release_interruption(unit, transport, session_id, "output audio cleared")
@@ -640,11 +640,11 @@ async def _deliver_text_event(
 # ---------------------------------------------------------------------------
 
 
-def _should_pause(transport: SessionTransport, st: Any) -> bool:
-    """Whether playback pauses while a possible interruption is undecided.
+def _can_pause(transport: SessionTransport, st: Any) -> bool:
+    """Whether playback can pause while a possible interruption is undecided.
 
-    WebRTC pauses server-side; WebSocket clients pause when opted in to the
-    interruption events and otherwise keep playing until committed.
+    WebRTC pauses server-side; a WebSocket client owns its player and pauses
+    only when it opted in to the interruption events.
     """
     return transport.kind != "websocket" or st.runtime_config.interruption_events_enabled
 
@@ -675,6 +675,10 @@ def _holds_interruption(unit: PipelineUnit, transport: SessionTransport, st: Any
         # speculative reply is stale whatever the new words are.
         return False
     if not (event.interrupt_response and cfg.interrupt_response_enabled):
+        return False
+    if not _can_pause(transport, st):
+        # A client that cannot pause would keep talking over a real
+        # interruption until its transcript arrives: barge in at once.
         return False
     if not (_reply_audible(st) or st.response_pending or transport.has_unplayed_audio()):
         # The assistant is silent: there is no speech to protect.
@@ -865,14 +869,11 @@ async def _gate_interruption(
     assert config is not None
     announced = st.runtime_config.interruption_events_enabled
     st.pending_interruption = PendingInterruption.begin(event, config, announced=announced)
-    pauses = _should_pause(transport, st)
-    if pauses:
-        transport.set_paused(True)
+    transport.set_paused(True)
     logger.info(
-        "Pipeline %d: speech during response held until it has words (turn=%s, paused=%s)",
+        "Pipeline %d: speech during response held until it has words (turn=%s)",
         unit.index,
         event.turn_id,
-        pauses,
     )
     if announced:
         await transport.send_events(

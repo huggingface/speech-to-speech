@@ -142,8 +142,8 @@ class ModuleArguments(Wav2Vec2STVHandlerArguments):
             "help": "Realtime server default for turn_detection.false_interruption, for sessions that do not set "
             "it. Stops a cough, room noise or a backchannel ('uh-huh', 'yeah') from cancelling the assistant's "
             "reply: playback pauses on speech start and resumes if the transcript has no real words. Applies "
-            "directly on WebRTC; WebSocket clients pause when they opt in to speech_to_speech.interruption "
-            "events, and otherwise keep playing until committed."
+            "directly on WebRTC, and on WebSocket clients that opt in to speech_to_speech.interruption events "
+            "to pause their player; other WebSocket clients keep the immediate barge-in."
         },
     )
     enable_llm_proxy: bool = field(

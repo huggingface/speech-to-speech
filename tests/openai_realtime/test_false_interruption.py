@@ -238,11 +238,11 @@ class _Call:
         self.received: list[dict] = []
         self.audio_ms = 0
 
-    def configure(self, false_interruption=True, *, extensions=None, interrupt_response=True):
+    def configure(
+        self, false_interruption=True, *, extensions=("speech_to_speech.interruption",), interrupt_response=True
+    ):
         td = {"type": "server_vad", "interrupt_response": interrupt_response, "false_interruption": false_interruption}
-        session = {"type": "realtime", "audio": {"input": {"turn_detection": td}}}
-        if extensions is not None:
-            session["extensions"] = extensions
+        session = {"type": "realtime", "audio": {"input": {"turn_detection": td}}, "extensions": list(extensions)}
         self.ws.send_json({"type": "session.update", "session": session})
         self.receive_until("session.updated")
 
@@ -479,7 +479,7 @@ def test_reply_ending_and_out_of_band_rules(call):
     assert (req.turn_id, req.turn_revision) == answer and call.user_messages()[-1] == "Yeah."
 
 
-def test_silent_and_disabled_and_reopened_unanswered_turn_do_not_hold(call):
+def test_silent_disabled_unpausable_and_reopened_unanswered_turn_do_not_hold(call):
     call.configure()
     t1 = call.speech(provisional=True)
     call.receive_until("input_audio_buffer.speech_started")
@@ -500,6 +500,18 @@ def test_silent_and_disabled_and_reopened_unanswered_turn_do_not_hold(call):
     call.speech()
     events = call.receive_until("input_audio_buffer.speech_started")
     assert any(e["type"] == "response.done" and e["response"]["status"] == "cancelled" for e in events)
+
+    # Option on, but a WebSocket client that did not opt in to the events cannot
+    # pause its player: it keeps the immediate barge-in instead of talking over the user.
+    call.configure(True, extensions=[])
+    _coach_is_reading(call)
+    gen = call.unit.cancel_scope.generation
+    unpausable = call.speech(provisional=True)
+    _wait_for(lambda: call.unit.cancel_scope.generation == gen + 1)
+    events = call.receive_until("input_audio_buffer.speech_started")
+    assert any(e["type"] == "response.done" and e["response"]["status"] == "cancelled" for e in events)
+    assert not any(e["type"].startswith("speech_to_speech.interruption") for e in events)
+    assert _pending(call) is None and not call.tracker.is_provisional(unpausable[0])
 
 
 def test_timeout_failed_transcription_and_pause_events(call, monkeypatch):
