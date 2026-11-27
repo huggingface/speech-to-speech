@@ -29,6 +29,9 @@ from speech_to_speech.utils.utils import _generate_id
 logger = logging.getLogger(__name__)
 
 _POSITIONAL_RE = re.compile(r"^__arg_\d+__$")
+# JSON spellings of Python's constants. Models used to JSON tool calls often
+# write them inside a Python-style call.
+_JSON_CONSTANTS = {"true": True, "false": False, "null": None}
 _LENIENT_CALL_RE = re.compile(
     r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*"
     r"\((?:[^()\"']+|\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*')*\)"
@@ -140,7 +143,7 @@ def _literal_from_ast(node: ast.AST) -> Any:
         return node.value
 
     if isinstance(node, ast.Name):
-        return node.id
+        return _JSON_CONSTANTS.get(node.id, node.id)
 
     if isinstance(node, ast.List):
         return [_literal_from_ast(elt) for elt in node.elts]

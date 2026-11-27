@@ -52,6 +52,15 @@ class TestParseFunctionCall:
         assert results[0].parameters["from_coord"] == [0.581, 0.898]
         assert results[0].parameters["to_coord"] == [0.601, 0.518]
 
+    def test_json_literals_parse_like_python_constants(self):
+        results = parse_function_call("set_alarm(enabled=true, snooze=false, label=null, tone=chime)")
+        assert results[0].parameters == {"enabled": True, "snooze": False, "label": None, "tone": "chime"}
+
+    def test_json_boolean_reaches_tool_arguments_as_boolean(self):
+        tool = _make_tool("set_alarm", {"enabled": {"type": "boolean"}}, required=["enabled"])
+        call = parse_function_call("set_alarm(enabled=true)")[0]
+        assert json.loads(call.to_realtime_function_tool_call([tool]).arguments) == {"enabled": True}
+
 
 # ---------------------------------------------------------------------------
 # parse_function_call – multiple positional arguments
