@@ -63,7 +63,7 @@ const S = {
   /** @type {RealtimeVoice | null} */ fillersFor: null,
   /** Grader tool calls not yet answered. */
   toolsPending: 0,
-  /** The next question's own turn, asked once the verdict reply is written. @type {{ text: string, run: number, replyId: string } | null} */
+  /** The next question's own turn, asked once the verdict reply is written. @type {{ text: string, question: string, run: number, replyId: string } | null} */
   pendingAsk: null,
   /** The server lost the quiz (it restarted): going back to the lobby. */
   expiring: false,
@@ -333,6 +333,18 @@ function setPhase(phase) {
   for (const v of ["lobby", "research", "quiz", "results"]) $(`#view-${v}`).hidden = v !== phase;
   $("#hud").hidden = phase !== "quiz" && phase !== "results";
   $("#panel").scrollTop = 0;
+}
+
+const ASK_STOPWORDS = new Set("a an the of to in on and or is are was were what why how when where which who does do did it its for with that this as be by from".split(" "));
+
+/**
+ * Whether a coach line already asks this question: most of its content words are in it.
+ * @param {string} spoken @param {string} question
+ */
+function asksQuestion(spoken, question) {
+  const said = new Set(wordsOf(spoken));
+  const words = wordsOf(question).filter((w) => !ASK_STOPWORDS.has(w));
+  return words.length > 0 && words.filter((w) => said.has(w)).length / words.length >= 0.6;
 }
 
 /** End the voice call: close the connection and the microphone. The next quiz dials again. */
@@ -713,8 +725,11 @@ function wireVoice(voice) {
     }
     const ask = S.pendingAsk;
     if (ask && ask.replyId === id) {
-      if (ask.run !== S.runId || S.phase !== "quiz") S.pendingAsk = null;
-      else if (/** @type {any} */ (e).detail.status === "completed" && spoken) {
+      if (ask.run !== S.runId || S.phase !== "quiz" || asksQuestion(spoken || "", ask.question)) {
+        // Gone, or the coach already asked it itself (e.g. after the verdict
+        // was cut off and it answered what it heard): don't ask it twice.
+        S.pendingAsk = null;
+      } else if (/** @type {any} */ (e).detail.status === "completed" && spoken) {
         // The verdict is written (it is still being spoken): ask for the next
         // question now, so it is ready to play after the pause between turns.
         S.pendingAsk = null;
@@ -1317,7 +1332,7 @@ function runTool(call) {
       }
       handleOutcome(out);
       voice.configure({ instructions: out.voice.instructions });
-      S.pendingAsk = out.voice.ask ? { text: out.voice.ask, run: S.runId, replyId: "" } : null;
+      S.pendingAsk = out.voice.ask ? { text: out.voice.ask, question: out.question?.question || "", run: S.runId, replyId: "" } : null;
       voice.sendToolOutput(call.callId, out.voice.output);
     })
     .catch((err) => {
