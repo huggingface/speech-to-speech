@@ -738,6 +738,26 @@ def test_default_pauses_a_client_that_can_pause(call):
     assert call.receive_until("speech_to_speech.interruption.resolved")[-1]["interrupted"] is False
 
 
+def test_interruption_after_a_pause_cuts_history_where_the_pause_began(call):
+    """Audio sent while the client held playback was never heard: history ends at the pause."""
+    call.configure({"playback": "pause"}, extensions=["speech_to_speech.interruption"])
+    _, key = _coach_is_reading(call)  # 2 s of the reply, sent at once
+    time.sleep(0.4)  # the client has played about 0.4 s of it
+
+    real = call.speech()
+    call.receive_until("speech_to_speech.interruption.pending")
+    call.audio(key, 1.0)  # more of the reply arrives while the client is paused
+    time.sleep(0.5)  # and the decision takes a while
+    call.stop(real)
+    call.final(real, "Stop.")
+    call.receive_until("input_audio_buffer.speech_started")
+
+    cuts = call.service._state(call.conn_id).assistant_audio_cuts
+    played_s = list(cuts.values())[-1] / RATE
+    # Neither the 0.5 s paused nor the 1 s sent meanwhile counts as heard.
+    assert 0.35 <= played_s < 0.75
+
+
 def test_tool_follow_up_during_a_cough_is_answered(call):
     """The coach called a tool and the client answers it while the user coughs."""
     from openai.types.responses import ResponseFunctionToolCall
