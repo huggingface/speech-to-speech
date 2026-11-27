@@ -1,7 +1,7 @@
 // @ts-check
 /** Tiny canvas confetti burst for streaks and good results. */
 
-const COLORS = ["#ffb547", "#ff7a8a", "#8b7bff", "#36e2a1", "#5cc8ff", "#fff1a8"];
+const COLORS = ["#1d4ed8", "#0d7a53", "#e07a16", "#c4283e", "#38bdf8", "#f59e0b"];
 
 /** @param {{ count?: number }} [opts] */
 export function confetti(opts = {}) {

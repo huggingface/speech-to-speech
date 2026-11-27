@@ -132,7 +132,9 @@ async function boot() {
 function setupUi() {
   $("#coach-pick").querySelectorAll("button").forEach((b) => {
     const key = /** @type {HTMLElement} */ (b).dataset.coach || "max";
-    b.classList.toggle("on", key === S.coachKey);
+    const active = key === S.coachKey;
+    b.classList.toggle("on", active);
+    b.setAttribute("aria-selected", String(active));
     b.addEventListener("click", () => {
       if (key === S.coachKey) return;
       store.set("coach", key);
@@ -141,6 +143,9 @@ function setupUi() {
       location.href = url.toString();
     });
   });
+  const onScroll = () => document.body.classList.toggle("scrolled", window.scrollY > 12);
+  window.addEventListener("scroll", onScroll, { passive: true });
+  onScroll();
   $("#btn-signin").hidden = !S.cfg.oauth || !!S.cfg.user;
   if (S.cfg.loginUrl) /** @type {HTMLAnchorElement} */ ($("#btn-signin")).href = S.cfg.loginUrl;
   const nameInput = /** @type {HTMLInputElement} */ ($("#player-name"));
@@ -155,7 +160,7 @@ function setupUi() {
     }`;
     account.hidden = false;
   } else if (S.cfg.loginRequired) {
-    $("#name-field").innerHTML = `<a class="signin-cta" href="${escapeHtml(S.cfg.loginUrl || "oauth/huggingface/login")}">🤗 Sign in with Hugging Face to play</a>`;
+    $("#name-field").innerHTML = `<a class="signin-cta" href="${escapeHtml(S.cfg.loginUrl || "oauth/huggingface/login")}">Sign in with Hugging Face</a>`;
   } else {
     nameInput.value = store.get("name");
     nameInput.addEventListener("change", () => store.set("name", nameInput.value.trim()));
@@ -165,7 +170,10 @@ function setupUi() {
     const b = /** @type {HTMLElement} */ (e.target).closest("button");
     if (!b) return;
     S.difficulty = b.dataset.v || "pro";
-    $("#difficulty").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+    $("#difficulty").querySelectorAll("button").forEach((x) => {
+      x.classList.toggle("on", x === b);
+      x.setAttribute("aria-checked", String(x === b));
+    });
   });
 
   $("#topic-form").addEventListener("submit", (e) => {
@@ -1395,7 +1403,7 @@ function hideVerdict() {
   $("#verdict").classList.remove("previous");
 }
 
-const VERDICT_LABEL = { correct: "✓ Correct", partial: "◐ Partly there", incorrect: "✗ Not quite", skipped: "⏭ Skipped" };
+const VERDICT_LABEL = { correct: "Correct", partial: "Partly there", incorrect: "Not quite", skipped: "Skipped" };
 
 /**
  * Points still on the table for the current question (tries and hints cost).
@@ -1411,7 +1419,7 @@ function updateStakes(st) {
   pill.textContent = `Try ${st.attempt} of ${st.max_attempts}`;
 }
 
-const CLUE_LABEL = { partial: "◐ Almost there", incorrect: "✗ Not yet", stuck: "💡 Let's work it out" };
+const CLUE_LABEL = { partial: "Almost there", incorrect: "Not yet", stuck: "Let's work it out" };
 
 /** @param {any} out */
 function showClue(out) {
@@ -1420,8 +1428,8 @@ function showClue(out) {
   v.classList.remove("previous");
   v.dataset.v = "clue";
   $("#verdict-chip").textContent = out.retry
-    ? CLUE_LABEL[/** @type {keyof typeof CLUE_LABEL} */ (out.verdict)] || "💡 Keep going"
-    : "💡 Hint";
+    ? CLUE_LABEL[/** @type {keyof typeof CLUE_LABEL} */ (out.verdict)] || "Keep going"
+    : "Hint";
   $("#verdict-points").textContent = !out.retry ? "" : out.attempts_left === 0 ? "Last try" : `${out.attempts_left + 1} tries left`;
   $("#verdict-clue").hidden = false;
   $("#verdict-clue").textContent = out.clue || out.say;
@@ -1561,7 +1569,7 @@ async function showResults(summary) {
 function renderReport(c) {
   const el = $("#r-report");
   const list = (/** @type {string[]} */ items) => `<ul>${items.map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul>`;
-  el.innerHTML = `<h4>📝 ${escapeHtml(c.headline || "Coaching notes")}</h4>${
+  el.innerHTML = `<h4>${escapeHtml(c.headline || "Coaching notes")}</h4>${
     c.strengths?.length ? `<div class="label">You know</div>${list(c.strengths)}` : ""
   }${c.review?.length ? `<div class="label">Review next</div>${list(c.review)}` : ""}`;
 }

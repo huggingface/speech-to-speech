@@ -147,7 +147,7 @@ export class SplatAvatar extends EventTarget {
     const obs = transparentCanvas(this.container);
     try {
       this.renderer = await GaussianSplatRenderer.create(/** @type {HTMLDivElement} */ (this.container), this.coach.asset, {
-        backgroundColor: "0x120e28",
+        backgroundColor: "0xc2ccd6",
         downloadProgress: (/** @type {number} */ p) => report(p * 90),
         loadProgress: (/** @type {number} */ p) => report(90 + p * 10),
         getChatState: () => this.chatState(),

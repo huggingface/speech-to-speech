@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Viva · voice quiz coach</title>
+  <title>Viva · Voice quiz coach</title>
   <meta name="description" content="Pick a topic. Your coach researches it, quizzes you out loud, grades your answers and helps you find what you missed.">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎓</text></svg>">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%231d4ed8'/><path d='M9 9.5L16 23L23 9.5' stroke='%23ffffff' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round' fill='none'/></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="static/style.css">
   <script type="importmap">
   {
@@ -27,21 +27,59 @@
 <body data-phase="lobby">
   <div id="stage" aria-hidden="true">
     <div id="avatar"></div>
-    <div id="avatar-loading"><div class="ring"></div><span>Waking <span class="coach-name">your coach</span> up… <b id="avatar-pct">0%</b></span></div>
+    <div id="avatar-loading">
+      <div class="ring"></div>
+      <span>Waking <span class="coach-name">your coach</span> up… <b id="avatar-pct">0%</b></span>
+    </div>
   </div>
 
   <header id="topbar">
-    <div class="brand"><span class="brand-mark">V</span><span class="brand-name">Viva</span><span class="brand-tag">voice quiz coach</span></div>
-    <div id="hud" hidden>
-      <div class="hud-topic" id="hud-topic"></div>
-      <div class="hud-score"><span class="hud-label">Score</span><span id="hud-score">0</span></div>
-      <div class="hud-streak" id="hud-streak" data-level="0"><span class="flame">🔥</span><span id="hud-streak-n">0</span><span class="mult" id="hud-mult">×1.0</span></div>
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 28 28" width="28" height="28" fill="none">
+          <rect width="28" height="28" rx="7" fill="currentColor"/>
+          <path d="M8.2 9L14 19.6L19.8 9" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="14" cy="9.2" r="1.5" fill="#93c5fd"/>
+        </svg>
+      </span>
+      <span class="brand-name">Viva</span>
+      <span class="brand-tag">Voice quiz coach</span>
     </div>
+
+    <div id="hud" hidden>
+      <span class="hud-topic" id="hud-topic"></span>
+      <span class="hud-sep hud-sep-topic" aria-hidden="true"></span>
+      <span class="hud-score"><span class="hud-label">Score</span><span id="hud-score">0</span></span>
+      <span class="hud-sep" aria-hidden="true"></span>
+      <span class="hud-streak" id="hud-streak" data-level="0">
+        <svg class="flame" viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+          <path fill="currentColor" d="M8.6 1.5c.3 2.1-.7 3.5-1.7 4.6-.9 1-1.6 1.9-1.6 3.2 0 1.6 1.2 2.9 2.7 2.9 1.6 0 2.7-1.2 2.7-2.8 0-1.1-.5-2-1.1-2.8.1 1.2-.5 1.8-1.2 1.8-.6 0-1-.4-1-1 0-.9.6-1.9 1.2-3.2.4-.8.5-1.7 0-2.7Zm-.6 13c-2.7 0-4.8-2-4.8-4.8 0-2.1 1.2-3.6 2.3-4.8C6.6 3.7 7.4 2.5 7.2 1c2.4 1.1 3.7 3 3.7 5.2 0 .4-.1.8-.2 1.1.9.9 1.5 2.1 1.5 3.4 0 2.3-1.8 3.8-4.2 3.8Z"/>
+        </svg>
+        <span id="hud-streak-n">0</span>
+        <span class="mult" id="hud-mult">×1.0</span>
+      </span>
+    </div>
+
     <div class="top-actions">
-      <a class="btn small signin" id="btn-signin" href="oauth/huggingface/login" hidden>🤗 Sign in</a>
+      <a class="btn small signin" id="btn-signin" href="oauth/huggingface/login" hidden>Sign in</a>
       <div class="account" id="account" hidden></div>
-      <button class="icon-btn" id="btn-board" title="Leaderboard" aria-label="Leaderboard">🏆</button>
-      <button class="icon-btn" id="btn-settings" title="Settings" aria-label="Settings">⚙︎</button>
+      <button class="icon-btn" id="btn-board" type="button" title="Leaderboard" aria-label="Leaderboard">
+        <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M6 3.5h8v4.2a4 4 0 0 1-8 0V3.5Z"/>
+          <path d="M6 5H3.5v1.3A2.7 2.7 0 0 0 6 9"/>
+          <path d="M14 5h2.5v1.3A2.7 2.7 0 0 1 14 9"/>
+          <path d="M10 11.7V15.5"/>
+          <path d="M6.8 16.5h6.4"/>
+        </svg>
+      </button>
+      <button class="icon-btn" id="btn-settings" type="button" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3.5 6h9m3 0h1M3.5 10h2m3 0h8M3.5 14h7m3 0h3"/>
+          <circle cx="14" cy="6" r="1.5"/>
+          <circle cx="7" cy="10" r="1.5"/>
+          <circle cx="12" cy="14" r="1.5"/>
+        </svg>
+      </button>
     </div>
   </header>
 
@@ -52,38 +90,49 @@
   <main id="panel">
     <!-- Lobby -->
     <section class="view" id="view-lobby">
-      <h1 class="title">Get quizzed <em>out loud.</em></h1>
-      <p class="lead">Pick any topic, paper or codebase. <span class="coach-name">Your coach</span> reads up on it, asks you questions out loud and, when you get stuck, gives you clues until you find the answer yourself.</p>
-      <div class="coach-pick" id="coach-pick">
-        <span class="coach-pick-label">Your coach</span>
-        <button type="button" data-coach="max">Max</button>
-        <button type="button" data-coach="ada">Ada</button>
-        <button type="button" data-coach="reachy">Reachy Mini</button>
-        <button type="button" data-coach="reachy2">Reachy 2</button>
-        <button type="button" data-coach="duck">Microduck</button>
+      <h1 class="title">Get quizzed out loud.</h1>
+      <p class="lead">Pick any topic, paper, or GitHub repo. <span class="coach-name">Your coach</span> reads up, asks questions aloud, and gives clues when you get stuck.</p>
+
+      <div class="control-block">
+        <div class="control-head">
+          <span class="control-label">Coach</span>
+        </div>
+        <div class="coach-pick" id="coach-pick" role="tablist" aria-label="Choose your coach">
+          <button type="button" role="tab" data-coach="max">Max</button>
+          <button type="button" role="tab" data-coach="ada">Ada</button>
+          <button type="button" role="tab" data-coach="reachy">Reachy Mini</button>
+          <button type="button" role="tab" data-coach="reachy2">Reachy 2</button>
+          <button type="button" role="tab" data-coach="duck">Microduck</button>
+        </div>
       </div>
 
       <form id="topic-form" class="topic-form" autocomplete="off">
-        <input id="topic-input" name="topic" maxlength="200" placeholder="A topic, a paper or a GitHub link…" aria-label="Quiz topic">
+        <input id="topic-input" name="topic" maxlength="200" placeholder="A topic, paper, or GitHub link…" aria-label="Quiz topic">
         <button type="submit" class="btn primary" id="topic-go">Quiz me</button>
       </form>
-      <div class="row-between">
+
+      <div class="row-between lobby-options">
         <div class="seg" id="difficulty" role="radiogroup" aria-label="Difficulty">
-          <button type="button" data-v="rookie" role="radio">Rookie</button>
-          <button type="button" data-v="pro" role="radio" class="on">Pro</button>
-          <button type="button" data-v="expert" role="radio">Expert</button>
+          <button type="button" data-v="rookie" role="radio" aria-checked="false">Rookie</button>
+          <button type="button" data-v="pro" role="radio" aria-checked="true" class="on">Pro</button>
+          <button type="button" data-v="expert" role="radio" aria-checked="false">Expert</button>
         </div>
         <label class="name-field" id="name-field">
-          <span>Leaderboard name</span>
+          <span>Name</span>
           <input id="player-name" maxlength="24" placeholder="Your name">
         </label>
       </div>
 
-      <h2 class="section">Featured topics</h2>
-      <div class="cards" id="featured"></div>
+      <div class="panel-section">
+        <h2 class="section">Featured topics</h2>
+        <div class="cards" id="featured"></div>
+      </div>
 
-      <div class="lobby-board">
-        <div class="row-between"><h2 class="section">Top players this week</h2><button class="link" id="lobby-board-more">Full leaderboard →</button></div>
+      <div class="panel-section lobby-board">
+        <div class="row-between section-row">
+          <h2 class="section">Top players this week</h2>
+          <button class="link" type="button" id="lobby-board-more">Full leaderboard</button>
+        </div>
         <ol class="board compact" id="lobby-board"></ol>
       </div>
     </section>
@@ -91,33 +140,43 @@
     <!-- Research -->
     <section class="view" id="view-research" hidden>
       <div class="research-head">
-        <div class="research-emoji" id="research-emoji">📚</div>
-        <div>
-          <div class="eyebrow">Preparing your quiz</div>
+        <div class="research-emoji" id="research-emoji" aria-hidden="true">📚</div>
+        <div class="research-meta">
           <h2 class="research-title" id="research-title"></h2>
+          <p class="view-sub">Preparing your quiz</p>
         </div>
       </div>
+
       <ol class="steps" id="research-steps">
         <li data-stage="plan">Planning what to read</li>
         <li data-stage="search">Searching sources</li>
         <li data-stage="read">Reading</li>
         <li data-stage="write">Writing your questions</li>
       </ol>
+
       <div class="sources" id="research-sources"></div>
-      <div class="voice-line" id="voice-line"><span class="dot"></span><span id="voice-status">Connecting voice…</span></div>
-      <p class="muted small" id="research-tip">Tip: answer in your own words. Say “hint”, “repeat” or “skip” anytime.</p>
-      <button class="btn ghost" id="research-cancel">Cancel</button>
+
+      <div class="voice-line" id="voice-line"><span class="dot" aria-hidden="true"></span><span id="voice-status">Connecting voice…</span></div>
+      <p class="muted small research-tip" id="research-tip">Answer in your own words. Say “hint”, “repeat”, or “skip” anytime.</p>
+      <div class="research-actions">
+        <button class="btn ghost" type="button" id="research-cancel">Cancel</button>
+      </div>
     </section>
 
     <!-- Quiz -->
     <section class="view" id="view-quiz" hidden>
       <div class="q-progress">
         <span id="q-count">Question 1 of 8</span>
-        <div class="dots" id="q-dots"></div>
+        <div class="dots" id="q-dots" aria-hidden="true"></div>
       </div>
+
       <article class="q-card" id="q-card">
-        <div class="q-meta"><span class="pill" id="q-level">Medium</span><span class="pill gold" id="q-points">150 pts</span><span class="pill" id="q-attempt" hidden>Try 2 of 3</span></div>
-        <p class="q-text" id="q-text"></p>
+        <div class="q-meta">
+          <span class="pill" id="q-level">Medium</span>
+          <span class="pill gold" id="q-points">150 pts</span>
+          <span class="pill" id="q-attempt" hidden>Try 2 of 3</span>
+        </div>
+        <h2 class="q-text" id="q-text"></h2>
       </article>
 
       <div class="answer-box" id="answer-box">
@@ -126,47 +185,59 @@
       </div>
 
       <div class="verdict" id="verdict" hidden>
-        <div class="verdict-head"><span class="verdict-chip" id="verdict-chip"></span><span class="verdict-points" id="verdict-points"></span></div>
+        <div class="verdict-head">
+          <span class="verdict-chip" id="verdict-chip"></span>
+          <span class="verdict-points" id="verdict-points"></span>
+        </div>
         <p class="clue" id="verdict-clue" hidden></p>
         <div class="reveal" id="reveal" hidden>
-          <div class="reveal-answer" id="reveal-answer"></div>
+          <p class="reveal-answer" id="reveal-answer"></p>
           <ul class="keypoints" id="reveal-points"></ul>
         </div>
       </div>
 
       <div class="mic-row">
-        <button class="mic" id="mic" data-state="idle" aria-label="Microphone status">
+        <button class="mic" id="mic" type="button" data-state="idle" aria-label="Microphone status">
           <span class="mic-ring" id="mic-ring"></span>
-          <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path fill="currentColor" d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-2.08A7 7 0 0 0 19 12h-2Z"/></svg>
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-2.08A7 7 0 0 0 19 12h-2Z"/></svg>
         </button>
-        <div class="mic-status"><b id="mic-title">Getting ready</b><span id="mic-sub">The first question is coming</span></div>
+        <div class="mic-status">
+          <b id="mic-title">Getting ready</b>
+          <span id="mic-sub">The first question is coming</span>
+        </div>
       </div>
 
       <form class="type-form" id="type-form" autocomplete="off">
-        <input id="type-input" maxlength="600" placeholder="…or type your answer" aria-label="Type your answer">
-        <button class="btn small" type="submit">Send</button>
+        <input id="type-input" maxlength="600" placeholder="Or type your answer…" aria-label="Type your answer">
+        <button class="btn small primary" type="submit">Send</button>
       </form>
 
       <div class="q-actions">
-        <button class="btn small ghost" data-intent="hint" id="btn-hint">💡 Hint <span class="muted">−20%</span></button>
-        <button class="btn small ghost" data-intent="repeat">🔁 Repeat</button>
-        <button class="btn small ghost" data-intent="skip">⏭ Skip</button>
-        <button class="btn small ghost danger" data-intent="stop">End quiz</button>
+        <button class="action-link" type="button" data-intent="hint" id="btn-hint">Hint <span class="muted">(-20%)</span></button>
+        <button class="action-link" type="button" data-intent="repeat">Repeat</button>
+        <button class="action-link" type="button" data-intent="skip">Skip</button>
+        <button class="action-link danger" type="button" data-intent="stop">End quiz</button>
       </div>
     </section>
 
     <!-- Results -->
     <section class="view" id="view-results" hidden>
       <div class="result-hero">
-        <div class="rank-icon" id="r-rank-icon">🥇</div>
-        <div class="eyebrow" id="r-topic"></div>
-        <h2 class="rank-title" id="r-rank">Expert</h2>
-        <div class="big-score"><span id="r-score">0</span><small>pts</small></div>
-        <div class="stats">
-          <div><b id="r-correct">0/0</b><span>correct</span></div>
-          <div><b id="r-streak">0</b><span>best streak</span></div>
-          <div><b id="r-time">0:00</b><span>time</span></div>
+        <div class="result-top">
+          <span class="rank-icon" id="r-rank-icon" aria-hidden="true">🥇</span>
+          <div class="result-heading">
+            <h2 class="rank-title" id="r-rank">Expert</h2>
+            <p class="result-topic" id="r-topic"></p>
+          </div>
+          <div class="big-score"><span id="r-score">0</span><span class="score-unit">pts</span></div>
         </div>
+
+        <div class="stats">
+          <div><b id="r-correct">0/0</b><span>Correct</span></div>
+          <div><b id="r-streak">0</b><span>Best streak</span></div>
+          <div><b id="r-time">0:00</b><span>Time</span></div>
+        </div>
+
         <div class="badges" id="r-badges"></div>
         <div class="placement" id="r-placement" hidden></div>
       </div>
@@ -176,27 +247,35 @@
       </div>
 
       <div class="result-actions">
-        <button class="btn primary" id="btn-drill" hidden>🎯 Drill my mistakes</button>
-        <button class="btn" id="btn-again">Play again</button>
-        <button class="btn ghost" id="btn-new">New topic</button>
+        <button class="btn primary" type="button" id="btn-drill" hidden>Drill my mistakes</button>
+        <button class="action-link again-btn" type="button" id="btn-again">Play again</button>
+        <button class="action-link" type="button" id="btn-new">New topic</button>
       </div>
-      <p class="muted small call-ended" id="r-call" hidden>📞 Call ended. Play again or pick a new topic to start another.</p>
+      <p class="muted small call-ended" id="r-call" hidden>Call ended. Play again or pick a new topic to start another.</p>
 
-      <h3 class="section">Review</h3>
-      <ol class="review" id="r-review"></ol>
+      <div class="panel-section">
+        <h2 class="section">Review</h2>
+        <ol class="review" id="r-review"></ol>
+      </div>
 
-      <h3 class="section">Leaderboard · <span id="r-board-topic"></span></h3>
-      <ol class="board" id="r-board"></ol>
+      <div class="panel-section">
+        <h2 class="section">Leaderboard · <span id="r-board-topic"></span></h2>
+        <ol class="board" id="r-board"></ol>
+      </div>
     </section>
   </main>
 
-  <!-- Leaderboard drawer -->
+  <!-- Leaderboard modal -->
   <dialog id="board-dialog" class="sheet">
     <div class="sheet-head">
-      <h2>🏆 Leaderboard</h2>
-      <button class="icon-btn" data-close aria-label="Close">✕</button>
+      <h2>Leaderboard</h2>
+      <button class="icon-btn subtle" type="button" data-close aria-label="Close">
+        <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+          <path d="M5 5l10 10M15 5 5 15"/>
+        </svg>
+      </button>
     </div>
-    <div class="row-between">
+    <div class="row-between dialog-controls">
       <div class="seg small" id="board-period">
         <button type="button" data-v="week" class="on">This week</button>
         <button type="button" data-v="all">All time</button>
@@ -206,22 +285,29 @@
     <ol class="board" id="board-list"></ol>
   </dialog>
 
-  <!-- Settings -->
+  <!-- Settings modal -->
   <dialog id="settings-dialog" class="sheet">
     <div class="sheet-head">
       <h2>Settings</h2>
-      <button class="icon-btn" data-close aria-label="Close">✕</button>
+      <button class="icon-btn subtle" type="button" data-close aria-label="Close">
+        <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+          <path d="M5 5l10 10M15 5 5 15"/>
+        </svg>
+      </button>
     </div>
     <label class="switch-row">
       <input type="checkbox" id="opt-bargein">
-      <span><b>Let me interrupt the coach</b><small>Talk over the coach to cut in, like on a call. On loud speakers without echo cancellation, turn it off so the coach doesn't hear itself.</small></span>
+      <span>
+        <b>Let me interrupt the coach</b>
+        <small>Talk over the coach to cut in, like on a call. On loud speakers without echo cancellation, turn it off so the coach does not hear itself.</small>
+      </span>
     </label>
     <label class="field" id="server-field" hidden>
       <span>Speech-to-speech server</span>
       <input id="opt-server" placeholder="ws://localhost:8765/v1/realtime">
       <small>Run <code>speech-to-speech serve</code> locally and paste its address.</small>
     </label>
-    <div class="muted small" id="lipsync-info"></div>
+    <div class="muted small settings-foot" id="lipsync-info"></div>
   </dialog>
 
   <div id="toast" class="toast" hidden></div>

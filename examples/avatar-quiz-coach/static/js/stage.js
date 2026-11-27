@@ -38,16 +38,16 @@ export class Stage {
 
     this.camera = new THREE.PerspectiveCamera(this.opt.fov, 1, 0.1, 60);
 
-    // Key light warm from the upper left, a lilac rim from behind to lift the
-    // silhouette off the dark backdrop, and a soft sky/ground fill.
-    const hemi = new THREE.HemisphereLight(0xfff4e8, 0x3a2f6a, 0.75);
-    const key = new THREE.DirectionalLight(0xfff0dc, 2.1);
+    // Key light warm from the upper left, crisp studio rim from behind to
+    // separate the silhouette cleanly from the daylight stone backdrop.
+    const hemi = new THREE.HemisphereLight(0xf6f9fc, 0x7c8a98, 0.95);
+    const key = new THREE.DirectionalLight(0xfff6ea, 1.9);
     key.position.set(-2.2, 3, 4);
-    const rim = new THREE.DirectionalLight(0xb9a8ff, 2.6);
+    const rim = new THREE.DirectionalLight(0xdce8f8, 1.6);
     rim.position.set(2.8, 2.2, -3);
-    const rim2 = new THREE.DirectionalLight(0xffc48a, 1.4);
+    const rim2 = new THREE.DirectionalLight(0xffe0bc, 0.9);
     rim2.position.set(-3, 0.5, -2.5);
-    const fill = new THREE.DirectionalLight(0xffe4cc, 0.5);
+    const fill = new THREE.DirectionalLight(0xeef3f8, 0.55);
     fill.position.set(2, -0.5, 3);
     this.scene.add(hemi, key, rim, rim2, fill);
     this.lights = { hemi, key, rim, rim2, fill };
