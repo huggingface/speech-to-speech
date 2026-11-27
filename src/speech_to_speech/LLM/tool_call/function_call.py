@@ -381,8 +381,7 @@ def parse_tool_call_block(block: str, function_tools: list[FunctionTool]) -> Lis
             value = value.removeprefix("\n").removesuffix("\n")
             # Prefer raw text when the schema accepts it: native string values
             # have no quotes or escaping to distinguish them from JSON literals.
-            parameter_validator = validator.evolve(schema=properties[key])
-            if parameter_validator.is_valid(value):
+            if next(validator.descend(value, properties[key]), None) is None:
                 arguments[key] = value
             else:
                 # Jinja stringifies scalar booleans/null as Python literals;

@@ -80,8 +80,12 @@ def test_history_stays_host_owned_and_next_turn_sees_it(adapter):
     assert any(m["role"] == "assistant" and "Ada" in str(m["content"]) for m in seen[1])
 
 
-def test_qwen_tools_reach_worker_and_calls_reach_client(adapter):
-    from openai.types.realtime import RealtimeSessionCreateRequest
+def test_qwen_tool_followup_reaches_worker_and_client(adapter):
+    from openai.types.realtime import (
+        RealtimeConversationItemFunctionCall,
+        RealtimeConversationItemFunctionCallOutput,
+        RealtimeSessionCreateRequest,
+    )
 
     module, worker = adapter
     config = RuntimeConfig(
@@ -91,6 +95,13 @@ def test_qwen_tools_reach_worker_and_calls_reach_client(adapter):
         )
     )
     config.chat.add_item(make_user_message("Check the weather."))
+    config.chat.add_item(
+        RealtimeConversationItemFunctionCall(type="function_call", name="check_weather", arguments="{}", call_id="w1")
+    )
+    config.chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(type="function_call_output", call_id="w1", output="Sunny")
+    )
+    config.chat.add_item(make_user_message("Has the weather changed?"))
     h = handler(module, CancelScope())
     h.tokenizer.chat_template = "<tool_call><function=example>"
 
@@ -98,6 +109,8 @@ def test_qwen_tools_reach_worker_and_calls_reach_client(adapter):
         system = messages[0]["content"]
         assert messages[0]["role"] == "system"
         assert "check_weather" in system and "Check the forecast." in system
+        assert any(m["role"] == "assistant" and m["content"] == "<code>check_weather()</code>" for m in messages)
+        assert any(m["role"] == "tool" and m["tool_call_id"] == "w1" and m["content"] == "Sunny" for m in messages)
         yield "<tool_call>\n<function=check_weather>\n</function>\n</tool_call>"
 
     worker.tokens = tokens

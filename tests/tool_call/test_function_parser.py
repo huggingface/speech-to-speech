@@ -459,12 +459,6 @@ class TestJsonToolCallBlocks:
 
 
 def test_qwen_native_calls_preserve_schema_types_and_raw_strings():
-    from speech_to_speech.LLM.tool_call.function_call import parse_tool_call_block
-
-    tool = _make_tool("get_weather", {})
-    (call,) = parse_tool_call_block("<tool_call>\n<function=get_weather>\n</function>\n</tool_call>", [tool])
-    assert json.loads(call.to_realtime_function_tool_call([tool]).arguments) == {}
-
     values = {
         "label": '  007 & "quoted"\nnext line  ',
         "count": 7,
@@ -491,7 +485,8 @@ def test_qwen_native_calls_preserve_schema_types_and_raw_strings():
         f"<parameter={key}>\n{json.dumps(value) if isinstance(value, (dict, list)) else str(value)}\n</parameter>\n"
         for key, value in values.items()
     )
-    (call,) = parse_tool_call_block(f"<tool_call><function=configure>\n{parameters}</function></tool_call>", [tool])
+    block = f"<tool_call><function=configure>\n{parameters}</function></tool_call>"
+    (call,) = function_call_module.parse_tool_call_block(block, [tool])
     assert json.loads(call.to_realtime_function_tool_call([tool]).arguments) == values
 
 
@@ -523,6 +518,7 @@ def test_qwen_native_calls_reject_invalid_or_undeclared_arguments(body):
         ({"type": ["integer", "null"]}, "null", None),
         ({"anyOf": [{"type": "integer"}, {"type": "null"}]}, "None", None),
         ({"allOf": [{"type": "array"}, {"minItems": 1}]}, "[1, null]", [1, None]),
+        ({"$id": "urn:tool:count", "$defs": {"count": {"type": "integer"}}, "$ref": "#/$defs/count"}, "7", 7),
         ({"enum": [False, True]}, "False", False),
         ({"type": "string"}, "False", "False"),
         ({"type": ["string", "integer"]}, "007", "007"),
