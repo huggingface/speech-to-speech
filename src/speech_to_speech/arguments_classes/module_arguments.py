@@ -143,10 +143,10 @@ class ModuleArguments(Wav2Vec2STVHandlerArguments):
             "help": "Realtime server default for turn_detection.false_interruption, for sessions that do not set "
             "it. Anything but 'off' stops a cough, room noise or a backchannel ('uh-huh', 'yeah') from cancelling "
             "the assistant's reply: speech during a reply interrupts only once its transcript has real words. "
-            "The value is what happens to the reply's audio meanwhile: 'continue' keeps playing, 'pause' "
-            "pauses and resumes, 'duck' plays it quieter ('pause' and 'duck' are applied by the server on "
-            "WebRTC and announced to WebSocket clients that opt in to speech_to_speech.interruption events). "
-            "Default is off.",
+            "The value is what happens to the reply's audio meanwhile: 'pause' stops it at once and resumes it "
+            "after a false interruption, 'continue' keeps playing, 'duck' plays it quieter. The server applies "
+            "'pause' and 'duck' on WebRTC; WebSocket clients apply them when they opt in to "
+            "speech_to_speech.interruption events, and otherwise keep playing. Default is off.",
         },
     )
     false_interruption_min_words: int = field(
@@ -156,11 +156,12 @@ class ModuleArguments(Wav2Vec2STVHandlerArguments):
             "during a reply interrupts it. Default is 1."
         },
     )
-    false_interruption_min_speech_ms: int = field(
-        default=1200,
+    false_interruption_min_speech_ms: Optional[int] = field(
+        default=None,
         metadata={
             "help": "With --false_interruption, active speech during a reply that interrupts it even before its "
-            "words are transcribed; 0 waits for words. Default is 1200."
+            "words are transcribed; 0 waits for words. Default: 1200 while the reply keeps playing, off while "
+            "it is paused."
         },
     )
     enable_llm_proxy: bool = field(

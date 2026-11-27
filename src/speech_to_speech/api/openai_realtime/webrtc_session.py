@@ -32,6 +32,7 @@ from aiortc.rtcrtpparameters import RTCRtpCodecParameters
 from aiortc.rtcrtpsender import RTCEncodedFrame
 from aiortc.rtp import AnyRtcpPacket, RtcpRrPacket, RtcpSrPacket
 
+from speech_to_speech.api.openai_realtime.false_interruption import RESUME_REWIND_MAX_MS, resume_rewind_samples
 from speech_to_speech.api.openai_realtime.service import PIPELINE_SAMPLE_RATE
 from speech_to_speech.api.openai_realtime.transports import PlaybackState, SessionTransport
 from speech_to_speech.pipeline.transcript_logging import log_exception, transcript_for_log
@@ -49,6 +50,7 @@ WEBRTC_FRAME_SAMPLES = int(WEBRTC_SAMPLE_RATE * AUDIO_PTIME)
 WEBRTC_DRAIN_FRAMES = 5
 # Volume of assistant audio while possible barge-in is checked with playback "duck" (about -12 dB).
 _DUCK_GAIN = 0.25
+_REWIND_HISTORY_BYTES = 2 * WEBRTC_SAMPLE_RATE * RESUME_REWIND_MAX_MS // 1000
 DATA_CHANNEL_LABEL = "oai-events"
 ICE_SERVERS_ENV = "SPEECH_TO_SPEECH_ICE_SERVERS"
 ICE_GATHERING_TIMEOUT_S = 5.0
@@ -131,9 +133,11 @@ class PipelineAudioTrack(MediaStreamTrack):
         self._generation = 0
         self._frame_generation = 0
         # Barge-in that is still undecided pauses or ducks playback. Paused
-        # audio stays buffered and plays on from the same sample.
+        # audio stays buffered; on resume, the end of what was played before
+        # the pause is replayed from the last gap between words.
         self._paused = False
         self._gain = 1.0
+        self._played = bytearray()
 
     def pause(self) -> None:
         self._paused = True
@@ -145,6 +149,10 @@ class PipelineAudioTrack(MediaStreamTrack):
         self._gain = 1.0
         if self._paused:
             self._paused = False
+            rewind = 2 * resume_rewind_samples(np.frombuffer(bytes(self._played), dtype=np.int16), WEBRTC_SAMPLE_RATE)
+            if rewind:
+                self._buffer[:0] = self._played[-rewind:]
+                del self._played[-rewind:]
             if self._buffer:
                 self._data_available.set()
 
@@ -156,6 +164,7 @@ class PipelineAudioTrack(MediaStreamTrack):
 
     def clear(self) -> None:
         del self._buffer[:]
+        del self._played[:]
         self._drain_remaining = 0
         self._generation += 1
         self._data_available.clear()
@@ -206,6 +215,11 @@ class PipelineAudioTrack(MediaStreamTrack):
             # A pause drains the codec lookahead with silence, then holds the buffer.
             payload = b"" if self._paused else bytes(self._buffer[:needed])
             del self._buffer[: len(payload)]
+            if waited_for_audio and not self._paused:
+                # Playback ran dry: what played before belongs to an earlier utterance.
+                del self._played[:]
+            self._played += payload
+            del self._played[: max(0, len(self._played) - _REWIND_HISTORY_BYTES)]
             # Drain codec lookahead and receiver prefetch before sleeping.
             self._drain_remaining = WEBRTC_DRAIN_FRAMES if payload else self._drain_remaining - 1
             payload += b"\x00" * (needed - len(payload))

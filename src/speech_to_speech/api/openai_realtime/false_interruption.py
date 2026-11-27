@@ -2,18 +2,20 @@
 
 With ``turn_detection.false_interruption`` set, user speech that starts while a
 reply is active, queued, or still playing does not cancel that reply right
-away. The router holds the new turn's pipeline events instead, and the reply
-keeps generating. The interruption is committed once the user's transcript has
-``min_words`` words that are not fillers or backchannels ("uh", "mm-hmm",
-"yeah"): the held events then run through the ordinary barge-in path, so the
-client sees exactly what an immediate interruption would have produced, only
-later. If the turn ends empty, filler-only, or untranscribable, its events are
-dropped. The client never hears about that turn, nothing enters the
-conversation, and the reply carries on (or resumes, when playback was paused).
+away. Playback pauses at once (by default) and the router holds the new turn's
+pipeline events, while the reply keeps generating. The interruption is
+committed once the user's transcript has ``min_words`` words that are not
+fillers or backchannels ("uh", "mm-hmm", "yeah"): the held events then run
+through the ordinary barge-in path, so the client sees exactly what an
+immediate interruption would have produced. If the turn ends empty,
+filler-only, or untranscribable, its events are dropped. The client never
+hears about that turn, nothing enters the conversation, and the reply resumes
+from the last gap between words before the pause.
 """
 
 from __future__ import annotations
 
+import math
 import re
 import time
 import unicodedata
@@ -21,6 +23,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 
+import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
 if TYPE_CHECKING:
@@ -31,6 +34,49 @@ INTERRUPTION_EVENTS_EXTENSION = "speech_to_speech.interruption"
 
 PlaybackMode = Literal["continue", "pause", "duck"]
 PLAYBACK_MODES: tuple[PlaybackMode, ...] = ("continue", "pause", "duck")
+
+# Speech that commits an interruption before its words are known, while the
+# reply keeps playing over it.
+DEFAULT_MIN_SPEECH_MS = 1200
+
+# Resuming a paused reply replays from the last gap between words within this
+# much of the audio played before the pause, rather than from the middle of a word.
+RESUME_REWIND_MAX_MS = 600
+_GAP_WINDOW_MS = 10
+_GAP_MIN_MS = 50
+_GAP_LEVEL = 0.1
+
+
+def resume_rewind_samples(played: np.ndarray, sample_rate: int) -> int:
+    """How many of the last *played* samples to replay when a paused reply resumes.
+
+    Replay starts just before the next word at the latest quiet stretch of at
+    least 50 ms (quieter than a tenth of the loudest 10 ms) in the last
+    ``RESUME_REWIND_MAX_MS``. Returns 0 when playback stopped in such a gap,
+    or when there is none: replaying from the middle of another word would be
+    no better than resuming where playback stopped.
+    """
+    window = max(1, sample_rate * _GAP_WINDOW_MS // 1000)
+    count = min(len(played), sample_rate * RESUME_REWIND_MAX_MS // 1000) // window
+    if count == 0:
+        return 0
+    tail = played[len(played) - count * window :].astype(np.float32).reshape(count, window)
+    level = np.sqrt(np.mean(tail * tail, axis=1))
+    quiet = level < level.max() * _GAP_LEVEL
+    min_run = math.ceil(_GAP_MIN_MS / _GAP_WINDOW_MS)
+    run = 0
+    for index in range(count - 1, -1, -1):
+        if quiet[index]:
+            run += 1
+            continue
+        if run >= min_run:
+            if index + run == count - 1:
+                return 0  # playback stopped between words
+            # Keep one window of the gap ahead of the next word.
+            return (count - (index + run)) * window
+        run = 0
+    return 0
+
 
 # Words and phrases that never count toward an interruption on their own.
 # Hyphens and punctuation are normalized away, so "mm-hmm" matches "mm hmm".
@@ -131,21 +177,25 @@ class FalseInterruptionConfig(BaseModel):
 
     min_words: int = Field(default=1, ge=1, le=50)
     """Words that are not fillers or backchannels needed to commit an interruption."""
-    min_speech_ms: int = Field(default=1200, ge=0, le=30000)
+    min_speech_ms: int | None = Field(default=None, ge=0, le=30000)
     """Active speech that commits an interruption even before its words are known; 0 turns it off.
 
-    Words can come late: VAD splits "Wait, wait, can you..." into short
-    segments, and a busy STT may skip partial transcripts while the reply is
-    being synthesized. A cough or a backchannel is well under a second.
+    By default (``None``) it is off while the reply is paused, which costs
+    nothing to wait on and keeps a long cough from cancelling it, and
+    ``DEFAULT_MIN_SPEECH_MS`` while the reply keeps playing over the user:
+    words can come late, since VAD splits "Wait, wait, can you..." into short
+    segments and a busy STT may skip partial transcripts while the reply is
+    being synthesized.
     """
-    playback: PlaybackMode = "continue"
+    playback: PlaybackMode = "pause"
     """What happens to the assistant's audio while the decision is pending.
 
-    ``continue`` keeps playing. ``pause`` stops playback and resumes from the
-    same point on a false interruption. ``duck`` keeps playing at low volume.
-    The server applies ``pause`` and ``duck`` on WebRTC, where it paces
-    playback. WebSocket clients own their player: they learn the mode from the
-    opt-in ``speech_to_speech.interruption.*`` events and apply it themselves.
+    ``pause`` stops playback at once and, on a false interruption, resumes
+    from the last gap between words. ``continue`` keeps playing. ``duck``
+    keeps playing at low volume. The server applies ``pause`` and ``duck`` on
+    WebRTC, where it paces playback. WebSocket clients own their player: they
+    learn the mode from the opt-in ``speech_to_speech.interruption.*`` events
+    and apply it themselves; without those events their playback continues.
     """
     timeout_ms: int = Field(default=2000, ge=0, le=30000)
     """Give up and resume if no transcript arrives this long after speech stops."""
@@ -156,6 +206,12 @@ class FalseInterruptionConfig(BaseModel):
 
     def model_post_init(self, __context: Any) -> None:
         self._phrases = _phrases(DEFAULT_IGNORE_WORDS if self.ignore_words is None else self.ignore_words)
+
+    def speech_threshold_ms(self, paused: bool) -> int:
+        """The ``min_speech_ms`` that applies when playback is (or is not) paused."""
+        if self.min_speech_ms is not None:
+            return self.min_speech_ms
+        return 0 if paused else DEFAULT_MIN_SPEECH_MS
 
     def word_count(self, transcript: str) -> int:
         """Count the words of *transcript* that are not ignored fillers or backchannels."""
@@ -238,6 +294,7 @@ class PendingInterruption:
     revision: int | None
     config: FalseInterruptionConfig
     audio_start_ms: int = 0
+    min_speech_ms: int = 0
     events: list[PipelineEvent] = field(default_factory=list)
     revisions: set[int | None] = field(default_factory=set)
     started_at: float = field(default_factory=time.monotonic)
@@ -250,13 +307,20 @@ class PendingInterruption:
     speaking_active_ms: float = 0.0
 
     @classmethod
-    def begin(cls, event: SpeechStartedEvent, config: FalseInterruptionConfig) -> PendingInterruption:
+    def begin(
+        cls,
+        event: SpeechStartedEvent,
+        config: FalseInterruptionConfig,
+        *,
+        paused: bool = False,
+    ) -> PendingInterruption:
         assert event.turn_id is not None
         pending = cls(
             turn_id=event.turn_id,
             revision=event.turn_revision,
             config=config,
             audio_start_ms=event.audio_start_ms,
+            min_speech_ms=config.speech_threshold_ms(paused),
         )
         pending.events.append(event)
         pending.revisions.add(event.turn_revision)
@@ -278,12 +342,12 @@ class PendingInterruption:
         return getattr(event, "turn_id", None) == self.turn_id
 
     def _long_enough(self, now: float | None = None) -> bool:
-        return bool(self.config.min_speech_ms) and self.speech_ms(now) >= self.config.min_speech_ms
+        return bool(self.min_speech_ms) and self.speech_ms(now) >= self.min_speech_ms
 
     def deadline(self) -> float | None:
         """When :meth:`due` next changes without a new event, if ever."""
-        if self.speaking_since is not None and self.config.min_speech_ms:
-            remaining_ms = self.config.min_speech_ms - self.speech_ms(self.speaking_since)
+        if self.speaking_since is not None and self.min_speech_ms:
+            remaining_ms = self.min_speech_ms - self.speech_ms(self.speaking_since)
             return self.speaking_since + max(0.0, remaining_ms) / 1000.0
         if self.stopped_at is not None:
             return self.stopped_at + self.config.timeout_ms / 1000.0

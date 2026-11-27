@@ -795,13 +795,14 @@ async def _gate_interruption(
         return False
     config = st.runtime_config.false_interruption
     assert config is not None
-    st.pending_interruption = PendingInterruption.begin(event, config)
-    transport.set_playback(_interruption_playback(transport, st, config))
+    playback = _interruption_playback(transport, st, config)
+    st.pending_interruption = PendingInterruption.begin(event, config, paused=playback == "pause")
+    transport.set_playback(playback)
     logger.info(
         "Pipeline %d: speech during response held until it has words (turn=%s, playback=%s)",
         unit.index,
         event.turn_id,
-        config.playback,
+        playback,
     )
     await _send_interruption_event(
         transport,
@@ -809,7 +810,7 @@ async def _gate_interruption(
         SpeechToSpeechInterruptionPendingEvent(
             event_id=unit.service._next_event_id(),
             audio_start_ms=event.audio_start_ms,
-            playback=config.playback,
+            playback="continue" if playback == "play" else playback,
         ),
     )
     return True

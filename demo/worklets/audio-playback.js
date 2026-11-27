@@ -10,6 +10,9 @@
  *     { kind: "config", inputRate: 24000 }              one-shot at startup
  *     { kind: "audio", samples: Float32Array, key }          (transferable) per chunk
  *     { kind: "clear", clearId? }                       wipe queue (barge-in)
+ *     { kind: "pause" }                                 hold the queue (speech that may be a cough)
+ *     { kind: "resume" }                                play on, replaying from the last gap between words
+ *     { kind: "gain", value }                           playback volume (ducking); resume and clear reset it
  *
  *   worklet -> main:
  *     { kind: "cleared", clearId, played }             per-item rendered PCM counts
@@ -25,6 +28,43 @@
 
 const STATS_INTERVAL_FRAMES = 12000;
 const FADE_FRAMES = 32;
+// Resuming after a pause replays from the last quiet stretch of at least
+// GAP_MIN_MS within the last REWIND_MAX_MS played, so speech does not pick up
+// in the middle of a word. Same rule as the server's WebRTC track.
+const REWIND_MAX_MS = 600;
+const GAP_WINDOW_MS = 10;
+const GAP_MIN_MS = 50;
+const GAP_LEVEL = 0.1;
+
+/**
+ * Samples at the end of `played` to replay when playback resumes.
+ * @param {Float32Array} played @param {number} rate
+ */
+function resumeRewindSamples(played, rate) {
+  const window = Math.max(1, Math.floor(rate * GAP_WINDOW_MS / 1000));
+  const count = Math.floor(Math.min(played.length, Math.floor(rate * REWIND_MAX_MS / 1000)) / window);
+  if (count === 0) return 0;
+  const start = played.length - count * window;
+  const level = new Float32Array(count);
+  let loudest = 0;
+  for (let w = 0; w < count; w++) {
+    let energy = 0;
+    for (let i = start + w * window; i < start + (w + 1) * window; i++) energy += played[i] * played[i];
+    level[w] = Math.sqrt(energy / window);
+    loudest = Math.max(loudest, level[w]);
+  }
+  const minRun = Math.ceil(GAP_MIN_MS / GAP_WINDOW_MS);
+  let run = 0;
+  for (let w = count - 1; w >= 0; w--) {
+    if (level[w] < loudest * GAP_LEVEL) {
+      run += 1;
+      continue;
+    }
+    if (run >= minRun) return w + run === count - 1 ? 0 : (count - (w + run)) * window;
+    run = 0;
+  }
+  return 0;
+}
 
 class AudioPlaybackProcessor extends AudioWorkletProcessor {
   constructor() {
@@ -41,6 +81,15 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
     this._fadeIn = 0;
     this._fadeOut = 0;
     this._lastSample = 0;
+    this._gain = 1;
+    this._paused = false;
+    this._pauseFade = 0;
+    this._history = new Float32Array(Math.ceil(sampleRate * REWIND_MAX_MS / 1000));
+    this._historyLength = 0;
+    this._historyEnd = 0;
+    /** @type {Float32Array | null} */
+    this._replay = null;
+    this._replayIdx = 0;
 
     this.port.onmessage = (e) => {
       const data = e.data;
@@ -73,9 +122,58 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
           this._readIdx = 0;
           this._fracPos = 0;
           this._fadeOut = FADE_FRAMES;
+          this._paused = false;
+          this._pauseFade = 0;
+          this._replay = null;
+          this._historyLength = 0;
+          this._gain = 1;
+          break;
+        case "pause":
+          if (!this._paused) {
+            this._paused = true;
+            this._pauseFade = this._playing ? FADE_FRAMES : 0;
+          }
+          break;
+        case "resume":
+          this._gain = 1;
+          if (this._paused) {
+            this._paused = false;
+            this._pauseFade = 0;
+            const played = this._played();
+            const rewind = resumeRewindSamples(played, sampleRate);
+            if (rewind > 0) {
+              this._replay = played.slice(played.length - rewind);
+              this._replayIdx = 0;
+              this._historyLength -= rewind;
+              this._historyEnd = (this._historyEnd - rewind + this._history.length) % this._history.length;
+            }
+            if (this._replay || this._queue.length) {
+              this._playing = true;
+              this._fadeIn = FADE_FRAMES;
+              this._fadeOut = 0;
+            }
+          }
+          break;
+        case "gain":
+          if (typeof data.value === "number" && data.value >= 0) this._gain = data.value;
           break;
       }
     };
+  }
+
+  /** @param {number} sample */
+  _remember(sample) {
+    this._history[this._historyEnd] = sample;
+    this._historyEnd = (this._historyEnd + 1) % this._history.length;
+    this._historyLength = Math.min(this._historyLength + 1, this._history.length);
+  }
+
+  /** The last samples played, oldest first. */
+  _played() {
+    const out = new Float32Array(this._historyLength);
+    const start = (this._historyEnd - this._historyLength + this._history.length) % this._history.length;
+    for (let i = 0; i < out.length; i++) out[i] = this._history[(start + i) % this._history.length];
+    return out;
   }
 
   _queuedSamples() {
@@ -130,9 +228,18 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
 
     for (let i = 0; i < out.length; i++) {
       let sample = 0;
+      const held = this._paused && this._pauseFade === 0;
 
-      if (this._playing) {
-        const v = this._readInterpolated();
+      if (this._playing && !held) {
+        // Replayed samples were already counted as played: they do not advance the queue.
+        const replaying = this._replay !== null;
+        let v = null;
+        if (this._replay) {
+          v = this._replay[this._replayIdx++];
+          if (this._replayIdx >= this._replay.length) this._replay = null;
+        } else {
+          v = this._readInterpolated();
+        }
         if (v === null) {
           // Underrun: try to ramp out cleanly to avoid clicks.
           sample = this._lastSample * Math.max(0, 1 - 1 / FADE_FRAMES);
@@ -140,12 +247,15 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
           if (Math.abs(sample) < 1e-4) {
             this._playing = false;
             this._lastSample = 0;
+            // What plays after a gap is a new utterance: never replay across it.
+            this._historyLength = 0;
             this.port.postMessage({ kind: "underrun" });
           }
         } else {
           sample = v;
           this._lastSample = v;
-          this._advance();
+          this._remember(v);
+          if (!replaying) this._advance();
         }
 
         if (this._fadeIn > 0) {
@@ -162,10 +272,15 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
             this._lastSample = 0;
           }
         }
+        if (this._pauseFade > 0) {
+          sample *= this._pauseFade / FADE_FRAMES;
+          this._pauseFade -= 1;
+        }
 
         this._totalPlayed += 1;
       }
 
+      sample *= this._gain;
       out[i] = sample;
       if (stereo) stereo[i] = sample;
     }

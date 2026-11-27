@@ -361,6 +361,47 @@ class TestPipelineAudioTrack:
             await asyncio.gather(held, return_exceptions=True)
             track.stop()
 
+    async def test_resume_replays_the_word_cut_by_the_pause(self):
+        """Paused mid-word, playback resumes from the gap before that word."""
+        track = PipelineAudioTrack()
+        word = lambda frames, value: np.full(WEBRTC_FRAME_SAMPLES * frames, value, dtype=np.int16)  # noqa: E731
+        track.write(np.concatenate([word(5, 1000), word(3, 0), word(10, 2000)]).tobytes())
+        for _ in range(5 + 3 + 5):
+            await asyncio.wait_for(track.recv(), timeout=RECV_TIMEOUT_S)
+
+        track.pause()
+        for _ in range(WEBRTC_DRAIN_FRAMES):
+            await asyncio.wait_for(track.recv(), timeout=RECV_TIMEOUT_S)
+        track.resume()
+        resumed = np.concatenate(
+            [(await asyncio.wait_for(track.recv(), timeout=RECV_TIMEOUT_S)).to_ndarray()[0] for _ in range(11)]
+        )
+        # 10 ms of the gap, then the second word from its start: 5 frames replayed, 5 never played.
+        assert np.all(resumed[: WEBRTC_FRAME_SAMPLES // 2] == 0)
+        assert np.count_nonzero(resumed == 2000) == 10 * WEBRTC_FRAME_SAMPLES
+        assert not np.any(resumed == 1000)
+        track.stop()
+
+    async def test_resume_never_replays_audio_from_before_a_clear(self):
+        track = PipelineAudioTrack()
+        track.write(
+            np.concatenate([np.full(WEBRTC_FRAME_SAMPLES * 3, 1000), np.zeros(WEBRTC_FRAME_SAMPLES * 3)])
+            .astype(np.int16)
+            .tobytes()
+        )
+        for _ in range(6):
+            await asyncio.wait_for(track.recv(), timeout=RECV_TIMEOUT_S)
+        track.clear()
+        track.write(np.full(WEBRTC_FRAME_SAMPLES * 4, 2000, dtype=np.int16).tobytes())
+        for _ in range(2):
+            await asyncio.wait_for(track.recv(), timeout=RECV_TIMEOUT_S)
+
+        track.pause()
+        track.resume()
+        frames = [(await asyncio.wait_for(track.recv(), timeout=RECV_TIMEOUT_S)).to_ndarray() for _ in range(2)]
+        assert all(np.all(frame == 2000) for frame in frames)
+        track.stop()
+
     async def test_duck_lowers_and_resume_restores_volume(self):
         track = PipelineAudioTrack()
         track.write((np.ones(WEBRTC_FRAME_SAMPLES * 2, dtype=np.int16) * 1000).tobytes())
