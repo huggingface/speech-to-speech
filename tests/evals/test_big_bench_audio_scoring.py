@@ -45,7 +45,10 @@ def test_negated_valid_reads_as_invalid(reply):
 
 
 @pytest.mark.parametrize("apostrophe", ["'", "’"])
-@pytest.mark.parametrize("subject, contraction", [("The argument", "isn"), ("The arguments", "aren")])
+@pytest.mark.parametrize(
+    "subject, contraction",
+    [("The argument", "isn"), ("The arguments", "aren"), ("The argument", "wasn"), ("The arguments", "weren")],
+)
 @pytest.mark.parametrize("prefix, method", [("Final answer: ", "marker"), ("", "scan")])
 def test_contracted_negation_accepts_straight_and_curly_apostrophes(apostrophe, subject, contraction, prefix, method):
     reply = f"{prefix}{subject} {contraction}{apostrophe}t valid."
