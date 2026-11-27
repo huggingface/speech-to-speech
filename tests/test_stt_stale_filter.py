@@ -611,3 +611,33 @@ def test_stt_preserves_input_revision_settle_with_resolved_async_smart_turn():
     thread.join(timeout=1.0)
     assert not thread.is_alive()
     assert queue_out.get_nowait() == PIPELINE_END
+
+
+def test_stt_accumulates_vad_settle_across_input_and_output_gates():
+    tracker = SpeculativeTurnTracker()
+    tracker.start_turn()
+    tracker.segment_finalized(1000, pending_smart_turn=True, smart_turn_hold_s=2.0)
+    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=500, processing_delay_ms=180)
+
+    queue_in = Queue()
+    queue_out = Queue()
+    handler = _SignalingSTTHandler(
+        Event(),
+        queue_in=queue_in,
+        queue_out=queue_out,
+        setup_kwargs={"speculative_turns": tracker, "final_revision_settle_s": 0.07},
+    )
+    store = TurnLatencyStore()
+    handler.turn_latency_store = store
+
+    queue_in.put(_vad_audio(revision=0, mode="final"))
+    queue_in.put(PIPELINE_END)
+    handler.run()
+
+    emitted = queue_out.get_nowait()
+    assert isinstance(emitted, Transcription)
+    assert queue_out.get_nowait() == PIPELINE_END
+    pending = store.pending_for_turn("turn_1", 0)
+    assert pending is not None
+    assert pending.vad_settle_s is not None
+    assert pending.vad_settle_s >= 0.15

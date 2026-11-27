@@ -33,36 +33,26 @@ class AudioInputNotifier(BaseHandler[VADAudio, LLMIn]):
             return False
         if item.turn_id is None or item.turn_revision is None:
             return True
-        store = getattr(self, "turn_latency_store", None)
-        if not self.speculative_turns.wait_for_gate(
-            item.turn_id,
-            item.turn_revision,
-            hold_for_grace=False,
-            hold_for_smart_turn=True,
+        hold_until = None
+        if (
+            item.processing_delay_s > 0
+            and not self.speculative_turns.has_pending_smart_turn(item.turn_id, item.turn_revision)
+            and self.speculative_turns.processing_deadline(item.turn_id, item.turn_revision) is None
         ):
-            if store is not None:
-                store.discard_pending_turn(item.turn_id, item.turn_revision)
-            return False
-        remaining_delay_s = max(0.0, item.processing_delay_s - (perf_counter() - item.created_at_s))
-        processing_deadline = self.speculative_turns.processing_deadline(item.turn_id, item.turn_revision)
-        if processing_deadline is not None:
-            remaining_delay_s = max(0.0, processing_deadline - monotonic())
-        wait_started_at_s = perf_counter()
+            remaining_delay_s = max(0.0, item.processing_delay_s - (perf_counter() - item.created_at_s))
+            if remaining_delay_s > 0:
+                hold_until = monotonic() + remaining_delay_s
         is_latest = self.speculative_turns.wait_for_gate(
             item.turn_id,
             item.turn_revision,
             hold_for_grace=False,
-            hold_until=monotonic() + remaining_delay_s,
+            hold_for_processing=True,
+            hold_until=hold_until,
         )
-        if store is not None and remaining_delay_s > 0:
-            store.record_smart_wait(
-                item.turn_id,
-                item.turn_revision,
-                wait_started_at_s,
-                min(perf_counter(), wait_started_at_s + remaining_delay_s),
-            )
-        if not is_latest and store is not None:
-            store.discard_pending_turn(item.turn_id, item.turn_revision)
+        if not is_latest:
+            store = getattr(self, "turn_latency_store", None)
+            if store is not None:
+                store.discard_pending_turn(item.turn_id, item.turn_revision)
         return is_latest
 
     def process(self, vad_audio: VADAudio) -> Iterator[LLMIn]:

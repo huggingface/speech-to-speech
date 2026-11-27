@@ -86,7 +86,7 @@ class TurnLatencyTracker:
     ``e2e_s`` runs from estimated speech end to first yielded TTS audio.
     TTFT remains an internal measurement, omitted from the simplified record.
 
-    ``vad_settle_s`` is the whole final STT input gate wait.
+    ``vad_settle_s`` is the total wait at the final STT gates before emission.
     ``smart_turn_wait_s`` is the union of actual waits for the processing
     delay and the output grace.
 
@@ -155,7 +155,8 @@ class TurnLatencyTracker:
             self.llm_first_tts_s = max(0.0, perf_counter() - self._llm_started_at_s)
 
     def record_vad_settle(self, seconds: float) -> None:
-        self.vad_settle_s = max(0.0, seconds)
+        seconds = max(0.0, seconds)
+        self.vad_settle_s = seconds if self.vad_settle_s is None else self.vad_settle_s + seconds
 
     def record_llm_ttft(self, seconds: float) -> None:
         if self.llm_ttft_s is None:

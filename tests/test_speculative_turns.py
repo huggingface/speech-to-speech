@@ -1656,7 +1656,7 @@ def test_wait_for_gate_pending_smart_turn_does_not_charge_hold_observer():
     results: list[bool] = []
 
     def waiter() -> None:
-        results.append(tracker.wait_for_gate("turn_1", 0, hold_for_grace=False, hold_for_smart_turn=True))
+        results.append(tracker.wait_for_gate("turn_1", 0, hold_for_grace=False, hold_for_processing=True))
         done.set()
 
     thread = Thread(target=waiter)
@@ -1670,6 +1670,36 @@ def test_wait_for_gate_pending_smart_turn_does_not_charge_hold_observer():
     assert results == [True]
     # Waiting for Smart Turn classification itself is not counted as grace hold_s.
     assert observed == []
+
+
+def test_wait_for_gate_hold_for_processing_charges_only_incomplete_delay():
+    tracker = SpeculativeTurnTracker()
+    observed: list[tuple[str, int, float, float]] = []
+    tracker.wait_observer = lambda tid, rev, start, end: observed.append((tid, rev, start, end))
+    tracker.start_turn()
+    tracker.segment_finalized(1000, pending_smart_turn=True, smart_turn_hold_s=2.0)
+
+    done = Event()
+    results: list[bool] = []
+
+    def waiter() -> None:
+        results.append(tracker.wait_for_gate("turn_1", 0, hold_for_grace=False, hold_for_processing=True))
+        done.set()
+
+    thread = Thread(target=waiter)
+    thread.start()
+    time.sleep(0.04)
+    assert not done.is_set()
+    resolved_at = time.perf_counter()
+    assert tracker.resolve_smart_turn("turn_1", 0, output_hold_ms=500, processing_delay_ms=120)
+    assert done.wait(1.0)
+    thread.join(timeout=1.0)
+
+    assert results == [True]
+    assert len(observed) >= 1
+    assert observed[0][2] >= resolved_at - 0.005
+    total_observed = sum(end - start for _tid, _rev, start, end in observed)
+    assert 0.04 <= total_observed <= 0.15
 
 
 def test_vad_smart_turn_stale_session_paused_after_gen_check_cannot_resolve_next_session(monkeypatch):
@@ -1736,6 +1766,8 @@ def test_vad_smart_turn_unexpected_worker_exception_logs_and_releases_pending(ca
     handler.smart_turn_analyzer = _StaticSmartTurnAnalyzer(
         SmartTurnResult(complete=False, probability=0.1, inference_ms=10.0)
     )
+    store = TurnLatencyStore()
+    handler.turn_latency_store = store
 
     def boom(*_args, **_kwargs):
         raise RuntimeError("unexpected worker failure")
@@ -1752,6 +1784,97 @@ def test_vad_smart_turn_unexpected_worker_exception_logs_and_releases_pending(ca
         grace = handler.speculative_turns._reopen_grace
         assert grace is not None
         assert grace.deadline - time.monotonic() <= 0.8
+        pending = store.pending_for_turn("turn_1", 0)
+        assert pending is not None
+        assert pending.smart_turn_status == "failed"
         assert any("Smart Turn worker failed" in record.getMessage() for record in caplog.records)
     finally:
+        handler.cleanup()
+
+
+def test_vad_cleanup_on_stop_event_unblocks_pending_smart_turn_waiter():
+    analyzer = _BlockingSmartTurnAnalyzer([SmartTurnResult(complete=True, probability=0.95, inference_ms=10.0)])
+    handler = _vad_handler_for_iterator(_StaticVADIterator(triggered=False, vad_output=None))
+    handler.stop_event = Event()
+    handler.smart_turn_analyzer = analyzer
+    try:
+        _drive_final_segment(handler)
+        assert analyzer.started_events[0].wait(1.0)
+
+        result: list[bool] = []
+        waiter = Thread(
+            target=lambda: result.append(
+                handler.speculative_turns.wait_for_gate("turn_1", 0, hold_for_grace=False, hold_for_processing=True)
+            )
+        )
+        waiter.start()
+        time.sleep(0.02)
+        assert waiter.is_alive()
+
+        started_cleanup = time.monotonic()
+        handler.stop_event.set()
+        handler.cleanup()
+        waiter.join(timeout=1.0)
+
+        assert not waiter.is_alive()
+        assert time.monotonic() - started_cleanup < 0.5
+        assert result == [False]
+    finally:
+        for ev in analyzer.release_events:
+            ev.set()
+        handler.cleanup()
+
+
+def test_vad_cleanup_on_pipeline_end_drain_preserves_smart_turn_decision():
+    from speech_to_speech.pipeline.messages import PIPELINE_END
+
+    analyzer = _BlockingSmartTurnAnalyzer([SmartTurnResult(complete=True, probability=0.95, inference_ms=10.0)])
+    handler = _vad_handler_for_iterator(
+        _StaticVADIterator(
+            triggered=False,
+            vad_output=[torch.zeros(512) for _ in range(31)],
+            last_utterance_active_speech_samples=12 * 512,
+        )
+    )
+    handler.stop_event = Event()
+    handler.queue_in = Queue()
+    handler.queue_out = Queue()
+    handler.pipeline_index = None
+    handler._times = []
+    handler.smart_turn_analyzer = analyzer
+    store = TurnLatencyStore()
+    handler.turn_latency_store = store
+
+    handler.queue_in.put(_audio_bytes())
+    handler.queue_in.put(PIPELINE_END)
+    vad_thread = Thread(target=handler.run)
+    vad_thread.start()
+    try:
+        assert analyzer.started_events[0].wait(1.0)
+        vad_thread.join(timeout=1.0)
+        assert not vad_thread.is_alive()
+
+        # Releasing Smart Turn after PIPELINE_END drain must still resolve the
+        # pending gate and record smart_turn_status instead of stalling for 2s.
+        result: list[bool] = []
+        waiter = Thread(
+            target=lambda: result.append(
+                handler.speculative_turns.wait_for_gate("turn_1", 0, hold_for_grace=False, hold_for_processing=True)
+            )
+        )
+        t0 = time.monotonic()
+        waiter.start()
+        analyzer.release_events[0].set()
+        waiter.join(timeout=1.0)
+
+        assert not waiter.is_alive()
+        assert time.monotonic() - t0 < 0.5
+        assert result == [True]
+        pending = store.pending_for_turn("turn_1", 0)
+        assert pending is not None
+        assert pending.smart_turn_status == "complete"
+    finally:
+        for ev in analyzer.release_events:
+            ev.set()
+        vad_thread.join(timeout=1.0)
         handler.cleanup()
