@@ -76,31 +76,29 @@ def resume_rewind_samples(played: np.ndarray, sample_rate: int) -> int:
 
 # Sounds an STT writes for hesitations, throat clearing, laughter, and "I'm
 # listening" noises. They carry no words in any language. Hyphens and
-# punctuation are normalized away, so "mm-hmm" matches "mm hmm".
+# punctuation are normalized away, so "mm-hmm" matches "mm hmm". Letters
+# repeated for length are too, so "Hmmmm", "Uhhh" and "Mhmm" match "hmm",
+# "uh" and "mhm"; written laughter ("haha", "hehehe") matches "ha".
 DEFAULT_FILLERS: tuple[str, ...] = (
     "uh",
-    "uhh",
     "um",
-    "umm",
     "uhm",
     "er",
     "erm",
     "ah",
-    "ahh",
     "eh",
     "oh",
     "ooh",
     "hm",
     "hmm",
-    "hmmm",
     "mm",
-    "mmm",
     "mhm",
     "mm hmm",
-    "mm hm",
     "uh huh",
     "ahem",
     "ha",
+    "hah",
+    "heh",
     "aha",
 )
 
@@ -148,8 +146,23 @@ def interruption_words(text: str) -> list[str]:
     return [word.strip("'") for word in "".join(chars).split() if word.strip("'")]
 
 
+# Laughter written as two or more syllables, after repeated letters are collapsed.
+_LAUGHTER = re.compile(r"a?(?:h[ae]){2,}h?")
+_REPEATED_LETTER = re.compile(r"(.)\1+")
+
+
+def _matching_form(word: str) -> str:
+    """The form a word is compared in against the ignore lists: "hmmmm" and "hmm" are both "hm"."""
+    word = _REPEATED_LETTER.sub(r"\1", word)
+    return "ha" if _LAUGHTER.fullmatch(word) else word
+
+
+def _matching_words(text: str) -> tuple[str, ...]:
+    return tuple(_matching_form(word) for word in interruption_words(text))
+
+
 def _phrases(ignored: tuple[str, ...] | list[str]) -> list[tuple[str, ...]]:
-    phrases = {tuple(interruption_words(entry)) for entry in ignored}
+    phrases = {_matching_words(entry) for entry in ignored}
     phrases.discard(())
     return sorted(phrases, key=len, reverse=True)
 
@@ -201,7 +214,7 @@ class FalseInterruptionConfig(BaseModel):
 
     def word_count(self, transcript: str) -> int:
         """Count the words of *transcript* that are not fillers or backchannels."""
-        words = interruption_words(transcript)
+        words = _matching_words(transcript)
         phrases = self._phrases
         count = 0
         index = 0

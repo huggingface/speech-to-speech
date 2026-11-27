@@ -626,7 +626,8 @@ them alone is handled as before. Then:
 Two lists decide what is not a word:
 
 - **`fillers`**: non-lexical sounds such as "uh", "um", "hmm", "mm-hmm", "uh-huh"
-  and "ahem". The defaults are the same in every language.
+  and "ahem". The defaults are the same in every language. Letters repeated
+  for length ("Hmmmm", "Uhhh", "Mhmm") and written laughter ("haha") match too.
 - **`backchannels`**: what a listener says to show they are following, such as
   "yeah", "okay", "right", "I see" and "got it". The built-in list is English.
   Set it for the session's language: "ouais" or "sí" count as words otherwise.
