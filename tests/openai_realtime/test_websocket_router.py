@@ -2284,3 +2284,39 @@ def test_response_cancel_unblocks_pending_speculative_output_during_reopen_grace
             assert time.monotonic() - started_at < 0.5
             assert [e["delta"] for e in events if e["type"] == "response.output_audio_transcript.delta"] == ["fresh"]
             assert events[-1]["response"]["status"] == "completed"
+
+
+def test_response_cancel_does_not_park_generation_done_during_reopen_grace():
+    unit, tracker = _make_unit(0), SpeculativeTurnTracker()
+    unit.service.speculative_turns = tracker
+    with TestClient(create_app(pool=[unit], stop_event=ThreadingEvent())) as client:
+        with client.websocket_connect("/v1/realtime") as ws:
+            ws.receive_json()
+            assert unit.session is not None
+            state = unit.service._state(unit.session.session_id)
+            turn_id, rev = tracker.start_turn()
+            tracker.start_reopen_grace(turn_id, rev, grace_s=1.0)
+            state.mark_response_pending("resp_spec")
+            stale_gen = unit.cancel_scope.generation
+
+            ws.send_json({"type": "response.cancel"})
+            deadline = time.monotonic() + 1.0
+            while not unit.cancel_scope.is_stale(stale_gen) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert unit.cancel_scope.is_stale(stale_gen)
+
+            unit.text_output_queue.put(
+                ResponseGenerationDoneEvent(
+                    response_key="resp_spec",
+                    succeeded=False,
+                    turn_id=turn_id,
+                    turn_revision=rev,
+                    cancel_generation=stale_gen,
+                )
+            )
+            deadline = time.monotonic() + 1.0
+            while not unit.text_output_queue.empty() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            time.sleep(0.03)
+            assert unit.session.pending_text_output_items == []
+            assert router_module._send_loop_wait_timeout(unit) == router_module.SEND_LOOP_WAIT_TIMEOUT_S

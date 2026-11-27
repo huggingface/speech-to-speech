@@ -10,9 +10,8 @@ import numpy as np
 import scipy.signal
 
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.console import console as console
-from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
+from speech_to_speech.pipeline.handler_types import TTSOut
+from speech_to_speech.pipeline.messages import TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
 from speech_to_speech.utils.utils import TORCH_DEVICES, resolve_device
@@ -118,15 +117,7 @@ class OmniVoiceTTSHandler(BaseTTSHandler):
                     return self.language_voice_clone_prompts[key]
         return self.voice_clone_prompt
 
-    def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
-        if isinstance(tts_input, EndOfResponse):
-            if self._gate_end_of_response(tts_input):
-                yield AUDIO_RESPONSE_DONE
-            return
-
-        if not self._admit_input(tts_input):
-            return
-
+    def _synthesize_input(self, tts_input: TTSInput) -> Iterator[TTSOut]:
         text = tts_input.text
         if not text.strip():
             return
@@ -177,20 +168,16 @@ class OmniVoiceTTSHandler(BaseTTSHandler):
 
         audio_int16 = np.clip(audio * 32768, -32768, 32767).astype(np.int16)
 
-        def emit(block: np.ndarray) -> Iterator[TTSOut]:
-            timer.first_yield()
-            yield block
-
         full_block_samples = (len(audio_int16) // self.blocksize) * self.blocksize
         for offset in range(0, full_block_samples, self.blocksize):
             if self._is_stale(cancel_generation):
                 logger.info("OmniVoice TTS output cancelled (interruption)")
                 return
-            yield from emit(audio_int16[offset : offset + self.blocksize])
+            yield audio_int16[offset : offset + self.blocksize]
 
         if full_block_samples < len(audio_int16):
             if self._is_stale(cancel_generation):
                 logger.info("OmniVoice TTS output cancelled (interruption)")
                 return
             tail = audio_int16[full_block_samples:]
-            yield from emit(np.pad(tail, (0, self.blocksize - len(tail))))
+            yield np.pad(tail, (0, self.blocksize - len(tail)))

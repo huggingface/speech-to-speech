@@ -24,10 +24,11 @@ def _tone(samples: int = 24000) -> np.ndarray:
 @pytest.fixture
 def chattts_modules(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(sys.modules, "ChatTTS", SimpleNamespace(Chat=_FakeChat))
+    from speech_to_speech.pipeline.console import console
     from speech_to_speech.TTS import chatTTS_handler
     from speech_to_speech.TTS.chatTTS_handler import ChatTTSHandler
 
-    monkeypatch.setattr(chatTTS_handler.console, "print", lambda *_a, **_k: None)
+    monkeypatch.setattr(console, "print", lambda *_a, **_k: None)
     return chatTTS_handler, ChatTTSHandler
 
 

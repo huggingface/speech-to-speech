@@ -246,7 +246,12 @@ def hand_over_mlx_lock(handler_name: str = "Unknown") -> bool:
 
 @contextmanager
 def suspend_mlx_lock() -> Iterator[None]:
-    """Release the MLX lock while its owner blocks on non-MLX work, then re-acquire."""
+    """Release the MLX lock while its owner blocks on non-MLX work, then re-acquire.
+
+    Callers that suspend mid-generator (such as MLX TTS handlers yielding before
+    a reopen-grace commit gate) must materialize any MLX arrays they need before
+    yielding so no unevaluated Metal graph races another MLX handler.
+    """
     with _mlx_lock_state:
         if _lock_owner_ident == get_ident() and _lock_depth > 0:
             depth = _lock_depth

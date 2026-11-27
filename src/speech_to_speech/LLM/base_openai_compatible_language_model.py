@@ -732,11 +732,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
     def _turn_output_allowed(
         self, turn_id: str | None, turn_revision: int | None, *, hold_for_grace: bool = True
     ) -> bool:
-        if self.speculative_turns is None:
-            return True
-        if hold_for_grace:
-            return self.speculative_turns.wait_for_gate(turn_id, turn_revision)
-        return self.speculative_turns.wait_for_gate(turn_id, turn_revision, hold_for_grace=False)
+        return self.speculative_turns is None or self.speculative_turns.wait_for_gate(
+            turn_id, turn_revision, hold_for_grace=hold_for_grace
+        )
 
     def _turn_allowed(self, turn: _Turn) -> bool:
         return self._turn_output_allowed(turn.turn_id, turn.turn_revision, hold_for_grace=not turn.wants_audio)

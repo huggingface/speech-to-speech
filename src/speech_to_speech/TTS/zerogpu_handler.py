@@ -4,7 +4,6 @@ import logging
 from threading import Event
 
 from speech_to_speech.pipeline.events import ResponseFailedEvent
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.pipeline.transcript_logging import log_exception
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
 from speech_to_speech.zerogpu import runtime
@@ -79,15 +78,11 @@ class ZeroGPUTTSHandler(BaseTTSHandler):
             language = selected if selected in self.supported_languages else self.language
         return language
 
-    def process(self, item):
+    def _on_end_of_response(self, end):
+        self._failed_responses.discard(self._identity(end))
+
+    def _synthesize_input(self, item):
         identity = self._identity(item)
-        if isinstance(item, EndOfResponse):
-            self._failed_responses.discard(identity)
-            if self._gate_end_of_response(item):
-                yield AUDIO_RESPONSE_DONE
-            return
-        if not self._admit_input(item):
-            return
         generation = identity[0]
         if identity in self._failed_responses or not item.text.strip() or self._cancelled(item, generation):
             return
@@ -110,7 +105,6 @@ class ZeroGPUTTSHandler(BaseTTSHandler):
                     continue
                 if first:
                     timer.first_provider_audio()
-                    timer.first_yield()
                     first = False
                 yield chunk
             if first and not cancelled():
