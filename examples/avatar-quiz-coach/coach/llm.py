@@ -147,6 +147,11 @@ def _http() -> httpx.AsyncClient:
     return _client
 
 
+# Endpoints and models that only take max_completion_tokens (OpenAI's newer
+# models), learned from their first 400 so later calls skip the extra round trip.
+_COMPLETION_TOKENS: set[tuple[str, str]] = set()
+
+
 async def chat_json(
     messages: list[dict[str, str]],
     models: list[str] | list[str | Route],
@@ -178,12 +183,18 @@ async def chat_json(
         }
         if effort:
             body["reasoning_effort"] = effort
-        for attempt in range(2):
+        if (base_url, model) in _COMPLETION_TOKENS:
+            body["max_completion_tokens"] = body.pop("max_tokens")
+        for attempt in range(3):
             started = time.perf_counter()
             try:
                 resp = await _http().post(f"{base_url}/chat/completions", json=body, headers=headers, timeout=timeout)
                 data = resp.json()
                 choices = data.get("choices") if isinstance(data, dict) else None
+                if resp.status_code == 400 and "max_completion_tokens" in resp.text and "max_tokens" in body:
+                    _COMPLETION_TOKENS.add((base_url, model))
+                    body["max_completion_tokens"] = body.pop("max_tokens")
+                    continue
                 if resp.status_code == 400 and "reasoning_effort" in body:
                     body.pop("reasoning_effort")
                     continue
