@@ -1316,6 +1316,9 @@ class ResponseHandler(RealtimeBaseHandler):
         st.next_assistant_output_sequence = audio_buf.next_output_sequence
         st.in_response = True
         new_item_id = self._start_item(conn_id)
+        prev_item_id = audio_buf.current_item_id
+        if prev_item_id and prev_item_id in st.resumed_audio_origins and prev_item_id not in st.assistant_audio_cuts:
+            st.assistant_audio_cuts[prev_item_id] = max(0, cut_samples - audio_buf.wire_start_sample)
         st.active_resumed_audio = st.resumed_audio_origins[new_item_id] = (resume_sample, audio_buf)
         if audio_buf.root_item_id and (cut_samples < audio_buf.total_samples or not audio_buf.generation_done):
             st.resumed_root_wire_cuts.setdefault(

@@ -890,6 +890,40 @@ class Chat:
             self._set_replied_past_locked(heard, replied_past)
             return True
 
+    def replace_assistant_message(
+        self,
+        old_item_id: str,
+        new_item_id: str,
+        text: str,
+        *,
+        status: Literal["completed", "incomplete"] = "incomplete",
+    ) -> bool:
+        """Replace assistant message *old_item_id* in-place with *new_item_id* and *text*."""
+        with self._lock:
+            self._unheard_assistant_items.pop(old_item_id, None)
+            target_ids = self._assistant_item_aliases.get(old_item_id, {old_item_id})
+            index = next(
+                (
+                    i
+                    for i, item in enumerate(self.buffer)
+                    if item.id in target_ids and isinstance(item, RealtimeConversationItemAssistantMessage)
+                ),
+                None,
+            )
+            if index is None:
+                return False
+            preceding_ids = [item.id for item in self.buffer[:index]]
+            replied_past = self._take_replied_past_locked(target_ids)
+            self._delete_item_locked(old_item_id)
+            if not text:
+                return True
+            retained_ids = {item.id for item in self.buffer}
+            heard = self._heard_message_locked(new_item_id, text)
+            heard.status = status
+            self.buffer.insert(sum(pid in retained_ids for pid in preceding_ids), heard)
+            self._set_replied_past_locked(heard, replied_past)
+            return True
+
     def bind_assistant_item_ids(self, response_key: str | None, output_items: Sequence[ConversationItem]) -> None:
         """Give delivered assistant history the IDs exposed by Realtime."""
         with self._lock:

@@ -539,6 +539,10 @@ async def _resume_false_interruption(
     st = unit.service._state(session_id)
     st.false_interruption_turn_id = None
     st.preserve_turn_on_cancel = False
+    if pending.interrupt_turn_id is not None:
+        st.dismissed_interruption_turns[pending.interrupt_turn_id] = None
+        while len(st.dismissed_interruption_turns) > 32:
+            st.dismissed_interruption_turns.pop(next(iter(st.dismissed_interruption_turns)))
     buf = pending.audio_buffer
     try:
         settled = unit.service.audio.force_resolve_input_turn(session_id, pending.interrupt_turn_id)

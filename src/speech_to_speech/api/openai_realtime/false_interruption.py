@@ -203,6 +203,27 @@ class AssistantAudioBuffer:
             [seg.text, seg.end_sample - seg.start_sample, seg.end_sample - seg.start_sample] for seg in self.segments
         ]
 
+    def text_for_range(self, start_sample: int, end_sample: int) -> str:
+        """Return transcript text spoken within ``[start_sample, end_sample]``."""
+        from speech_to_speech.api.openai_realtime.handlers.response import _heard_transcript
+
+        if end_sample <= start_sample:
+            return ""
+        if start_sample <= 0:
+            return _heard_transcript(self.as_audio_segments(), end_sample)
+        segs: list[list[Any]] = []
+        for seg in self.segments:
+            seg_len = seg.end_sample - seg.start_sample
+            if seg_len <= 0 or seg.end_sample <= start_sample:
+                continue
+            if seg.start_sample < start_sample:
+                text = _unheard_text_suffix(seg.text, start_sample - seg.start_sample, seg_len)
+                dur = seg.end_sample - start_sample
+            else:
+                text, dur = seg.text, seg_len
+            segs.append([text, dur, dur])
+        return _heard_transcript(segs, end_sample - start_sample)
+
 
 @dataclass
 class PendingFalseInterruption:

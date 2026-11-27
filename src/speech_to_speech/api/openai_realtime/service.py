@@ -314,6 +314,8 @@ class ConnState(BaseModel):
     active_resumed_audio: tuple[int, Any] | None = None
     # Active false-interruption candidate turn_id (suppresses chat/LLM while under min_interruption_words).
     false_interruption_turn_id: str | None = None
+    # Dismissed false-interruption turn IDs retained until their late terminal transcription arrives.
+    dismissed_interruption_turns: dict[str, None] = Field(default_factory=dict)
     # When True, the next cancelled finish_response keeps the turn and response key open for replay buffering.
     preserve_turn_on_cancel: bool = False
     # Keyed by output index so response.done can preserve interleaving with
@@ -942,11 +944,12 @@ class RealtimeService:
 
         cfg = st.runtime_config
         min_words = self.session_min_interruption_words(conn_id)
+        was_dismissed = event.turn_id is not None and st.dismissed_interruption_turns.pop(event.turn_id, False) is None
+        is_false_interruption_turn = event.turn_id is not None and (
+            event.turn_id == st.false_interruption_turn_id or was_dismissed
+        )
         suppress_false_interruption = (
-            min_words > 0
-            and st.false_interruption_turn_id is not None
-            and event.turn_id == st.false_interruption_turn_id
-            and count_interruption_words(event.transcript) < min_words
+            min_words > 0 and is_false_interruption_turn and count_interruption_words(event.transcript) < min_words
         )
         transcript = "" if suppress_false_interruption else event.transcript
         if transcript and event.speaker_attribution is not None:

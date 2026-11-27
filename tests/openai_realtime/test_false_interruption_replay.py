@@ -846,6 +846,152 @@ def test_wire_item_retrieve_preserves_original_cut_and_delete_works_on_replay_it
         assert still_1["status"] == "incomplete" and still_1["content"][0]["transcript"] == "First sentence."
 
 
+def test_late_backchannel_after_timeout_recovery_is_suppressed() -> None:
+    with _ws_session(min_words=2, timeout_ms=80) as (unit, ws, sid):
+        chat = unit.service._state(sid).runtime_config.chat
+        chat.add_item(make_user_message("Explain."))
+        _queue_completed_reply(unit, sid, "rk_late", [("First part. Second part.", _tone(RATE * 2))])
+        _drain_until(ws, "response.done")
+
+        unit.text_output_queue.put(SpeechStartedEvent(turn_id="turn_late", turn_revision=0))
+        _drain_until(ws, "input_audio_buffer.speech_started")
+        unit.text_output_queue.put(SpeechStoppedEvent(turn_id="turn_late", turn_revision=0, duration_s=0.1))
+        # Grace period expires before STT returns; reply resumes.
+        replayed = _drain_until(ws, "response.done")
+        assert any(ev["type"] == "response.output_audio.delta" for ev in replayed)
+
+        # Delayed 1-word backchannel ("yeah" < min_words=2) for that same turn must not enter Chat or queue LLM.
+        unit.text_output_queue.put(TranscriptionCompletedEvent(transcript="yeah", turn_id="turn_late", turn_revision=0))
+        _drain_until(ws, "conversation.item.input_audio_transcription.completed")
+        assert unit.text_prompt_queue.empty()
+        assert [(m.role, m.status) for m in chat.buffer] == [("user", None), ("assistant", "completed")]
+
+
+def test_double_recovery_retrieval_and_deletion_history_reconciliation() -> None:
+    # 1. Two recoveries on the same reply: all 3 wire items stay retrievable; deleting item_3 drops only "Last sentence.".
+    with _ws_session(min_words=1) as (unit, ws, sid):
+        chat = unit.service._state(sid).runtime_config.chat
+        chat.add_item(make_user_message("Three sentences."))
+        _queue_completed_reply(
+            unit,
+            sid,
+            "rk_dbl",
+            [
+                ("First sentence.", _tone(RATE * 2)),
+                ("Middle sentence.", _tone(RATE * 2)),
+                ("Last sentence.", _tone(RATE * 2)),
+            ],
+        )
+        item_1 = next(
+            ev["item"]["id"] for ev in _drain_until(ws, "response.done") if ev["type"] == "response.output_item.added"
+        )
+
+        # First cough at 2s -> item_2 replays from ~1.4s..6s.
+        unit.text_output_queue.put(SpeechStartedEvent(turn_id="turn_d1", turn_revision=0))
+        _drain_until(ws, "input_audio_buffer.speech_started")
+        ws.send_json(
+            {"type": "conversation.item.truncate", "item_id": item_1, "content_index": 0, "audio_end_ms": 2000}
+        )
+        _wait_for(lambda: unit.session.pending_false_interruption.client_played_samples is not None)
+        unit.text_output_queue.put(SpeechStoppedEvent(turn_id="turn_d1", turn_revision=0, duration_s=0.2))
+        unit.text_output_queue.put(TranscriptionCompletedEvent(transcript="", turn_id="turn_d1", turn_revision=0))
+        item_2 = next(
+            ev["item"]["id"] for ev in _drain_until(ws, "response.done") if ev["type"] == "response.output_item.added"
+        )
+
+        # Second cough during item_2 -> truncate item_2 after "Middle sentence." (total played 4s).
+        unit.text_output_queue.put(SpeechStartedEvent(turn_id="turn_d2", turn_revision=0))
+        _drain_until(ws, "input_audio_buffer.speech_started")
+        wire_start_ms = unit.session.pending_false_interruption.audio_buffer.wire_start_sample * 1000 // RATE
+        ws.send_json(
+            {
+                "type": "conversation.item.truncate",
+                "item_id": item_2,
+                "content_index": 0,
+                "audio_end_ms": 4000 - wire_start_ms,
+            }
+        )
+        _wait_for(lambda: unit.session.pending_false_interruption.client_played_samples is not None)
+        unit.text_output_queue.put(SpeechStoppedEvent(turn_id="turn_d2", turn_revision=0, duration_s=0.2))
+        unit.text_output_queue.put(TranscriptionCompletedEvent(transcript="", turn_id="turn_d2", turn_revision=0))
+        item_3 = next(
+            ev["item"]["id"] for ev in _drain_until(ws, "response.done") if ev["type"] == "response.output_item.added"
+        )
+        assert len({item_1, item_2, item_3}) == 3
+
+        # All three wire items are retrievable with their own views.
+        for iid, expected_status in ((item_1, "incomplete"), (item_2, "incomplete"), (item_3, "completed")):
+            ws.send_json({"type": "conversation.item.retrieve", "item_id": iid})
+            got = _drain_until(ws, "conversation.item.retrieved")[-1]["item"]
+            assert got["id"] == iid and got["status"] == expected_status
+
+        # Deleting newest replay (item_3) removes "Last sentence." from model history while keeping first + middle.
+        ws.send_json({"type": "conversation.item.delete", "item_id": item_3})
+        assert _drain_until(ws, "conversation.item.deleted")[-1]["item_id"] == item_3
+        assistant_msgs = [m for m in chat.buffer if m.role == "assistant"]
+        assert len(assistant_msgs) == 1 and assistant_msgs[0].status == "incomplete"
+        text_after = assistant_msgs[0].content[0].text
+        assert (
+            "First sentence." in text_after and "Middle sentence." in text_after and "Last sentence." not in text_after
+        )
+
+    # 2. Deleting original item_1 after one replay keeps surviving item_2 in model history at the same position.
+    with _ws_session(min_words=1) as (unit, ws, sid):
+        chat = unit.service._state(sid).runtime_config.chat
+        chat.add_item(make_user_message("Two sentences."))
+        _queue_completed_reply(
+            unit,
+            sid,
+            "rk_del_root",
+            [("First sentence.", _tone(RATE * 2)), ("Last sentence.", _tone(RATE * 2))],
+        )
+        item_1 = next(
+            ev["item"]["id"] for ev in _drain_until(ws, "response.done") if ev["type"] == "response.output_item.added"
+        )
+
+        unit.text_output_queue.put(SpeechStartedEvent(turn_id="turn_dr", turn_revision=0))
+        _drain_until(ws, "input_audio_buffer.speech_started")
+        ws.send_json(
+            {"type": "conversation.item.truncate", "item_id": item_1, "content_index": 0, "audio_end_ms": 2000}
+        )
+        _wait_for(lambda: unit.session.pending_false_interruption.client_played_samples is not None)
+        unit.text_output_queue.put(SpeechStoppedEvent(turn_id="turn_dr", turn_revision=0, duration_s=0.2))
+        unit.text_output_queue.put(TranscriptionCompletedEvent(transcript="", turn_id="turn_dr", turn_revision=0))
+        item_2 = next(
+            ev["item"]["id"] for ev in _drain_until(ws, "response.done") if ev["type"] == "response.output_item.added"
+        )
+
+        # Add a later user turn so we also verify in-place chronological order preservation.
+        chat.add_item(make_user_message("Follow up."))
+
+        ws.send_json({"type": "conversation.item.delete", "item_id": item_1})
+        assert _drain_until(ws, "conversation.item.deleted")[-1]["item_id"] == item_1
+
+        # item_1 is gone, item_2 survives in model history (before "Follow up.") and remains retrievable & deletable.
+        assert [(m.role, m.status) for m in chat.buffer] == [
+            ("user", None),
+            ("assistant", "completed"),
+            ("user", None),
+        ]
+        assert chat.get_item(item_1) is None and chat.get_item(item_2) is not None
+        assert "Last sentence." in chat.buffer[1].content[0].text
+        assert "First" not in chat.buffer[1].content[0].text
+
+        ws.send_json({"type": "conversation.item.retrieve", "item_id": item_1})
+        assert _drain_until(ws, "error")[-1]["error"]["type"] == "conversation_item_not_found"
+        ws.send_json({"type": "conversation.item.retrieve", "item_id": item_2})
+        got_2 = _drain_until(ws, "conversation.item.retrieved")[-1]["item"]
+        assert (
+            got_2["id"] == item_2
+            and got_2["status"] == "completed"
+            and "Last sentence." in got_2["content"][0]["transcript"]
+        )
+
+        ws.send_json({"type": "conversation.item.delete", "item_id": item_2})
+        assert _drain_until(ws, "conversation.item.deleted")[-1]["item_id"] == item_2
+        assert [m for m in chat.buffer if m.role == "assistant"] == []
+
+
 def test_per_session_false_interruption_config_via_session_update() -> None:
     # 1. Server default disabled (0); Session A opts in via session.update while Session B on same service stays off.
     unit = _make_unit(min_words=0, timeout_ms=2000)
