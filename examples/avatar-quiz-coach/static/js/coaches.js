@@ -43,7 +43,7 @@ export const COACHES = {
   },
   reachy: {
     name: "Reachy Mini",
-    voice: "en-arthur_m",
+    voice: "auto-oliver_m",
     renderer: "robot",
     robot: "mini",
     lipGain: 1,
@@ -53,7 +53,7 @@ export const COACHES = {
   },
   reachy2: {
     name: "Reachy 2",
-    voice: "en-arthur_m",
+    voice: "auto-arthur_m",
     renderer: "robot",
     robot: "reachy2",
     lipGain: 1,
@@ -63,7 +63,7 @@ export const COACHES = {
   },
   duck: {
     name: "Microduck",
-    voice: "en-maya_f",
+    voice: "auto-clara_f",
     renderer: "robot",
     robot: "duck",
     lipGain: 1,
