@@ -40,8 +40,10 @@ _lock_owner_thread: str | None = None
 _lock_owner_handler: str | None = None
 _lock_acquired_at: float | None = None
 _lock_depth = 0
-# Threads waiting for the lock for short work that must not wait out a long
-# hold, such as a final transcription during a reply (see hand_over_mlx_lock).
+# Threads waiting for the lock, and those among them waiting for short work
+# that must not wait out a long hold, such as a final transcription during a
+# reply (see hand_over_mlx_lock).
+_waiters = 0
 _priority_waiters = 0
 # How long hand_over_mlx_lock waits for a priority waiter to take the lock.
 _HAND_OVER_WAIT_S = 0.05
@@ -118,9 +120,10 @@ def acquire_mlx_lock(
     Returns:
         True if lock was acquired, False if timeout occurred
     """
-    global _priority_waiters
+    global _priority_waiters, _waiters
     with _mlx_lock_state:
         owner_before = _owner_snapshot()
+        _waiters += 1
         if priority:
             _priority_waiters += 1
     logger.debug("%s: Attempting to acquire MLX lock (owner=%s)", handler_name, owner_before)
@@ -128,8 +131,9 @@ def acquire_mlx_lock(
     try:
         acquired = _mlx_lock.acquire(timeout=timeout) if timeout else _mlx_lock.acquire(blocking=True)
     finally:
-        if priority:
-            with _mlx_lock_state:
+        with _mlx_lock_state:
+            _waiters -= 1
+            if priority:
                 _priority_waiters -= 1
     wait_s = perf_counter() - start
     tracker = active_turn_latency_tracker()
@@ -210,12 +214,21 @@ def hand_over_mlx_lock(handler_name: str = "Unknown") -> bool:
     that arrives meanwhile, such as user speech over that reply, would wait all
     of it out. The owner calls this between steps, with no MLX work of its own
     in flight: if a priority waiter is queued, it finishes the GPU work,
-    releases the lock, and takes it back after the waiter is done. Ordinary
-    waiters, which may hold the lock for long, are not let in. Returns whether
-    the lock was handed over.
+    releases the lock, and takes it back after the waiter is done. Returns
+    whether the lock was handed over.
+
+    Ordinary waiters, which may hold the lock for long, are not let in. A
+    release wakes every thread already queued before the owner gets the lock
+    back, so the lock is handed over only when all of them are priority
+    waiters; with an ordinary one queued, the owner keeps it to the end.
     """
     with _mlx_lock_state:
-        if not _priority_waiters or _lock_owner_ident != get_ident() or _lock_depth != 1:
+        if (
+            not _priority_waiters
+            or _waiters != _priority_waiters
+            or _lock_owner_ident != get_ident()
+            or _lock_depth != 1
+        ):
             return False
     _synchronize_mlx()
     release_mlx_lock(handler_name=handler_name)

@@ -3,6 +3,8 @@
 import threading
 import time
 
+import pytest
+
 from speech_to_speech.utils.mlx_lock import MLXLockContext, hand_over_mlx_lock
 
 
@@ -54,6 +56,28 @@ def test_an_ordinary_waiter_waits_for_the_whole_hold():
     holder.join(5)
     llm.join(5)
     assert order == ["tts0", "tts1", "tts2", "llm"]
+
+
+@pytest.mark.parametrize("final_first", [False, True])
+def test_no_hand_over_while_an_ordinary_waiter_is_queued(final_first):
+    """A release wakes every queued thread, so handing over to a final would let a queued LLM in too."""
+    order: list[str] = []
+    queued = threading.Event()
+    holder = threading.Thread(target=_hold_in_steps, args=(order, 3, queued))
+    holder.start()
+    while not order:
+        time.sleep(0.001)
+    first, second = (("stt-final", True), ("llm", False)) if final_first else (("llm", False), ("stt-final", True))
+    first_started = threading.Event()
+    waiters = [_waiter(order, *first, first_started)]
+    first_started.wait(1.0)
+    time.sleep(0.01)  # the first waiter is blocked on the lock before the second starts
+    waiters.append(_waiter(order, *second, queued))
+    holder.join(5)
+    for waiter in waiters:
+        waiter.join(5)
+    assert order[:3] == ["tts0", "tts1", "tts2"]
+    assert sorted(order[3:]) == ["llm", "stt-final"]
 
 
 def test_hand_over_without_waiters_or_without_the_lock_does_nothing():
