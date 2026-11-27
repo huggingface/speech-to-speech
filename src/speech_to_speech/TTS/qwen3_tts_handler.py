@@ -26,12 +26,10 @@ from openai.types.realtime.realtime_response_create_params import RealtimeRespon
 from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.api.openai_realtime.utils import StreamingPcm16Resampler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.console import console as console
 from speech_to_speech.pipeline.control import SESSION_END, is_control_message
 from speech_to_speech.pipeline.events import AssistantOutputEvent
-from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
+from speech_to_speech.pipeline.handler_types import TTSOut
 from speech_to_speech.pipeline.messages import (
-    AUDIO_RESPONSE_DONE,
     PIPELINE_END,
     AssistantTextPart,
     EndOfResponse,
@@ -848,20 +846,17 @@ class Qwen3TTSHandler(BaseTTSHandler):
         spoken = getattr(self, "_spoken_text", None)
         return spoken if isinstance(spoken, str) else tts_input.text
 
-    def _on_first_audio_committed(self, tts_input: TTSInput, timer: TTSResponseTimer | None) -> None:
-        super()._on_first_audio_committed(tts_input, timer)
+    def _on_first_audio_committed(
+        self,
+        tts_input: TTSInput,
+        timer: TTSResponseTimer | None,
+        e2e_s: float | None = None,
+    ) -> None:
+        super()._on_first_audio_committed(tts_input, timer, e2e_s)
         if timer is not None:
-            self._log_first_audio_latency(tts_input, timer)
+            self._log_first_audio_latency(tts_input, timer, e2e_s)
 
-    def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
-        if isinstance(tts_input, EndOfResponse):
-            if self._gate_end_of_response(tts_input):
-                yield AUDIO_RESPONSE_DONE
-            return
-
-        if not self._admit_input(tts_input):
-            return
-
+    def _synthesize_input(self, tts_input: TTSInput) -> Iterator[TTSOut]:
         runtime_config = tts_input.runtime_config
         response = tts_input.response
 
@@ -899,11 +894,16 @@ class Qwen3TTSHandler(BaseTTSHandler):
         finally:
             self._spoken_text = None
 
-    def _log_first_audio_latency(self, tts_input: TTSInput, timer: TTSResponseTimer) -> None:
+    def _log_first_audio_latency(
+        self,
+        tts_input: TTSInput,
+        timer: TTSResponseTimer,
+        e2e_s: float | None = None,
+    ) -> None:
         elapsed_s = timer.speech_stop_elapsed_s()
         if elapsed_s is None or elapsed_s < 0:
             return
-        latency_s = timer.first_yield(ignore_cancel=True)
+        latency_s = e2e_s if e2e_s is not None else timer.first_yield(ignore_cancel=True)
         if latency_s is None:
             if timer.has_tracker:
                 return

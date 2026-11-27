@@ -23,7 +23,6 @@ from speech_to_speech.api.openai_realtime.websocket_router import create_app
 from speech_to_speech.LLM.chat_completions_language_model import ChatCompletionsApiModelHandler
 from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 from speech_to_speech.pipeline.control import SESSION_END, is_control_message
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
 from tests.llm_history import mock_async_client
 from tests.openai_realtime.conftest import make_pipeline_unit
@@ -97,8 +96,8 @@ class _FakeTTS(BaseTTSHandler):
     def setup(self, cancel_scope):
         self.cancel_scope = cancel_scope
 
-    def process(self, tts_input):
-        yield AUDIO_RESPONSE_DONE if isinstance(tts_input, EndOfResponse) else b"\x01\x00" * 512
+    def _synthesize_input(self, tts_input):
+        yield b"\x01\x00" * 512
 
 
 def _forward_session_end(unit, stop):

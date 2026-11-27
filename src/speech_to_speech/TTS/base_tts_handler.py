@@ -1,17 +1,14 @@
 from __future__ import annotations
 
-import functools
 import logging
 from collections.abc import Callable, Iterator
-from contextlib import nullcontext
-from typing import Any
 
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.console import console
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
-from speech_to_speech.pipeline.messages import EndOfResponse, TTSInput
-from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker, TurnGateAction
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.turn_latency import TTSResponseTimer, TurnLatencyStore
 from speech_to_speech.utils.mlx_lock import suspend_mlx_lock
 
@@ -29,53 +26,47 @@ class BaseTTSHandler(BaseHandler[TTSIn, TTSOut]):
     _active_tts_input: TTSInput | None = None
     _active_timer: TTSResponseTimer | None = None
 
-    def __init_subclass__(cls, **kwargs: Any) -> None:
-        super().__init_subclass__(**kwargs)
-        raw_process = cls.__dict__.get("process")
-        if raw_process is None or getattr(raw_process, "_tts_scoped", False):
+    def _on_end_of_response(self, end: EndOfResponse) -> None:
+        """Reset per-response handler state when an EndOfResponse arrives."""
+
+    def _synthesize_input(self, tts_input: TTSInput) -> Iterator[TTSOut]:
+        """Yield synthesized audio blocks for one admitted ``TTSInput``."""
+        raise NotImplementedError
+
+    def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
+        if isinstance(tts_input, EndOfResponse):
+            self._on_end_of_response(tts_input)
+            if self._gate_end_of_response(tts_input):
+                yield AUDIO_RESPONSE_DONE
             return
 
-        @functools.wraps(raw_process)
-        def _scoped_process(self: BaseTTSHandler, tts_input: TTSIn) -> Iterator[TTSOut]:
-            if isinstance(tts_input, TTSInput) and self._active_tts_input is tts_input:
-                yield from raw_process(self, tts_input)
-                return
+        if not self._admit_input(tts_input):
+            return
 
-            previous_input = self._active_tts_input
-            previous_timer = self._active_timer
-            self._active_tts_input = tts_input if isinstance(tts_input, TTSInput) else None
+        self._active_tts_input = tts_input
+        self._active_timer = None
+        process_generation = tts_input.cancel_generation
+        if process_generation is None and self.cancel_scope is not None:
+            process_generation = self.cancel_scope.generation
+
+        gen = self._synthesize_input(tts_input)
+        try:
+            first_audio = True
+            for output in gen:
+                if first_audio:
+                    if not self._commit_first_audio(tts_input, generation=process_generation):
+                        return
+                    first_audio = False
+                    timer = self._active_timer
+                    e2e_s = timer.commit() if timer is not None else None
+                    self._on_first_audio_committed(tts_input, timer, e2e_s)
+                yield output
+        finally:
+            close = getattr(gen, "close", None)
+            if close is not None:
+                close()
+            self._active_tts_input = None
             self._active_timer = None
-            process_generation: int | None = None
-            if isinstance(tts_input, TTSInput):
-                process_generation = tts_input.cancel_generation
-                if process_generation is None and self.cancel_scope is not None:
-                    process_generation = self.cancel_scope.generation
-
-            gen = raw_process(self, tts_input)
-            try:
-                first_audio = isinstance(tts_input, TTSInput)
-                for output in gen:
-                    if first_audio:
-                        assert isinstance(tts_input, TTSInput)
-                        if not self._commit_first_audio(tts_input, generation=process_generation):
-                            return
-                        first_audio = False
-                        timer = self._active_timer
-                        if timer is not None:
-                            timer.publish_provider_audio()
-                        self._on_first_audio_committed(tts_input, timer)
-                        if timer is not None:
-                            timer.first_yield(ignore_cancel=True)
-                    yield output
-            finally:
-                close = getattr(gen, "close", None)
-                if close is not None:
-                    close()
-                self._active_tts_input = previous_input
-                self._active_timer = previous_timer
-
-        _scoped_process._tts_scoped = True  # type: ignore[attr-defined]
-        setattr(cls, "process", _scoped_process)
 
     def _gate_end_of_response(self, end: EndOfResponse) -> bool:
         """Wait for the speculative turn gate and say whether to forward the end marker.
@@ -122,7 +113,12 @@ class BaseTTSHandler(BaseHandler[TTSIn, TTSOut]):
         """Return the text printed to the terminal once first audio commits."""
         return tts_input.text
 
-    def _on_first_audio_committed(self, tts_input: TTSInput, timer: TTSResponseTimer | None) -> None:
+    def _on_first_audio_committed(
+        self,
+        tts_input: TTSInput,
+        timer: TTSResponseTimer | None,
+        e2e_s: float | None = None,
+    ) -> None:
         """Run user-visible first-audio side effects after speculative commit succeeds."""
         if self._print_assistant_text:
             console.print(f"[green]ASSISTANT: {self._assistant_text_for_print(tts_input)}")
@@ -158,18 +154,11 @@ class BaseTTSHandler(BaseHandler[TTSIn, TTSOut]):
         if _aborted():
             return False
         tracker = self.speculative_turns
-        if (
-            tracker is not None
-            and tts_input is not None
-            and tts_input.turn_id is not None
-            and tts_input.turn_revision is not None
-        ):
-            gate = getattr(tracker, "gate", None)
-            would_hold = (
-                callable(gate)
-                and gate(tts_input.turn_id, tts_input.turn_revision, commit=False).action is TurnGateAction.HOLD
-            )
-            with suspend_mlx_lock() if would_hold else nullcontext():
+        if tracker is not None and self._turn_uncommitted(tts_input):
+            assert tts_input is not None
+            # Suspend the MLX lock around any wait for an uncommitted turn so a
+            # concurrent pending reopen cannot starve MLX STT behind this gate.
+            with suspend_mlx_lock():
                 committed = tracker.wait_for_gate(
                     tts_input.turn_id,
                     tts_input.turn_revision,

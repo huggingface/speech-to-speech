@@ -12,7 +12,7 @@ import numpy as np
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import ResponseFailedEvent
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.messages import EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.transcript_logging import transcript_for_log
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
@@ -288,16 +288,11 @@ class PocketTTSHandler(BaseTTSHandler):
         """
         return 0.1  # 100ms threshold
 
-    def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
-        if isinstance(tts_input, EndOfResponse):
-            self._failed_responses.discard(self._response_identity(tts_input))
-            if self._gate_end_of_response(tts_input):
-                yield AUDIO_RESPONSE_DONE
-            return
+    def _on_end_of_response(self, end: EndOfResponse) -> None:
+        self._failed_responses.discard(self._response_identity(end))
 
+    def _synthesize_input(self, tts_input: TTSInput) -> Iterator[TTSOut]:
         if self._response_identity(tts_input) in self._failed_responses:
-            return
-        if not self._admit_input(tts_input):
             return
 
         gen = tts_input.cancel_generation
@@ -352,10 +347,6 @@ class PocketTTSHandler(BaseTTSHandler):
             if timer.first_provider_audio(first_audio_at_s):
                 logger.debug("Time to first audio: %.3fs", first_audio_at_s - timer.started_at_s)
 
-        def emit(block: np.ndarray) -> Iterator[TTSOut]:
-            timer.first_yield()
-            yield block
-
         for audio_chunk in self._generate_audio(text, gen, record_first_provider_audio):
             if self._is_stale(gen):
                 logger.info("TTS generation cancelled (interruption)")
@@ -369,7 +360,7 @@ class PocketTTSHandler(BaseTTSHandler):
             for block in blocks.push(converted):
                 if self._is_stale(gen):
                     return
-                yield from emit(block)
+                yield block
 
         if self._is_stale(gen):
             return
@@ -377,4 +368,4 @@ class PocketTTSHandler(BaseTTSHandler):
         for block in chain(blocks.push(tail), blocks.flush()):
             if self._is_stale(gen):
                 return
-            yield from emit(block)
+            yield block

@@ -66,7 +66,9 @@ def make_handler(
 
 @pytest.fixture(autouse=True)
 def _quiet_console(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(irodori_module.console, "print", lambda *_a, **_k: None)
+    from speech_to_speech.pipeline.console import console
+
+    monkeypatch.setattr(console, "print", lambda *_a, **_k: None)
 
 
 @pytest.mark.parametrize(

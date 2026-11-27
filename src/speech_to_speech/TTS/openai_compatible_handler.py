@@ -19,8 +19,8 @@ from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.LLM.utils import WHISPER_LANGUAGE_TO_LLM_LANGUAGE
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.events import ResponseFailedEvent
-from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.handler_types import TTSOut
+from speech_to_speech.pipeline.messages import EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.pipeline.turn_latency import TTSResponseTimer
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
@@ -463,21 +463,20 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
         ev = getattr(op, "_cancelled", None) if op is not None else None
         return bool(ev.is_set()) if ev is not None else bool(getattr(op, "cancelled", False))
 
-    def _on_first_audio_committed(self, tts_input: TTSInput, timer: TTSResponseTimer | None) -> None:
+    def _on_end_of_response(self, end: EndOfResponse) -> None:
+        with self._operation_lock:
+            self._failed_responses.discard(self._response_identity(end))
+
+    def _on_first_audio_committed(
+        self,
+        tts_input: TTSInput,
+        timer: TTSResponseTimer | None,
+        e2e_s: float | None = None,
+    ) -> None:
         if timer is not None:
-            self._log_first_audio_latency(tts_input, timer)
+            self._log_first_audio_latency(tts_input, timer, e2e_s)
 
-    def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
-        if isinstance(tts_input, EndOfResponse):
-            if self._gate_end_of_response(tts_input):
-                with self._operation_lock:
-                    self._failed_responses.discard(self._response_identity(tts_input))
-                yield AUDIO_RESPONSE_DONE
-            return
-
-        if not self._admit_input(tts_input):
-            return
-
+    def _synthesize_input(self, tts_input: TTSInput) -> Iterator[TTSOut]:
         cancel_generation = tts_input.cancel_generation
         if cancel_generation is None and self.cancel_scope is not None:
             cancel_generation = self.cancel_scope.generation
@@ -794,13 +793,18 @@ class OpenAICompatibleTTSHandler(BaseTTSHandler):
         yield from blocks.push(converted)
         yield from blocks.flush()
 
-    def _log_first_audio_latency(self, tts_input: TTSInput, timer: TTSResponseTimer) -> None:
+    def _log_first_audio_latency(
+        self,
+        tts_input: TTSInput,
+        timer: TTSResponseTimer,
+        e2e_s: float | None = None,
+    ) -> None:
         ttfa_s = timer.provider_ttfa_s if timer.provider_ttfa_s is not None else perf_counter() - timer.started_at_s
         logger.info("OpenAI-compatible TTS time to first audio: %.3fs", ttfa_s)
         elapsed_s = timer.speech_stop_elapsed_s()
         if elapsed_s is None:
             return
-        latency_s = timer.first_yield(ignore_cancel=True)
+        latency_s = e2e_s if e2e_s is not None else timer.first_yield(ignore_cancel=True)
         if latency_s is None:
             if getattr(self, "turn_latency_store", None) is not None:
                 return

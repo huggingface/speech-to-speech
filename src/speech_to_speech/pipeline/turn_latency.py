@@ -561,7 +561,7 @@ class TTSResponseTimer:
 
         When ``defer_until_commit`` is enabled for an uncommitted speculative
         turn, the measurement is captured locally and only published once
-        :meth:`publish_provider_audio` is called after the turn commits.
+        :meth:`commit` is called after the turn commits.
         """
         if self._provider_done or self._cancelled():
             return False
@@ -575,15 +575,14 @@ class TTSResponseTimer:
             record_response_tts_ttfa(self._store, self._response_key, ttfa_s)
         return True
 
-    def publish_provider_audio(self) -> float | None:
-        """Publish deferred provider TTFA once speculative first audio commits."""
+    def commit(self) -> float | None:
+        """Publish deferred provider TTFA and record first-yield E2E once committed."""
         self._defer_until_commit = False
         pending = self._pending_provider_ttfa_s
         self._pending_provider_ttfa_s = None
-        if pending is None:
-            return None
-        record_response_tts_ttfa(self._store, self._response_key, pending)
-        return pending
+        if pending is not None:
+            record_response_tts_ttfa(self._store, self._response_key, pending)
+        return self.first_yield(ignore_cancel=True)
 
     def first_yield(self, *, ignore_cancel: bool = False) -> float | None:
         """Record speech stop to first yielded block.

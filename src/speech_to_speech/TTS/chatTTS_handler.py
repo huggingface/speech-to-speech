@@ -12,9 +12,8 @@ import soxr
 import torch
 
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.console import console as console
-from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse
+from speech_to_speech.pipeline.handler_types import TTSOut
+from speech_to_speech.pipeline.messages import TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
 from speech_to_speech.TTS.pcm_blocks import PCMBlockBuffer
@@ -56,15 +55,7 @@ class ChatTTSHandler(BaseTTSHandler):
         logger.info(f"Warming up {self.__class__.__name__}")
         _ = self.model.infer("text")
 
-    def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
-        if isinstance(tts_input, EndOfResponse):
-            if self._gate_end_of_response(tts_input):
-                yield AUDIO_RESPONSE_DONE
-            return
-
-        if not self._admit_input(tts_input):
-            return
-
+    def _synthesize_input(self, tts_input: TTSInput) -> Iterator[TTSOut]:
         text = tts_input.text
 
         _cancel_gen = self.cancel_scope.generation if self.cancel_scope else None
@@ -86,10 +77,6 @@ class ChatTTSHandler(BaseTTSHandler):
         wavs_gen = self.model.infer(
             text, params_infer_code=self.params_infer_code, stream=self.stream, split_text=not self.stream
         )
-
-        def emit(block: np.ndarray) -> Iterator[TTSOut]:
-            timer.first_yield()
-            yield block
 
         if self.stream:
             resampler = soxr.ResampleStream(24000, 16000, 1, dtype="float32", quality="HQ")
@@ -113,7 +100,7 @@ class ChatTTSHandler(BaseTTSHandler):
                 for block in blocks.push(converted):
                     if self._is_stale(_cancel_gen):
                         return
-                    yield from emit(block)
+                    yield block
 
             if self._is_stale(_cancel_gen):
                 return
@@ -122,7 +109,7 @@ class ChatTTSHandler(BaseTTSHandler):
             for block in chain(blocks.push(tail), blocks.flush()):
                 if self._is_stale(_cancel_gen):
                     return
-                yield from emit(block)
+                yield block
         else:
             wavs = wavs_gen
             if len(wavs[0]) == 0:
@@ -132,9 +119,7 @@ class ChatTTSHandler(BaseTTSHandler):
             audio_chunk = librosa.resample(wavs[0], orig_sr=24000, target_sr=16000)
             audio_chunk = np.clip(audio_chunk * 32768, -32768, 32767).astype(np.int16)
             for i in range(0, len(audio_chunk), self.chunk_size):
-                yield from emit(
-                    np.pad(
-                        audio_chunk[i : i + self.chunk_size],
-                        (0, self.chunk_size - len(audio_chunk[i : i + self.chunk_size])),
-                    )
+                yield np.pad(
+                    audio_chunk[i : i + self.chunk_size],
+                    (0, self.chunk_size - len(audio_chunk[i : i + self.chunk_size])),
                 )

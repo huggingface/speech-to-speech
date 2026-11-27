@@ -18,9 +18,8 @@ from typing import Any, Iterator, Optional
 import numpy as np
 
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.console import console as console
-from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
+from speech_to_speech.pipeline.handler_types import TTSOut
+from speech_to_speech.pipeline.messages import TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 from speech_to_speech.TTS.base_tts_handler import BaseTTSHandler
 from speech_to_speech.utils.mlx_lock import MLXLockContext
@@ -227,21 +226,13 @@ class KokoroTTSHandler(BaseTTSHandler):
 
         logger.info(f"{self.__class__.__name__} warmed up")
 
-    def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
+    def _synthesize_input(self, tts_input: TTSInput) -> Iterator[TTSOut]:
         """
         Process text input and generate audio output.
 
         Yields:
             Audio chunks as numpy int16 arrays
         """
-        if isinstance(tts_input, EndOfResponse):
-            if self._gate_end_of_response(tts_input):
-                yield AUDIO_RESPONSE_DONE
-            return
-
-        if not self._admit_input(tts_input):
-            return
-
         runtime_config = tts_input.runtime_config
         response = tts_input.response
         language_code = tts_input.tts_language_code
@@ -409,7 +400,6 @@ class KokoroTTSHandler(BaseTTSHandler):
                         logger.info("TTS generation cancelled (interruption)")
                         return
                     chunk = audio[i : i + self.blocksize]
-                    timer.first_yield()
                     logger.debug(f"TTS yielding audio chunk: {len(chunk)} samples")
                     yield chunk
 
@@ -475,7 +465,6 @@ class KokoroTTSHandler(BaseTTSHandler):
                     logger.info("TTS generation cancelled (interruption)")
                     return
                 chunk = audio[i : i + self.blocksize]
-                timer.first_yield()
                 yield chunk
 
     def on_session_end(self) -> None:
