@@ -46,7 +46,8 @@ def test_complete_turn_selects_default_speculative_grace() -> None:
     handler = _handler_with_smart_turn(analyzer)
     audio = np.arange(32, dtype=np.float32)
 
-    assert handler._smart_turn_timing_ms(audio) == (800, 0)
+    status, _analysis_s, grace_ms, delay_ms = handler._classify_smart_turn(audio)
+    assert (status, grace_ms, delay_ms) == ("complete", 800, 0)
     assert len(analyzer.calls) == 1
     np.testing.assert_array_equal(analyzer.calls[0][0], audio)
 
@@ -56,7 +57,8 @@ def test_incomplete_turn_selects_longer_speculative_grace() -> None:
     handler = _handler_with_smart_turn(analyzer)
     full_turn = np.arange(10, dtype=np.float32)
 
-    assert handler._smart_turn_timing_ms(full_turn) == (2000, 600)
+    status, _analysis_s, grace_ms, delay_ms = handler._classify_smart_turn(full_turn)
+    assert (status, grace_ms, delay_ms) == ("incomplete", 2000, 600)
     np.testing.assert_array_equal(analyzer.calls[0][0], full_turn)
 
 
@@ -65,7 +67,8 @@ def test_inference_failure_uses_default_speculative_grace() -> None:
     handler = _handler_with_smart_turn(analyzer)
     audio = np.ones(32, dtype=np.float32)
 
-    assert handler._smart_turn_timing_ms(audio) == (800, 0)
+    status, _analysis_s, grace_ms, delay_ms = handler._classify_smart_turn(audio)
+    assert (status, grace_ms, delay_ms) == ("failed", 800, 0)
     assert len(analyzer.calls) == 1
 
 

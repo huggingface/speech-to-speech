@@ -235,15 +235,17 @@ class SpeculativeTurnTracker:
                 if pending_matches:
                     self._condition.notify_all()
                 return False
-            if on_resolve is not None:
-                on_resolve()
             self._processing_deadline = finalized_at + max(0, processing_delay_ms) / 1000.0
             grace_s = max(0, output_hold_ms) / 1000.0
             if grace_s > 0:
                 self._reopen_grace = _ReopenGrace(turn_id, revision, finalized_at + grace_s)
             elif self._grace_matches_locked(turn_id, revision):
                 self._reopen_grace = None
-            self._condition.notify_all()
+            try:
+                if on_resolve is not None:
+                    on_resolve()
+            finally:
+                self._condition.notify_all()
             return True
 
     def has_pending_smart_turn(self, turn_id: str | None = None, revision: int | None = None) -> bool:

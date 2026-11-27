@@ -218,7 +218,8 @@ def test_vad_decision_reaches_terminal_response_metadata(service, conn_id, final
     monkeypatch.setattr(vad_module, "time", SimpleNamespace(time=lambda: 100.0, perf_counter=lambda: next(clock)))
     try:
         outputs = list(vad.process(_audio_bytes()))
-        assert vad.wait_for_smart_turn(timeout=2.0)
+        if vad._smart_turn_future is not None:
+            vad._smart_turn_future.result(timeout=2.0)
     finally:
         vad.cleanup()
     assert len(outputs) == 1

@@ -162,7 +162,8 @@ class VADHandlerArguments:
     smart_turn_incomplete_delay_ms: int = field(
         default=600,
         metadata={
-            "help": "Extra delay (ms) before processing final speech input when Smart Turn reports incomplete. "
+            "help": "Extra delay (ms) before emitting the final transcript when Smart Turn reports incomplete "
+            "(STT still runs in parallel with Smart Turn). "
             "It starts with the output grace and is capped by --smart_turn_max_wait_ms. "
             "Default is 600 ms."
         },

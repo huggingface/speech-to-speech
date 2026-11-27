@@ -3,8 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Iterator
-from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FutureTimeoutError
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from queue import Queue
 from threading import Event
@@ -625,13 +624,6 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         )
         return "incomplete", analysis_s, self.smart_turn_max_wait_ms, processing_delay_ms
 
-    def _smart_turn_timing_ms(self, audio: np.ndarray) -> tuple[int, int]:
-        """Return the response grace and pre-processing delay for this endpoint."""
-        status, analysis_s, reopen_grace_ms, processing_delay_ms = self._classify_smart_turn(audio)
-        self._last_smart_turn_status = status
-        self._last_smart_turn_analysis_s = analysis_s
-        return reopen_grace_ms, processing_delay_ms
-
     def _submit_smart_turn(
         self,
         turn_id: str | None,
@@ -659,47 +651,52 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         analyzer: Any,
         token: object,
     ) -> None:
-        if session_gen != self._smart_turn_session_gen or not self.speculative_turns.is_latest(turn_id, turn_revision):
-            return
-        status, analysis_s, reopen_grace_ms, processing_delay_ms = self._classify_smart_turn(
-            audio, analyzer=analyzer, sample_rate=sample_rate
-        )
-        if session_gen != self._smart_turn_session_gen or not self.speculative_turns.is_latest(turn_id, turn_revision):
-            return
-        store = getattr(self, "turn_latency_store", None)
-
-        def _record_latency() -> None:
-            if store is not None:
-                store.record_smart_turn(
-                    turn_id,
-                    turn_revision,
-                    status=status,
-                    analysis_s=analysis_s,
-                    grace_s=reopen_grace_ms / 1000.0 if status != "disabled" else None,
-                    processing_delay_s=processing_delay_ms / 1000.0 if status != "disabled" else None,
-                )
-
-        self.speculative_turns.resolve_smart_turn(
-            turn_id,
-            turn_revision,
-            output_hold_ms=reopen_grace_ms,
-            processing_delay_ms=processing_delay_ms,
-            token=token,
-            on_resolve=_record_latency,
-        )
-
-    def wait_for_smart_turn(self, timeout: float = 5.0) -> bool:
-        """Wait until any background Smart Turn classification has finished."""
-        future = self._smart_turn_future
-        if future is None:
-            return True
         try:
-            future.result(timeout=timeout)
-            return True
-        except CancelledError:
-            return True
-        except FutureTimeoutError:
-            return False
+            if session_gen != self._smart_turn_session_gen or not self.speculative_turns.is_latest(
+                turn_id, turn_revision
+            ):
+                return
+            status, analysis_s, reopen_grace_ms, processing_delay_ms = self._classify_smart_turn(
+                audio, analyzer=analyzer, sample_rate=sample_rate
+            )
+            if session_gen != self._smart_turn_session_gen or not self.speculative_turns.is_latest(
+                turn_id, turn_revision
+            ):
+                return
+            store = getattr(self, "turn_latency_store", None)
+
+            def _record_latency() -> None:
+                if store is not None:
+                    store.record_smart_turn(
+                        turn_id,
+                        turn_revision,
+                        status=status,
+                        analysis_s=analysis_s,
+                        grace_s=reopen_grace_ms / 1000.0 if status != "disabled" else None,
+                        processing_delay_s=processing_delay_ms / 1000.0 if status != "disabled" else None,
+                    )
+
+            self.speculative_turns.resolve_smart_turn(
+                turn_id,
+                turn_revision,
+                output_hold_ms=reopen_grace_ms,
+                processing_delay_ms=processing_delay_ms,
+                token=token,
+                on_resolve=_record_latency,
+            )
+        except Exception:
+            logger.exception(
+                "Smart Turn worker failed for turn=%s rev=%s; falling back to default speculative reopen grace",
+                turn_id,
+                turn_revision,
+            )
+            self.speculative_turns.resolve_smart_turn(
+                turn_id,
+                turn_revision,
+                output_hold_ms=self.speculative_reopen_ms,
+                processing_delay_ms=0,
+                token=token,
+            )
 
     def process(self, audio_chunk: VADIn) -> Iterator[VADOut]:
         runtime_config = None
