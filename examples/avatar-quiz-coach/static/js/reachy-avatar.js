@@ -34,7 +34,7 @@ const REACTION_MOVES = /** @type {Record<string, string[]>} */ ({
   incorrect: ["uncertain1", "oops2"],
   clue: ["helpful1"],
   hint: ["helpful1"],
-  skipped: ["resigned1"],
+  skipped: ["resigned1", "understanding1"],
   think: ["thoughtful1", "thoughtful2"],
   listen: ["attentive1", "attentive2"],
   surprised: ["amazed1"],
