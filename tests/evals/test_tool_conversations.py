@@ -94,6 +94,46 @@ def test_argument_values_accept_any_listed_alternative():
     assert (s["correct_arguments"], s["scored_argument_calls"]) == (2, 3)
 
 
+_FALLBACK = "I'm having trouble responding right now. Please try again."
+
+
+def _failed_turns_row():
+    failed = _user(0, "set_timer", (_FALLBACK, []))
+    failed["rounds"][0]["status"] = "failed"
+    called_then_failed = _user(1, "get_time", ("", ["get_time"]), (_FALLBACK, []))
+    called_then_failed["rounds"][1]["status"] = "failed"
+    free = _user(2, None, (_FALLBACK, []))
+    free["rounds"][0]["status"] = "failed"
+    answered = _user(3, "dance", ("", ["dance"]))
+    answered["rounds"][0]["status"] = "completed"
+    late = {"kind": "late_result", "tool": "research_report", "text": _FALLBACK, "calls": [], "status": "failed"}
+    return {
+        "conversation": 0,
+        "rep": 0,
+        "errors": ["response_failed"] * 4,
+        "turns": [failed, called_then_failed, free, answered, late],
+    }
+
+
+def test_failed_responses_are_counted_apart_from_model_behaviour():
+    s = summarize([_failed_turns_row()])
+    assert (s["failed_turns"], s["attempted_turns"]) == (4, 5)
+    # Only the completed turn is scored; the fallback apology is not "said it, no call".
+    assert (s["right_tool"], s["tool_turns"], s["said_no_call"]) == (1, 1, 0)
+    assert (s["user_turns"], s["free_turns"], s["late_results"]) == (1, 0, 0)
+
+
+def test_comparison_recounts_reports_from_their_turns():
+    row = _failed_turns_row()
+    stale = summarize([row])
+    stale.update(failed_turns=0, tool_turns=3, said_no_call=2)  # as written before failed turns were set apart
+    table = render_comparison(
+        [{"label": "old", "summary": stale, "results": [row]}, {"label": "new", "summary": stale}]
+    )
+    assert "| Said it, no call | 0/1 (0.0%) | 2/3 (66.7%) p=1 |" in table
+    assert "| Turns whose response failed | 4/5 (80.0%) | 0/5 (0.0%) p=0.048 |" in table
+
+
 def test_fisher_exact_matches_known_values():
     assert fisher_exact(5, 5, 5, 5) == pytest.approx(1.0)
     assert fisher_exact(0, 10, 10, 0) == pytest.approx(1.0825e-05, rel=1e-3)
