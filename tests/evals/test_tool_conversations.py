@@ -200,9 +200,20 @@ def test_server_config_is_private_and_points_speech_at_the_stand_in(tmp_path, mo
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
-@pytest.mark.parametrize("spoken", [False, True], ids=["text", "audio"])
-@pytest.mark.parametrize("minutes, reason", [(5, None), (3, "incorrect_arguments"), (None, "response_timeout")])
-def test_five_minute_timer_cli_scores_each_attempt(monkeypatch, tmp_path, spoken, minutes, reason):
+@pytest.mark.parametrize(
+    "spoken, minutes, reason, sequence",
+    [
+        (False, 5, None, "single"),
+        (False, 3, "incorrect_arguments", "single"),
+        (False, None, "response_timeout", "single"),
+        (True, 5, None, "single"),
+        (True, 3, "incorrect_arguments", "single"),
+        (True, None, "response_timeout", "single"),
+        (True, 5, None, "reopen"),
+        (True, 5, "split_turn", "split"),
+    ],
+)
+def test_five_minute_timer_cli_scores_each_attempt(monkeypatch, tmp_path, spoken, minutes, reason, sequence):
     class Socket:
         def __init__(self):
             self.events = []
@@ -232,7 +243,16 @@ def test_five_minute_timer_cli_scores_each_attempt(monkeypatch, tmp_path, spoken
                         "arguments": json.dumps({"minutes": minutes, "label": "tea"}),
                     }
                 )
+            if spoken and output:
+                self.incoming.put_nowait({"type": "input_audio_buffer.speech_started", "item_id": "first"})
+                if sequence == "reopen":
+                    self.incoming.put_nowait({"type": "input_audio_buffer.speech_started", "item_id": "reopened"})
+                self.incoming.put_nowait({"type": "response.created", "response": {"id": "initial"}})
             self.incoming.put_nowait({"type": "response.done", "response": {"status": "completed", "output": output}})
+            if spoken and output and sequence == "split":
+                self.incoming.put_nowait({"type": "input_audio_buffer.speech_started", "item_id": "second"})
+                self.incoming.put_nowait({"type": "response.created", "response": {"id": "second-auto"}})
+                self.incoming.put_nowait({"type": "response.done", "response": {"status": "completed", "output": []}})
 
         async def recv(self):
             return json.dumps(await self.incoming.get())
@@ -283,3 +303,6 @@ def test_five_minute_timer_cli_scores_each_attempt(monkeypatch, tmp_path, spoken
         assert json.loads(turn["rounds"][0]["arguments"][0]) == {"minutes": minutes, "label": "tea"}
         assert events[3]["item"]["call_id"] == "timer-call"
         assert events[4] == {"type": "response.create"}
+        if sequence == "split":
+            assert turn["failure"] == "split_turn"
+            assert len(turn["rounds"]) == 1

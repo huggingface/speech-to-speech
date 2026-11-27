@@ -50,17 +50,42 @@ class Response:
     errors: list[str]
 
 
-async def _response(ws: Any, *, request: bool = True) -> Response:
+class _SplitTurn(Exception):
+    """One recording started a new input item after the server began answering."""
+
+
+@dataclass
+class _AudioTurn:
+    item_id: str | None = None
+    response_started: bool = False
+
+    def observe(self, event: dict[str, Any]) -> None:
+        kind = event.get("type")
+        if kind in ("response.created", "response.done"):
+            self.response_started = True
+        elif kind == "input_audio_buffer.speech_started":
+            item_id = event.get("item_id")
+            if not item_id:
+                return
+            # A speculative reopen may replace the item before any public response.
+            if self.response_started and self.item_id is not None and item_id != self.item_id:
+                raise _SplitTurn
+            self.item_id = item_id
+
+
+async def _response(ws: Any, *, request: bool = True, audio_turn: _AudioTurn | None = None) -> Response:
     if request:
         await ws.send(json.dumps({"type": "response.create"}))
     async with asyncio.timeout(RESPONSE_TIMEOUT_S):
-        return await _read_response(ws)
+        return await _read_response(ws, audio_turn)
 
 
-async def _read_response(ws: Any) -> Response:
+async def _read_response(ws: Any, audio_turn: _AudioTurn | None) -> Response:
     errors: list[str] = []
     while True:
         event = json.loads(await ws.recv())
+        if audio_turn is not None:
+            audio_turn.observe(event)
         kind = event.get("type")
         if kind == "error":
             error = event.get("error") or {}
@@ -138,9 +163,13 @@ async def run_conversation(config: RunnerConfig, conversation: Conversation) -> 
                     await _send_timer_audio(ws, pcm)
             rounds = []
             failure = None
+            audio_turn = _AudioTurn() if pcm is not None else None
             for round_index in range(MAX_TOOL_ROUNDS):
                 try:
-                    reply = await _response(ws, request=pcm is None or round_index > 0)
+                    reply = await _response(ws, request=pcm is None or round_index > 0, audio_turn=audio_turn)
+                except _SplitTurn:
+                    failure = "split_turn"
+                    break
                 except TimeoutError:
                     if not timer:
                         raise
