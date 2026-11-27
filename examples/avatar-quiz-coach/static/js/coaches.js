@@ -70,6 +70,8 @@ export const COACHES = {
     jawGain: 1,
     // Its beak follows the mouth shapes, 60 ms ahead of the voice (measured).
     mouth: "beak",
+    // It speaks duck: its voice plays as Microduck's own quacks, the words as subtitles.
+    quack: true,
     leadMs: 60,
     asset: "static/avatars/robots/duck",
     moves: "static/avatars/reachy-moves.json",

@@ -8,6 +8,7 @@
  */
 
 import { COACHES } from "./coaches.js";
+import { Quacker } from "./quack.js";
 
 const $ = (/** @type {string} */ s) => /** @type {HTMLElement} */ (document.querySelector(s));
 const params = new URLSearchParams(location.search);
@@ -79,11 +80,16 @@ async function speak(name, opt = {}) {
   avatar.beginResponse(id);
   if (opt.cues ?? /** @type {HTMLInputElement} */ ($("#cues")).checked) avatar.addVisemes(id, fakeCues(pcm));
   const chunk = 960;
+  // A coach that speaks duck quacks over the clip instead.
+  const quacker = /** @type {any} */ (coach).quack ? new Quacker() : null;
   let i = 0;
   clearInterval(feeding);
   return new Promise((resolve) => {
     feeding = window.setInterval(() => {
-      for (let k = 0; k < 2 && i < pcm.length; k++, i += chunk) avatar.feed(id, pcm.subarray(i, i + chunk));
+      for (let k = 0; k < 2 && i < pcm.length; k++, i += chunk) {
+        const part = pcm.subarray(i, i + chunk);
+        avatar.feed(id, quacker ? quacker.process(part) : part);
+      }
       if (i >= pcm.length) {
         clearInterval(feeding);
         avatar.endResponse();

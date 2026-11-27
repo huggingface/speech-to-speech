@@ -78,7 +78,9 @@ mic ─▶ speech-to-speech backend: VAD + STT ─▶ LLM (the coach) ─▶ TTS
   derives visemes from the audio in the browser. The robots talk the way
   the real Reachy Mini does: the head wobbles with the voice, using the
   official SDK's speech wobble (loudness-driven sways on all six head axes),
-  and Microduck also opens its beak with the visemes. They stand on a
+  and Microduck also opens its beak with the visemes. Microduck only speaks
+  duck: its voice plays as the robot's own quacks, one per burst of
+  syllables, and the words show as subtitles. They stand on a
   tabletop, hold a pose per conversational state (breathing, listening,
   thinking, as in Pollen's
   [reachy-mini-3d-voice](https://huggingface.co/spaces/pollen-robotics/reachy-mini-3d-voice)
@@ -164,5 +166,8 @@ from its [MuJoCo model](https://github.com/pollen-robotics/microduck), loaded by
 the deck's MJCF loader (`static/js/mjcf.js`, CC BY 4.0, Fabien Danieau). Their
 reactions come from Reachy Mini's
 [emotions library](https://huggingface.co/datasets/pollen-robotics/reachy-mini-emotions-library)
-(Apache-2.0). The Docker build downloads the models from pinned, checksummed
-URLs and bakes the emotions.
+(Apache-2.0). Microduck's quacks are synthesized in the browser
+(`static/js/quack.js`) by a port of the `chirp` recipe from microduck's
+[`sounds`](https://github.com/pollen-robotics/microduck/tree/main/sounds) crate
+(Apache-2.0, after apirrone's microduck_sounds). The Docker build downloads the
+models from pinned, checksummed URLs and bakes the emotions.

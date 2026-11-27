@@ -11,6 +11,7 @@
 import { COACHES } from "./coaches.js";
 import { RealtimeVoice } from "./realtime.js";
 import { confetti } from "./confetti.js";
+import { Quacker, quackify } from "./quack.js";
 
 /** @typedef {import("./avatar.js").Avatar | import("./splat-avatar.js").SplatAvatar | import("./robot-avatar.js").RobotAvatar} Avatar */
 
@@ -57,9 +58,9 @@ const S = {
   dropped: new Set(),
   echoAt: 0,
   overCoach: false,
-  /** Short fillers in the coach's voice, played while the grader works; kept across calls. @type {{ pcm: Int16Array, plays: number, line: string }[]} */
+  /** Short fillers in the coach's voice, played while the grader works; kept across calls. @type {{ pcm: Int16Array, plays: number, line: string, quacks?: Int16Array }[]} */
   fillers: [],
-  /** @type {{ pcm: Int16Array, plays: number, line: string } | null} */ lastFiller: null,
+  /** @type {{ pcm: Int16Array, plays: number, line: string, quacks?: Int16Array } | null} */ lastFiller: null,
   /** @type {RealtimeVoice | null} */ fillersFor: null,
   /** Grader tool calls not yet answered. */
   toolsPending: 0,
@@ -104,6 +105,11 @@ async function boot() {
   S.coachKey = wanted in COACHES ? wanted : "max";
   S.coach = COACHES[/** @type {keyof typeof COACHES} */ (S.coachKey)];
   document.querySelectorAll(".coach-name").forEach((el) => (el.textContent = S.coach.name));
+  if (/** @type {any} */ (S.coach).quack) {
+    // It speaks duck: say so where the lobby says what the coach does.
+    const lead = document.querySelector("#view-lobby .lead");
+    if (lead) lead.insertAdjacentHTML("beforeend", ` <b>${escapeHtml(S.coach.name)} only speaks duck: read along in the subtitles.</b>`);
+  }
   setupUi();
   loadTopics();
   renderLobbyBoard();
@@ -345,6 +351,19 @@ function asksQuestion(spoken, question) {
   const said = new Set(wordsOf(spoken));
   const words = wordsOf(question).filter((w) => !ASK_STOPWORDS.has(w));
   return words.length > 0 && words.filter((w) => said.has(w)).length / words.length >= 0.6;
+}
+
+/** One Quacker per reply, for a coach that speaks duck. @type {Map<string, Quacker>} */
+const quackers = new Map();
+
+/** The voice's audio as quacks, same length, so subtitles and timing hold. @param {string} id @param {Int16Array} pcm */
+function inDuck(id, pcm) {
+  let q = quackers.get(id);
+  if (!q) {
+    if (quackers.size > 8) quackers.clear();
+    quackers.set(id, (q = new Quacker()));
+  }
+  return q.process(pcm);
 }
 
 /** End the voice call: close the connection and the microphone. The next quiz dials again. */
@@ -697,7 +716,7 @@ function wireVoice(voice) {
     if (!S.responseHadAudio) setCoachTalking(true);
     S.responseHadAudio = true;
     S.lineAudio.set(d.responseId, (S.lineAudio.get(d.responseId) || 0) + d.pcm.length / d.rate);
-    avatar.feed(d.responseId, d.pcm);
+    avatar.feed(d.responseId, S.coach.quack ? inDuck(d.responseId, d.pcm) : d.pcm);
   });
   voice.addEventListener("response-done", (e) => {
     if (S.dropped.has(/** @type {any} */ (e).detail.responseId)) {
@@ -1056,7 +1075,7 @@ function playFiller() {
   S.lastFiller = filler;
   const id = `filler-${performance.now()}`;
   avatar.beginResponse(id);
-  avatar.feed(id, filler.pcm);
+  avatar.feed(id, S.coach.quack ? (filler.quacks ??= quackify(filler.pcm)) : filler.pcm);
   avatar.endResponse();
   setCoachTalking(true);
 }
