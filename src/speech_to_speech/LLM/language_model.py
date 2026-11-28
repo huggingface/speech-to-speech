@@ -1210,6 +1210,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             converted_messages,
             tokenize=False,
             add_generation_prompt=True,
+            enable_thinking=self.enable_thinking,
         )
         inputs = self.processor(
             text=[text_prompt],
@@ -1248,5 +1249,6 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             converted_messages,
             tokenize=False,
             add_generation_prompt=True,
+            enable_thinking=self.enable_thinking,
         )
         return images, formatted_prompt
