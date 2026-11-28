@@ -367,6 +367,11 @@ def prepare_all_args(args: ParsedArguments) -> None:
     """Validate selectors and apply the global device to selected configs only."""
 
     prepare_module_args(args.module_kwargs, args.llm_backend)
+    if args.module_kwargs.stt == "none":
+        args.llm_backend = replace(
+            args.llm_backend,
+            config={**args.llm_backend.config, "audio_input": True},
+        )
     if args.module_kwargs.device is None:
         return
     for field_name in ("stt_backend", "llm_backend", "tts_backend"):

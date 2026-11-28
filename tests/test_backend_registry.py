@@ -706,6 +706,13 @@ def test_audio_input_validation_uses_registry_capability_not_backend_name():
     prepare_module_args(module_args, selection)
 
 
+@pytest.mark.parametrize("stt", ["none", "faster-whisper"])
+def test_audio_input_mode_reaches_api_handler_config(stt):
+    args = parse_arguments(["--stt", stt, "--llm_backend", "chat-completions"])
+    prepare_all_args(args)
+    assert args.llm_backend.config.get("audio_input", False) is (stt == "none")
+
+
 def test_llm_proxy_validation_uses_registry_capability():
     args = parse_arguments(["--llm_backend", "transformers"])
 

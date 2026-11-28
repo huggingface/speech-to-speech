@@ -282,6 +282,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         audio_history_turns: int = 1,
         llm_current_date: bool = False,
         llm_timezone: Optional[str] = None,
+        audio_input: bool = False,
         **_kwargs: Any,
     ) -> None:
         self.cancel_scope = cancel_scope
@@ -293,6 +294,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.current_date = llm_current_date
         self.current_date_tz = prompt_timezone(llm_timezone)
         self.gen_kwargs = dict(gen_kwargs)
+        self.audio_input = audio_input
         self.audio_max_tokens = audio_max_tokens
         self.audio_temperature = audio_temperature
         if audio_content_type not in {"input_audio", "audio_url"}:
