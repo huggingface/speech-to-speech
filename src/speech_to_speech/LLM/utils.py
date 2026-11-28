@@ -1,6 +1,7 @@
 import base64
 import io
 import re
+import unicodedata
 from collections.abc import Callable
 from datetime import datetime, tzinfo
 from typing import Optional
@@ -157,16 +158,45 @@ def remove_markdown(text: str) -> str:
     return _restore_markdown_code(text, protected_code)
 
 
+# Variation selectors only choose a glyph (emoji/text style, ideograph variants) and
+# are not spoken; dropping them also removes the U+FE0F left by emoji.
+_VARIATION_SELECTORS = frozenset([*range(0xFE00, 0xFE10), *range(0xE0100, 0xE01F0)])
+_JOINERS = "\u200c\u200d"
+
+
 def remove_unspeechable(text: str) -> str:
     """Keep only speechable characters: letters, digits, punctuation, whitespace.
     support unicode characters (english, arabic, chinese, japanese, korean, etc.)
 
-    Safe to call per streaming delta. Markdown stripping is intentionally not
-    included here -- unlike character filtering, it needs complete text (see
-    remove_markdown), so callers apply it separately once a full sentence exists.
+    Combining marks (Indic vowel signs and viramas, Thai tone marks, Arabic
+    harakat, decomposed accents) and the zero-width joiners that Persian and
+    Indic scripts use inside words are kept next to the letters they modify.
+    Marks that belong to an emoji (variation selectors, keycap enclosures) are
+    dropped with it.
+
+    Safe to call per streaming delta: a mark at the start of ``text`` is assumed
+    to belong to the last character of the previous delta. Markdown stripping is
+    intentionally not included here -- unlike character filtering, it needs
+    complete text (see remove_markdown), so callers apply it separately once a
+    full sentence exists.
     """
     text = text.translate(SMART_PUNCT_TRANSLATION)
-    return SPEECHABLE_PATTERN.sub("", text)
+    kept: list[str] = []
+    previous_kept = True
+    for index, char in enumerate(text):
+        keep = SPEECHABLE_PATTERN.match(char) is None
+        if not keep and previous_kept:
+            if char in _JOINERS:
+                following = text[index + 1 : index + 2]
+                # Streamed emoji sequences arrive one code point per delta, so a ZWJ
+                # that ends a delta is dropped; a ZWNJ is kept for Persian.
+                keep = unicodedata.category(following)[0] in "LM" if following else char == "\u200c"
+            else:
+                keep = unicodedata.category(char) in ("Mn", "Mc") and ord(char) not in _VARIATION_SELECTORS
+        if keep:
+            kept.append(char)
+        previous_kept = keep
+    return "".join(kept)
 
 
 def format_language_instruction(lang_name: str) -> str:
