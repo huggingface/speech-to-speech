@@ -2,7 +2,7 @@ import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from queue import Empty, Queue
 from threading import Event as ThreadingEvent
 from typing import Any, Callable, TypeVar
@@ -373,6 +373,7 @@ def _release_session(unit: PipelineUnit, session_id: str) -> None:
     if old_session is None:
         # Already released (e.g. duplicate close callbacks racing).
         return
+    unit.service.retire_context(session_id)
     old_session.released_at = time.monotonic()
     # The send loop can be parked on output from an unclaimed internal
     # prefetch. Invalidate that response while its connection state is still
@@ -423,6 +424,10 @@ async def _dispatch_client_event(
     audio sits client-side).
     """
     service = unit.service
+    lease = service.context_scopes.get(session_id)
+    if lease is not None and not lease.valid():
+        await transport.close()
+        return
     client_event_id = raw.get("event_id")
 
     async def send_correlated(events: list[Any]) -> None:
@@ -607,9 +612,10 @@ def create_app(
     pool: list[PipelineUnit],
     stop_event: ThreadingEvent,
     llm_proxy_config: LLMProxyConfig | None = None,
+    context_integration=None,
 ) -> FastAPI:
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async def transport_lifespan(app: FastAPI) -> AsyncIterator[None]:
         # One send loop per pipeline unit; notifications wake it to forward
         # queued output to the transport currently attached via unit.session.
         send_tasks = [asyncio.create_task(_send_loop_for(unit)) for unit in pool]
@@ -629,7 +635,24 @@ def create_app(
                 except Exception:
                     pass
 
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        async with AsyncExitStack() as stack:
+            if context_integration is not None:
+                from speech_to_speech.context_extension import ContextDispatcher
+
+                provider = await stack.enter_async_context(context_integration.context_factory())
+                dispatcher = ContextDispatcher(provider, wait_seconds=context_integration.wait_seconds)
+                stack.push_async_callback(dispatcher.close)
+                for unit in pool:
+                    unit.service.context_dispatcher = dispatcher
+                    stack.callback(setattr, unit.service, "context_dispatcher", None)
+            async with transport_lifespan(app):
+                yield
+
     app = FastAPI(lifespan=lifespan)
+    if context_integration is not None and context_integration.scope_middleware is not None:
+        app.add_middleware(context_integration.scope_middleware)
 
     llm_proxy_usage = mount_llm_proxy(app, llm_proxy_config)
 
@@ -646,6 +669,16 @@ def create_app(
                 return unit
         return None
 
+    def connection_scope(scope):
+        if context_integration is None:
+            return
+        from speech_to_speech.context_extension import STATE_KEY, ContextScope
+
+        lease = scope.get("state", {}).get(STATE_KEY)
+        if lease is not None and (not isinstance(lease, ContextScope) or not lease.valid()):
+            raise ValueError("Invalid context scope")
+        return lease
+
     @app.websocket("/v1/realtime")
     async def realtime_endpoint(ws: WebSocket) -> None:
         offered_subprotocols = {
@@ -653,6 +686,11 @@ def create_app(
         }
         await ws.accept(subprotocol="realtime" if "realtime" in offered_subprotocols else None)
 
+        try:
+            lease = connection_scope(ws.scope)
+        except ValueError:
+            await ws.close(code=1008, reason="Invalid context scope")
+            return
         transport = WebSocketTransport(ws)
         unit = _claim_unit(transport)
         if unit is None:
@@ -677,6 +715,8 @@ def create_app(
         try:
             session_id = unit.service.register()
             unit.session.session_id = session_id
+            if lease is not None:
+                unit.service.context_scopes[session_id] = lease
             logger.info(f"Client connected to pipeline {unit.index} (session {session_id})")
 
             # Defensive: drain edge queues and reset events so stale data from a
@@ -798,6 +838,10 @@ def create_app(
                 media_type="text/plain",
             )
         offer_sdp = (await request.body()).decode("utf-8")
+        try:
+            lease = connection_scope(request.scope)
+        except ValueError:
+            return Response(content="Invalid context scope", status_code=403, media_type="text/plain")
 
         # Claim with a placeholder transport; the send loop tolerates a
         # transport-less snapshot until the session object below is attached.
@@ -818,6 +862,8 @@ def create_app(
             session_id = unit.service.register()
             assert unit.session is not None
             unit.session.session_id = session_id
+            if lease is not None:
+                unit.service.context_scopes[session_id] = lease
             logger.info(f"WebRTC client claiming pipeline {unit.index} (session {session_id})")
 
             # Defensive: drain edge queues and reset events so stale data from a
@@ -826,7 +872,9 @@ def create_app(
         except Exception as e:  # noqa: BLE001
             logger.error(f"WebRTC call setup failed (pipeline {unit.index}): {type(e).__name__}: {e}")
             # No transport or drain task exists yet, so undoing the claim
-            # directly is the whole release.
+            # directly releases the pool slot and the allocated connection.
+            if unit.session is not None and unit.session.session_id:
+                _safe_unregister(unit, unit.session.session_id)
             unit.session = None
             return Response(content="WebRTC session setup failed", status_code=500, media_type="text/plain")
 
@@ -843,10 +891,15 @@ def create_app(
             _release_session(unit, session_id)
 
         async def _on_client_event(raw: dict[str, Any]) -> None:
+            if released:
+                return
             assert session is not None  # callbacks only fire after setup()
             await _dispatch_client_event(unit, session_id, raw, session, transport_kind="webrtc")
 
         def _on_audio(pcm: bytes) -> None:
+            lease = unit.service.context_scopes.get(session_id)
+            if released or (lease is not None and not lease.valid()):
+                return
             chunks = unit.service.append_pcm(session_id, pcm, PIPELINE_SAMPLE_RATE)
             if not chunks:
                 return
@@ -939,6 +992,20 @@ def create_app(
                 session = unit.session
                 transport = session.transport if session is not None else None
                 session_id = session.session_id if session is not None else None
+
+                lease = unit.service.context_scopes.get(session_id) if session_id is not None else None
+                if (
+                    session is not None
+                    and session.released_at is None
+                    and transport is not None
+                    and lease is not None
+                    and not lease.valid()
+                ):
+                    unit.cancel_scope.cancel()
+                    await transport.close()
+                    # The owning route drains this slot before its next registration.
+                    await asyncio.sleep(0.01)
+                    continue
 
                 # Text events first (speech_started cancels active response).
                 try:

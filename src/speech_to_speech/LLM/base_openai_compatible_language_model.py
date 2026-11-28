@@ -39,6 +39,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from speech_to_speech.api.openai_realtime.runtime_config import resolve_reasoning_effort
 from speech_to_speech.baseHandler import BaseHandler
+from speech_to_speech.context_extension import PreparedContext
 from speech_to_speech.LLM.chat import (
     Chat,
     ChatItemError,
@@ -222,6 +223,8 @@ class _Turn(BaseModel):
     wants_audio: bool
     response_key: str
     prefetch_transaction: ResponsePrefetchTransaction | None = None
+    context_current: Callable[[], bool] | None = Field(default=None, exclude=True, repr=False)
+    prepared_context: PreparedContext | None = Field(default=None, exclude=True, repr=False)
     # End of the conversation when this turn started; keeps its output ahead of
     # user messages appended while the model was still running.
     history_anchor_id: str | None = None
@@ -491,6 +494,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             turn.prefetch_transaction is not None
             and turn.prefetch_transaction.discarded
             or self._generation_is_stale(turn.gen)
+            or (turn.context_current is not None and not turn.context_current())
         )
 
     @staticmethod
@@ -1063,7 +1067,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if tracker is not None:
                 tracker.record_llm_start(generation_started_at_s)
             try:
-                api_input = (serialize_fn or self._serialize)(active_chat)
+                view = active_chat
+                if turn.prepared_context is not None:
+                    view = active_chat.copy(deep=True)
+                    turn.prepared_context.project(view)
+                api_input = (serialize_fn or self._serialize)(view)
                 # Images the model actually sees this turn; only these are stripped on
                 # write-back, so an image a fast client injects mid-generation for the
                 # next turn survives (it is not in this serialized snapshot).
@@ -1083,9 +1091,14 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         trace = HttpRequestTrace(trace_context)
                         trace.dispatch()
                         options = trace.request_options(optional_kwargs)
+                        payload = api_input
+                        if turn.prepared_context is not None and not turn.prepared_context.current():
+                            payload = (serialize_fn or self._serialize)(active_chat)
+                        if turn.context_current is not None and not turn.context_current():
+                            raise _StreamInterrupted
                         if client is None:
-                            return (request_fn or self._request)(api_input, options)
-                        return (request_fn or self._request)(api_input, options, client=client)
+                            return (request_fn or self._request)(payload, options)
+                        return (request_fn or self._request)(payload, options, client=client)
 
                     if turn.prefetch_transaction is not None:
                         events = self._iter_prefetch_events_interruptibly(
@@ -1131,12 +1144,16 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                         self.request_timeout_s,
                     )
                     error_message = f"Language model generation timed out after {self.request_timeout_s:.1f}s."
+                elif turn.prepared_context is not None:
+                    # Provider diagnostics may quote the model input verbatim.
+                    logger.error("Language model request with reference data failed (%s)", type(exc).__name__)
+                    error_message = "Language model generation failed while processing reference data."
                 else:
                     log_exception(logger, "LLM generation failed; ending the current response", exc)
                     if error_message is None:
                         error_message = f"Language model generation failed: {exc}"
                 if consumed_image_ids and _is_image_input_rejection(exc):
-                    image_input_error = str(exc)
+                    image_input_error = "Image input rejected" if turn.prepared_context is not None else str(exc)
             finally:
                 self._close_response(events)
                 self._close_response(api_response)
@@ -1360,6 +1377,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             response_key=request.response_key,
             prefetch_transaction=request.prefetch_transaction,
             history_anchor_id=history_anchor_id,
+            context_current=request.context_current,
         )
         yield from self._generate(
             active_chat,
@@ -1461,6 +1479,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             prefetch_transaction=request.prefetch_transaction,
             history_anchor_id=history_anchor_id,
         )
+        turn.context_current = request.context_current
+        turn.prepared_context = request.prepared_context
         yield from self._generate(active_chat, original_chat, turn, optional_kwargs)
 
     @property

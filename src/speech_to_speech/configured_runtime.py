@@ -311,7 +311,9 @@ def _build_runtime(arguments: dict[str, ParsedArguments], stop_event: Event) -> 
     return result
 
 
-def build_configured_server(config: ResolvedConfig, stop_event: Event, *, local: bool = False) -> ConfiguredRuntime:
+def build_configured_server(
+    config: ResolvedConfig, stop_event: Event, *, local: bool = False, context_integration=None
+) -> ConfiguredRuntime:
     """Publish one definition through a server, with an optional loopback client."""
     _validate_counts(config)
     if len(config.pipelines) != 1:
@@ -329,6 +331,7 @@ def build_configured_server(config: ResolvedConfig, stop_event: Event, *, local:
         result.server = RealtimeServer(
             stop_event=event,
             pool=next(iter(result.pools.values())),
+            **({"context_integration": context_integration} if context_integration is not None else {}),
             host="127.0.0.1" if local else args.realtime_server_kwargs.host,
             port=args.realtime_server_kwargs.port,
             llm_proxy_config=build_llm_proxy_config(args.module_kwargs, args.llm_backend)
@@ -383,7 +386,11 @@ def _run_configured_command(command: Literal["serve", "local", "talk"], config: 
 
             setup_logger(config.runtime.get("log_level", "info"))
             with model_startup_output(command == "local" and console.quiet):
-                result = build_configured_server(config, stop_event, local=command == "local")
+                from speech_to_speech.context_extension import configured_integration
+
+                integration = configured_integration() if command == "serve" else None
+                options = {"context_integration": integration} if integration is not None else {}
+                result = build_configured_server(config, stop_event, local=command == "local", **options)
             set_log_transcripts(
                 result.client.config.log_transcripts
                 if command == "local"
