@@ -105,6 +105,21 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _add_chat_eos(model: PreTrainedModel, tokenizer: PreTrainedTokenizerBase) -> None:
+    """Keep model stop tokens and also stop at the tokenizer's chat boundary."""
+    chat_eos = tokenizer.eos_token_id
+    if chat_eos is None:
+        return
+    eos = model.generation_config.eos_token_id
+    if eos is None:
+        model.generation_config.eos_token_id = chat_eos
+    elif isinstance(eos, int):
+        if eos != chat_eos:
+            model.generation_config.eos_token_id = [eos, chat_eos]
+    elif chat_eos not in eos:
+        model.generation_config.eos_token_id = [*eos, chat_eos]
+
+
 @runtime_checkable
 class _Tokenizer(Protocol):
     """Minimal interface the base class needs from any tokenizer."""
@@ -847,6 +862,7 @@ class LanguageModelHandler(BaseLanguageModelHandler):
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_name, torch_dtype=torch_dtype, trust_remote_code=True
             ).to(device)  # type: ignore[arg-type]
+            _add_chat_eos(self.model, self.tokenizer)
             self.pipe = pipeline(  # type: ignore[call-overload]
                 "text-generation", model=self.model, tokenizer=self.tokenizer, device=device
             )
@@ -1059,6 +1075,7 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
             self.model = AutoModelForImageTextToText.from_pretrained(
                 model_name, torch_dtype=self.torch_dtype, trust_remote_code=True
             ).to(device)  # type: ignore[arg-type]
+            _add_chat_eos(self.model, self.tokenizer)
             self.streamer = TextIteratorStreamer(
                 self.tokenizer,  # type: ignore[arg-type]
                 skip_prompt=True,
