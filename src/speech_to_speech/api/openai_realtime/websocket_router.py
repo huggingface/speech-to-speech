@@ -558,8 +558,15 @@ async def _resume_false_interruption(
         cut = pending.cut_samples()
         buffered_tools = list(buf.buffered_tool_events)
         if cut >= buf.total_samples and buf.generation_done and not buffered_tools:
-            if buf.root_item_id and buf.full_text():
-                st.runtime_config.chat.truncate_assistant_message(buf.root_item_id, buf.full_text(), status="completed")
+            if buf.current_item_id:
+                segs = st.assistant_audio_segments.get(buf.current_item_id, [])
+                item_text = " ".join(str(seg[0]).strip() for seg in segs if seg[0] and str(seg[0]).strip()) or (
+                    buf.full_text() if buf.current_item_id == buf.root_item_id else ""
+                )
+                if item_text:
+                    st.runtime_config.chat.truncate_assistant_message(
+                        buf.current_item_id, item_text, status="completed"
+                    )
             if pending.was_generating:
                 unit.service.close_response_key(session_id, buf.response_key)
             logger.info("Pipeline %d: false interruption (%s), reply already fully played", unit.index, reason)
@@ -570,6 +577,7 @@ async def _resume_false_interruption(
             if cut >= buf.total_samples
             else buf.pcm_base_sample + resume_rewind_samples(buf.pcm, cut - buf.pcm_base_sample)
         )
+        buf.resume_overlap_words = buf.rewound_overlap_words(resume_sample, cut)
         remaining = buf.remaining_segments_from(resume_sample)
         created_events = unit.service.response.begin_resumed_audio_response(session_id, buf, resume_sample)
         session.last_assistant_audio = buf
@@ -934,9 +942,10 @@ async def _dispatch_client_event(
             and (pending := session.pending_false_interruption) is not None
             and event.item_id == pending.audio_buffer.current_item_id
         ):
-            pending.client_played_samples = (
-                pending.audio_buffer.wire_start_sample + event.audio_end_ms * PIPELINE_SAMPLE_RATE // 1000
-            )
+            played = pending.audio_buffer.wire_start_sample + event.audio_end_ms * PIPELINE_SAMPLE_RATE // 1000
+            if 0 < pending.audio_buffer.total_samples - played < PIPELINE_SAMPLE_RATE // 1000:
+                played = pending.audio_buffer.total_samples
+            pending.client_played_samples = played
         service.handle_conversation_item_truncate(session_id, event)
 
     elif isinstance(event, ResponseCreateEvent):

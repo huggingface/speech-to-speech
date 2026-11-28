@@ -1380,38 +1380,40 @@ class ResponseHandler(RealtimeBaseHandler):
                     st.answered_tool_call_ids[call_id] = None
                 while len(st.answered_tool_call_ids) > TOOL_FOLLOWUP_ACK_LIMIT:
                     st.answered_tool_call_ids.pop(next(iter(st.answered_tool_call_ids)))
-            if status == "completed":
-                if resumed is not None:
-                    output_items = terminal_response.output or []
-                    for idx, output_item in enumerate(output_items):
-                        if isinstance(output_item, RealtimeConversationItemAssistantMessage) and output_item.id:
-                            text = " ".join(
-                                transcript.strip()
-                                for part in (output_item.content or [])
-                                if (transcript := getattr(part, "transcript", None)) and transcript.strip()
+            if resumed is not None and status in ("completed", "incomplete"):
+                output_items = terminal_response.output or []
+                first_resumed_msg = True
+                for idx, output_item in enumerate(output_items):
+                    if isinstance(output_item, RealtimeConversationItemAssistantMessage) and output_item.id:
+                        text = " ".join(
+                            transcript.strip()
+                            for part in (output_item.content or [])
+                            if (transcript := getattr(part, "transcript", None)) and transcript.strip()
+                        )
+                        if text:
+                            next_call = next(
+                                (
+                                    later.call_id
+                                    for later in output_items[idx + 1 :]
+                                    if isinstance(later, RealtimeConversationItemFunctionCall)
+                                    and later.call_id is not None
+                                ),
+                                None,
                             )
-                            if text:
-                                next_call = next(
-                                    (
-                                        later.call_id
-                                        for later in output_items[idx + 1 :]
-                                        if isinstance(later, RealtimeConversationItemFunctionCall)
-                                        and later.call_id is not None
-                                    ),
-                                    None,
-                                )
-                                st.runtime_config.chat.add_heard_assistant_message(
-                                    output_item.id,
-                                    text,
-                                    kept_call_after=next_call,
-                                    status="completed",
-                                )
-                else:
-                    st.runtime_config.chat.bind_assistant_item_ids(
-                        st.current_response_key,
-                        terminal_response.output or [],
-                    )
-                    self._service.history.finalize(conn_id, st.current_response_key)
+                            st.runtime_config.chat.add_heard_assistant_message(
+                                output_item.id,
+                                text,
+                                kept_call_after=next_call,
+                                status=status,
+                                replay_overlap_words=resumed.resume_overlap_words if first_resumed_msg else 0,
+                            )
+                            first_resumed_msg = False
+            elif status == "completed":
+                st.runtime_config.chat.bind_assistant_item_ids(
+                    st.current_response_key,
+                    terminal_response.output or [],
+                )
+                self._service.history.finalize(conn_id, st.current_response_key)
             heard = self._heard_output(conn_id, open_item_id) if status == "cancelled" else []
             resumed_calls_by_index = sorted(st.pending_function_calls.items()) if resumed is not None else []
             resumed_msg_index = (
@@ -1425,7 +1427,7 @@ class ResponseHandler(RealtimeBaseHandler):
             self._end_response(conn_id, status, keep_turn_open=keep_turn_open)
             # Speech already delivered stays in history, cut to its audio; a
             # client truncate or WebRTC playback position can cut it further.
-            for item_id, text in heard:
+            for idx, (item_id, text) in enumerate(heard):
                 before, following = kept_calls.get(item_id, ([], None))
                 if resumed is not None and following is None and item_id in resumed_msg_index:
                     msg_idx = resumed_msg_index[item_id]
@@ -1439,6 +1441,7 @@ class ResponseHandler(RealtimeBaseHandler):
                     after_item_id=anchor,
                     kept_calls_before=before,
                     kept_call_after=following,
+                    replay_overlap_words=resumed.resume_overlap_words if (resumed is not None and idx == 0) else 0,
                 )
                 _log_heard(item_id, st.assistant_audio_segments.get(item_id, []), text, "audio sent before cancel")
         # Apply any client items that arrived mid-generation now that in_response
