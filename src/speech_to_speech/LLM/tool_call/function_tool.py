@@ -2,7 +2,7 @@ import textwrap
 
 from openai.types.realtime import RealtimeFunctionTool
 
-from speech_to_speech.LLM.tool_call.signature_from_schema import signature_from_schema
+from speech_to_speech.LLM.tool_call.signature_from_schema import parameter_names_from_schema, signature_from_schema
 
 
 class FunctionTool(RealtimeFunctionTool):
@@ -22,10 +22,12 @@ class FunctionTool(RealtimeFunctionTool):
         if isinstance(self.parameters, dict) and include_args_doc:
             props = self.parameters.get("properties", {})
             if props:
+                # Document each argument under the name the signature shows.
+                parameter_names = parameter_names_from_schema(self.parameters)
                 arg_lines = []
                 for arg_name, arg_schema in props.items():
                     desc = arg_schema.get("description", "") if isinstance(arg_schema, dict) else ""
-                    arg_lines.append(f"{arg_name}: {desc}")
+                    arg_lines.append(f"{parameter_names[arg_name]}: {desc}")
                 args_doc = f"Args:\n{textwrap.indent(chr(10).join(arg_lines), '    ')}"
                 tool_doc += f"\n\n{args_doc}"
 

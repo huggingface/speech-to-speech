@@ -308,6 +308,23 @@ class TestSanitizedNameCalls:
             "def lookup(user_name_2: int, user_name: str = None)"
         )
 
+    def test_args_doc_uses_signature_names(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "user-name": {"type": "string", "description": "Display name."},
+                "user.name": {"type": "integer", "description": "Numeric id."},
+                "class": {"type": "string", "description": "Seat class."},
+            },
+            "required": ["user.name"],
+        }
+        args_doc = _tool("lookup", schema).to_code_prompt().split("Args:\n", 1)[1]
+        assert [line.strip() for line in args_doc.splitlines()[:3]] == [
+            "user_name: Display name.",
+            "user_name_2: Numeric id.",
+            "class_: Seat class.",
+        ]
+
     def test_colliding_names_named_call(self):
         tool = _tool("lookup", COLLIDING_SCHEMA)
         (call,) = parse_function_call("lookup(user_name_2=5, user_name='bob')")
