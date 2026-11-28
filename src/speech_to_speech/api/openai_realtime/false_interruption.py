@@ -98,7 +98,7 @@ class AssistantAudioBuffer:
     root_item_id: str
     current_item_id: str
     wire_start_sample: int = 0
-    resume_overlap_words: int = 0
+    resume_source: tuple[str, int] | None = None
     turn_id: str | None = None
     turn_revision: int | None = None
     cancel_generation: int | None = None
@@ -196,10 +196,10 @@ class AssistantAudioBuffer:
                 output.append((text, pcm))
         return output
 
-    def rewound_overlap_words(self, resume_sample: int, cut_sample: int) -> int:
-        """Count words from segments overlapping the rewound ``[resume_sample, cut_sample)`` window."""
-        start = max(self.pcm_base_sample, min(resume_sample, self.total_samples))
-        end = max(start, min(cut_sample, self.total_samples))
+    def words_in_range(self, start_sample: int, end_sample: int) -> int:
+        """Count words from segments falling within ``[start_sample, end_sample)``."""
+        start = max(self.pcm_base_sample, min(start_sample, self.total_samples))
+        end = max(start, min(end_sample, self.total_samples))
         if end <= start:
             return 0
         words = 0

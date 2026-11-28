@@ -90,7 +90,7 @@ class _UnheardReply(NamedTuple):
     preceding: list[str | None]  # Items before it that survived its removal.
     turn_id: str | None  # The user message that opened its turn, if any.
     replied_past: frozenset[str] = frozenset()  # Calls it was said past, see ``Chat._replies_past``.
-    replay_overlap_words: int = 0  # Leading rewound words on a resumed reply, see ``Chat._replay_overlap_words``.
+    replay_source: tuple[str, int] | None = None  # ``(source_wire_id, word_offset)``, see ``Chat._replay_sources``.
 
 
 class ChatItemError(Exception):
@@ -196,9 +196,10 @@ class Chat:
         self._provisional_generations: dict[str, tuple[set[str], set[str]]] = {}
         self._provisional_output_items: dict[str, list[tuple[str, str, str | None]]] = {}
         self._assistant_item_aliases: dict[str, set[str]] = {}
-        # Leading rewound-word count on resumed assistant items, used to deduplicate
-        # only actual replay overlap at render time without dropping genuine repeats.
-        self._replay_overlap_words: dict[str, int] = {}
+        # Resumed assistant message internal id -> (source wire item_id, word offset where replay begins).
+        # Tying overlap to the source item and its current word count keeps deduplication accurate if the
+        # source item is later shortened, extended, restored, or deleted.
+        self._replay_sources: dict[str, tuple[str, int]] = {}
         # Realtime item id of each reply removed as unheard -> where it stood,
         # so a later playback report can put it back.
         self._unheard_assistant_items: dict[str, _UnheardReply] = {}
@@ -634,13 +635,14 @@ class Chat:
         with self._lock:
             # An explicit delete is final: a later playback report must not restore it.
             self._unheard_assistant_items.pop(item_id, None)
+            self._replay_sources = {msg_id: src for msg_id, src in self._replay_sources.items() if src[0] != item_id}
             return self._delete_item_locked(item_id)
 
     def _delete_item_locked(self, item_id: str) -> SupportedItem | None:
         removed: SupportedItem | None = None
         target_ids = self._assistant_item_aliases.pop(item_id, {item_id})
         for target_id in target_ids:
-            self._replay_overlap_words.pop(target_id, None)
+            self._replay_sources.pop(target_id, None)
         # Native reasoning requires its following provider message/call.
         # Find that companion before deleting it, allowing interleaved user
         # inputs and tool results without consuming another response's pair.
@@ -738,7 +740,7 @@ class Chat:
         kept_calls_before: Collection[str] = (),
         kept_call_after: str | None = None,
         status: Literal["completed", "incomplete"] = "incomplete",
-        replay_overlap_words: int = 0,
+        replay_source: tuple[str, int] | None = None,
     ) -> None:
         """Add the heard part of an interrupted reply, addressed by its Realtime *item_id*.
 
@@ -750,8 +752,8 @@ class Chat:
             self._unheard_assistant_items.pop(item_id, None)
             message = self._heard_message_locked(item_id, text)
             message.status = status
-            if replay_overlap_words > 0 and message.id is not None:
-                self._replay_overlap_words[message.id] = replay_overlap_words
+            if replay_source is not None and message.id is not None:
+                self._replay_sources[message.id] = replay_source
             calls = {
                 item.call_id: index
                 for index, item in enumerate(self.buffer)
@@ -852,8 +854,8 @@ class Chat:
                 heard.status = status
                 self.buffer.insert(max(anchors, default=0), heard)
                 self._set_replied_past_locked(heard, reply.replied_past)
-                if reply.replay_overlap_words > 0 and heard.id is not None:
-                    self._replay_overlap_words[heard.id] = reply.replay_overlap_words
+                if reply.replay_source is not None and heard.id is not None:
+                    self._replay_sources[heard.id] = reply.replay_source
                 self._gen_counter += 1
                 self._compact_in_flight = False
                 return True
@@ -875,7 +877,9 @@ class Chat:
                     None,
                 )
                 replied_past = self._take_replied_past_locked(target_ids)
-                replay_overlap = max((self._replay_overlap_words.get(tid, 0) for tid in target_ids), default=0)
+                replay_source = next(
+                    (self._replay_sources[tid] for tid in target_ids if tid in self._replay_sources), None
+                )
                 self._delete_item_locked(item_id)
                 # Companions deleted with it (native reasoning) cannot anchor it.
                 retained_ids = {item.id for item in self.buffer}
@@ -883,7 +887,7 @@ class Chat:
                     [item.id for item in before if item.id in retained_ids],
                     turn_id,
                     frozenset(replied_past),
-                    replay_overlap,
+                    replay_source,
                 )
                 while len(self._unheard_assistant_items) > _UNHEARD_ASSISTANT_ITEM_LIMIT:
                     self._unheard_assistant_items.pop(next(iter(self._unheard_assistant_items)))
@@ -897,15 +901,15 @@ class Chat:
                 return True
             preceding_ids = [item.id for item in self.buffer[:index]]
             replied_past = self._take_replied_past_locked(target_ids)
-            replay_overlap = max((self._replay_overlap_words.get(tid, 0) for tid in target_ids), default=0)
+            replay_source = next((self._replay_sources[tid] for tid in target_ids if tid in self._replay_sources), None)
             self._delete_item_locked(item_id)
             retained_ids = {item.id for item in self.buffer}
             heard = self._heard_message_locked(item_id, text)
             heard.status = status
             self.buffer.insert(sum(preceding_id in retained_ids for preceding_id in preceding_ids), heard)
             self._set_replied_past_locked(heard, replied_past)
-            if replay_overlap > 0 and heard.id is not None:
-                self._replay_overlap_words[heard.id] = replay_overlap
+            if replay_source is not None and heard.id is not None:
+                self._replay_sources[heard.id] = replay_source
             return True
 
     def bind_assistant_item_ids(self, response_key: str | None, output_items: Sequence[ConversationItem]) -> None:
@@ -1043,8 +1047,8 @@ class Chat:
             self._replies_past = {
                 item_id: calls for item_id, calls in self._replies_past.items() if item_id in retained_ids
             }
-            self._replay_overlap_words = {
-                item_id: words for item_id, words in self._replay_overlap_words.items() if item_id in retained_ids
+            self._replay_sources = {
+                item_id: src for item_id, src in self._replay_sources.items() if item_id in retained_ids
             }
             for item in recorded_items:
                 if not isinstance(item, RealtimeConversationItemUserMessage):
@@ -1288,6 +1292,24 @@ class Chat:
         with self._lock:
             return self._to_responses_api_chat_locked(items if items is not None else self.buffer)
 
+    def _replay_overlap_locked(
+        self,
+        item_id: str | None,
+        prev_item_id: str | None,
+        prev_word_count: int,
+    ) -> int:
+        """Return leading words of *item_id* that overlap the immediately preceding assistant item."""
+        if not item_id or not prev_item_id:
+            return 0
+        source = self._replay_sources.get(item_id)
+        if source is None:
+            return 0
+        source_wire_id, resume_word_offset = source
+        source_ids = self._assistant_item_aliases.get(source_wire_id, {source_wire_id})
+        if prev_item_id not in source_ids:
+            return 0
+        return max(0, prev_word_count - resume_word_offset)
+
     def _to_responses_api_chat_locked(
         self, items: list[SupportedItem], *, running_status: bool = True
     ) -> ResponseInputParam:
@@ -1309,10 +1331,13 @@ class Chat:
                 )
             )
         prev_plain_assistant_incomplete = False
+        prev_assistant_id: str | None = None
+        prev_assistant_words = 0
         for item in buffer_items:
             assert item.id is not None and item.id != "", f"item.id is {item.id}"
             if isinstance(item, RealtimeConversationItemUserMessage):
                 prev_plain_assistant_incomplete = False
+                prev_assistant_id, prev_assistant_words = None, 0
                 content: ResponseInputMessageContentListParam = []
                 audio_placeholder_added = False
                 for user_part in item.content:
@@ -1330,6 +1355,7 @@ class Chat:
                     _append_user_input(result, content)
             elif isinstance(item, ResponsesAssistantMessage):
                 prev_plain_assistant_incomplete = False
+                prev_assistant_id, prev_assistant_words = None, 0
                 result.append(
                     cast(ResponseInputItemParam, item.response_item.model_dump(exclude_unset=True, by_alias=True))
                 )
@@ -1341,7 +1367,11 @@ class Chat:
                             ResponseOutputTextParam(text=assistant_part.text, type="output_text", annotations=[])
                         )
                 if assistant_content:
-                    overlap = self._replay_overlap_words.get(item.id or "", 0) if prev_plain_assistant_incomplete else 0
+                    overlap = (
+                        self._replay_overlap_locked(item.id, prev_assistant_id, prev_assistant_words)
+                        if prev_plain_assistant_incomplete
+                        else 0
+                    )
                     _append_assistant_output(
                         result,
                         item,
@@ -1350,16 +1380,21 @@ class Chat:
                         max_overlap_words=overlap,
                     )
                     prev_plain_assistant_incomplete = item.status == "incomplete"
+                    prev_assistant_id = item.id
+                    prev_assistant_words = sum(len(part["text"].split()) for part in assistant_content)
             elif isinstance(item, ResponseReasoningItem):
                 prev_plain_assistant_incomplete = False
+                prev_assistant_id, prev_assistant_words = None, 0
                 result.append(cast(ResponseInputItemParam, item.model_dump(exclude_unset=True, by_alias=True)))
             elif isinstance(item, ResponsesFunctionCall):
                 prev_plain_assistant_incomplete = False
+                prev_assistant_id, prev_assistant_words = None, 0
                 result.append(
                     cast(ResponseInputItemParam, item.response_item.model_dump(exclude_unset=True, by_alias=True))
                 )
             elif isinstance(item, RealtimeConversationItemFunctionCall) and item.call_id is not None:
                 prev_plain_assistant_incomplete = False
+                prev_assistant_id, prev_assistant_words = None, 0
                 assert item.call_id is not None and item.call_id != ""
                 function_call = ResponseFunctionToolCallParam(
                     arguments=item.arguments,
@@ -1375,6 +1410,7 @@ class Chat:
                 result.append(function_call)
             elif isinstance(item, RealtimeConversationItemFunctionCallOutput):
                 prev_plain_assistant_incomplete = False
+                prev_assistant_id, prev_assistant_words = None, 0
                 function_call_output = FunctionCallOutput(
                     call_id=provider_call_ids.get(item.call_id, item.call_id),
                     output=item.output,
@@ -1399,10 +1435,11 @@ class Chat:
             if self.init_chat_message:
                 text = " ".join(p.text for p in self.init_chat_message.content if p.text)
                 messages.append(TransformersSystemMessage(content=text))
-            prev_assistant_incomplete = False
+            prev_assistant_id: str | None = None
+            prev_assistant_words = 0
             for item in self._model_history_locked(self.buffer):
                 if isinstance(item, RealtimeConversationItemUserMessage):
-                    prev_assistant_incomplete = False
+                    prev_assistant_id, prev_assistant_words = None, 0
                     has_media = any(p.type in {"input_image", "input_audio"} for p in item.content)
                     content: str | list[dict[str, Any]]
                     if has_media:
@@ -1412,11 +1449,12 @@ class Chat:
                     _append_user_message(messages, content)
                 elif isinstance(item, RealtimeConversationItemAssistantMessage):
                     text = " ".join(p.text for p in item.content if p.text)
-                    overlap = self._replay_overlap_words.get(item.id or "", 0) if prev_assistant_incomplete else 0
+                    overlap = self._replay_overlap_locked(item.id, prev_assistant_id, prev_assistant_words)
                     _append_assistant_message(messages, text, max_overlap_words=overlap)
-                    prev_assistant_incomplete = item.status == "incomplete"
+                    prev_assistant_id = item.id
+                    prev_assistant_words = len(text.split())
                 elif isinstance(item, RealtimeConversationItemFunctionCall):
-                    prev_assistant_incomplete = False
+                    prev_assistant_id, prev_assistant_words = None, 0
                     assert item.call_id is not None and item.call_id != ""
                     args: Any = item.arguments
                     try:
@@ -1438,7 +1476,7 @@ class Chat:
                     else:
                         messages.append(TransformersFunctionCallMessage(tool_calls=[call]))
                 elif isinstance(item, RealtimeConversationItemFunctionCallOutput):
-                    prev_assistant_incomplete = False
+                    prev_assistant_id, prev_assistant_words = None, 0
                     name = ""
                     for prev in reversed(messages):
                         if isinstance(prev, TransformersFunctionCallMessage):
@@ -1470,7 +1508,7 @@ class Chat:
             clone._deleted_tool_output_ids = set(self._deleted_tool_output_ids)
             clone._replies_past = {item_id: set(calls) for item_id, calls in self._replies_past.items()}
             clone._assistant_item_aliases = {wire_id: set(ids) for wire_id, ids in self._assistant_item_aliases.items()}
-            clone._replay_overlap_words = dict(self._replay_overlap_words)
+            clone._replay_sources = dict(self._replay_sources)
             if deep:
                 state = deepcopy(state)
             (
@@ -1531,7 +1569,7 @@ class Chat:
             clone._deleted_tool_output_ids = set(self._deleted_tool_output_ids)
             clone._replies_past = {item_id: set(calls) for item_id, calls in self._replies_past.items()}
             clone._assistant_item_aliases = {wire_id: set(ids) for wire_id, ids in self._assistant_item_aliases.items()}
-            clone._replay_overlap_words = dict(self._replay_overlap_words)
+            clone._replay_sources = dict(self._replay_sources)
             tracked = deepcopy(self._provisional_generations.get(response_key))
         if tracked is not None:
             item_ids, call_ids = tracked
@@ -1553,7 +1591,7 @@ class Chat:
             self._deleted_tool_output_ids.clear()
             self._replies_past.clear()
             self._assistant_item_aliases.clear()
-            self._replay_overlap_words.clear()
+            self._replay_sources.clear()
             self._unheard_assistant_items.clear()
 
     def close(self) -> None:

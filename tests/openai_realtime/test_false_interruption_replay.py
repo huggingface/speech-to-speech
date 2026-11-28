@@ -290,7 +290,7 @@ def test_chat_serializers_merge_consecutive_assistant_items_and_deduplicate_rewi
     chat = Chat(10)
     chat.add_item(make_user_message("What is the capital of France?"))
     chat.add_heard_assistant_message("item_1", "The capital of France is", status="incomplete")
-    chat.add_heard_assistant_message("item_2", "France is Paris.", status="completed", replay_overlap_words=2)
+    chat.add_heard_assistant_message("item_2", "France is Paris.", status="completed", replay_source=("item_1", 3))
     assert chat.to_transformers_chat()[1]["content"] == "The capital of France is Paris."
     resp = chat.to_responses_api_chat()
     assert [m["role"] for m in resp] == ["user", "assistant"] and resp[1]["status"] == "completed"
@@ -312,18 +312,27 @@ def test_chat_serializers_merge_consecutive_assistant_items_and_deduplicate_rewi
         tf[1]["content"] == "The capital of France is Paris." and tf[1]["tool_calls"][0]["function"]["name"] == "lookup"
     )
 
-    # Zero rewound overlap preserves genuine repeats across both incomplete->completed and completed->completed.
-    for statuses, left, right, expected in (
-        (("incomplete", "completed"), "The code is seven", "seven nine.", "The code is seven seven nine."),
-        (("completed", "completed"), "Hello.", "Hello.", "Hello. Hello."),
-    ):
-        c = Chat(10)
-        c.add_item(make_user_message("Say it."))
-        c.add_heard_assistant_message("a1", left, status=statuses[0])
-        c.add_heard_assistant_message("a2", right, status=statuses[1], replay_overlap_words=0)
-        assert c.to_transformers_chat()[1]["content"] == expected
-        if statuses[0] == "incomplete":
-            assert c.to_responses_api_chat()[1]["content"][0]["text"] == expected
+    # Overlap tracks the preceding item's current cut: shortening past the rewind drops overlap to 0,
+    # keeping a genuine repeated digit intact in both serializers; re-extending restores the overlap.
+    c_cut = Chat(10)
+    c_cut.add_item(make_user_message("Read the code."))
+    c_cut.add_heard_assistant_message("r1", "The code is seven seven", status="incomplete")
+    c_cut.add_heard_assistant_message("r2", "seven nine.", status="completed", replay_source=("r1", 4))
+    assert c_cut.to_transformers_chat()[1]["content"] == "The code is seven seven nine."
+    assert c_cut.to_responses_api_chat()[1]["content"][0]["text"] == "The code is seven seven nine."
+    c_cut.truncate_assistant_message("r1", "The code is seven")
+    assert c_cut.to_transformers_chat()[1]["content"] == "The code is seven seven nine."
+    assert c_cut.to_responses_api_chat()[1]["content"][0]["text"] == "The code is seven seven nine."
+    c_cut.truncate_assistant_message("r1", "The code is seven seven")
+    assert c_cut.to_transformers_chat()[1]["content"] == "The code is seven seven nine."
+    assert c_cut.to_responses_api_chat()[1]["content"][0]["text"] == "The code is seven seven nine."
+
+    # Non-replay consecutive completed messages also keep legitimate repeated words.
+    c2 = Chat(10)
+    c2.add_item(make_user_message("Say it."))
+    c2.add_heard_assistant_message("a1", "Hello.", status="completed")
+    c2.add_heard_assistant_message("a2", "Hello.", status="completed")
+    assert c2.to_transformers_chat()[1]["content"] == "Hello. Hello."
 
 
 # ── End-to-end Realtime router tests ───────────────────────────────────────
@@ -767,7 +776,7 @@ def test_edge_cases_zero_audio_repeated_word_incomplete_and_end_of_replay_cough(
             ("assistant", "completed", "Hello there!"),
         ]
 
-    # 2. Rewind landing in silence before a genuine repeated word ("seven seven") keeps both words.
+    # 2. Genuine repeated digit survives both silence-landed rewind AND shortening item_1 after replay.
     with _ws_session(min_words=1) as (unit, ws, sid):
         chat = unit.service._state(sid).runtime_config.chat
         chat.add_item(make_user_message("What is the code?"))
@@ -779,6 +788,25 @@ def test_edge_cases_zero_audio_repeated_word_incomplete_and_end_of_replay_cough(
         )
         item_1 = _added_id(_drain_until(ws, "response.done"))
         _cough_replay(unit, ws, "turn_rep", item_1, audio_end_ms=2050)
+        assert chat.to_transformers_chat()[1]["content"] == "The code is seven seven nine."
+        assert chat.to_responses_api_chat()[1]["content"][0]["text"] == "The code is seven seven nine."
+
+    with _ws_session(min_words=1) as (unit, ws, sid):
+        chat = unit.service._state(sid).runtime_config.chat
+        chat.add_item(make_user_message("What is the code?"))
+        _queue_reply(
+            unit,
+            sid,
+            "rk_rep2",
+            [("The code is seven", _tone(RATE * 2)), ("seven nine.", _tone(RATE * 2))],
+        )
+        item_1 = _added_id(_drain_until(ws, "response.done"))
+        item_2, _ = _cough_replay(unit, ws, "turn_rep2", item_1, audio_end_ms=3000)
+        assert chat.to_transformers_chat()[1]["content"] == "The code is seven seven nine."
+        # Later playback correction shortens item_1 from 3s to 2s -> both sevens come from distinct audio.
+        _truncate(ws, item_1, 2000)
+        assert _retrieve(ws, item_1)["content"][0]["transcript"] == "The code is seven"
+        assert _retrieve(ws, item_2)["content"][0]["transcript"] == "seven nine."
         assert chat.to_transformers_chat()[1]["content"] == "The code is seven seven nine."
         assert chat.to_responses_api_chat()[1]["content"][0]["text"] == "The code is seven seven nine."
 

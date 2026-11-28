@@ -1405,7 +1405,7 @@ class ResponseHandler(RealtimeBaseHandler):
                                 text,
                                 kept_call_after=next_call,
                                 status=status,
-                                replay_overlap_words=resumed.resume_overlap_words if first_resumed_msg else 0,
+                                replay_source=resumed.resume_source if first_resumed_msg else None,
                             )
                             first_resumed_msg = False
             elif status == "completed":
@@ -1441,7 +1441,7 @@ class ResponseHandler(RealtimeBaseHandler):
                     after_item_id=anchor,
                     kept_calls_before=before,
                     kept_call_after=following,
-                    replay_overlap_words=resumed.resume_overlap_words if (resumed is not None and idx == 0) else 0,
+                    replay_source=resumed.resume_source if (resumed is not None and idx == 0) else None,
                 )
                 _log_heard(item_id, st.assistant_audio_segments.get(item_id, []), text, "audio sent before cancel")
         # Apply any client items that arrived mid-generation now that in_response

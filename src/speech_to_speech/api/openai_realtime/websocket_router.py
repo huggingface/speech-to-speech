@@ -577,7 +577,12 @@ async def _resume_false_interruption(
             if cut >= buf.total_samples
             else buf.pcm_base_sample + resume_rewind_samples(buf.pcm, cut - buf.pcm_base_sample)
         )
-        buf.resume_overlap_words = buf.rewound_overlap_words(resume_sample, cut)
+        word_offset = buf.words_in_range(buf.wire_start_sample, resume_sample)
+        if buf.resume_source is not None and st.runtime_config.chat.get_item(buf.current_item_id) is None:
+            prev_source_id, prev_offset = buf.resume_source
+            buf.resume_source = (prev_source_id, prev_offset + word_offset)
+        else:
+            buf.resume_source = (buf.current_item_id, word_offset)
         remaining = buf.remaining_segments_from(resume_sample)
         created_events = unit.service.response.begin_resumed_audio_response(session_id, buf, resume_sample)
         session.last_assistant_audio = buf
