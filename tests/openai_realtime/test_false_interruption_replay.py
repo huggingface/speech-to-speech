@@ -284,6 +284,8 @@ def test_audio_buffer_tracks_segments_unsynthesized_tail_and_cap() -> None:
 
     buf.append_pcm(_silence(MAX_RETAINED_AUDIO_SAMPLES))
     assert len(buf.pcm) // 2 == MAX_RETAINED_AUDIO_SAMPLES and buf.pcm_base_sample == 2 * RATE
+    # Word offsets count from start_sample across retained segments even after earlier PCM is evicted.
+    assert buf.words_in_range(0, buf.total_samples) == 6
 
 
 def test_chat_serializers_merge_consecutive_assistant_items_and_deduplicate_rewind() -> None:
@@ -809,6 +811,28 @@ def test_edge_cases_zero_audio_repeated_word_incomplete_and_end_of_replay_cough(
         assert _retrieve(ws, item_2)["content"][0]["transcript"] == "seven nine."
         assert chat.to_transformers_chat()[1]["content"] == "The code is seven seven nine."
         assert chat.to_responses_api_chat()[1]["content"][0]["text"] == "The code is seven seven nine."
+
+    # 2b. Reply longer than the 120s retained PCM buffer still counts word offsets from item start.
+    with _ws_session(min_words=1) as (unit, ws, sid):
+        chat = unit.service._state(sid).runtime_config.chat
+        chat.add_item(make_user_message("Long code."))
+        _queue_reply(
+            unit,
+            sid,
+            "rk_long_cap",
+            [
+                ("Intro words.", _tone(MAX_RETAINED_AUDIO_SAMPLES)),
+                ("The code is seven", _tone(RATE * 2)),
+                ("seven nine.", _silence(int(0.2 * RATE)) + _tone(RATE * 2)),
+            ],
+        )
+        item_1 = _added_id(_drain_until(ws, "response.done"))
+        assert unit.session.last_assistant_audio.pcm_base_sample > 0
+        cut_ms = (MAX_RETAINED_AUDIO_SAMPLES + RATE * 2) * 1000 // RATE + 50
+        _cough_replay(unit, ws, "turn_long_cap", item_1, audio_end_ms=cut_ms)
+        expected = "Intro words. The code is seven seven nine."
+        assert chat.to_transformers_chat()[1]["content"] == expected
+        assert chat.to_responses_api_chat()[1]["content"][0]["text"] == expected
 
     # 3. Replay hitting max_output_tokens (status="incomplete") stays stored and retrievable.
     with _ws_session(min_words=1) as (unit, ws, sid):

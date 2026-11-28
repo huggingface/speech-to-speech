@@ -198,7 +198,7 @@ class AssistantAudioBuffer:
 
     def words_in_range(self, start_sample: int, end_sample: int) -> int:
         """Count words from segments falling within ``[start_sample, end_sample)``."""
-        start = max(self.pcm_base_sample, min(start_sample, self.total_samples))
+        start = max(0, min(start_sample, self.total_samples))
         end = max(start, min(end_sample, self.total_samples))
         if end <= start:
             return 0
