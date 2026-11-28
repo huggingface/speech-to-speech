@@ -186,29 +186,42 @@ def test_vision_sampling_requires_positive_temperature_before_loading(monkeypatc
         handler._load_model("model", "cpu", "float32", gen_kwargs)
 
 
-def test_transformers_stops_at_chat_end_before_generating_another_role(monkeypatch):
+def test_transformers_stops_at_chat_end_before_generating_another_role(monkeypatch, tmp_path):
     import torch
-    from transformers import GPT2Config, GPT2LMHeadModel
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import GPT2Config, GPT2LMHeadModel, PreTrainedTokenizerFast
 
+    vocab = {"prompt": 0, "chat_end": 1, "doc_end": 2, "answer": 3, "user": 4, "pad": 5}
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=Tokenizer(WordLevel(vocab)), eos_token="chat_end", pad_token="pad"
+    )
     model = GPT2LMHeadModel(
-        GPT2Config(vocab_size=8, n_embd=8, n_layer=1, n_head=1, bos_token_id=0, eos_token_id=2, pad_token_id=2)
+        GPT2Config(vocab_size=len(vocab), n_embd=8, n_layer=1, n_head=1, bos_token_id=0, eos_token_id=2, pad_token_id=5)
     ).eval()
-    prompt = torch.tensor([[0]])
     # A completed assistant turn (3, 1), then an invented user turn (4, 2).
     continuation = [3, 1, 4, 2]
     kwargs = dict(
         max_new_tokens=4,
         do_sample=False,
-        attention_mask=torch.ones_like(prompt),
         prefix_allowed_tokens_fn=lambda _, ids: [continuation[len(ids) - 1]],
     )
-    assert model.generate(prompt, **kwargs).tolist() == [[0, 3, 1, 4, 2]]
+    tokenizer.save_pretrained(tmp_path)
+    model.save_pretrained(tmp_path)
+    text = object.__new__(LanguageModelHandler)
+    text.backend = "transformers"
+    text._load_model(str(tmp_path), "cpu", "float32", {})
+    assert text.pipe("prompt", return_tensors=True, **kwargs)[0]["generated_token_ids"] == [0, 3, 1]
+
     handler = object.__new__(VisionLanguageModelHandler)
     handler.backend = "transformers"
-    processor = SimpleNamespace(tokenizer=SimpleNamespace(eos_token_id=1))
+    processor = SimpleNamespace(tokenizer=tokenizer)
     monkeypatch.setattr(language_model.AutoProcessor, "from_pretrained", lambda *args, **kwargs: processor)
     monkeypatch.setattr(language_model.AutoModelForImageTextToText, "from_pretrained", lambda *args, **kwargs: model)
     handler._load_model("model", "cpu", "float32", {})
+    prompt = torch.tensor([[0]])
     assert model.generate(prompt, **kwargs).tolist() == [[0, 3, 1]]
     # Explicit generation overrides still take precedence.
     assert model.generate(prompt, eos_token_id=2, **kwargs).tolist() == [[0, 3, 1, 4, 2]]
+    continuation[1] = 2
+    assert model.generate(prompt, **kwargs).tolist() == [[0, 3, 2]]
