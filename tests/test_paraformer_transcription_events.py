@@ -130,3 +130,27 @@ def test_paraformer_skips_mps_cache_clear_on_cpu(monkeypatch):
 
     assert len(result) == 1
     assert isinstance(result[0], Transcription)
+
+
+@pytest.mark.parametrize(
+    ("model_text", "expected"),
+    [
+        # FunASR's timestamp path joins every token with a space. Chinese text
+        # should come out as its plain path returns it; English words keep theirs.
+        (" 今 天 天 气 不 错 ", "今天天气不错"),
+        ("hello world how are you", "hello world how are you"),
+        ("我 喜 欢 python 编 程", "我喜欢python编程"),
+        ("我 有 3 个", "我有3个"),
+        ("今 天 ， 好 。", "今天，好。"),
+        ("i have 3 apples", "i have 3 apples"),
+    ],
+)
+def test_paraformer_keeps_spaces_only_between_latin_or_digit_words(monkeypatch, model_text, expected):
+    monkeypatch.setattr(paraformer_handler.console, "print", lambda *args, **kwargs: None)
+    handler = _handler()
+    handler.model = MagicMock()
+    handler.model.generate.return_value = [{"text": model_text}]
+
+    result = list(handler.process(VADAudio(audio=np.zeros(16000, dtype=np.float32), mode="final")))
+
+    assert result[0].text == expected
