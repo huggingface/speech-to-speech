@@ -15,7 +15,8 @@ from speech_to_speech.pipeline.turn_latency import TurnLatencyStore
 
 
 @pytest.mark.parametrize("tail", [". How are you?", ""])
-def test_local_ttft_precedes_sentence_batching_and_trailing_reply(monkeypatch, tail):
+@pytest.mark.parametrize("handler_type", [LanguageModelHandler, VisionLanguageModelHandler])
+def test_local_ttft_precedes_sentence_batching_and_trailing_reply(monkeypatch, tail, handler_type):
     clock = [10.0]
 
     def tokens(*args, **kwargs):
@@ -31,16 +32,23 @@ def test_local_ttft_precedes_sentence_batching_and_trailing_reply(monkeypatch, t
     monkeypatch.setattr(language_model, "perf_counter", lambda: clock[0])
     monkeypatch.setattr("speech_to_speech.pipeline.turn_latency.perf_counter", lambda: clock[0])
     monkeypatch.setattr(language_model, "mlx_stream_generate", tokens, raising=False)
+    monkeypatch.setattr(language_model, "mlx_vlm_stream_generate", tokens, raising=False)
     monkeypatch.setattr(language_model, "MLXLockContext", lambda **kwargs: nullcontext(True), raising=False)
     monkeypatch.setattr(language_model, "mx", SimpleNamespace(clear_cache=lambda: None), raising=False)
-    monkeypatch.setattr(language_model.torch.mps, "empty_cache", lambda: None)
-    handler = object.__new__(LanguageModelHandler)
+
+    def unexpected_mps_cleanup():
+        pytest.fail("MLX generation called the PyTorch MPS allocator")
+
+    monkeypatch.setattr(language_model.torch.mps, "empty_cache", unexpected_mps_cleanup)
+    handler = object.__new__(handler_type)
     handler.backend = "mlx"
     handler.model = object()
     handler.tokenizer = SimpleNamespace(
         apply_chat_template=lambda messages, tokenize, **kwargs: [1] if tokenize else "prompt",
         encode=lambda text: [],
     )
+    handler.processor = handler.tokenizer
+    handler.enable_thinking = False
     handler.gen_kwargs = {"max_new_tokens": 16}
     handler.cancel_scope = None
     handler.speculative_turns = None

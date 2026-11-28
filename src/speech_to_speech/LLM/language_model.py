@@ -914,7 +914,6 @@ class LanguageModelHandler(BaseLanguageModelHandler):
                 mx.clear_cache()
             except Exception:
                 pass
-            torch.mps.empty_cache()
         else:
             self._cancel_criteria.reset()
             if ctx.prefetch_transaction is not None:
@@ -1110,7 +1109,6 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
                 mx.clear_cache()
             except Exception:
                 pass
-            torch.mps.empty_cache()
         else:
             inputs, input_tokens = self._prepare_vlm_inputs(prepared)
             ctx.input_tokens += input_tokens
