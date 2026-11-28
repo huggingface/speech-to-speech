@@ -52,6 +52,7 @@ from openai.types.realtime.realtime_response_create_params import RealtimeRespon
 from openai.types.realtime.realtime_server_event import ConversationItemRetrieved
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from speech_to_speech.api.openai_realtime.false_interruption import count_interruption_words
 from speech_to_speech.api.openai_realtime.handlers import (
     AudioHandler,
     ConversationHandler,
@@ -305,6 +306,16 @@ class ConnState(BaseModel):
     assistant_audio_segments: dict[str, list[list[Any]]] = Field(default_factory=dict)
     # Played position (pipeline samples) each truncated assistant item was cut to.
     assistant_audio_cuts: dict[str, int] = Field(default_factory=dict)
+    # Active resumed AssistantAudioBuffer while replaying/continuing a falsely interrupted reply.
+    active_resumed_audio: Any | None = None
+    # Active false-interruption candidate turn_id (suppresses chat/LLM while under min_interruption_words).
+    false_interruption_turn_id: str | None = None
+    # Dismissed false-interruption turn IDs retained until their late terminal transcription arrives.
+    dismissed_interruption_turns: dict[str, None] = Field(default_factory=dict)
+    # Whether replay recording was active when the current response began (mid-reply opt-in takes effect next turn).
+    replay_enabled_for_response: bool | None = None
+    # When True, the next cancelled finish_response keeps the turn and response key open for replay buffering.
+    preserve_turn_on_cancel: bool = False
     # Keyed by output index so response.done can preserve interleaving with
     # assistant message items.
     pending_function_calls: dict[int, RealtimeConversationItemFunctionCall] = Field(default_factory=dict)
@@ -395,6 +406,8 @@ class RealtimeService:
         speculative_turns: SpeculativeTurnTracker | None = None,
         turn_latency_store: TurnLatencyStore | None = None,
         default_instructions: str | None = None,
+        min_interruption_words: int = 0,
+        false_interruption_timeout_ms: int = 2000,
     ) -> None:
         self.text_prompt_queue = text_prompt_queue
         self.should_listen = should_listen
@@ -404,6 +417,9 @@ class RealtimeService:
         if speculative_turns is not None:
             speculative_turns.wait_observer = self.turn_latency_store.record_smart_wait
         self._default_instructions = default_instructions
+        self.min_interruption_words = max(0, min_interruption_words)
+        self.false_interruption_timeout_ms = max(1, false_interruption_timeout_ms)
+        self.false_interruption_timeout_s = max(0.001, self.false_interruption_timeout_ms / 1000.0)
         # None means the active backend does not declare a complete language set.
         self.stt_supported_languages: set[str] | None = None
         self.tts_supported_languages: set[str] | None = None
@@ -473,6 +489,15 @@ class RealtimeService:
         }
 
     # ── Connection lifecycle ─────────────────────
+
+    def session_min_interruption_words(self, conn_id: str) -> int:
+        override = self._state(conn_id).runtime_config.min_interruption_words
+        return self.min_interruption_words if override is None else override
+
+    def session_false_interruption_timeout_s(self, conn_id: str) -> float:
+        override = self._state(conn_id).runtime_config.false_interruption_timeout_ms
+        timeout_ms = self.false_interruption_timeout_ms if override is None else override
+        return max(0.001, timeout_ms / 1000.0)
 
     def register(self) -> str:
         """Register a new connection and return its session_id."""
@@ -727,7 +752,13 @@ class RealtimeService:
             self.turn_latency_store.discard_pending_turn(event.turn_id, event.turn_revision)
             return []
 
-        if self._is_stale_turn_event(event):
+        st = self._state(conn_id)
+        resumed_output = (
+            st.active_resumed_audio is not None
+            and isinstance(event, _TURN_OUTPUT_EVENTS)
+            and getattr(event, "response_key", None) == st.current_response_key
+        )
+        if not resumed_output and self._is_stale_turn_event(event):
             history = getattr(event, "history", None)
             if history is not None:
                 history.resolve()
@@ -910,8 +941,16 @@ class RealtimeService:
             accounting.speech_stopped_at_s = event.speech_stopped_at_s
 
         cfg = st.runtime_config
-        transcript = event.transcript
-        if event.speaker_attribution is not None:
+        min_words = self.session_min_interruption_words(conn_id)
+        was_dismissed = event.turn_id is not None and st.dismissed_interruption_turns.pop(event.turn_id, False) is None
+        is_false_interruption_turn = event.turn_id is not None and (
+            event.turn_id == st.false_interruption_turn_id or was_dismissed
+        )
+        suppress_false_interruption = (
+            min_words > 0 and is_false_interruption_turn and count_interruption_words(event.transcript) < min_words
+        )
+        transcript = "" if suppress_false_interruption else event.transcript
+        if transcript and event.speaker_attribution is not None:
             transcript = event.speaker_attribution.for_llm(transcript)
         user_item_id = accounting.user_item_id if accounting is not None else None
         user_message = make_user_message(transcript)

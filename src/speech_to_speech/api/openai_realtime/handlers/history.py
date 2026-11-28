@@ -115,6 +115,10 @@ class HistoryHandler(RealtimeBaseHandler):
         key = getattr(event, "response_key", None)
         proposal: ResponseHistory | None = getattr(event, "history", None)
         st = self._state(conn_id)
+        if st.active_resumed_audio is not None and key == st.current_response_key:
+            if proposal is not None:
+                proposal.resolve()
+            return None
         if key is None or key in st.closed_response_keys:
             if proposal is not None:
                 proposal.resolve()

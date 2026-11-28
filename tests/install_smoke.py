@@ -127,6 +127,8 @@ def _validate_package_defaults() -> None:
     assert module_args.log_level == "info"
     assert module_args.enable_live_transcription is True
     assert module_args.live_transcription_update_interval == 0.5
+    assert module_args.min_interruption_words == 0
+    assert module_args.false_interruption_timeout_ms == 2000
     assert responses_api_args.model_name == "gpt-5.6-terra"
     assert responses_api_args.responses_api_stream is True
     assert responses_api_args.responses_api_reasoning_effort == "none"

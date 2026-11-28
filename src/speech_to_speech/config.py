@@ -39,6 +39,8 @@ _MODULE_PIPELINE = {
     "mac_optimal_settings",
     "enable_live_transcription",
     "live_transcription_update_interval",
+    "min_interruption_words",
+    "false_interruption_timeout_ms",
     "enable_llm_proxy",
     "llm_proxy_connect_timeout_s",
     "enable_visemes",

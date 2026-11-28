@@ -348,6 +348,12 @@ def prepare_module_args(module_kwargs: ModuleArguments, llm_backend: BackendSele
         raise ValueError("Speaker-aware conversation requires an STT backend; --stt none does not produce transcripts.")
     if module_kwargs.diarization_model_name and not 0 < module_kwargs.diarization_threshold < 1:
         raise ValueError("--diarization_threshold must be between 0 and 1.")
+    if module_kwargs.min_interruption_words < 0:
+        raise ValueError("--min_interruption_words must not be negative.")
+    if module_kwargs.false_interruption_timeout_ms <= 0:
+        raise ValueError("--false_interruption_timeout_ms must be greater than 0.")
+    if module_kwargs.min_interruption_words > 0 and module_kwargs.stt == "none":
+        raise ValueError("--min_interruption_words requires an STT backend; --stt none does not produce transcripts.")
     if module_kwargs.tts is None:
         module_kwargs.tts = "qwen3"
     if module_kwargs.stt == "none" and not llm_backend.spec.capabilities.supports_audio_input:
@@ -651,6 +657,8 @@ def _build_pipeline_unit(
         speculative_turns=speculative_turns,
         turn_latency_store=turn_latency_store,
         default_instructions=default_instructions,
+        min_interruption_words=module_kwargs.min_interruption_words,
+        false_interruption_timeout_ms=module_kwargs.false_interruption_timeout_ms,
     )
 
     if module_kwargs.enable_live_transcription and not stt_selection.spec.capabilities.streams_audio_chunks:

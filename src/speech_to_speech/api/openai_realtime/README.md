@@ -586,6 +586,15 @@ With `interrupt_response: false` the server still sends `input_audio_buffer.spee
 
 This is not the same as `--block-mic-during-playback`. That option stops sending microphone audio while the assistant speaks, so nothing is heard or transcribed until playback ends.
 
+### False-interruption audio replay (`--min_interruption_words`)
+
+Pass `--min_interruption_words N` (`1` to recover from empty/failed STT such as coughs, or `2+` to require at least `N` transcribed words across scripts) as a server default, or override per session in `session.update` under `audio.input.turn_detection` (`min_interruption_words`, `false_interruption_timeout_ms`), to recover from false barge-ins without custom output events or client changes:
+
+1. The server retains the 16 kHz PCM16 audio and aligned transcript segments of the current assistant audio reply (bounded to the most recent 120 seconds).
+2. When speech starts during playback, standard OpenAI Realtime interruption runs immediately on the wire (`response.done(status="cancelled")` + `input_audio_buffer.speech_started`, plus transport buffer flush), so playback stops promptly. If LLM/TTS is still generating a long reply, generation (including any in-flight tool calls) stays alive privately in the server buffer until STT resolves or `false_interruption_timeout_ms` (default 2000 ms) elapses.
+3. If STT produces at least `min_interruption_words` words, if the user continues speaking past `false_interruption_timeout_ms`, or if an explicit client cancel/new turn/option-off occurs, the buffered generation and any held tool calls are discarded and the conversation proceeds as a normal interruption.
+4. Once speech stops, `false_interruption_timeout_ms` starts a post-stop grace period. If STT returns empty, fails, settles below `min_interruption_words`, or does not return before the grace period expires, the server rewinds up to 600 ms from the client's reported `conversation.item.truncate` position (or server playback estimate) to a quiet word gap, applies a 10 ms fade-in, replays the remaining PCM as a standard Realtime response (over WebSocket or WebRTC), delivers any held tool calls, and seamlessly continues streaming any remaining live LLM/TTS chunks for long turns. Conversation history stores the exact wire items the client received (so `retrieve`, `truncate`, and `delete` operate on each item independently), while model serializers merge consecutive assistant items and deduplicate any rewound overlap words at render time.
+
 ### Changing reasoning effort from a client
 
 Clients pick the LLM's reasoning effort with the OpenAI Realtime `reasoning` object. In `session.update` it applies to the rest of the session and is echoed in `session.updated`; in `response.create` it applies to that response only:
