@@ -22,6 +22,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 STATE_KEY = "speech_to_speech.context_scope"
+MAX_CONTEXT_WAIT_MS = 400
+_MAX_WAIT_SECONDS = MAX_CONTEXT_WAIT_MS / 1000
+
+
+def _bounded_wait(seconds: float) -> float:
+    if type(seconds) not in (int, float) or seconds < 0 or not math.isfinite(seconds):
+        raise ValueError("Context preparation budget must be a finite, nonnegative number of seconds")
+    return min(seconds, _MAX_WAIT_SECONDS)
 
 
 @dataclass(frozen=True)
@@ -68,12 +76,11 @@ class ContextProvider(Protocol):
 @dataclass(frozen=True)
 class ContextIntegration:
     context_factory: Callable[[], AbstractAsyncContextManager[ContextProvider]]
-    wait_seconds: float = 0.025
+    wait_seconds: float = _MAX_WAIT_SECONDS
     scope_middleware: Callable[[ASGIApp], ASGIApp] | None = None
 
     def __post_init__(self):
-        if not 0 <= self.wait_seconds <= 1:
-            raise ValueError("Context preparation budget must be between 0 and 1 second")
+        object.__setattr__(self, "wait_seconds", _bounded_wait(self.wait_seconds))
 
 
 def configured_integration() -> ContextIntegration | None:
@@ -148,9 +155,9 @@ class PreparedContext:
 class ContextDispatcher:
     """Owned by the serving loop. Slow lookups retain admission until they finish."""
 
-    def __init__(self, provider: ContextProvider, *, wait_seconds: float = 0.025, capacity: int = 4):
+    def __init__(self, provider: ContextProvider, *, wait_seconds: float = _MAX_WAIT_SECONDS, capacity: int = 4):
         self.provider = provider
-        self.wait_seconds = wait_seconds
+        self.wait_seconds = _bounded_wait(wait_seconds)
         self.capacity = capacity
         self.active: dict[str, asyncio.Task[tuple[str, ...] | None]] = {}
         self.pending: dict[str, Callable[[], None]] = {}

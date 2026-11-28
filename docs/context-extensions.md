@@ -1,6 +1,8 @@
 # Per-request context extensions
 
-A deployment can supply a read-only context provider to the Realtime server. A provider can return up to four short strings before the preparation deadline. The server formats them as reference data in a request-local copy of the eligible user message. A miss, error, expired deadline or saturated provider allows an active response to proceed. The default wait is 25 ms with four concurrent lookups per server and one per connection.
+A deployment can supply a read-only context provider to the Realtime server. A provider can return up to four short strings before the preparation deadline. The server formats them as reference data in a request-local copy of the eligible user message. A miss, error, expired deadline or saturated provider allows an active response to proceed.
+
+The host gives retrieval up to 400 ms by default and caps longer requests at 400 ms. Fast results proceed immediately. A deployment can shorten the wait or set it to zero to bypass retrieval. The deadline covers context preparation before model dispatch. At most four lookups can run per server and one per connection, including work that is still finishing after its deadline.
 
 For automatic activation, place a UTF-8 binding at `<sys.prefix>/etc/speech-to-speech/context.json` or set `S2S_CONTEXT_BINDING` to an absolute file path. The file names an installed distribution, entry point, and absolute deployment configuration file. Both flag-based and YAML `serve` use the binding. The package can configure it through its own setup command. Example binding:
 

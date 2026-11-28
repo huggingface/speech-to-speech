@@ -2,6 +2,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from threading import Event
+from time import perf_counter
 from types import SimpleNamespace
 
 import pytest
@@ -28,6 +29,16 @@ class Recorder:
     async def prepare_context(self, query):
         self.requests.append(query)
         return ("amber",)
+
+
+def test_host_recall_default_and_ceiling():
+    for constructor in (ContextIntegration, ContextDispatcher):
+        assert constructor(Recorder()).wait_seconds == 0.4
+        for requested, effective in ((0, 0), (0.15, 0.15), (0.4, 0.4), (1, 0.4), (5, 0.4)):
+            assert constructor(Recorder(), wait_seconds=requested).wait_seconds == effective
+        for invalid in (-1, float("nan"), float("inf"), True, "5"):
+            with pytest.raises(ValueError, match="budget"):
+                constructor(Recorder(), wait_seconds=invalid)
 
 
 def test_ws_manual_request_scoped_copy():
@@ -152,6 +163,36 @@ def pending_text_request(text):
     chat = Chat(4)
     chat.add_item(make_user_message(text))
     return GenerateResponseRequest(runtime_config=RuntimeConfig(chat=chat))
+
+
+@pytest.mark.asyncio
+async def test_five_second_extension_cannot_extend_recall_window():
+    deadline = asyncio.get_running_loop().create_future()
+    release = asyncio.Event()
+
+    class Slow:
+        async def prepare_context(self, query):
+            deadline.set_result(query.deadline)
+            await release.wait()
+            return ("late record",)
+
+    dispatcher = ContextDispatcher(Slow(), wait_seconds=5)
+    queue = asyncio.Queue()
+    request = pending_text_request("coffee")
+    try:
+        before = perf_counter()
+        dispatcher.submit("session", request, SimpleNamespace(put=queue.put_nowait), None, lambda: True)
+        after = perf_counter()
+        cutoff = await asyncio.wait_for(deadline, 1)
+        assert before + 0.4 <= cutoff <= after + 0.4
+        assert await asyncio.wait_for(queue.get(), 2) is request
+        assert perf_counter() >= cutoff
+        assert request.prepared_context is None
+        release.set()
+        await dispatcher.active["session"]
+        assert request.prepared_context is None and queue.empty()
+    finally:
+        await dispatcher.close()
 
 
 @pytest.mark.asyncio
